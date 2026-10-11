@@ -222,8 +222,23 @@ export function formatRecordedIndia(
   value: string | null | undefined,
   fallback: string
 ): string {
+  const parts = formatRecordedIndiaParts(value, fallback);
+  if (!parts) return '—';
+  return `${parts.date}, ${parts.time}`;
+}
+
+/**
+ * Same computation as [formatRecordedIndia], split for two-line
+ * cells that lead with the time (`time`: "4:07 PM",
+ * `date`: "06 Oct 2026"). Null when unparseable. Not a second
+ * formatter — identical parts, timezone, and no-seconds behavior.
+ */
+export function formatRecordedIndiaParts(
+  value: string | null | undefined,
+  fallback: string
+): { time: string; date: string } | null {
   const date = new Date(value ?? fallback);
-  if (Number.isNaN(date.getTime())) return '—';
+  if (Number.isNaN(date.getTime())) return null;
   const day = String(date.getDate()).padStart(2, '0');
   const month = IN_MONTHS[date.getMonth()] ?? '';
   const year = date.getFullYear();
@@ -231,7 +246,7 @@ export function formatRecordedIndia(
   const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
   const minutes = String(date.getMinutes()).padStart(2, '0');
   const suffix = h24 < 12 ? 'AM' : 'PM';
-  return `${day} ${month} ${year}, ${h12}:${minutes} ${suffix}`;
+  return { time: `${h12}:${minutes} ${suffix}`, date: `${day} ${month} ${year}` };
 }
 
 export function isRecordingMimeType(value: unknown): value is RecordingMimeType {

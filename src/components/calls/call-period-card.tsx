@@ -1,7 +1,6 @@
 "use client"
 
 import {
-  MessageCircle,
   Mic,
   Phone,
   PhoneIncoming,
@@ -10,9 +9,10 @@ import {
   Unlink,
   Users,
 } from 'lucide-react'
+import { WhatsappIcon } from '@/components/icons/whatsapp-icon'
 import { CallMetricTile } from './call-metric-tile'
 import { formatTalkTime } from '@/lib/calls/formatters'
-import type { RecordingMetrics } from '@/lib/calls/aggregate'
+import { mergedWhatsappRecordings, type RecordingMetrics } from '@/lib/calls/aggregate'
 
 function fmtCount(n: number): string {
   return n.toLocaleString('en-US')
@@ -31,9 +31,11 @@ interface CallPeriodCardProps {
 }
 
 /**
- * One period card: title + date header, then the fixed 9-metric
+ * One period card: title + date header, then the fixed 8-metric
  * recording grid. Counts come straight from call_recordings —
- * no call-log inference anywhere on this card.
+ * no call-log inference anywhere on this card. WhatsApp is the
+ * single merged reporting category (whatsapp + whatsapp_business);
+ * there is no separate WhatsApp Business KPI.
  */
 export function CallPeriodCard({ title, dateLabel, metrics }: CallPeriodCardProps) {
   return (
@@ -75,14 +77,9 @@ export function CallPeriodCard({ title, dateLabel, metrics }: CallPeriodCardProp
           icon={Phone}
         />
         <CallMetricTile
-          value={metrics ? fmtCount(metrics.whatsappRecordings) : '—'}
+          value={metrics ? fmtCount(mergedWhatsappRecordings(metrics)) : '—'}
           label="WhatsApp"
-          icon={MessageCircle}
-        />
-        <CallMetricTile
-          value={metrics ? fmtCount(metrics.whatsappBusinessRecordings) : '—'}
-          label="WhatsApp Business"
-          icon={MessageCircle}
+          icon={WhatsappIcon}
         />
         <CallMetricTile
           value={metrics ? fmtCount(metrics.uniqueClients) : '—'}

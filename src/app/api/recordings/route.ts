@@ -39,14 +39,17 @@ function parseBound(value: string | null): number | null {
  *     recording's own phone_number). Never the filename.
  *   from, to — ISO bounds over EFFECTIVE time
  *     (recorded_at ?? created_at).
- *   call_type — phone | whatsapp | whatsapp_business.
+ *   call_type — phone | whatsapp (both match whatsapp +
+ *     whatsapp_business: one reporting category) |
+ *     whatsapp_business (legacy alias, same merged set).
  *   direction — in | out | unknown (unknown = IS NULL, never
  *     folded into in/out).
  *   uploaded_by — auth user UUID.
  *   status — linked | unlinked (contact_id nullity).
  *   summary=1 — instead of rows, aggregate the filtered set:
- *     { total, totalDurationSecs, phone, whatsapp,
- *       whatsappBusiness, unlinked }.
+ *     { total, totalDurationSecs, phone, whatsapp (merged),
+ *       unlinked }. The stored whatsapp/whatsapp_business split
+ *     is folded server-side; there is no separate business KPI.
  */
 export async function GET(request: Request) {
   try {
@@ -160,7 +163,13 @@ export async function GET(request: Request) {
         .select(select, { count: 'exact' })
         .eq('account_id', accountId);
       if (contactId) query = query.eq('contact_id', contactId);
-      if (callType) query = query.eq('call_type', callType);
+      if (callType === 'phone') query = query.eq('call_type', 'phone');
+      // Merged reporting category: either whatsapp* value matches
+      // both stored types, exactly like the summary RPC. Phone stays
+      // exact and excludes both.
+      if (callType === 'whatsapp' || callType === 'whatsapp_business') {
+        query = query.in('call_type', ['whatsapp', 'whatsapp_business']);
+      }
       if (direction === 'in' || direction === 'out') query = query.eq('direction', direction);
       if (direction === 'unknown') query = query.is('direction', null);
       if (uploadedBy) query = query.eq('uploaded_by', uploadedBy);
@@ -276,7 +285,6 @@ function emptySummary() {
     totalDurationSecs: 0,
     phone: 0,
     whatsapp: 0,
-    whatsappBusiness: 0,
     unlinked: 0,
   };
 }
@@ -284,14 +292,15 @@ function emptySummary() {
 /**
  * Coerce the RPC's JSONB aggregate to the summary shape. Non-finite
  * or missing members fall back to zero — the function always
- * returns all six keys, so this only guards transport skew.
+ * returns all keys, so this only guards transport skew. The stored
+ * whatsapp/whatsapp_business split is folded here into the single
+ * user-facing WhatsApp count.
  */
 function toSummary(data: unknown): {
   total: number;
   totalDurationSecs: number;
   phone: number;
   whatsapp: number;
-  whatsappBusiness: number;
   unlinked: number;
 } {
   const base = emptySummary();
@@ -303,8 +312,7 @@ function toSummary(data: unknown): {
     total: num(row.total),
     totalDurationSecs: num(row.totalDurationSecs),
     phone: num(row.phone),
-    whatsapp: num(row.whatsapp),
-    whatsappBusiness: num(row.whatsappBusiness),
+    whatsapp: num(row.whatsapp) + num(row.whatsappBusiness),
     unlinked: num(row.unlinked),
   };
 }

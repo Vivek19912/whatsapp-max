@@ -22,8 +22,14 @@ export interface RecordingsSummary {
   total: number;
   totalDurationSecs: number;
   phone: number;
+  /** Merged user-facing WhatsApp count (whatsapp + whatsapp_business). */
   whatsapp: number;
-  whatsappBusiness: number;
+  /**
+   * Legacy transport key: older RPC payloads / caches may still carry
+   * the raw whatsapp_business split. Never rendered — the route folds
+   * it into `whatsapp`, and the UI reads only `whatsapp`.
+   */
+  whatsappBusiness?: number;
   unlinked: number;
 }
 

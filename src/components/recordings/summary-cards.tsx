@@ -1,10 +1,11 @@
 'use client';
 
-import { AudioLines, Clock3, MessageCircle, Phone, Unlink } from 'lucide-react';
+import { AudioLines, Clock3, Phone, Unlink } from 'lucide-react';
 import type { ComponentType } from 'react';
 
 import { Skeleton } from '@/components/dashboard/skeleton';
 import { formatTalkTime } from '@/lib/calls/formatters';
+import { WhatsappIcon } from '@/components/icons/whatsapp-icon';
 import type { RecordingsSummary } from '@/lib/recordings/library';
 import { cn } from '@/lib/utils';
 
@@ -55,8 +56,8 @@ export function SummaryCards({
 }) {
   if (loading || !summary) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6" aria-label="Loading summary">
-        {Array.from({ length: 6 }).map((_, i) => (
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5" aria-label="Loading summary">
+        {Array.from({ length: 5 }).map((_, i) => (
           <Skeleton key={i} className="h-[68px] w-full rounded-xl" />
         ))}
       </div>
@@ -64,7 +65,7 @@ export function SummaryCards({
   }
   const fmt = (n: number) => n.toLocaleString('en-US');
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
       <Card
         icon={AudioLines}
         label="Total Recordings"
@@ -83,17 +84,17 @@ export function SummaryCards({
         value={fmt(summary.phone)}
         iconClassName="bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
       />
+      {/*
+        Merged reporting category: `summary.whatsapp` already folds
+        stored whatsapp + whatsapp_business (route + migration 115),
+        so one "WhatsApp Calls" card covers both. No separate
+        WhatsApp Business card.
+      */}
       <Card
-        icon={MessageCircle}
+        icon={WhatsappIcon}
         label="WhatsApp Calls"
         value={fmt(summary.whatsapp)}
         iconClassName="bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400"
-      />
-      <Card
-        icon={MessageCircle}
-        label="WhatsApp Business"
-        value={fmt(summary.whatsappBusiness)}
-        iconClassName="bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
       />
       <Card
         icon={Unlink}

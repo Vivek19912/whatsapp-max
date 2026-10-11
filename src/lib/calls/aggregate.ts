@@ -49,7 +49,19 @@ export interface RecordingMetrics {
   incomingRecordings: number;
   outgoingRecordings: number;
   phoneRecordings: number;
+  /**
+   * Stored `whatsapp` rows only — the RAW split, not the reporting
+   * number. User-facing WhatsApp reporting always uses
+   * [mergedWhatsappRecordings] (whatsapp + whatsapp_business = one
+   * "WhatsApp" category). The stored values stay distinct.
+   */
   whatsappRecordings: number;
+  /**
+   * Stored `whatsapp_business` rows only — RAW split, never rendered
+   * as its own KPI. Retained so the underlying values stay distinct
+   * (recording authorization depends on the difference) and existing
+   * API payloads keep their shape.
+   */
   whatsappBusinessRecordings: number;
   /** DISTINCT contact_id, NULLs never counted. */
   uniqueClients: number;
@@ -95,6 +107,19 @@ export function aggregateRecordingMetrics(rows: CallsRecordingRow[]): RecordingM
     uniqueClients: contacts.size,
     unlinkedRecordings,
   };
+}
+
+/**
+ * User-facing WhatsApp reporting count: stored `whatsapp` +
+ * `whatsapp_business` folded into ONE "WhatsApp" category.
+ * Regression anchor: whatsapp = 4, whatsapp_business = 3,
+ * phone = 5 → WhatsApp = 7, Phone = 5. Phone stays separate.
+ */
+export function mergedWhatsappRecordings(metrics: {
+  whatsappRecordings: number;
+  whatsappBusinessRecordings: number;
+}): number {
+  return metrics.whatsappRecordings + metrics.whatsappBusinessRecordings;
 }
 
 // ============================================================

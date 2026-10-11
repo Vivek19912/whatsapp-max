@@ -6,6 +6,7 @@ import {
   RECORDING_MAX_BYTES,
   formatRecordingDuration,
   formatRecordedIndia,
+  formatRecordedIndiaParts,
   latestByContact,
   recordingSortTime,
   resolveUploaderName,
@@ -241,6 +242,19 @@ describe('formatRecordedIndia', () => {
   it('returns an em dash for unparseable input', () => {
     expect(formatRecordedIndia('not-a-date', 'also-bad')).toBe('—');
     expect(formatRecordedIndia(null, '')).toBe('—');
+  });
+});
+
+describe('formatRecordedIndiaParts', () => {
+  it('splits the same instant into time-first parts', () => {
+    expect(
+      formatRecordedIndiaParts(new Date(2026, 9, 6, 16, 7).toISOString(), '')
+    ).toEqual({ time: '4:07 PM', date: '06 Oct 2026' });
+  });
+
+  it('returns null for unparseable input', () => {
+    expect(formatRecordedIndiaParts('not-a-date', 'also-bad')).toBeNull();
+    expect(formatRecordedIndiaParts(null, '')).toBeNull();
   });
 });
 

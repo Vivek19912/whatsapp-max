@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   aggregateRecordingMetrics,
   callTypeBucket,
+  mergedWhatsappRecordings,
   recordingDirection,
   type CallsRecordingRow,
 } from './aggregate';
@@ -51,9 +52,13 @@ describe('call types', () => {
     expect(out.phoneRecordings).toBe(0);
   });
 
-  it('whatsapp_business call_type counts WhatsApp Business', () => {
-    const out = aggregateRecordingMetrics([row({ call_type: 'whatsapp_business' })]);
-    expect(out.whatsappBusinessRecordings).toBe(1);
+  it('underlying stored values stay distinct (authorization depends on it)', () => {
+    const wa = aggregateRecordingMetrics([row({ call_type: 'whatsapp' })]);
+    const wab = aggregateRecordingMetrics([row({ call_type: 'whatsapp_business' })]);
+    expect(wa.whatsappRecordings).toBe(1);
+    expect(wa.whatsappBusinessRecordings).toBe(0);
+    expect(wab.whatsappRecordings).toBe(0);
+    expect(wab.whatsappBusinessRecordings).toBe(1);
   });
 
   it('NULL call_type counts toward none of the three', () => {
@@ -71,6 +76,28 @@ describe('call types', () => {
     expect(callTypeBucket(null)).toBeNull();
     const out = aggregateRecordingMetrics([row({ call_type: 'voip' })]);
     expect(out.phoneRecordings + out.whatsappRecordings + out.whatsappBusinessRecordings).toBe(0);
+  });
+});
+
+describe('merged WhatsApp reporting (whatsapp + whatsapp_business = WhatsApp)', () => {
+  it('merges 4 + 3 into WhatsApp = 7 while Phone stays 5', () => {
+    const rows: CallsRecordingRow[] = [
+      ...Array.from({ length: 4 }, (_, i) => row({ id: `wa-${i}`, call_type: 'whatsapp' })),
+      ...Array.from({ length: 3 }, (_, i) => row({ id: `wab-${i}`, call_type: 'whatsapp_business' })),
+      ...Array.from({ length: 5 }, (_, i) => row({ id: `ph-${i}`, call_type: 'phone' })),
+    ];
+    const out = aggregateRecordingMetrics(rows);
+    expect(mergedWhatsappRecordings(out)).toBe(7);
+    expect(out.phoneRecordings).toBe(5);
+  });
+
+  it('phone filter excludes both WhatsApp values', () => {
+    const out = aggregateRecordingMetrics([
+      row({ call_type: 'whatsapp' }),
+      row({ call_type: 'whatsapp_business' }),
+    ]);
+    expect(out.phoneRecordings).toBe(0);
+    expect(mergedWhatsappRecordings(out)).toBe(2);
   });
 });
 

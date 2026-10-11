@@ -21,8 +21,12 @@ import {
 } from '@/lib/recordings/library';
 import { RecordingDrawer } from '@/components/recordings/recording-drawer';
 import { RecordingsToolbar } from '@/components/recordings/recordings-toolbar';
-import { PAGE_SIZE, RecordingsTable } from '@/components/recordings/recordings-table';
+import { RecordingsTable } from '@/components/recordings/recordings-table';
 import { SummaryCards } from '@/components/recordings/summary-cards';
+import {
+  DEFAULT_WORKSPACE_PAGE_SIZE,
+  type WorkspacePageSize,
+} from '@/lib/flows/workspace-pagination';
 
 const DEFAULT_FILTERS: RecordingsFilters = {
   q: '',
@@ -59,6 +63,7 @@ export default function RecordingsPage() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [filters, setFilters] = useState<RecordingsFilters>(DEFAULT_FILTERS);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<WorkspacePageSize>(DEFAULT_WORKSPACE_PAGE_SIZE);
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [summary, setSummary] = useState<RecordingsSummary | null>(null);
@@ -90,7 +95,7 @@ export default function RecordingsPage() {
     setError(null);
     try {
       const body = await loadRecordingsList(
-        recordingsQuery(effectiveFilters, range, PAGE_SIZE, page * PAGE_SIZE),
+        recordingsQuery(effectiveFilters, range, pageSize, page * pageSize),
         controller.signal
       );
       if (controller.signal.aborted) return;
@@ -112,7 +117,7 @@ export default function RecordingsPage() {
       if (!controller.signal.aborted) setLoading(false);
     }
     return () => controller.abort();
-  }, [effectiveFilters, range, page]);
+  }, [effectiveFilters, range, page, pageSize]);
 
   const fetchSummary = useCallback(async () => {
     const controller = new AbortController();
@@ -168,6 +173,11 @@ export default function RecordingsPage() {
     setPage(0);
   }, []);
 
+  const updatePageSize = useCallback((size: WorkspacePageSize) => {
+    setPageSize(size);
+    setPage(0);
+  }, []);
+
   const handleSelect = useCallback((r: CallRecording, play: boolean) => {
     setSelected(r);
     setAutoplay(play);
@@ -190,7 +200,11 @@ export default function RecordingsPage() {
     filters.rangeKey !== 'last30';
 
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 p-4 sm:p-6">
+    // No max-width cap and no extra padding here: the shared
+    // DashboardShell main already provides the gutter, exactly like
+    // /workspace. The previous centered capped wrapper double-inset
+    // the table versus Workspace.
+    <div className="flex w-full flex-col gap-4">
       <div className="flex items-center gap-3">
         <Mic className="h-6 w-6 shrink-0" />
         <div>
@@ -241,7 +255,9 @@ export default function RecordingsPage() {
           onSelect={handleSelect}
           page={page}
           total={totalCount}
+          pageSize={pageSize}
           onPage={setPage}
+          onPageSize={updatePageSize}
         />
       )}
 

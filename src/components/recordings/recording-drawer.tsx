@@ -8,7 +8,6 @@ import {
   Clock3,
   ExternalLink,
   Link2,
-  MessageCircle,
   Minus,
   Pause,
   Phone,
@@ -20,6 +19,7 @@ import {
 import { useRef, useState, type ReactNode } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { WhatsappIcon } from '@/components/icons/whatsapp-icon';
 import {
   Sheet,
   SheetContent,
@@ -216,14 +216,14 @@ export function RecordingDrawer({
       : recording?.direction === 'out'
         ? 'Outgoing'
         : 'Unknown';
+  // Merged reporting category: stored `whatsapp` and
+  // `whatsapp_business` both display as "WhatsApp" with the single
+  // shared brand icon. The stored value stays distinct (recording
+  // authorization depends on it).
+  const isWhatsappType =
+    recording?.call_type === 'whatsapp' || recording?.call_type === 'whatsapp_business';
   const typeLabel =
-    recording?.call_type === 'phone'
-      ? 'Phone'
-      : recording?.call_type === 'whatsapp'
-        ? 'WhatsApp'
-        : recording?.call_type === 'whatsapp_business'
-          ? 'WhatsApp Business'
-          : null;
+    recording?.call_type === 'phone' ? 'Phone' : isWhatsappType ? 'WhatsApp' : null;
 
   return (
     <Sheet open={recording !== null} onOpenChange={(v) => !v && onClose()}>
@@ -280,7 +280,16 @@ export function RecordingDrawer({
                 </DetailRow>
               ) : null}
               {typeLabel ? (
-                <DetailRow icon={<MessageCircle className="h-4 w-4" />} label="Call Type">
+                <DetailRow
+                  icon={
+                    isWhatsappType ? (
+                      <WhatsappIcon size={16} />
+                    ) : (
+                      <Phone className="h-4 w-4" />
+                    )
+                  }
+                  label="Call Type"
+                >
                   {typeLabel}
                 </DetailRow>
               ) : null}

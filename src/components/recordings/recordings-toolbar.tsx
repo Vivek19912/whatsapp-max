@@ -99,8 +99,9 @@ export function RecordingsToolbar({
         <SelectContent>
           <SelectItem value="all">All Types</SelectItem>
           <SelectItem value="phone">Phone</SelectItem>
+          {/* Merged reporting category: one WhatsApp option matches
+              stored whatsapp + whatsapp_business (route folds both). */}
           <SelectItem value="whatsapp">WhatsApp</SelectItem>
-          <SelectItem value="whatsapp_business">WhatsApp Business</SelectItem>
         </SelectContent>
       </Select>
 

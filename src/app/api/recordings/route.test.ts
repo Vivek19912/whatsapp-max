@@ -358,7 +358,11 @@ describe("GET /api/recordings search and filters", () => {
       const json = (await res.json()) as { recordings: Array<{ id: string }> };
       return json.recordings.map((r) => r.id).sort();
     };
-    expect(await ids("call_type=whatsapp")).toEqual(["r-2"]);
+    expect(await ids("call_type=whatsapp")).toEqual(["r-2", "r-3"]);
+    // Legacy alias: whatsapp_business selects the same merged set.
+    expect(await ids("call_type=whatsapp_business")).toEqual(["r-2", "r-3"]);
+    // Phone stays separate: excludes both WhatsApp values.
+    expect(await ids("call_type=phone")).toEqual(["r-1"]);
     expect(await ids("call_type=phone&status=linked")).toEqual(["r-1"]);
     expect(await ids("direction=in")).toEqual(["r-2"]);
     expect(await ids("direction=unknown")).toEqual(["r-3"]);
@@ -408,12 +412,13 @@ describe("GET /api/recordings search and filters", () => {
     );
     expect(res.status).toBe(200);
     const json = (await res.json()) as { summary: Record<string, number> };
+    // Merged reporting: whatsapp + whatsapp_business fold into one
+    // "WhatsApp" count; no separate business KPI is returned.
     expect(json.summary).toEqual({
       total: 3,
       totalDurationSecs: 154,
       phone: 1,
-      whatsapp: 1,
-      whatsappBusiness: 1,
+      whatsapp: 2,
       unlinked: 1,
     });
     expect(h.rpcCalls).toHaveLength(1);
@@ -422,6 +427,43 @@ describe("GET /api/recordings search and filters", () => {
       p_account_id: "acct-1",
       p_status: "linked",
     });
+  });
+
+  it("merges whatsapp + whatsapp_business into one WhatsApp count (4 + 3 = 7)", async () => {
+    seed();
+    h.rpcResult = {
+      total: 12,
+      totalDurationSecs: 700,
+      phone: 5,
+      whatsapp: 4,
+      whatsappBusiness: 3,
+      unlinked: 2,
+    };
+    const res = await GET(new Request("https://app.test/api/recordings?summary=1"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary.whatsapp).toBe(7);
+    expect(json.summary.phone).toBe(5);
+    expect(json.summary).not.toHaveProperty("whatsappBusiness");
+  });
+
+  it("passes a WhatsApp type filter through to the RPC for exact aggregation", async () => {
+    seed();
+    h.rpcResult = {
+      total: 2,
+      totalDurationSecs: 138,
+      phone: 0,
+      whatsapp: 1,
+      whatsappBusiness: 1,
+      unlinked: 1,
+    };
+    const res = await GET(
+      new Request("https://app.test/api/recordings?summary=1&call_type=whatsapp")
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary.whatsapp).toBe(2);
+    expect(h.rpcCalls[0].args).toMatchObject({ p_call_type: "whatsapp" });
   });
 
   it("is exact past 5000 matches: the RPC total is returned verbatim, never truncated", async () => {
@@ -438,9 +480,10 @@ describe("GET /api/recordings search and filters", () => {
       unlinked: 17,
     };
     const res = await GET(new Request("https://app.test/api/recordings?summary=1"));
-    const json = (await res.json()) as { summary: { total: number; unlinked: number } };
+    const json = (await res.json()) as { summary: { total: number; unlinked: number; whatsapp: number } };
     expect(json.summary.total).toBe(6001);
     expect(json.summary.unlinked).toBe(17);
+    expect(json.summary.whatsapp).toBe(3001);
   });
 
   it("passes search candidates and date bounds through to the RPC", async () => {
@@ -477,7 +520,6 @@ describe("GET /api/recordings search and filters", () => {
       totalDurationSecs: 0,
       phone: 0,
       whatsapp: 0,
-      whatsappBusiness: 0,
       unlinked: 0,
     });
     expect(h.rpcCalls).toHaveLength(0);

@@ -31,6 +31,7 @@ import {
   AlertTriangle,
   Loader2,
   Plus,
+  SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
 
@@ -48,7 +49,6 @@ import {
 } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import {
   Dialog,
   DialogContent,
@@ -78,6 +78,10 @@ import {
   PresenceDot,
 } from '@/components/presence/presence-dot';
 import { AddUserDialog } from './add-user-dialog';
+import {
+  RecordingConfigDialog,
+  type RecordingConfigPatch,
+} from './recording-config-dialog';
 import { SettingsPanelHead } from '@/components/settings/settings-panel-head';
 import { ROLE_META } from '@/components/settings/role-meta';
 
@@ -105,12 +109,13 @@ export function displayRecordingNumber(digits: string | null): string {
 }
 
 // The single effective WhatsApp choice — mirrors the API vocabulary
-// (user_recording_settings.whatsapp_recording_source).
-const RECORDING_SOURCES = [
-  { value: 'none', label: 'None' },
-  { value: 'whatsapp', label: 'WhatsApp' },
-  { value: 'whatsapp_business', label: 'WhatsApp Business' },
-] as const;
+// (user_recording_settings.whatsapp_recording_source). Used only for
+// the read-only row summary; editing lives in RecordingConfigDialog.
+const RECORDING_SOURCE_LABELS: Record<string, string> = {
+  none: 'None',
+  whatsapp: 'WhatsApp',
+  whatsapp_business: 'WhatsApp Business',
+};
 
 // Editable roles in the inline dropdown. Owner is never an option —
 // promotions go through the (deferred) Transfer Ownership flow.
@@ -135,121 +140,6 @@ function fmtDate(iso: string): string {
   });
 }
 
-// Owner-only phone-number editor. The owner types the salesperson's
-// actual SIM number (or clears it for None); the server normalizes,
-// validates, and stores digits. CallVault maps the number to the
-// device's CURRENT subscription — no slot/subscription ids here.
-function PhoneNumberCell({
-  member,
-  disabled,
-  onSaved,
-}: {
-  member: Member;
-  disabled: boolean;
-  onSaved: (userId: string, next: string | null) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  async function save(next: string | null) {
-    setSaving(true);
-    try {
-      const res = await fetch(
-        `/api/account/recording-settings/${member.user_id}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone_recording_number: next }),
-        },
-      );
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error(payload.error || 'Failed to update phone recording');
-        return;
-      }
-      const saved = (payload.setting?.phone_recording_number ?? null) as
-        | string
-        | null;
-      onSaved(member.user_id, saved);
-      setEditing(false);
-      toast.success(
-        saved
-          ? `Phone recording for ${member.full_name || 'member'} set to ${displayRecordingNumber(saved)}`
-          : `Phone recording for ${member.full_name || 'member'} set to None`,
-      );
-    } catch {
-      toast.error('Could not reach the server');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!editing) {
-    return (
-      <div className="flex items-center gap-1.5">
-        <span
-          className="inline-flex items-center rounded-md border border-border bg-muted px-2.5 py-1 text-xs font-medium text-foreground"
-          aria-label={`Phone recording number for ${member.full_name || 'member'}`}
-        >
-          {displayRecordingNumber(member.phone_recording_number)}
-        </span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={disabled || saving}
-          onClick={() => {
-            setDraft(member.phone_recording_number ?? '');
-            setEditing(true);
-          }}
-          aria-label={`Edit phone recording number for ${member.full_name || 'member'}`}
-        >
-          Edit
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <Input
-        value={draft}
-        disabled={disabled || saving}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="+91 __________"
-        inputMode="tel"
-        className="w-36 bg-muted border-border text-foreground text-xs"
-        aria-label={`Phone number to record for ${member.full_name || 'member'}`}
-      />
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={disabled || saving}
-        onClick={() => void save(draft)}
-      >
-        {saving ? 'Saving...' : 'Save'}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={disabled || saving}
-        onClick={() => void save(null)}
-        aria-label={`Set phone recording to none for ${member.full_name || 'member'}`}
-      >
-        None
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={disabled || saving}
-        onClick={() => setEditing(false)}
-      >
-        Cancel
-      </Button>
-    </div>
-  );
-}
-
 export function TeamMembersView() {
   const { user, canManageMembers, isOwner } = useAuth();
   const { getPresence, getRow, now } = usePresence();
@@ -259,6 +149,7 @@ export function TeamMembersView() {
 
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
+  const [configMember, setConfigMember] = useState<Member | null>(null);
   const [pendingMemberAction, setPendingMemberAction] = useState<string | null>(
     null,
   );
@@ -334,60 +225,15 @@ export function TeamMembersView() {
     }
   }
 
-  // Owner-only per-user recording policy (phone + WhatsApp). Same
-  // optimistic-update + revert discipline as handleRoleChange: the
-  // controls must never lie about the persisted effective values.
-  // Each policy updates independently (partial PUT).
-  async function handleSourceChange(
-    member: Member,
-    field: 'whatsapp_recording_source',
-    label: string,
-    nextSource: string,
+  // Recording policy edits happen exclusively in RecordingConfigDialog
+  // (owner-only). Its onSaved merges the server-confirmed patch into
+  // the roster so the row summary updates without a full reload.
+  function handleConfigSaved(
+    userId: string,
+    patch: RecordingConfigPatch,
   ) {
-    const current = (member[field] || 'none') as string;
-    if (current === nextSource) return;
-    setPendingMemberAction(member.user_id);
     setMembers((prev) =>
-      prev.map((m) =>
-        m.user_id === member.user_id ? { ...m, [field]: nextSource } : m,
-      ),
-    );
-    try {
-      const res = await fetch(`/api/account/recording-settings/${member.user_id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [field]: nextSource }),
-      });
-      if (!res.ok) {
-        setMembers((prev) =>
-          prev.map((m) =>
-            m.user_id === member.user_id ? { ...m, [field]: current } : m,
-          ),
-        );
-        const payload = await res.json().catch(() => ({}));
-        toast.error(payload.error || 'Failed to update recording setting');
-        return;
-      }
-      toast.success(
-        `${label} for ${member.full_name || 'member'} set to ${nextSource}`,
-      );
-    } catch {
-      setMembers((prev) =>
-        prev.map((m) =>
-          m.user_id === member.user_id ? { ...m, [field]: current } : m,
-        ),
-      );
-      toast.error('Could not reach the server');
-    } finally {
-      setPendingMemberAction(null);
-    }
-  }
-
-  async function handlePhoneNumberSaved(userId: string, next: string | null) {
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.user_id === userId ? { ...m, phone_recording_number: next } : m,
-      ),
+      prev.map((m) => (m.user_id === userId ? { ...m, ...patch } : m)),
     );
   }
 
@@ -445,8 +291,8 @@ export function TeamMembersView() {
           owner, never by the member's own device. */}
       {isOwner ? (
         <p className="text-xs text-muted-foreground">
-          Phone and WhatsApp dropdowns control which calls each
-          member&apos;s CallVault device is allowed to record.
+          Use Configure on a member to choose which calls their
+          CallVault device is allowed to record.
         </p>
       ) : null}
 
@@ -602,46 +448,39 @@ export function TeamMembersView() {
                       </span>
                     )}
 
-                    {/* Recording policy. Owner-only editors (including
-                        the owner's own row): one phone NUMBER and
-                        exactly one WhatsApp app per member. Other roles
-                        see no controls here (their own effective values
+                    {/* Recording summary + Configure. The row itself
+                        carries no editable controls: owners open the
+                        RecordingConfigDialog, everyone else sees the
+                        read-only summary (their own effective values
                         travel with their CallVault session). */}
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      <span className="font-medium text-muted-foreground">
+                        Recording
+                      </span>
+                      <span className="text-muted-foreground">
+                        Phone:{' '}
+                        <span className="text-foreground">
+                          {displayRecordingNumber(member.phone_recording_number)}
+                        </span>
+                      </span>
+                      <span className="text-muted-foreground">
+                        WhatsApp:{' '}
+                        <span className="text-foreground">
+                          {RECORDING_SOURCE_LABELS[member.whatsapp_recording_source] ?? 'None'}
+                        </span>
+                      </span>
+                    </div>
                     {isOwner ? (
-                      <>
-                        <PhoneNumberCell
-                          member={member}
-                          disabled={isBusy}
-                          onSaved={handlePhoneNumberSaved}
-                        />
-                        <Select
-                          value={member.whatsapp_recording_source || 'none'}
-                          onValueChange={(v) =>
-                            v &&
-                            handleSourceChange(
-                              member,
-                              'whatsapp_recording_source',
-                              'WhatsApp recording',
-                              v,
-                            )
-                          }
-                        >
-                          <SelectTrigger
-                            className="w-36 bg-muted border-border text-foreground"
-                            disabled={isBusy}
-                            aria-label={`WhatsApp recording source for ${member.full_name || 'member'}`}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {RECORDING_SOURCES.map((s) => (
-                              <SelectItem key={s.value} value={s.value}>
-                                {s.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isBusy}
+                        onClick={() => setConfigMember(member)}
+                        aria-label={`Configure recording for ${member.full_name || 'member'}`}
+                      >
+                        <SlidersHorizontal className="size-4" />
+                        Configure
+                      </Button>
                     ) : null}
 
                     {/* Remove. Admin+ only; never on the owner row;
@@ -674,6 +513,12 @@ export function TeamMembersView() {
         open={addUserOpen}
         onOpenChange={setAddUserOpen}
         onCreated={loadEverything}
+      />
+
+      <RecordingConfigDialog
+        member={configMember}
+        onClose={() => setConfigMember(null)}
+        onSaved={handleConfigSaved}
       />
 
       <Dialog
