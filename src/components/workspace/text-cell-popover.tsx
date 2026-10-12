@@ -101,6 +101,15 @@ export interface TextCellPopoverProps {
   defaultOpen?: boolean;
   /** Test/SSR escape hatch: render initially expanded. */
   defaultExpanded?: boolean;
+  /**
+   * Two-line visual clamp for the trigger text (Customer
+   * Response / Next Action cells): wraps naturally up to 2
+   * lines with an ellipsis, instead of the single-line
+   * `truncate`. Visual only — `value`, the editor, and the
+   * saved text are never touched. Defaults to false so every
+   * other column keeps its existing single-line trigger.
+   */
+  twoLineClamp?: boolean;
   placeholder?: string;
 }
 
@@ -285,6 +294,7 @@ export function TextCellPopover({
   onRestore,
   defaultOpen = false,
   defaultExpanded = false,
+  twoLineClamp = false,
   placeholder = "",
 }: TextCellPopoverProps) {
   const [open, setOpen] = useState(defaultOpen);
@@ -413,7 +423,14 @@ export function TextCellPopover({
         >
           <span
             className={cn(
-              "min-w-0 flex-1 truncate hover:underline hover:underline-offset-2 hover:decoration-dotted",
+              "min-w-0 flex-1 hover:underline hover:underline-offset-2 hover:decoration-dotted",
+              // Wide long-text columns show up to 2 wrapped lines
+              // with an ellipsis (visual only — the full value
+              // stays in the trigger markup, editor, and DB).
+              // Every other column keeps single-line truncation.
+              twoLineClamp
+                ? "line-clamp-2 leading-[22px] whitespace-normal break-words"
+                : "truncate",
               value === "" && "text-muted-foreground",
             )}
           >

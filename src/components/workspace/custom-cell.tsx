@@ -220,6 +220,7 @@ export function CustomCell({
   stored,
   canEdit,
   onSaved,
+  twoLineClamp = false,
   members,
 }: {
   flowId: string;
@@ -228,6 +229,14 @@ export function CustomCell({
   stored: string | null | undefined;
   canEdit: boolean;
   onSaved: (fieldId: string, runId: string, value: string | null) => void;
+  /**
+   * Two-line visual clamp for the text trigger (Customer
+   * Response / Next Action cells): up to 2 wrapped lines with
+   * an ellipsis instead of single-line truncation. Visual only
+   * — stored values, saves, and the editing popover are
+   * untouched. Defaults to false; ignored for non-text types.
+   */
+  twoLineClamp?: boolean;
   /**
    * Live account roster for the "Assigned To" column (same data as
    * Settings → Team Members via GET /api/account/members).
@@ -405,6 +414,7 @@ export function CustomCell({
           fieldLabel={field.name}
           value={shown ?? ""}
           editable={false}
+          twoLineClamp={twoLineClamp}
         />
       );
     }
@@ -533,6 +543,7 @@ export function CustomCell({
           fieldLabel={field.name}
           value={shown ?? ""}
           editable={canEdit}
+          twoLineClamp={twoLineClamp}
           onSave={save}
         />
       );

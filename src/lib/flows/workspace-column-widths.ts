@@ -21,6 +21,74 @@ export const WORKSPACE_COLUMN_MIN_WIDTH = 80;
 /** Hard ceiling: wider would swallow the viewport. */
 export const WORKSPACE_COLUMN_MAX_WIDTH = 500;
 
+/**
+ * Natural width cap for standard custom text cells in the
+ * Workspace live table (`max-w-56` = 14rem = 224px on the body
+ * TableCell in `src/app/(dashboard)/workspace/page.tsx`). This
+ * is the previous configured width for every text column.
+ */
+export const WORKSPACE_STANDARD_TEXT_CELL_WIDTH = 224;
+/**
+ * Doubled width for the two long-text business columns
+ * ("Customer Response" and "Next Action"): exactly
+ * 2 × 224px = 448px (`max-w-112` = 28rem), inside the 80–500
+ * safe band. Header and body cells share this value through
+ * `columnWidthStyle`, so the two can never misalign.
+ */
+export const WORKSPACE_WIDE_TEXT_CELL_WIDTH = 448;
+
+/**
+ * Long-text business columns rendered at the doubled width,
+ * matched by stored-name identity (case-insensitive, trimmed) —
+ * never by display labels — following the `isAssigneeField`
+ * convention in `workspace-assignee.ts`.
+ */
+export const WORKSPACE_WIDE_TEXT_COLUMN_NAMES: ReadonlySet<string> = new Set([
+  "customer response",
+  "next action",
+]);
+
+/** True for the "Customer Response" / "Next Action" columns. */
+export function isWideTextColumnName(name: unknown): boolean {
+  return (
+    typeof name === "string" &&
+    WORKSPACE_WIDE_TEXT_COLUMN_NAMES.has(name.trim().toLowerCase())
+  );
+}
+
+/**
+ * Default (stored-width fallback) pixels for one custom field
+ * name, or undefined when the column keeps its natural width.
+ * Stored user widths always win — this only fills gaps so the
+ * doubled width is visible without resetting anyone's saved
+ * preferences. Every other column is untouched.
+ */
+export function defaultColumnWidthForFieldName(
+  name: unknown,
+): number | undefined {
+  return isWideTextColumnName(name)
+    ? WORKSPACE_WIDE_TEXT_CELL_WIDTH
+    : undefined;
+}
+
+/**
+ * Default width entries for a field list, keyed by stable
+ * visibility id (`custom:<field uuid>`). Pure: the input array
+ * is never mutated. Only "Customer Response" / "Next Action"
+ * fields produce entries; hidden fields are included so
+ * unhiding restores the doubled width.
+ */
+export function defaultColumnWidthsForFields(
+  fields: ReadonlyArray<{ id: string; name: string }>,
+): Record<string, number> {
+  const defaults: Record<string, number> = {};
+  for (const f of fields) {
+    const px = defaultColumnWidthForFieldName(f?.name);
+    if (px !== undefined) defaults[`custom:${f.id}`] = px;
+  }
+  return defaults;
+}
+
 /** Clamp a dragged/stored width into the safe band (integers). */
 export function clampColumnWidth(value: unknown): number {
   const num = typeof value === "number" ? value : Number(value);

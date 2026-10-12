@@ -523,6 +523,135 @@ describe("GET table with Workspace filters (server-side)", () => {
   });
 });
 
+describe("GET table with column filters (five business columns, server-side)", () => {
+  function tableWith(qs: string) {
+    return GET(new Request(`https://app.test/api/flows/flow-1/table?${qs}`), {
+      params: Promise.resolve({ id: "flow-1" }),
+    });
+  }
+
+  it("forwards multi-selects, numeric, date, and datetime filters into one RPC call", async () => {
+    const nfFrom = "2026-10-01T00:00:00.000Z";
+    const nfTo = "2026-10-20T00:00:00.000Z";
+    const res = await tableWith(
+      `view=completed&callStatus=${encodeURIComponent("Connected")}&callStatus=${encodeURIComponent("Not Answering")}` +
+        `&callsTriedOp=between&callsTriedMin=2&callsTriedMax=5` +
+        `&followUpStatus=${encodeURIComponent("Follow-up Pending")}` +
+        `&lastContactFrom=2026-10-01&lastContactTo=2026-10-15` +
+        `&nextFollowUpFrom=${encodeURIComponent(nfFrom)}&nextFollowUpTo=${encodeURIComponent(nfTo)}` +
+        `&search=rahul&page=1&pageSize=10`,
+    );
+    expect(res.status).toBe(200);
+    // Server-side: the RPC paginates the FILTERED set — every
+    // predicate rides one call, and totals stay correct.
+    expect(h.rpcArgs).toMatchObject({
+      p_flow_id: "flow-1",
+      p_view: "completed",
+      p_search: "rahul",
+      p_call_status: ["Connected", "Not Answering"],
+      p_calls_tried_op: "between",
+      p_calls_tried_value: null,
+      p_calls_tried_min: 2,
+      p_calls_tried_max: 5,
+      p_followup_status: ["Follow-up Pending"],
+      p_last_contact_from: "2026-10-01",
+      p_last_contact_to: "2026-10-15",
+      p_next_followup_from: nfFrom,
+      p_next_followup_to: nfTo,
+    });
+  });
+
+  it("forwards eq/gt/lt numerics and trims/dedupes categorical values", async () => {
+    const res = await tableWith(
+      `callsTriedOp=gt&callsTriedValue=3&callStatus=${encodeURIComponent(" Busy ")}&callStatus=Busy&callStatus=`,
+    );
+    expect(res.status).toBe(200);
+    expect(h.rpcArgs).toMatchObject({
+      p_calls_tried_op: "gt",
+      p_calls_tried_value: 3,
+      p_calls_tried_min: null,
+      p_calls_tried_max: null,
+      p_call_status: ["Busy"],
+    });
+  });
+
+  it("unknown statuses forward for zero-match (never 400 the table)", async () => {
+    const res = await tableWith(`callStatus=Nope&followUpStatus=Whatever`);
+    expect(res.status).toBe(200);
+    // Account isolation holds inside the RPC — unknown values
+    // simply match zero rows.
+    expect(h.rpcArgs).toMatchObject({
+      p_call_status: ["Nope"],
+      p_followup_status: ["Whatever"],
+    });
+  });
+
+  it("unfiltered reads pass nulls for every column param (byte-identical shape)", async () => {
+    const res = await tableWith(`view=all`);
+    expect(res.status).toBe(200);
+    expect(h.rpcArgs).toMatchObject({
+      p_call_status: null,
+      p_calls_tried_op: null,
+      p_calls_tried_value: null,
+      p_calls_tried_min: null,
+      p_calls_tried_max: null,
+      p_followup_status: null,
+      p_last_contact_from: null,
+      p_last_contact_to: null,
+      p_next_followup_from: null,
+      p_next_followup_to: null,
+    });
+    // The meta.filters echo shape is unchanged.
+    const json = (await res.json()) as {
+      meta: { filters: { dateFrom: null; dateTo: null; assignee: string } };
+    };
+    expect(json.meta.filters).toEqual({ dateFrom: null, dateTo: null, assignee: "all" });
+  });
+
+  it("400s bad operators, non-integer counts, and inverted numerics", async () => {
+    for (const qs of [
+      `callsTriedOp=gte&callsTriedValue=3`,
+      `callsTriedOp=eq`,
+      `callsTriedOp=eq&callsTriedValue=abc`,
+      `callsTriedOp=eq&callsTriedValue=3.5`,
+      `callsTriedOp=eq&callsTriedValue=`,
+      `callsTriedOp=eq&callsTriedValue=1000`,
+      `callsTriedOp=between&callsTriedMin=2`,
+      `callsTriedOp=between&callsTriedMin=6&callsTriedMax=5`,
+      `callsTriedOp=lt&callsTriedValue=-1`,
+    ]) {
+      expect((await tableWith(qs)).status, qs).toBe(400);
+    }
+  });
+
+  it("400s malformed/inverted dates and datetimes, 400s oversized values", async () => {
+    for (const qs of [
+      `lastContactFrom=2026-13-01`,
+      `lastContactFrom=2026-02-30`,
+      `lastContactFrom=10-15-2026`,
+      `lastContactFrom=2026-10-16&lastContactTo=2026-10-15`,
+      `nextFollowUpFrom=soon`,
+      `nextFollowUpFrom=2026-10-20T00:00:00.000Z&nextFollowUpTo=2026-10-01T00:00:00.000Z`,
+      `callStatus=${encodeURIComponent("x".repeat(81))}`,
+    ]) {
+      expect((await tableWith(qs)).status, qs).toBe(400);
+    }
+    const tooMany = Array.from({ length: 51 }, (_, i) => `callStatus=v${i}`).join("&");
+    expect((await tableWith(tooMany)).status).toBe(400);
+  });
+
+  it("open-ended date bounds pass one side null", async () => {
+    const res = await tableWith(`lastContactTo=2026-10-15&nextFollowUpFrom=2026-10-01T00:00:00.000Z`);
+    expect(res.status).toBe(200);
+    expect(h.rpcArgs).toMatchObject({
+      p_last_contact_from: null,
+      p_last_contact_to: "2026-10-15",
+      p_next_followup_from: "2026-10-01T00:00:00.000Z",
+      p_next_followup_to: null,
+    });
+  });
+});
+
 describe("GET table with Workspace flow overrides", () => {
   it("attaches overrides separately while rows keep original answers", async () => {
     h.overrides = [

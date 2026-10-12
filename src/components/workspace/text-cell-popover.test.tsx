@@ -318,8 +318,7 @@ describe("22+23+24. expand mode", () => {
   });
 });
 
-describe("25. focus management", () => {
-  it("cursor is placed at the end on open; trigger regains focus on close", () => {
+describe("25. focus management", () => {  it("cursor is placed at the end on open; trigger regains focus on close", () => {
     expect(popoverSrc).toContain("setSelectionRange(el.value.length, el.value.length)");
     const closes = popoverSrc.split("focusTrigger()").length - 1;
     expect(closes).toBeGreaterThanOrEqual(2);
@@ -336,5 +335,137 @@ describe("25. focus management", () => {
     const guard = popoverSrc.slice(guardStart, guardEnd);
     expect(guard).toContain("setDirtyNotice(true)");
     expect(guard).not.toContain("setOpen(false)");
+  });
+});
+
+describe("26. two-line clamp for Customer Response / Next Action", () => {
+  const LONG_PLAIN = "word ".repeat(120).trim();
+
+  function renderPopover(value: string, twoLineClamp?: boolean) {
+    return renderToStaticMarkup(
+      <TextCellPopover
+        fieldLabel="Customer Response"
+        value={value}
+        editable={false}
+        twoLineClamp={twoLineClamp}
+      />,
+    );
+  }
+
+  function renderCell(name: string, stored: string | null, twoLineClamp?: boolean) {
+    return renderToStaticMarkup(
+      <CustomCell
+        flowId="flow-1"
+        runId="run-1"
+        field={textField({ name })}
+        stored={stored}
+        canEdit
+        onSaved={vi.fn()}
+        members={[]}
+        twoLineClamp={twoLineClamp}
+      />,
+    );
+  }
+
+  it("default trigger keeps single-line truncation (other columns unchanged)", () => {
+    const html = renderPopover(LONG_PLAIN);
+    expect(html).toContain("truncate");
+    expect(html).not.toContain("line-clamp-2");
+  });
+
+  it("clamped trigger wraps to 2 lines with ellipsis styling", () => {
+    const html = renderPopover(LONG_PLAIN, true);
+    expect(html).toContain("line-clamp-2");
+    expect(html).toContain("whitespace-normal");
+    expect(html).toContain("break-words");
+    expect(html).toContain("leading-[22px]");
+    // The clamped span no longer single-line truncates.
+    expect(html).not.toContain("truncate");
+  });
+
+  it("clamping is visual only — the full text stays in the trigger markup", () => {
+    const html = renderPopover(LONG_PLAIN, true);
+    expect(html).toContain(LONG_PLAIN);
+  });
+
+  it("short and empty values render under the clamp without errors", () => {
+    expect(renderPopover("OK", true)).toContain("OK");
+    expect(renderPopover("OK", true)).toContain("line-clamp-2");
+    expect(renderPopover("", true)).toContain("line-clamp-2");
+  });
+
+  it("CustomCell threads the clamp to editable and read-only text cells", () => {
+    for (const canEdit of [true, false]) {
+      const html = renderToStaticMarkup(
+        <CustomCell
+          flowId="flow-1"
+          runId="run-1"
+          field={textField()}
+          stored={LONG_PLAIN}
+          canEdit={canEdit}
+          onSaved={vi.fn()}
+          members={[]}
+          twoLineClamp
+        />,
+      );
+      expect(html).toContain("line-clamp-2");
+      expect(html).toContain("popover-trigger");
+    }
+    // Opt-in: omitted prop keeps the old single-line trigger.
+    expect(renderCell("Customer Response", LONG_PLAIN)).toContain("truncate");
+    expect(renderCell("Customer Response", LONG_PLAIN)).not.toContain(
+      "line-clamp-2",
+    );
+  });
+
+  it("non-text cells never clamp (selects keep dropdowns)", () => {
+    // Single-select/assignee fields never render the text
+    // popover at all, clamped or not.
+    for (const [f, stored] of [
+      [
+        textField({ name: "Type", field_type: "single_select", options: ["Fresh", "Hot"] }),
+        "Fresh",
+      ],
+      [
+        textField({ name: "Stage", field_type: "single_select", options: ["New Lead"] }),
+        "New Lead",
+      ],
+    ] as const) {
+      const selectHtml = renderToStaticMarkup(
+        <CustomCell
+          flowId="flow-1"
+          runId="run-1"
+          field={f}
+          stored={stored}
+          canEdit
+          onSaved={vi.fn()}
+          members={[]}
+          twoLineClamp
+        />,
+      );
+      expect(selectHtml).not.toContain("line-clamp-2");
+      expect(selectHtml).not.toContain("popover-trigger");
+    }
+  });
+
+  it("the page wires the clamp + padding + 448px width for exactly the two columns", () => {
+    expect(pageSrc).toContain("twoLineClamp={isWideTextColumnName(f.name)}");
+    expect(pageSrc).toContain("max-w-112 whitespace-normal px-3 py-2");
+    // The clamp itself lives on the popover trigger (visual only).
+    expect(popoverSrc).toContain("line-clamp-2");
+    // Widths unchanged: the doubled 448px default still feeds
+    // header and body from one source.
+    expect(pageSrc).toContain("defaultColumnWidthsForFields(customFields)");
+    expect(pageSrc).toContain("effectiveColumnWidths");
+    // Click-to-edit popover path is intact.
+    expect(pageSrc).toContain("<CustomCell");
+    expect(cellSrc).toContain("onSave={save}");
+  });
+
+  it("the open editor still shows the complete original text", () => {
+    const html = panel();
+    expect(html).toContain("this is the game");
+    expect(html).toContain("Please share the best itinerary");
+    expect(html).not.toContain("line-clamp-2");
   });
 });

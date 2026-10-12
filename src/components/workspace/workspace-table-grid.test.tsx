@@ -245,6 +245,22 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
     expect(pageSrc).toContain("sticky top-0");
     expect(pageSrc).not.toMatch(/overflow-x-(auto|scroll)/);
   });
+
+  it("wide-column headers center their labels; body text stays left-aligned", () => {
+    // Customer Response / Next Action headers center within the
+    // full 448px cell, matched by stored-name identity (never
+    // positional indexes) — header cells only.
+    expect(pageSrc).toContain("isWideTextColumnName(f.name) && 'text-center'");
+    // Vertical centering, background, sizing, and resizing come
+    // from the untouched header path.
+    expect(pageSrc).toContain("align-middle");
+    expect(pageSrc).toContain("headStyle(customFieldVisId(f.id), f.name)");
+    expect(pageSrc).toContain("ColumnResizeHandle");
+    // Body cells keep no centering: the wide body cap and the text
+    // trigger stay left-aligned (including two-line truncation).
+    expect(pageSrc).toContain("'max-w-112 whitespace-normal px-3 py-2'");
+    expect(cellSrc).toContain("text-left");
+  });
 });
 
 describe("10/11. chips and behavior unchanged", () => {

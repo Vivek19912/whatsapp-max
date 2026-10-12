@@ -42,9 +42,12 @@ import {
 import {
   ALL_ASSIGNEES,
   buildWorkspaceTableQuery,
+  columnFiltersRequestKey,
+  emptyColumnFilters,
   hasActiveWorkspaceFilters,
   serializeAssigneeSelection,
   type WorkspaceAssigneeSelection,
+  type WorkspaceColumnFilters,
 } from '@/lib/flows/workspace-filters';
 import { AddColumnDialog } from '@/components/workspace/add-column-dialog';
 import { ColumnsMenu } from '@/components/workspace/columns-menu';
@@ -56,9 +59,20 @@ import {
   type AppliedDateFilter,
 } from '@/components/workspace/workspace-filters';
 import { ColumnResizeHandle } from '@/components/workspace/column-resize-handle';
+import { HiddenRowsMenu } from '@/components/workspace/hidden-rows-menu';
+import { RowActionsMenu } from '@/components/workspace/row-actions-menu';
 import { TravelCrmAction } from '@/components/workspace/travel-crm-action';
 import { WorkspacePagination } from '@/components/workspace/workspace-pagination';
-import { columnWidthStyle } from '@/lib/flows/workspace-column-widths';
+import {
+  columnWidthStyle,
+  defaultColumnWidthsForFields,
+  isWideTextColumnName,
+} from '@/lib/flows/workspace-column-widths';
+import {
+  excludeHiddenRows,
+  orderPinnedFirst,
+  type HiddenRowInfo,
+} from '@/lib/flows/workspace-row-prefs';
 import { formatColumnLabel } from '@/lib/flows/column-label';
 
 /**
@@ -337,6 +351,13 @@ export default function WorkspacePage() {
   const [appliedDate, setAppliedDate] = useState<AppliedDateFilter | null>(null);
   const [appliedAssignee, setAppliedAssignee] =
     useState<WorkspaceAssigneeSelection>(ALL_ASSIGNEES);
+  // Applied five-column filters (null-safe empty default). Rides
+  // the table request like date/assignee — server-side, so
+  // pagination, counts, views, search, pin/hide, and ordering all
+  // compose by construction.
+  const [appliedColumns, setAppliedColumns] = useState<WorkspaceColumnFilters>(
+    () => emptyColumnFilters()
+  );
   // Header background overrides by stable visibility id
   // (`core:row`, `flow:<key>`, `custom:<uuid>`, `lead_source`).
   // Server-persisted per (account, flow); defaults resolve in
@@ -349,6 +370,18 @@ export default function WorkspacePage() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
   // Active resize drag (viewport-level select-none while set).
   const [resizingKey, setResizingKey] = useState<string | null>(null);
+  // Row pin/hide prefs (per user per flow, migration 117). Pinned
+  // run ids float to the top; hidden rows (with lead name/phone
+  // for the restore panel) leave the rendered table. The server
+  // applies the same rules post-migration, so these double as the
+  // optimistic layer (instant feedback, rolled back on failure).
+  const [pinnedIds, setPinnedIds] = useState<ReadonlySet<string>>(new Set());
+  const [hiddenRows, setHiddenRows] = useState<HiddenRowInfo[]>([]);
+  // In-flight row-pref requests by run id ('__all__' = bulk
+  // restore): guards against duplicate taps while pending.
+  const [rowActionPending, setRowActionPending] = useState<ReadonlySet<string>>(
+    new Set()
+  );
   // Live account roster for the "Assigned To" column — the SAME
   // source as Settings → Team Members (GET /api/account/members,
   // RLS-scoped to this account). Fetched once per page mount so a
@@ -481,6 +514,57 @@ export default function WorkspacePage() {
     return () => ctrl.abort();
   }, [flowId]);
 
+  // Row pin/hide prefs — same account/flow scope as the table,
+  // refetched per flow (Completed/Incomplete deliberately share
+  // one configuration). Best-effort like the reads above: a
+  // failure (e.g. migration 117 not yet applied) leaves empty
+  // prefs, and each pin/hide/restore action surfaces its own
+  // error toast — the table itself keeps working.
+  const reloadRowPrefs = useCallback(async () => {
+    if (!flowId) return;
+    try {
+      const res = await fetch(`/api/flows/${flowId}/row-prefs`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) return;
+      const json = (await res.json().catch(() => null)) as {
+        pinned?: unknown;
+        hidden?: unknown;
+      } | null;
+      if (!json || !Array.isArray(json.pinned) || !Array.isArray(json.hidden))
+        return;
+      setPinnedIds(
+        new Set(
+          json.pinned.filter((v): v is string => typeof v === 'string' && v !== '')
+        )
+      );
+      const clean: HiddenRowInfo[] = [];
+      for (const h of json.hidden) {
+        if (!h || typeof h !== 'object') continue;
+        const row = h as Record<string, unknown>;
+        if (typeof row.flow_run_id !== 'string' || row.flow_run_id === '')
+          continue;
+        clean.push({
+          flow_run_id: row.flow_run_id,
+          name: typeof row.name === 'string' ? row.name : null,
+          phone: typeof row.phone === 'string' ? row.phone : null,
+        });
+      }
+      setHiddenRows(clean);
+    } catch {
+      // Best-effort: prefs stay as they were.
+    }
+  }, [flowId]);
+
+  useEffect(() => {
+    // A previous flow's pins/hides must never flash into the new
+    // flow's table while its prefs load.
+    setPinnedIds(new Set());
+    setHiddenRows([]);
+    if (!flowId) return;
+    void reloadRowPrefs();
+  }, [flowId, reloadRowPrefs]);
+
   // Debounced search; resets to the first page.
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -505,9 +589,14 @@ export default function WorkspacePage() {
   }, []);
 
   const applyFilters = useCallback(
-    (date: AppliedDateFilter | null, assignee: WorkspaceAssigneeSelection) => {
+    (
+      date: AppliedDateFilter | null,
+      assignee: WorkspaceAssigneeSelection,
+      columns: WorkspaceColumnFilters
+    ) => {
       setAppliedDate(date);
       setAppliedAssignee(assignee);
+      setAppliedColumns(columns);
       setPage(0);
       setSelected(null);
     },
@@ -568,7 +657,7 @@ export default function WorkspacePage() {
   // ignored.
   const appliedDateRange = appliedDate?.range ?? null;
   const requestKey = flowId
-    ? `${flowId}|${view}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${page}|${pageSize}`
+    ? `${flowId}|${view}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(appliedColumns)}|${page}|${pageSize}`
     : null;
   const loading = requestKey !== null && requestKey !== loadedKey;
   useEffect(() => {
@@ -581,6 +670,7 @@ export default function WorkspacePage() {
       pageSize,
       dateRange: appliedDateRange,
       assignee: appliedAssignee,
+      columns: appliedColumns,
     });
     fetch(`/api/flows/${flowId}/table?${qs}`, {
       signal: ctrl.signal,
@@ -610,7 +700,7 @@ export default function WorkspacePage() {
         setLoadedKey(requestKey);
       });
     return () => ctrl.abort();
-  }, [flowId, requestKey, view, debouncedSearch, appliedDateRange, appliedAssignee, page, pageSize, refreshSeq]);
+  }, [flowId, requestKey, view, debouncedSearch, appliedDateRange, appliedAssignee, appliedColumns, page, pageSize, refreshSeq]);
 
   const totalPages = useMemo(() => {
     const total = payload?.meta.total ?? 0;
@@ -673,6 +763,25 @@ export default function WorkspacePage() {
   }, [deepLinkContactId, payload, pageSize, selected]);  const activeFlowName = flows?.find((f) => f.id === flowId)?.name ?? null;
 
   const customFields = useMemo(() => payload?.customFields ?? [], [payload]);
+  // Live business-column metadata for the Filters panel: each
+  // column's own options (never hardcoded) + presence flags for
+  // the date sections. Resolved by case-insensitive stored name —
+  // the same rule the table RPC filters by.
+  const columnFilterOptions = useMemo(() => {
+    const byName = new Map(
+      customFields.map((f) => [f.name.trim().toLowerCase(), f] as const)
+    );
+    const selectOptions = (name: string): string[] => {
+      const field = byName.get(name);
+      return field && Array.isArray(field.options) ? [...field.options] : [];
+    };
+    return {
+      callStatus: selectOptions('call status'),
+      followUpStatus: selectOptions('follow-up status'),
+      lastContactDate: byName.has('last contact date'),
+      nextFollowUp: byName.has('next follow-up date & time'),
+    };
+  }, [customFields]);
   const overridesForRequest =
     valueOverrides.key === requestKey ? valueOverrides.map : {};
 
@@ -810,6 +919,22 @@ export default function WorkspacePage() {
     () => orderBusinessColumns(customFieldsVisible),
     [customFieldsVisible]
   );
+  // Doubled-width defaults for "Customer Response" / "Next Action"
+  // (2 × 224px natural cap = 448px, inside the 80–500 band).
+  // Stored user widths spread LAST and always win, so no saved
+  // preference is ever reset — columns the user never resized
+  // simply render at the doubled default, while explicitly
+  // resized columns (these or any others) keep their exact saved
+  // pixels. Keyed by stable `custom:<uuid>` identity, so renames
+  // never orphan the default; hidden fields stay included so
+  // unhiding restores the wide default.
+  const effectiveColumnWidths = useMemo(
+    () => ({
+      ...defaultColumnWidthsForFields(customFields),
+      ...columnWidths,
+    }),
+    [customFields, columnWidths]
+  );
   const receivedDefaults = useMemo(() => {
     if (!leadReceivedField || !payload) return {} as Record<string, string>;
     const map: Record<string, string> = {};
@@ -819,6 +944,25 @@ export default function WorkspacePage() {
     }
     return map;
   }, [leadReceivedField, payload]);
+
+  // Visible table rows for the current pin/hide prefs: hidden rows
+  // removed, pinned rows first (both stable — relative order within
+  // each group is the server's). Post-migration-117 the server
+  // applies the same rules, so these are no-ops on migrated data
+  // and the fallback otherwise; either way the client and server
+  // can never disagree on membership or pin-partitioning.
+  const hiddenIdSet = useMemo(
+    () => new Set(hiddenRows.map((h) => h.flow_run_id)),
+    [hiddenRows]
+  );
+  const visibleRows = useMemo(
+    () =>
+      orderPinnedFirst(
+        excludeHiddenRows(payload?.rows ?? [], hiddenIdSet),
+        pinnedIds
+      ),
+    [payload, hiddenIdSet, pinnedIds]
+  );
 
   // Effective header backgrounds for the VISIBLE set — customs
   // first, then semantic reference colors, then unused palette
@@ -858,12 +1002,12 @@ export default function WorkspacePage() {
       const background =
         headerMap[visId] ?? resolveHeaderColor(visId, label, headerColors);
       return {
-        ...columnWidthStyle(visId, columnWidths),
+        ...columnWidthStyle(visId, effectiveColumnWidths),
         backgroundColor: background,
         color: headerTextColor(background),
       };
     },
-    [headerMap, headerColors, columnWidths]
+    [headerMap, headerColors, effectiveColumnWidths]
   );
 
   // Live width during a drag (no fetch); persist on release.
@@ -905,6 +1049,161 @@ export default function WorkspacePage() {
     },
     [flowId, columnWidths]
   );
+
+  // Row pin/hide mutations (agent+ only — the menus render for
+  // writers). Optimistic like header colors: paint immediately,
+  // roll back the snapshot + toast when the server rejects, then
+  // refetch prefs + table on success (counts and cross-page pin
+  // order come from the server). In-flight runs skip duplicate
+  // taps; hiding never deletes, archives, completes, or modifies
+  // any lead or flow-run record — it only flips a personal flag.
+  const markRowPending = useCallback((key: string, on: boolean) => {
+    setRowActionPending((prev) => {
+      if (prev.has(key) === on) return prev;
+      const next = new Set(prev);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
+
+  const mutateRowPref = useCallback(
+    async (
+      runId: string,
+      patch: { pinned?: boolean; hidden?: boolean },
+      messages: { success: string; failure: string }
+    ) => {
+      if (!flowId || rowActionPending.has(runId)) return;
+      const prevPinned = pinnedIds;
+      const prevHidden = hiddenRows;
+      if (patch.pinned !== undefined) {
+        const pinned = patch.pinned;
+        setPinnedIds((prev) => {
+          const next = new Set(prev);
+          if (pinned) next.add(runId);
+          else next.delete(runId);
+          return next;
+        });
+      }
+      if (patch.hidden !== undefined) {
+        if (patch.hidden) {
+          const row = payload?.rows.find((r) => r.runId === runId);
+          const info: HiddenRowInfo = {
+            flow_run_id: runId,
+            name: row?.name ?? null,
+            phone: row?.phone ?? null,
+          };
+          setHiddenRows((prev) =>
+            prev.some((h) => h.flow_run_id === runId) ? prev : [...prev, info]
+          );
+        } else {
+          setHiddenRows((prev) => prev.filter((h) => h.flow_run_id !== runId));
+        }
+      }
+      markRowPending(runId, true);
+      try {
+        const res = await fetch(`/api/flows/${flowId}/row-prefs`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_run_id: runId, ...patch }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(
+            (body as { error?: string }).error ?? messages.failure
+          );
+        }
+        toast.success(messages.success);
+        await reloadRowPrefs();
+        reloadTable();
+      } catch (err) {
+        setPinnedIds(prevPinned);
+        setHiddenRows(prevHidden);
+        toast.error(
+          err instanceof Error ? err.message : messages.failure
+        );
+      } finally {
+        markRowPending(runId, false);
+      }
+    },
+    [flowId, rowActionPending, pinnedIds, hiddenRows, payload, markRowPending, reloadRowPrefs, reloadTable]
+  );
+
+  const handleTogglePin = useCallback(
+    (runId: string) => {
+      const pinned = pinnedIds.has(runId);
+      void mutateRowPref(
+        runId,
+        { pinned: !pinned },
+        pinned
+          ? { success: 'Row unpinned', failure: 'Could not unpin the row.' }
+          : { success: 'Row pinned to the top', failure: 'Could not pin the row.' }
+      );
+    },
+    [pinnedIds, mutateRowPref]
+  );
+
+  const handleHideRow = useCallback(
+    (runId: string) => {
+      void mutateRowPref(
+        runId,
+        { hidden: true },
+        { success: 'Row hidden', failure: 'Could not hide the row.' }
+      );
+    },
+    [mutateRowPref]
+  );
+
+  const handleRestoreRow = useCallback(
+    (runId: string) => {
+      void mutateRowPref(
+        runId,
+        { hidden: false },
+        { success: 'Row restored', failure: 'Could not restore the row.' }
+      );
+    },
+    [mutateRowPref]
+  );
+
+  const handleRestoreAllHidden = useCallback(async () => {
+    // '__all__' is the bulk-restore pending key: run ids are UUIDs,
+    // so it can never collide with a real row's pending entry.
+    if (!flowId || rowActionPending.has('__all__') || hiddenRows.length === 0)
+      return;
+    const prevHidden = hiddenRows;
+    setHiddenRows([]);
+    markRowPending('__all__', true);
+    try {
+      const res = await fetch(`/api/flows/${flowId}/row-prefs`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all_hidden: true }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          (body as { error?: string }).error ?? 'Could not restore hidden rows.'
+        );
+      }
+      const { restored } = (await res.json().catch(() => ({}))) as {
+        restored?: unknown;
+      };
+      toast.success(
+        typeof restored === 'number' && restored > 0
+          ? `Restored ${restored} hidden row${restored === 1 ? '' : 's'}`
+          : 'Hidden rows restored'
+      );
+      await reloadRowPrefs();
+      reloadTable();
+    } catch (err) {
+      setHiddenRows(prevHidden);
+      toast.error(
+        err instanceof Error ? err.message : 'Could not restore hidden rows.'
+      );
+    } finally {
+      markRowPending('__all__', false);
+    }
+  }, [flowId, rowActionPending, hiddenRows, markRowPending, reloadRowPrefs, reloadTable]);
 
   return (
     <div className={cn('space-y-5', dmSans.className)}>
@@ -1019,6 +1318,8 @@ export default function WorkspacePage() {
                 members={teamMembers}
                 appliedDate={appliedDate}
                 appliedAssignee={appliedAssignee}
+                appliedColumns={appliedColumns}
+                columnOptions={columnFilterOptions}
                 onApply={applyFilters}
               />
               <ColumnsMenu
@@ -1039,6 +1340,15 @@ export default function WorkspacePage() {
                 canCustomizeColors={canSendMessages}
                 headerColorMap={headerMap}
               />
+              {canSendMessages && (
+                <HiddenRowsMenu
+                  hidden={hiddenRows}
+                  pendingIds={rowActionPending}
+                  restoreAllPending={rowActionPending.has('__all__')}
+                  onRestore={handleRestoreRow}
+                  onRestoreAll={handleRestoreAllHidden}
+                />
+              )}
               {canEditSettings && (
                 <Button
                   type="button"
@@ -1071,6 +1381,7 @@ export default function WorkspacePage() {
             hasActiveWorkspaceFilters({
               dateRange: appliedDateRange,
               assignee: appliedAssignee,
+              columns: appliedColumns,
             }) ? (
               <EmptyState
                 icon={Table2}
@@ -1111,6 +1422,20 @@ export default function WorkspacePage() {
                       right boundary (writers only). */}
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
+                      {/* Row actions: narrow fixed column first (writers
+                          only). One three-dot menu per row — pin /
+                          unpin / hide — with a filled-pin indicator
+                          for pinned rows. Never resized, hidden, or
+                          recolored: it sits outside the visibility,
+                          width, and header-color systems. */}
+                      {canSendMessages && (
+                        <TableHead
+                          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+                          aria-label="Row actions"
+                        >
+                          <span className="sr-only">Actions</span>
+                        </TableHead>
+                      )}
                       {rowVisible && (
                       <TableHead
                         className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold last:border-r-0"
@@ -1154,7 +1479,16 @@ export default function WorkspacePage() {
                       {customFieldsOrdered.map((f) => (
                         <TableHead
                           key={f.id}
-                          className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
+                          className={cn(
+                            'sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0',
+                            // Customer Response / Next Action headers
+                            // center their labels within the full
+                            // 448px cell (the resize handle is
+                            // absolutely positioned, so it never
+                            // offsets centering). Header-only: body
+                            // text stays left-aligned.
+                            isWideTextColumnName(f.name) && 'text-center'
+                          )}
                             style={headStyle(customFieldVisId(f.id), f.name)}
                           >
                             {formatColumnLabel(f.name)}
@@ -1175,16 +1509,33 @@ export default function WorkspacePage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {payload.rows.map((row, rowIndex) => (
+                    {visibleRows.map((row, rowIndex) => (
                       <TableRow
                         key={row.runId}
-                        className="cursor-pointer"
+                        className={cn(
+                          'cursor-pointer',
+                          // Pinned rows read subtly highlighted (light
+                          // amber wash) while keeping the row hover.
+                          pinnedIds.has(row.runId) &&
+                            'bg-amber-50/70 dark:bg-amber-950/20'
+                        )}
                         onClick={() => setSelected(row)}
                       >
+                        {canSendMessages && (
+                          <TableCell className="w-12 border-r border-border px-2 last:border-r-0">
+                            <RowActionsMenu
+                              rowLabel={row.name ?? row.phone ?? 'row'}
+                              isPinned={pinnedIds.has(row.runId)}
+                              pending={rowActionPending.has(row.runId)}
+                              onTogglePin={() => handleTogglePin(row.runId)}
+                              onHide={() => handleHideRow(row.runId)}
+                            />
+                          </TableCell>
+                        )}
                         {rowVisible && (
                         <TableCell
                           className="text-muted-foreground border-r border-border text-sm tabular-nums last:border-r-0"
-                          style={columnWidthStyle(ROW_VIS_ID, columnWidths)}
+                          style={columnWidthStyle(ROW_VIS_ID, effectiveColumnWidths)}
                         >
                           {workspaceRowNumber({
                             page,
@@ -1226,7 +1577,7 @@ export default function WorkspacePage() {
                               className="max-w-56 truncate border-r border-border last:border-r-0"
                               style={columnWidthStyle(
                                 flowColumnVisId(c.key),
-                                columnWidths
+                                effectiveColumnWidths
                               )}
                             >
                               {!c.system && flowId !== null ? (
@@ -1260,10 +1611,31 @@ export default function WorkspacePage() {
                           customFieldsOrdered.map((f) => (
                             <TableCell
                               key={f.id}
-                              className="max-w-56 overflow-hidden border-r border-border last:border-r-0"
+                              className={cn(
+                                'overflow-hidden border-r border-border last:border-r-0',
+                                // Doubled natural cap for the two
+                                // long-text columns (2 × max-w-56 =
+                                // max-w-112 = 448px): twice the room
+                                // with no clipping or overlap, and
+                                // the grid keeps scrolling as one.
+                                // Customer Response / Next Action
+                                // cells additionally wrap up to 2
+                                // lines (see twoLineClamp below):
+                                // whitespace-normal overrides the
+                                // table primitive's nowrap so text
+                                // wraps within the 448px; px-3/py-2
+                                // sets 12px horizontal + 8px
+                                // vertical padding (vertical centering
+                                // comes from the primitive's
+                                // align-middle). Every other column
+                                // keeps max-w-56 + natural width.
+                                isWideTextColumnName(f.name)
+                                  ? 'max-w-112 whitespace-normal px-3 py-2'
+                                  : 'max-w-56'
+                              )}
                               style={columnWidthStyle(
                                 customFieldVisId(f.id),
-                                columnWidths
+                                effectiveColumnWidths
                               )}
                             >
                               <CustomCell
@@ -1280,6 +1652,7 @@ export default function WorkspacePage() {
                                 canEdit={canSendMessages}
                                 onSaved={handleCustomSaved}
                                 members={teamMembers}
+                                twoLineClamp={isWideTextColumnName(f.name)}
                               />
                             </TableCell>
                           ))}

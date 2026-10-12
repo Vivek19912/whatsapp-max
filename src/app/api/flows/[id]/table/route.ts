@@ -6,6 +6,12 @@ import {
   parseAssigneeParam,
   serializeAssigneeSelection,
   validateWorkspaceDateRange,
+  isCalendarDateString,
+  isCallsTriedOp,
+  CALLS_TRIED_MIN,
+  CALLS_TRIED_MAX,
+  COLUMN_FILTER_VALUES_MAX,
+  COLUMN_FILTER_VALUE_MAX,
   type WorkspaceAssigneeSelection,
   type WorkspaceDateRange,
 } from '@/lib/flows/workspace-filters'
@@ -42,6 +48,26 @@ import { uploaderNamesByUserId } from '@/lib/recordings/uploaders'
  *     Member filtering matches the stable ID server-side; unknown
  *     or foreign IDs match zero rows (account isolation holds
  *     inside the account-scoped RPC).
+ *
+ * Plus five optional column filters over existing business columns
+ * (migration 118 — absent = inactive, AND with everything else):
+ *   callStatus[] / followUpStatus[] — repeated query keys; stored
+ *     single-select value must equal ANY listed value (OR within
+ *     the section). Unknown values simply match nothing.
+ *   callsTriedOp (eq|gt|lt|between) + callsTriedValue (eq/gt/lt)
+ *     or callsTriedMin+callsTriedMax (between) — numeric conditions
+ *     over the stored "No. of Calls Tried" count.
+ *   lastContactFrom/lastContactTo — YYYY-MM-DD calendar days,
+ *     half-open [from, to) over "Last Contact Date".
+ *   nextFollowUpFrom/nextFollowUpTo — UTC ISO instants, half-open
+ *     [from, to) over "Next Follow-up Date & Time" (stored values
+ *     normalize to toISOString() on write; bounds normalize the
+ *     same way — no tz skew). Rows with no follow-up never match.
+ * All column-filter inputs validate here (400 otherwise) and push
+ * into the paginated RPC, so total + page stay correct with any
+ * combination active — including search, views, pin ordering, and
+ * hidden exclusion. Applying or clearing filters never writes
+ * lead data; the meta.filters echo shape is unchanged.
  */
 export async function GET(
   request: Request,
@@ -93,7 +119,138 @@ export async function GET(
   } catch {
     return NextResponse.json(
       { error: 'Invalid assignee filter.' },
-      { status: 400 },
+      { status: 400 }
+    )
+  }
+
+  // Column filters — additive query keys; absent = inactive. Every
+  // input validates here (400 otherwise) and pushes into the
+  // paginated RPC. Categorical values match stored single-select
+  // values by exact equality server-side, so unknown values simply
+  // match zero rows rather than 400ing the table.
+  const badColumnFilter = (message: string) =>
+    NextResponse.json({ error: message }, { status: 400 })
+
+  function parseMultiValues(key: string): string[] | null {
+    const raw = url.searchParams.getAll(key)
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const entry of raw) {
+      const v = entry.trim()
+      if (v === '' || seen.has(v)) continue
+      if (v.length > COLUMN_FILTER_VALUE_MAX) {
+        throw new Error(
+          `Filter values must be ${COLUMN_FILTER_VALUE_MAX} characters or fewer.`
+        )
+      }
+      seen.add(v)
+      out.push(v)
+    }
+    if (out.length > COLUMN_FILTER_VALUES_MAX) {
+      throw new Error(
+        `At most ${COLUMN_FILTER_VALUES_MAX} values per filter.`
+      )
+    }
+    return out.length > 0 ? out : null
+  }
+
+  function parseCallsTriedInt(raw: string | null, what: string): number {
+    // Number("") is 0 — blank inputs must 400, not filter for 0.
+    if (raw === null || raw.trim() === '') {
+      throw new Error(
+        `${what} must be a whole number between ${CALLS_TRIED_MIN} and ${CALLS_TRIED_MAX}.`
+      )
+    }
+    const num = Number(raw.trim())
+    if (!Number.isInteger(num) || num < CALLS_TRIED_MIN || num > CALLS_TRIED_MAX) {
+      throw new Error(
+        `${what} must be a whole number between ${CALLS_TRIED_MIN} and ${CALLS_TRIED_MAX}.`
+      )
+    }
+    return num
+  }
+
+  function parseInstant(raw: string | null, what: string): string | null {
+    if (raw === null || raw.trim() === '') return null
+    const ms = Date.parse(raw.trim())
+    if (Number.isNaN(ms)) {
+      throw new Error(`${what} must be a valid datetime.`)
+    }
+    // Canonical UTC ISO (toISOString shape) — the same
+    // normalization stored values carry, so text comparison in the
+    // RPC is chronological with no tz skew.
+    return new Date(ms).toISOString()
+  }
+
+  let callStatus: string[] | null = null
+  let followUpStatus: string[] | null = null
+  let callsTriedOp: string | null = null
+  let callsTriedValue: number | null = null
+  let callsTriedMin: number | null = null
+  let callsTriedMax: number | null = null
+  let lastContactFrom: string | null = null
+  let lastContactTo: string | null = null
+  let nextFollowUpFrom: string | null = null
+  let nextFollowUpTo: string | null = null
+  try {
+    callStatus = parseMultiValues('callStatus')
+    followUpStatus = parseMultiValues('followUpStatus')
+
+    const rawOp = url.searchParams.get('callsTriedOp')
+    if (rawOp !== null && rawOp.trim() !== '') {
+      if (!isCallsTriedOp(rawOp.trim())) {
+        throw new Error('callsTriedOp must be eq, gt, lt, or between.')
+      }
+      callsTriedOp = rawOp.trim()
+      if (callsTriedOp === 'between') {
+        callsTriedMin = parseCallsTriedInt(
+          url.searchParams.get('callsTriedMin'), 'Min calls'
+        )
+        callsTriedMax = parseCallsTriedInt(
+          url.searchParams.get('callsTriedMax'), 'Max calls'
+        )
+        if (callsTriedMin > callsTriedMax) {
+          throw new Error('Min calls must be on or below max calls.')
+        }
+      } else {
+        callsTriedValue = parseCallsTriedInt(
+          url.searchParams.get('callsTriedValue'), 'Call count'
+        )
+      }
+    }
+
+    const rawLcFrom = url.searchParams.get('lastContactFrom')
+    const rawLcTo = url.searchParams.get('lastContactTo')
+    if (rawLcFrom !== null || rawLcTo !== null) {
+      if (
+        (rawLcFrom !== null && !isCalendarDateString(rawLcFrom)) ||
+        (rawLcTo !== null && !isCalendarDateString(rawLcTo))
+      ) {
+        throw new Error('lastContactFrom/To must be valid dates (YYYY-MM-DD).')
+      }
+      if (
+        rawLcFrom !== null &&
+        rawLcTo !== null &&
+        rawLcFrom.trim() > rawLcTo.trim()
+      ) {
+        throw new Error('lastContactFrom must be on or before lastContactTo.')
+      }
+      lastContactFrom = rawLcFrom?.trim() ?? null
+      lastContactTo = rawLcTo?.trim() ?? null
+    }
+
+    nextFollowUpFrom = parseInstant(url.searchParams.get('nextFollowUpFrom'), 'nextFollowUpFrom')
+    nextFollowUpTo = parseInstant(url.searchParams.get('nextFollowUpTo'), 'nextFollowUpTo')
+    if (
+      nextFollowUpFrom !== null &&
+      nextFollowUpTo !== null &&
+      nextFollowUpFrom > nextFollowUpTo
+    ) {
+      throw new Error('nextFollowUpFrom must be on or before nextFollowUpTo.')
+    }
+  } catch (err) {
+    return badColumnFilter(
+      err instanceof Error ? err.message : 'Invalid column filter.'
     )
   }
 
@@ -139,6 +296,19 @@ export async function GET(
       p_started_from: dateRange?.from ?? null,
       p_started_to: dateRange?.to ?? null,
       p_assignee: serializeAssigneeSelection(assignee),
+      // Column filters (migration 118 — NULL/absent = inactive).
+      // Conjunctive with every predicate above; total + page slice
+      // stay correct, and pin ordering + hidden exclusion compose.
+      p_call_status: callStatus,
+      p_calls_tried_op: callsTriedOp,
+      p_calls_tried_value: callsTriedValue,
+      p_calls_tried_min: callsTriedMin,
+      p_calls_tried_max: callsTriedMax,
+      p_followup_status: followUpStatus,
+      p_last_contact_from: lastContactFrom,
+      p_last_contact_to: lastContactTo,
+      p_next_followup_from: nextFollowUpFrom,
+      p_next_followup_to: nextFollowUpTo,
     },
   )
   if (rpcErr) {

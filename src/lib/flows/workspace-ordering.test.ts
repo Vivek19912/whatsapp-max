@@ -87,7 +87,11 @@ describe("workspace page rendering", () => {
   });
 
   it("renders rows in server order with UI-only numbering", () => {
-    expect(PAGE).toMatch(/payload\.rows\.map/);
+    // visibleRows = server-ordered payload rows minus hidden rows,
+    // with pinned rows partitioned stably to the top (no .sort() —
+    // see the no-sort test above): relative order within each group
+    // is exactly the server's, and numbering stays UI-only.
+    expect(PAGE).toMatch(/visibleRows\.map\(\(row, rowIndex\)/);
     expect(PAGE).toMatch(/workspaceRowNumber/);
   });
 });
