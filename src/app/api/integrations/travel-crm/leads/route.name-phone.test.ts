@@ -290,6 +290,18 @@ describe("5+6. edited Name/Phone sent as customerName/phone", () => {
     expect(h.travelCalls[0].body).toMatchObject({ customerName: "Rahul Sharma" });
   });
 
+  it("a 10-digit Phone without a country code is sent verbatim (no 91 added)", async () => {
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: { ...FUNNEL, phone: "8885638563" },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls[0].body).toMatchObject({ phone: "8885638563" });
+  });
+
   it("rejects invalid Name/Phone edits without calling Travel CRM", async () => {
     const badName = await POST(
       post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: { ...FUNNEL, customerName: "A" } }),

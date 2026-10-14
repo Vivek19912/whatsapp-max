@@ -40,9 +40,8 @@ import {
   validateNightsInput,
 } from "@/lib/integrations/travel-crm/itineraries";
 import {
-  displayToCanonicalPhone,
   formatPhoneForDisplay,
-  isIndianCountryCodeNumber,
+  resolveDialogPhoneForSubmit,
 } from "@/lib/whatsapp/phone-utils";
 import {
   LEAD_RECEIVED_FIELD_NAME,
@@ -2060,18 +2059,17 @@ export function TravelCrmAction({
       if (input.field === "phone") continue;
       if (raw) overrides[input.field === "assignedToEmail" ? "assignedUserId" : input.field] = raw;
     }
-    // Phone: the input shows the display form (Indian +91 stripped);
-    // map edits back to canonical so the payload keeps the
-    // international number the integration expects.
+    // Phone: the input shows the display form (Indian +91 stripped
+    // for readability). Untouched values restore the exact stored
+    // original; user edits send verbatim — a country code is never
+    // inferred, so a typed 10-digit number stays 10 digits.
     if (inputs.some((i) => i.field === "phone")) {
       const rawPhone = (values.phone ?? "").trim();
       if (rawPhone) {
         const prefillPhone = dialog?.prefill.phone;
-        overrides.phone = displayToCanonicalPhone(
+        overrides.phone = resolveDialogPhoneForSubmit(
           rawPhone,
-          isIndianCountryCodeNumber(
-            typeof prefillPhone === "string" ? prefillPhone : null,
-          ),
+          typeof prefillPhone === "string" ? prefillPhone : null,
         );
       }
     }

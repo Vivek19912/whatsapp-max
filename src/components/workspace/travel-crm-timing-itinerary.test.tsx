@@ -487,7 +487,8 @@ describe("Phase 1 regression guards", () => {
     expect(src).toContain("DepartureSearchSelect");
     expect(src).toContain("joinServiceLabels");
     expect(src).toContain("travelerFormToOverrides");
-    expect(src).toContain("displayToCanonicalPhone");
+    // Phone edits resolve verbatim without inventing a country code.
+    expect(src).toContain("resolveDialogPhoneForSubmit");
   });
 });
 

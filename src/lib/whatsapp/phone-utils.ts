@@ -56,7 +56,7 @@ export function isIndianCountryCodeNumber(value: string | null | undefined): boo
  * mobile number. Every other value renders unchanged (non-Indian
  * numbers keep their country code; invalid/ambiguous values are
  * never stripped). Never use the result for storage, messaging,
- * matching, or API payloads — see displayToCanonicalPhone to map
+ * matching, or API payloads — see resolveDialogPhoneForSubmit to map
  * an edited display value back.
  */
 export function formatPhoneForDisplay(value: string | null | undefined): string {
@@ -67,21 +67,27 @@ export function formatPhoneForDisplay(value: string | null | undefined): string 
 }
 
 /**
- * Map an edited display value back to its canonical form for
- * storage/API payloads. When the dialog opened with a stripped
- * Indian number (`wasStripped`) and the edited value is exactly
- * 10 digits, the 91 prefix is restored; every other shape passes
- * through verbatim (today's behavior), so non-Indian edits and
- * full international entries are never mangled or double-prefixed.
+ * Map a dialog phone edit back for submission. The phone input shows
+ * the display form (Indian +91 stripped); this resolves what to
+ * actually send:
+ *   - blank → "" (caller omits the override);
+ *   - untouched display value → the EXACT stored prefill (restores
+ *     a stripped country code without guessing);
+ *   - any user edit → verbatim (trimmed). A country code is never
+ *     inferred, added, stripped, or duplicated: `8885638563` stays
+ *     `8885638563`, `+91 8885638563` stays as typed.
  */
-export function displayToCanonicalPhone(
-  displayValue: string | null | undefined,
-  wasStripped: boolean,
+export function resolveDialogPhoneForSubmit(
+  rawPhone: string | null | undefined,
+  prefillPhone: unknown,
 ): string {
-  if (!wasStripped) return (displayValue ?? '').trim()
-  const digits = normalizePhone(displayValue ?? '')
-  if (!digits) return ''
-  return digits.length === 10 ? `91${digits}` : digits
+  const raw = typeof rawPhone === "string" ? rawPhone.trim() : "";
+  if (!raw) return "";
+  const canonical =
+    typeof prefillPhone === "string" ? prefillPhone.trim() : "";
+  if (!canonical) return raw;
+  if (raw === formatPhoneForDisplay(canonical)) return canonical;
+  return raw;
 }
 
 /**

@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
-  displayToCanonicalPhone,
   formatPhoneForDisplay,
   isIndianCountryCodeNumber,
   normalizePhone,
+  resolveDialogPhoneForSubmit,
 } from "./phone-utils";
 import { seedValues } from "@/components/workspace/travel-crm-action";
 
@@ -80,31 +80,52 @@ describe("6. dialog Phone field shows the display form", () => {
   });
 });
 
-describe("7+8. edits map back to canonical for the payload", () => {
-  it("edited stripped Indian number regains +91", () => {
-    expect(displayToCanonicalPhone("9890431235", true)).toBe("919890431235");
+describe("7+8. dialog phone edits submit without inventing a country code", () => {
+  it("a typed 10-digit number without a code stays code-free", () => {
+    // The reported bug: prefill was Indian, so any 10-digit edit got
+    // 91 prepended. Now user input passes through verbatim.
+    expect(resolveDialogPhoneForSubmit("8885638563", "+911234567890")).toBe(
+      "8885638563",
+    );
+    expect(resolveDialogPhoneForSubmit("8885638563", "919890431234")).toBe(
+      "8885638563",
+    );
+    expect(resolveDialogPhoneForSubmit("8885638563", null)).toBe("8885638563");
   });
 
-  it("untouched display round-trips to the stored canonical", () => {
-    expect(displayToCanonicalPhone(INDIAN_DISPLAY, true)).toBe(INDIAN_CANONICAL);
+  it("an explicitly supplied country code is preserved, never duplicated", () => {
+    expect(resolveDialogPhoneForSubmit("+91 8885638563", "+911234567890")).toBe(
+      "+91 8885638563",
+    );
+    expect(resolveDialogPhoneForSubmit("+971501234567", "+911234567890")).toBe(
+      "+971501234567",
+    );
+    expect(resolveDialogPhoneForSubmit("919890431235", "+911234567890")).toBe(
+      "919890431235",
+    );
   });
 
-  it("full international entries are never double-prefixed", () => {
-    expect(displayToCanonicalPhone("919890431235", true)).toBe("919890431235");
-    expect(displayToCanonicalPhone(NON_INDIAN, false)).toBe(NON_INDIAN);
-    expect(displayToCanonicalPhone("+971501234567", false)).toBe("+971501234567");
+  it("an untouched display value restores the exact stored original", () => {
+    expect(resolveDialogPhoneForSubmit(INDIAN_DISPLAY, INDIAN_CANONICAL)).toBe(
+      INDIAN_CANONICAL,
+    );
+    expect(resolveDialogPhoneForSubmit("+919890431234", "+919890431234")).toBe(
+      "+919890431234",
+    );
+    expect(resolveDialogPhoneForSubmit(NON_INDIAN, NON_INDIAN)).toBe(NON_INDIAN);
   });
 
   it("empty edits stay empty (existing skip behavior)", () => {
-    expect(displayToCanonicalPhone("", true)).toBe("");
+    expect(resolveDialogPhoneForSubmit("", "+911234567890")).toBe("");
+    expect(resolveDialogPhoneForSubmit(null, "+911234567890")).toBe("");
   });
 
-  it("submit reconstructs canonical (wiring intact)", () => {
+  it("submit resolves without the 91 heuristic (wiring intact)", () => {
     const src = readFileSync(
       `${process.cwd()}/src/components/workspace/travel-crm-action.tsx`,
       "utf8",
     );
-    expect(src).toContain("displayToCanonicalPhone(");
-    expect(src).toContain("isIndianCountryCodeNumber(");
+    expect(src).toContain("resolveDialogPhoneForSubmit(");
+    expect(src).not.toContain("displayToCanonicalPhone(");
   });
 });

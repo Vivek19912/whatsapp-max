@@ -48,6 +48,7 @@ import {
   extractLookupOptions,
   fetchTravelCrmLookups,
   TravelCrmError,
+  verifyTravelCrmLead,
   type LookupOption,
 } from "@/lib/integrations/travel-crm/client";
 import { normalizePhone } from "@/lib/whatsapp/phone-utils";
@@ -307,17 +308,55 @@ export async function POST(request: Request) {
       );
     }
 
-    // Existing real link → Created state, no external call, no duplicate.
+    // Existing real link → verify it still exists, then Created
+    // state with no external create call and no duplicate. The
+    // stored ID alone proves nothing: a lead deleted in Travel CRM
+    // would otherwise wedge this run on a dead link forever. Only
+    // a CONFIRMED absence (explicit exists:false) clears the
+    // association so the normal flow below can re-create; transport
+    // errors, auth failures, and ambiguous responses keep the link
+    // and behave exactly as before. Verification needs the owner
+    // email for tenant scoping, so assignment resolution moves
+    // above this check (no behavior change — pure reorder).
+    const ownerEmail = await resolveAccountOwnerEmail(supabase, accountId);
     try {
       const existing = await readLink(supabase, accountId, runId);
       if (existing?.external_lead_id) {
-        return NextResponse.json({
-          success: true,
-          code: "CREATED",
-          leadId: existing.external_lead_id,
-          leadUrl: travelCrmLeadUrl(baseUrl, existing.external_lead_id),
-          alreadyExists: true,
-        });
+        let stale = false;
+        if (ownerEmail) {
+          try {
+            const check = await verifyTravelCrmLead(
+              baseUrl,
+              secret,
+              existing.external_lead_id,
+              fetch,
+              { ownerEmail },
+            );
+            stale = !check.exists;
+          } catch (err) {
+            console.error("[travel-crm] link verification inconclusive (keeping link):", err instanceof Error ? err.message : err);
+          }
+        }
+        if (stale) {
+          try {
+            await supabase
+              .from("travel_crm_lead_links")
+              .delete()
+              .eq("account_id", accountId)
+              .eq("flow_run_id", runId)
+              .eq("integration_type", "travel-crm");
+          } catch (err) {
+            console.error("[travel-crm] stale link clear failed:", err);
+          }
+        } else {
+          return NextResponse.json({
+            success: true,
+            code: "CREATED",
+            leadId: existing.external_lead_id,
+            leadUrl: travelCrmLeadUrl(baseUrl, existing.external_lead_id),
+            alreadyExists: true,
+          });
+        }
       }
     } catch (err) {
       console.error("[travel-crm] link read failed:", err);
@@ -333,7 +372,8 @@ export async function POST(request: Request) {
     // finds the owner's matching user and assigns there. Unresolvable
     // owner email gates creation with "assignment-required" instead of
     // sending null (Travel CRM would never silently pick another user).
-    const ownerEmail = await resolveAccountOwnerEmail(supabase, accountId);
+    // (ownerEmail itself is resolved above, before the link check, so
+    // stale-link verification can scope to the correct tenant.)
     const overrideEmail: string | null = ownerEmail;
     const overrideIssue: TravelCrmAssignmentIssue | null = ownerEmail
       ? null
