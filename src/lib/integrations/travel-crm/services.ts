@@ -13,9 +13,20 @@ export const TRAVEL_CRM_SERVICE_LABELS: readonly string[] = [
   "Cruise",
   "Flight",
   "Hotel",
-  "Vehicle (disposal)",
+  "Vehicle",
   "Sightseeing",
   "Add-on Service (Rail, Passport, etc.)",
+];
+
+/**
+ * Retired display labels kept ONLY for backward compatibility
+ * with previously stored settings and dialog values (stored as
+ * labels, never Travel CRM database IDs). Never offered in the
+ * UI — accepted by validation and resolved to the same enum so
+ * existing selections keep submitting unchanged.
+ */
+export const TRAVEL_CRM_LEGACY_SERVICE_LABELS: readonly string[] = [
+  "Vehicle (disposal)",
 ];
 
 /**
@@ -25,18 +36,21 @@ export const TRAVEL_CRM_SERVICE_LABELS: readonly string[] = [
  * The live Travel CRM catalog (`serviceTypes`) derives its labels from
  * the enum via `labelForLookup` (title-cased enum words: "Vehicle
  * Transfer", "Other Add On", …), which does NOT match WACRM's display
- * labels for VEHICLE_TRANSFER ("Vehicle (disposal)") and OTHER_ADD_ON
+ * labels for VEHICLE_TRANSFER ("Vehicle") and OTHER_ADD_ON
  * ("Add-on Service (Rail, Passport, etc.)"). This explicit map is the
  * single authority that resolves WACRM's display labels to the exact
  * Travel CRM enum, so the payload always carries an enum value — never
  * a display label — while users keep seeing the same six options.
- * Keys are the exact labels from TRAVEL_CRM_SERVICE_LABELS (matched
+ * Keys are the exact labels from TRAVEL_CRM_SERVICE_LABELS plus the
+ * retired labels from TRAVEL_CRM_LEGACY_SERVICE_LABELS (matched
  * case-insensitively during canonicalization).
  */
 export const TRAVEL_CRM_SERVICE_VALUE_BY_LABEL: Readonly<Record<string, string>> = {
   Cruise: "CRUISE",
   Flight: "FLIGHT",
   Hotel: "HOTEL",
+  Vehicle: "VEHICLE_TRANSFER",
+  // Retired label — previously stored settings/values only.
   "Vehicle (disposal)": "VEHICLE_TRANSFER",
   Sightseeing: "SIGHTSEEING",
   "Add-on Service (Rail, Passport, etc.)": "OTHER_ADD_ON",
@@ -77,13 +91,42 @@ export function normalizeServiceLabels(value: unknown): string[] {
 }
 
 /**
+ * Current user-visible label for a stored service value. Retired
+ * labels resolve to their successor ("Vehicle (disposal)" →
+ * "Vehicle") so previously saved selections keep rendering
+ * checked under the new name; every other value passes through
+ * untouched. Display-only — stored values, payloads, and enums
+ * are never rewritten here.
+ */
+export function resolveDisplayServiceLabel(value: string): string {
+  const key = value.trim().toLowerCase();
+  const legacyIndex = TRAVEL_CRM_LEGACY_SERVICE_LABELS.findIndex(
+    (l) => l.toLowerCase() === key,
+  );
+  if (legacyIndex !== -1) {
+    const successor = TRAVEL_CRM_SERVICE_VALUE_BY_LABEL[
+      TRAVEL_CRM_LEGACY_SERVICE_LABELS[legacyIndex]
+    ];
+    const current = TRAVEL_CRM_SERVICE_LABELS.find(
+      (l) => TRAVEL_CRM_SERVICE_VALUE_BY_LABEL[l] === successor,
+    );
+    if (current) return current;
+  }
+  return value;
+}
+/**
  * True when every label is one of the six offered services
  * (case-insensitive). Stored settings should only ever contain
  * offered labels; anything else is rejected at the API boundary.
+ * Retired labels (previously stored selections) keep validating
+ * so existing settings are never rejected after a rename.
  */
 export function isOfferedServiceLabel(value: string): boolean {
   const key = value.trim().toLowerCase();
-  return TRAVEL_CRM_SERVICE_LABELS.some((l) => l.toLowerCase() === key);
+  return (
+    TRAVEL_CRM_SERVICE_LABELS.some((l) => l.toLowerCase() === key) ||
+    TRAVEL_CRM_LEGACY_SERVICE_LABELS.some((l) => l.toLowerCase() === key)
+  );
 }
 
 /** Split a semicolon-joined services string (dialog value state). */

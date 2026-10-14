@@ -419,7 +419,7 @@ describe("per-lead Services edits ride the dedicated override path", () => {
   });
 });
 
-describe("dialog Services section shows only the per-flow configuration", () => {
+describe("server still sends per-flow defaults for the dialog (dialog shows all six)", () => {
   // Production-like full catalog: 13 live entries with their own labels.
   const FULL_CATALOG = {
     leadSources: [{ value: "WHATSAPP", label: "WhatsApp" }],

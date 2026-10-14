@@ -21,6 +21,7 @@ import {
   type WacrmAnswerSource,
 } from "@/lib/integrations/travel-crm/mapping";
 import { splitServiceLabels } from "@/lib/integrations/travel-crm/services";
+import { DEFAULT_DEPARTURE_COUNTRY } from "@/lib/integrations/travel-crm/departure-catalog";
 import { readFlowItineraryDefaults, readFlowServiceLabels, readFlowDepartureDefaults } from "@/lib/integrations/travel-crm/flow-settings";
 import {
   LEAD_STAGE_DEFAULT_VALUE,
@@ -837,6 +838,29 @@ export async function POST(request: Request) {
         }
         mapping.ready = isTravelCrmReady(mapping.fields);
       }
+    }
+
+    // --- Workspace creation-dialog default: Departure Country = India.
+    // --- Applies ONLY when the field is still missing after lead data,
+    // --- dialog overrides, and saved per-flow departure defaults all
+    // --- resolved to nothing (i.e. a genuinely new entry with no saved
+    // --- value). Existing saved values (lead answers, flow defaults,
+    // --- explicit overrides) always win and are never overwritten.
+    // --- Departure City stays empty for the agent to pick from the
+    // --- Indian catalog list. Stored flow configuration is never
+    // --- modified here; the value rides the normal draft/prefill path
+    // --- so initialization, validation, and submission all see India.
+    if (mapping.fields.departureCountry?.status === "missing") {
+      draft.departureCountry = DEFAULT_DEPARTURE_COUNTRY;
+      mapping.fields.departureCountry = {
+        status: "available",
+        source: { kind: "flow-default", key: "workspace-default:departureCountry" },
+      };
+      if (!mapping.available.includes("departureCountry")) {
+        mapping.available.push("departureCountry");
+      }
+      mapping.missing = mapping.missing.filter((f) => f !== "departureCountry");
+      mapping.ready = isTravelCrmReady(mapping.fields);
     }
 
     // --- Dialog itinerary override (multi-row editor): wins over

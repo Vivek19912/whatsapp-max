@@ -93,8 +93,8 @@ describe("8. destination lookup comes from Travel CRM (never hardcoded)", () => 
       ],
     };
     expect(extractDestinationOptions(lookups)).toEqual([
-      { value: "dest-sg", label: "Singapore" },
-      { value: "dest-bali", label: "Bali" },
+      { value: "dest-sg", label: "Singapore", countryName: null, privateName: null },
+      { value: "dest-bali", label: "Bali", countryName: null, privateName: null },
     ]);
   });
 
@@ -103,9 +103,25 @@ describe("8. destination lookup comes from Travel CRM (never hardcoded)", () => 
       extractDestinationOptions({
         countries: [{ id: "c-sg", name: "Singapore" }],
       }),
-    ).toEqual([{ value: "c-sg", label: "Singapore" }]);
+    ).toEqual([{ value: "c-sg", label: "Singapore", countryName: null, privateName: null }]);
     expect(extractDestinationOptions({})).toEqual([]);
     expect(extractDestinationOptions(null)).toEqual([]);
+  });
+
+  it("forwards countryName/privateName metadata verbatim (null when absent)", () => {
+    expect(
+      extractDestinationOptions({
+        destinations: [
+          { value: "d1", label: "Thailand", countryName: "Thailand", privateName: "Thai Private" },
+          { value: "d2", label: "Goa", countryName: "India", privateName: "  " },
+          { value: "d3", label: "Bali" },
+        ],
+      }),
+    ).toEqual([
+      { value: "d1", label: "Thailand", countryName: "Thailand", privateName: "Thai Private" },
+      { value: "d2", label: "Goa", countryName: "India", privateName: null },
+      { value: "d3", label: "Bali", countryName: null, privateName: null },
+    ]);
   });
 
   it("contains no hardcoded destination values in WACRM source", () => {
@@ -259,7 +275,9 @@ describe("14. master-ID catalogs never mix with legacy display names", () => {
 
   it("1. Singapore destination loads exactly once, by ID", () => {
     const dests = extractDestinationOptions(MIXED);
-    expect(dests).toEqual([{ value: SG_ID, label: "Singapore" }]);
+    expect(dests).toEqual([
+      { value: SG_ID, label: "Singapore", countryName: null, privateName: null },
+    ]);
   });
 
   it("2. Singapore's cities are populated from linkage", () => {
@@ -279,7 +297,7 @@ describe("14. master-ID catalogs never mix with legacy display names", () => {
 
   it("legacy lists still work when no master catalog exists (old servers)", () => {
     expect(extractDestinationOptions({ countries: ["Singapore"] })).toEqual([
-      { value: "Singapore", label: "Singapore" },
+      { value: "Singapore", label: "Singapore", countryName: null, privateName: null },
     ]);
     const free = extractCityOptions({ cities: ["Delhi", "Mumbai"] });
     expect(citiesForDestination(free, "anything")).toHaveLength(2);

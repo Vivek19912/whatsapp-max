@@ -18,9 +18,14 @@ export const dynamic = "force-dynamic";
  * and returns ONLY the itinerary-relevant slice parsed from its
  * real payload — never hardcoded WACRM values:
  *
- *   { destinations: [{value,label}],
+ *   { destinations: [{value,label,countryName,privateName}],
  *     cities: [{value,label,destinationValue}],
  *     citiesByDestination: {<destinationValue>: [{value,label}]} }
+ *
+ * `countryName`/`privateName` are forwarded verbatim from the
+ * upstream feed (null when it omits them) for country-grouped,
+ * private-name-searchable dropdowns; they are display/search
+ * metadata only and never enter stored values.
  *
  * Lookup bootstrap: the account owner's email (resolved server-side
  * from the authenticated account's own rows — never request input)

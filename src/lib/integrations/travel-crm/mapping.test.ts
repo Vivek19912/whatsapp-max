@@ -294,7 +294,7 @@ describe("canonicalizeServices", () => {
           "Cruise",
           "Flight",
           "Hotel",
-          "Vehicle (disposal)",
+          "Vehicle",
           "Sightseeing",
           "Add-on Service (Rail, Passport, etc.)",
         ],
@@ -305,6 +305,8 @@ describe("canonicalizeServices", () => {
 
   it("resolves individual display labels and catalog labels to canonical enums", () => {
     expect(canonicalizeServices(["Flight", "Hotel"], options)).toEqual(["FLIGHT", "HOTEL"]);
+    expect(canonicalizeServices(["Vehicle"], options)).toEqual(["VEHICLE_TRANSFER"]);
+    // The retired label keeps resolving for previously stored values.
     expect(canonicalizeServices(["Vehicle (disposal)"], options)).toEqual(["VEHICLE_TRANSFER"]);
     expect(
       canonicalizeServices(["Add-on Service (Rail, Passport, etc.)"], options),
@@ -312,6 +314,7 @@ describe("canonicalizeServices", () => {
   });
 
   it("resolves the six known labels even when the catalog is unavailable", () => {
+    expect(canonicalizeServices(["Vehicle"], null)).toEqual(["VEHICLE_TRANSFER"]);
     expect(canonicalizeServices(["Vehicle (disposal)"], null)).toEqual(["VEHICLE_TRANSFER"]);
     expect(canonicalizeServices(["Add-on Service (Rail, Passport, etc.)"], [])).toEqual([
       "OTHER_ADD_ON",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, Plus, Settings2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,19 +21,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { TRAVEL_CRM_SERVICE_LABELS } from "@/lib/integrations/travel-crm/services";
+import {
+  resolveDisplayServiceLabel,
+  TRAVEL_CRM_SERVICE_LABELS,
+} from "@/lib/integrations/travel-crm/services";
 import {
   citiesForDestination,
   cityLabelForValue,
-  destinationLabelForValue,
   resolveSelectValue,
   validateNightsInput,
 } from "@/lib/integrations/travel-crm/itineraries";
-import {
-  DEPARTURE_COUNTRIES,
-  departureCityOptions,
-  isDepartureCityInCountry,
-} from "@/lib/integrations/travel-crm/departure-catalog";
+import { ItineraryDestinationSelect } from "./travel-crm-action";
 
 export interface ItineraryEditRow {
   destination: string;
@@ -115,8 +113,6 @@ export function TravelCrmSettings({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [rows, setRows] = useState<ItineraryEditRow[]>([]);
-  const [departureCountry, setDepartureCountryState] = useState("");
-  const [departureCity, setDepartureCityState] = useState("");
   const [destinations, setDestinations] = useState<LookupOption[]>([]);
   const [cities, setCities] = useState<LookupOption[]>([]);
   const [lookupsLoading, setLookupsLoading] = useState(false);
@@ -153,17 +149,6 @@ export function TravelCrmSettings({
           );
         } else {
           setRows([]);
-        }
-        const dep = (json as { departure?: unknown } | null)?.departure;
-        if (dep && typeof dep === "object" && !Array.isArray(dep)) {
-          const rec = dep as Record<string, unknown>;
-          setDepartureCountryState(
-            typeof rec.country === "string" ? rec.country : "",
-          );
-          setDepartureCityState(typeof rec.city === "string" ? rec.city : "");
-        } else {
-          setDepartureCountryState("");
-          setDepartureCityState("");
         }
       })
       .catch(() => setError("Could not load settings."))
@@ -233,9 +218,15 @@ export function TravelCrmSettings({
   }, [open, flowId]);
 
   function toggle(label: string) {
+    // Compare through the display resolver so a retired stored
+    // label ("Vehicle (disposal)") still matches its successor
+    // ("Vehicle"): unchecking clears every spelling, checking
+    // stores the current label.
+    const matches = (s: string) =>
+      resolveDisplayServiceLabel(s).toLowerCase() === label.toLowerCase();
     setSelected((prev) =>
-      prev.some((s) => s.toLowerCase() === label.toLowerCase())
-        ? prev.filter((s) => s.toLowerCase() !== label.toLowerCase())
+      prev.some(matches)
+        ? prev.filter((s) => !matches(s))
         : [...prev, label],
     );
   }
@@ -250,19 +241,6 @@ export function TravelCrmSettings({
 
   function setNights(index: number, value: string) {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, nights: value } : r)));
-  }
-
-  function setDepartureCountry(value: string) {
-    setDepartureCountryState(value);
-    // Changing country clears an incompatible city rather than
-    // keeping an invalid pairing (same rule as itinerary rows).
-    setDepartureCityState((prev) =>
-      prev && !isDepartureCityInCountry(value, prev) ? "" : prev,
-    );
-  }
-
-  function setDepartureCity(value: string) {
-    setDepartureCityState(value);
   }
 
   async function save() {
@@ -288,24 +266,17 @@ export function TravelCrmSettings({
         city: r.city,
         nights: Number(r.nights.trim()),
       }));
-    // Departure: both empty clears the defaults; a city without a
-    // country is rejected client-side (the server re-validates
-    // against the copied Travel CRM catalog).
-    const depCountry = departureCountry.trim();
-    const depCity = departureCity.trim();
-    if (!depCountry && depCity) {
-      setError("Select a departure country for the city.");
-      return;
-    }
-    const departure =
-      depCountry || depCity ? { country: depCountry, city: depCity } : null;
+    // The departure key is deliberately omitted: the API
+    // preserves stored departure defaults when absent, so saving
+    // here never wipes saved values and the creation dialog keeps
+    // prefilling them.
     setBusy(true);
     setError(null);
     try {
       const res = await fetch(`/api/flows/${flowId}/travel-crm-settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ services: selected, itinerary, departure }),
+        body: JSON.stringify({ services: selected, itinerary }),
       });
       const json = (await res.json().catch(() => null)) as {
         error?: string;
@@ -319,19 +290,6 @@ export function TravelCrmSettings({
       setBusy(false);
     }
   }
-
-  // Departure options come from the COPIED Travel CRM catalog
-  // (world-countries names + INDIAN/curated cities) — always
-  // available locally, never fetched. Sorted like the Travel CRM
-  // form; cities follow the selected country.
-  const departureCountries = useMemo(
-    () => [...DEPARTURE_COUNTRIES].sort((a, b) => a.localeCompare(b)),
-    [],
-  );
-  const departureCities = useMemo(
-    () => departureCityOptions(departureCountry),
-    [departureCountry],
-  );
 
   return (
     <>
@@ -366,8 +324,13 @@ export function TravelCrmSettings({
               ) : (
                 <div className="grid gap-1.5" role="group" aria-label="Default services">
                   {TRAVEL_CRM_SERVICE_LABELS.map((label) => {
+                    // Retired stored labels resolve to the current
+                    // name, so previously saved selections keep
+                    // rendering checked after the rename.
                     const checked = selected.some(
-                      (s) => s.toLowerCase() === label.toLowerCase(),
+                      (s) =>
+                        resolveDisplayServiceLabel(s).toLowerCase() ===
+                        label.toLowerCase(),
                     );
                     return (
                       <label
@@ -435,13 +398,17 @@ export function TravelCrmSettings({
                     // intact in state and on save.
                     const destinationValue = resolveSelectValue(destinations, row.destination);
                     const cityValue = resolveSelectValue(cityOptions, row.city);
-                    // Explicit label resolution (ID → name) for display:
-                    // the stored UUID is passed to the Select only as the
-                    // value; the human-readable name is rendered directly
-                    // so the trigger never shows a raw UUID, even during
-                    // SSR or before Base UI registers its items.
-                    const destinationLabel = destinationLabelForValue(destinations, row.destination);
+                    // Explicit label resolution (ID → name) for the
+                    // city display: the stored UUID is passed to the
+                    // Select only as the value; the human-readable
+                    // name renders directly so the trigger never
+                    // shows a raw UUID.
                     const cityLabel = cityLabelForValue(cityOptions, row.city);
+                    // Destination uses the shared country-grouped
+                    // selector (same component as the creation
+                    // dialog): groups appear when the lookup feed
+                    // carries country metadata, otherwise the flat
+                    // list renders exactly as before.
                     return (
                       <div
                         key={i}
@@ -454,23 +421,12 @@ export function TravelCrmSettings({
                           >
                             Destination
                           </label>
-                          <Select
+                          <ItineraryDestinationSelect
                             value={destinationValue}
-                            onValueChange={(v) => setDestination(i, v ?? "")}
-                          >
-                            <SelectTrigger id={`itin-dest-${i}`} aria-label="Destination" className="h-8 w-full">
-                              <SelectValue placeholder="Select">
-                                {destinationLabel !== null ? destinationLabel : undefined}
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              {destinations.map((o) => (
-                                <SelectItem key={o.value} value={o.value}>
-                                  {o.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            options={destinations}
+                            inputId={`itin-dest-${i}`}
+                            onChange={(v) => setDestination(i, v ?? "")}
+                          />
                         </div>
                         <div className="grid gap-1">
                           <label
@@ -543,73 +499,6 @@ export function TravelCrmSettings({
                     <Plus className="h-4 w-4" />
                     Add More
                   </Button>
-                </div>
-              )}
-            </div>
-            <div className="space-y-2">
-              <p className="text-foreground text-sm font-semibold">Departure Defaults</p>
-              <p className="text-muted-foreground text-xs">
-                Prefilled Departure Country/City when creating a lead in Travel CRM.
-                Empty means no prefill. Editing a lead never changes these defaults.
-              </p>
-              {loading ? (
-                <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading…
-                </p>
-              ) : (
-                <div className="grid grid-cols-[1fr_1fr] gap-2">
-                  <div className="grid gap-1">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="dep-country"
-                    >
-                      Departure Country
-                    </label>
-                    <Select
-                      value={departureCountry || undefined}
-                      onValueChange={(v) => setDepartureCountry(v ?? "")}
-                    >
-                      <SelectTrigger id="dep-country" aria-label="Departure Country" className="h-8 w-full">
-                        <SelectValue placeholder="Select country" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {departureCountries.map((name) => (
-                          <SelectItem key={name} value={name}>
-                            {name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-1">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="dep-city"
-                    >
-                      Departure City
-                    </label>
-                    <Select
-                      value={departureCity || undefined}
-                      onValueChange={(v) => setDepartureCity(v ?? "")}
-                      disabled={!departureCountry}
-                    >
-                      <SelectTrigger id="dep-city" aria-label="Departure City" className="h-8 w-full">
-                        <SelectValue
-                          placeholder={
-                            departureCountry ? "Select city" : "Pick country first"
-                          }
-                        />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {departureCities.map((o) => (
-                          <SelectItem key={o.value} value={o.value}>
-                            {o.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
                 </div>
               )}
             </div>

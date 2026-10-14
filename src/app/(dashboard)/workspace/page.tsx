@@ -86,8 +86,7 @@ const dmSans = DM_Sans({
 });
 import {
   headerTextColor,
-  buildHeaderColorMap,
-  resolveHeaderColor,
+  assignHeaderBackgrounds,
 } from '@/lib/flows/header-colors';
 import {
   customFieldVisId,
@@ -964,50 +963,102 @@ export default function WorkspacePage() {
     [payload, hiddenIdSet, pinnedIds]
   );
 
-  // Effective header backgrounds for the VISIBLE set — customs
-  // first, then semantic reference colors, then unused palette
-  // colors reassigned in visible order (a mapped color never
-  // disappears when its column is absent), overflow beyond that.
-  // Hidden columns keep their stored overrides in headerColors, so unhiding restores their tint; visibility
-  // resets never touch this map.
-  const headerMap = useMemo(
-    () =>
-      buildHeaderColorMap(
-        [
-          { visId: ROW_VIS_ID, label: 'Row' },
-          ...flowColumnsVisible.map((c) => ({
-            visId: flowColumnVisId(c.key),
-            label: c.label,
-          })),
-          ...customFieldsVisible.map((f) => ({
-            visId: customFieldVisId(f.id),
-            label: f.name,
-          })),
-        ],
-        headerColors
-      ),
-    [flowColumnsVisible, customFieldsVisible, headerColors]
-  );
-
   // No pinned/frozen columns: every column scrolls horizontally
   // as one unified grid. Only the header row sticks vertically
   // (top-0) so column titles stay visible while rows scroll.
   // The row-number column hides exactly like any other column.
   const rowVisible = !visibility.hiddenIds.includes(ROW_VIS_ID);
-  // Header paint for one column: resized width + map background +
-  // auto-contrast text. The map fallback covers keys missing
-  // from the visible set (defensive only).
-  const headStyle = useCallback(
-    (visId: string, label: string) => {
-      const background =
-        headerMap[visId] ?? resolveHeaderColor(visId, label, headerColors);
+
+  // Exact rendered header order (one entry PER RENDERED header,
+  // hidden columns excluded, business display order applied):
+  // row when visible, then flow columns in render order, then
+  // business columns in pinned display order. Flow headers are
+  // keyed by RENDER key (`sys:<key>` / `flow:<key>`) — never the
+  // bare `flow:<key>` visibility id — so a system column and a
+  // flow answer sharing one logical key (e.g. var_key "name"
+  // beside system Name) keep separate color slots. Widths stay
+  // keyed by the stable legacy visibility id (saved widths are
+  // preserved); `fallbackIds` lets overrides persisted under the
+  // legacy id still apply after the key namespacing.
+  const visibleHeaderOrder = useMemo(
+    (): Array<{
+      visId: string;
+      label: string;
+      widthId: string;
+      fallbackIds?: readonly string[];
+    }> => [
+      ...(rowVisible ? [{ visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID }] : []),
+      ...flowColumnsVisible.map((c) => ({
+        visId: flowColumnRenderKey(c),
+        label: c.label,
+        widthId: flowColumnVisId(c.key),
+        fallbackIds: [flowColumnVisId(c.key)],
+      })),
+      ...customFieldsOrdered.map((f) => ({
+        visId: customFieldVisId(f.id),
+        label: f.name,
+        widthId: customFieldVisId(f.id),
+      })),
+    ],
+    [rowVisible, flowColumnsVisible, customFieldsOrdered]
+  );
+
+  // Positional backgrounds index-aligned with visibleHeaderOrder:
+  // backgrounds[i] paints headers[i], sequentially assigned so
+  // every adjacent pair differs (palette cycles to another
+  // existing color instead of naively repeating when exhausted —
+  // first/last and the scrollable tail included). Rebuilt on
+  // every hide/show/reorder/add via the order above. Hidden
+  // columns keep their stored overrides in headerColors, so
+  // unhiding restores their tint; visibility resets never touch
+  // this sequence.
+  const headerBackgrounds = useMemo(
+    () =>
+      assignHeaderBackgrounds(
+        visibleHeaderOrder.map(({ visId, label, fallbackIds }) => ({
+          visId,
+          label,
+          ...(fallbackIds ? { fallbackIds } : {}),
+        })),
+        headerColors
+      ),
+    [visibleHeaderOrder, headerColors]
+  );
+
+  // Legacy-id map for the Columns manager (dots, taken-color
+  // blocking, picker): derived from the SAME positional sequence
+  // the headers paint, keyed by render id plus legacy flow ids so
+  // lookups by either identity resolve to the painted color. The
+  // TABLE headers never read this map — they paint positionally
+  // from headerBackgrounds, so no key miss can fall back to the
+  // per-column green default.
+  const headerMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    visibleHeaderOrder.forEach((entry, i) => {
+      map[entry.visId] = headerBackgrounds[i];
+      for (const legacy of entry.fallbackIds ?? []) {
+        if (!(legacy in map)) map[legacy] = headerBackgrounds[i];
+      }
+    });
+    return map;
+  }, [visibleHeaderOrder, headerBackgrounds]);
+
+  // Header paint by RENDERED POSITION (never by key lookup): the
+  // caller passes the header's index in visibleHeaderOrder, so a
+  // system/flow key collision can never share one slot and no
+  // fallback can repaint neighbours with the default green.
+  // Widths still resolve by stable legacy id.
+  const headStyleAt = useCallback(
+    (index: number) => {
+      const entry = visibleHeaderOrder[index];
+      const background = headerBackgrounds[index];
       return {
-        ...columnWidthStyle(visId, effectiveColumnWidths),
+        ...columnWidthStyle(entry?.widthId ?? '', effectiveColumnWidths),
         backgroundColor: background,
         color: headerTextColor(background),
       };
     },
-    [headerMap, headerColors, effectiveColumnWidths]
+    [visibleHeaderOrder, headerBackgrounds, effectiveColumnWidths]
   );
 
   // Live width during a drag (no fetch); persist on release.
@@ -1439,7 +1490,7 @@ export default function WorkspacePage() {
                       {rowVisible && (
                       <TableHead
                         className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold last:border-r-0"
-                        style={headStyle(ROW_VIS_ID, 'Row')}
+                        style={headStyleAt(0)}
                       >
                         No.
                         {canSendMessages && (
@@ -1454,13 +1505,14 @@ export default function WorkspacePage() {
                         )}
                       </TableHead>
                       )}
-                      {flowColumnsVisible.map((c) => {
+                      {flowColumnsVisible.map((c, flowIdx) => {
                         const visId = flowColumnVisId(c.key);
+                        const headerIdx = (rowVisible ? 1 : 0) + flowIdx;
                         return (
                           <TableHead
                             key={flowColumnRenderKey(c)}
                             className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
-                            style={headStyle(visId, c.label)}
+                            style={headStyleAt(headerIdx)}
                           >
                             {formatColumnLabel(c.label)}
                             {canSendMessages && (
@@ -1476,7 +1528,7 @@ export default function WorkspacePage() {
                           </TableHead>
                         );
                       })}
-                      {customFieldsOrdered.map((f) => (
+                      {customFieldsOrdered.map((f, customIdx) => (
                         <TableHead
                           key={f.id}
                           className={cn(
@@ -1489,7 +1541,11 @@ export default function WorkspacePage() {
                             // text stays left-aligned.
                             isWideTextColumnName(f.name) && 'text-center'
                           )}
-                            style={headStyle(customFieldVisId(f.id), f.name)}
+                            style={headStyleAt(
+                              (rowVisible ? 1 : 0) +
+                                flowColumnsVisible.length +
+                                customIdx
+                            )}
                           >
                             {formatColumnLabel(f.name)}
                           {canSendMessages && (

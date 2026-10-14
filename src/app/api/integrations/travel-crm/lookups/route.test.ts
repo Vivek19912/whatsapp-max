@@ -86,7 +86,7 @@ describe("GET /api/integrations/travel-crm/lookups (itinerary proxy)", () => {
     const json = (await res.json()) as Record<string, unknown>;
     expect(json).toMatchObject({
       success: true,
-      destinations: [{ value: "dest-sg", label: "Singapore" }],
+      destinations: [{ value: "dest-sg", label: "Singapore", countryName: null, privateName: null }],
       cities: [{ value: "city-marina", label: "Marina Bay", destinationValue: "dest-sg" }],
     });
     expect(JSON.stringify(json)).not.toContain(SECRET);
@@ -122,9 +122,31 @@ describe("GET /api/integrations/travel-crm/lookups (itinerary proxy)", () => {
       cities: Array<{ value: string; label: string; destinationValue: string | null }>;
     };
     // Exactly one Singapore — the master ID entry, never the legacy name.
-    expect(json.destinations).toEqual([{ value: SG_ID, label: "Singapore" }]);
+    // Metadata rides along untouched (null when the feed omits it).
+    expect(json.destinations).toEqual([
+      { value: SG_ID, label: "Singapore", countryName: null, privateName: null },
+    ]);
     expect(json.cities).toEqual([
       { value: SENTOSA_ID, label: "Sentosa", destinationValue: SG_ID },
+    ]);
+  });
+
+  it("forwards upstream countryName/privateName metadata for grouped dropdowns", async () => {
+    const SG_ID = "11111111-2222-3333-4444-555555555555";
+    h.lookups = {
+      destinations: [
+        { value: SG_ID, label: "Singapore", countryName: "Singapore", privateName: "Lion City" },
+      ],
+      cities: [],
+      citiesByDestination: {},
+    };
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      destinations: Array<Record<string, unknown>>;
+    };
+    expect(json.destinations).toEqual([
+      { value: SG_ID, label: "Singapore", countryName: "Singapore", privateName: "Lion City" },
     ]);
   });
 

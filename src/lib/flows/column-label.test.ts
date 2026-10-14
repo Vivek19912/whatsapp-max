@@ -43,14 +43,14 @@ describe("formatColumnLabel (display-only first-word capitalization)", () => {
 
   it("renders display-only aliases for the two renamed business columns", () => {
     expect(formatColumnLabel("Lead Type")).toBe("Type");
-    expect(formatColumnLabel("Lead Received")).toBe("Received");
+    expect(formatColumnLabel("Lead Received")).toBe("Lead Source");
   });
 
   it("matches aliases case-insensitively without touching the stored name", () => {
     const storedType = "Lead Type";
     const storedReceived = "Lead Received";
     expect(formatColumnLabel("lead type")).toBe("Type");
-    expect(formatColumnLabel("  Lead Received  ")).toBe("Received");
+    expect(formatColumnLabel("  Lead Received  ")).toBe("Lead Source");
     // Stored identities are unchanged (display-only).
     expect(storedType).toBe("Lead Type");
     expect(storedReceived).toBe("Lead Received");

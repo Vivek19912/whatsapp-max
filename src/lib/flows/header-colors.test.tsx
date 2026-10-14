@@ -4,12 +4,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { HeaderColorSwatches } from "@/components/workspace/header-color-picker";
 import {
+  areAdjacentBackgroundsDistinct,
+  assignHeaderBackgrounds,
   buildHeaderColorMap,
   defaultHeaderColor,
   HEADER_COLOR_POOL,
   HEADER_COLOR_PRESETS,
   HEADER_CURATED_DEFAULTS,
   HEADER_FALLBACK_PALETTE,
+  HEADER_REFERENCE_NAME,
   HEADER_REFERENCE_PALETTE,
   HEADER_TEXT_DARK,
   HEADER_TEXT_LIGHT,
@@ -28,6 +31,7 @@ import {
 const GREEN = "#93c47d";
 const BLUE = "#6d9eeb";
 const ORANGE = "#ff9900";
+const GRAY = "#cbd5e1";
 const TEAL = "#46bdc6";
 const REMARK_GREEN = "#34a853";
 const RED = "#ea4335";
@@ -72,9 +76,9 @@ describe("semantic mapping (mapped columns present)", () => {
     expect(defaultHeaderColor("custom:x", "phone")).toBe(BLUE);
   });
 
-  it("paints Name orange", () => {
-    expect(defaultHeaderColor("flow:name", "Name")).toBe(ORANGE);
-    expect(defaultHeaderColor("custom:x", "Name")).toBe(ORANGE);
+  it("paints Name Cool Gray", () => {
+    expect(defaultHeaderColor("flow:name", "Name")).toBe(GRAY);
+    expect(defaultHeaderColor("custom:x", "Name")).toBe(GRAY);
   });
 
   it("paints Follow-Up Status / Follow Up teal (but not nearby date fields)", () => {
@@ -118,10 +122,75 @@ describe("semantic mapping (mapped columns present)", () => {
   });
 });
 
+describe("Name Cool Gray rename (only the Name header changes)", () => {
+  const order = [
+    { visId: "core:row", label: "Row" },
+    { visId: "flow:submission_time", label: "Submission Time" },
+    { visId: "flow:name", label: "Name" },
+    { visId: "sys:name", label: "WhatsApp Name" },
+    { visId: "flow:phone", label: "Phone Number" },
+    { visId: "custom:a", label: "Assigned To" },
+  ];
+
+  it("paints only the Name header Cool Gray", () => {
+    expect(HEADER_REFERENCE_NAME).toBe(GRAY);
+    const backgrounds = assignHeaderBackgrounds(order, {});
+    const names = order.map((c) => c.visId).indexOf("flow:name");
+    expect(backgrounds[names]).toBe("#cbd5e1");
+    for (let i = 0; i < order.length; i++) {
+      if (i !== names) expect(backgrounds[i]).not.toBe("#cbd5e1");
+    }
+  });
+
+  it("leaves every neighbouring header on its existing color", () => {
+    const map = buildHeaderColorMap(order, {});
+    expect(map["core:row"]).toBe("#f1f5f9");
+    expect(map["flow:submission_time"]).toBe(GREEN);
+    expect(map["sys:name"]).toBe(TEAL);
+    expect(map["flow:phone"]).toBe(BLUE);
+    expect(map["custom:a"]).toBe(REMARK_GREEN);
+  });
+
+  it("keeps adjacent headers distinct around the gray Name", () => {
+    const backgrounds = assignHeaderBackgrounds(order, {});
+    expect(areAdjacentBackgroundsDistinct(backgrounds)).toBe(true);
+  });
+
+  it("Cool Gray is distinct from every pool color and the Row background", () => {
+    for (const hex of [...HEADER_COLOR_POOL, "#f1f5f9"]) {
+      expect(hex.toLowerCase()).not.toBe(GRAY);
+    }
+  });
+
+  it("never auto-assigns retired orange (explicit customs still honored)", () => {
+    const orders: Array<typeof order> = [
+      order,
+      order.filter((c) => c.visId !== "flow:name"),
+      Array.from({ length: 10 }, (_, i) => ({
+        visId: `custom:g${i}`,
+        label: `Generic ${i}`,
+      })),
+    ];
+    for (const cols of orders) {
+      for (const bg of assignHeaderBackgrounds(cols, {})) {
+        expect(bg).not.toBe(ORANGE);
+      }
+    }
+    // A stored custom may still paint orange by explicit choice.
+    expect(
+      assignHeaderBackgrounds(order, { "custom:a": ORANGE })[
+        order.findIndex((c) => c.visId === "custom:a")
+      ],
+    ).toBe(ORANGE);
+  });
+});
+
 describe("fallback reassignment (mapped columns absent)", () => {
   it("reassigns unused mapped colors to visible columns in palette order", () => {
     // No mapped column at all: the visible set still carries the
-    // palette sequentially (green first, then blue, orange, …).
+    // palette sequentially (green first, then blue, teal, …).
+    // Retired orange is never dealt, so the third column takes
+    // teal instead.
     const map = buildHeaderColorMap(
       [
         { visId: "custom:a", label: "Assigned To" },
@@ -133,13 +202,14 @@ describe("fallback reassignment (mapped columns absent)", () => {
     expect(map).toEqual({
       "custom:a": GREEN,
       "custom:b": BLUE,
-      "custom:c": ORANGE,
+      "custom:c": TEAL,
     });
   });
 
   it("colors of absent mapped columns still appear (red/green reuse)", () => {
     // Flow without Reason/Remark/Follow-Up/Name/Phone: the fixed Row
-    // color plus the first five palette colors in order.
+    // color plus the first five assignable palette colors in order
+    // (retired orange excluded).
     const map = buildHeaderColorMap(
       [
         { visId: "core:row", label: "Row" },
@@ -153,7 +223,7 @@ describe("fallback reassignment (mapped columns absent)", () => {
     );
     expect(map["core:row"]).toBe("#f1f5f9");
     expect(Object.values(map).sort()).toEqual(
-      ["#f1f5f9", "#93c47d", "#6d9eeb", "#ff9900", "#46bdc6", "#34a853"].sort()
+      ["#f1f5f9", "#93c47d", "#6d9eeb", "#46bdc6", "#34a853", "#ea4335"].sort()
     );
   });
 
@@ -167,9 +237,9 @@ describe("fallback reassignment (mapped columns absent)", () => {
       ],
       {},
     );
-    expect(map["flow:name"]).toBe(ORANGE);
+    expect(map["flow:name"]).toBe(GRAY);
     expect(map["flow:phone"]).toBe(BLUE);
-    // Green first (palette order), then the next unused mapped
+    // Green first (palette order), then the next unused assignable
     // color (teal) — red and remark-green stay unused here only
     // because fewer than six columns are visible.
     expect(map["custom:a"]).toBe(GREEN);
@@ -255,7 +325,7 @@ describe("determinism and stability", () => {
     expect(Object.values(withoutLost)).toContain(RED);
     expect(withoutLost).toEqual(buildHeaderColorMap(cols, {}));
     // Semantics survive the hide.
-    expect(withoutLost["flow:name"]).toBe(ORANGE);
+    expect(withoutLost["flow:name"]).toBe(GRAY);
     expect(withoutLost["flow:phone"]).toBe(BLUE);
     expect(withoutLost["custom:l"]).toBe(REMARK_GREEN);
   });
@@ -282,6 +352,11 @@ describe("readable text on reference colors", () => {
     }
     expect(headerTextColor(RED)).toBe(HEADER_TEXT_LIGHT);
     expect(isDarkHeaderColor(RED)).toBe(true);
+  });
+
+  it("uses dark slate on the Name Cool Gray (text color unchanged)", () => {
+    expect(headerTextColor(GRAY)).toBe(HEADER_TEXT_DARK);
+    expect(isDarkHeaderColor(GRAY)).toBe(false);
   });
 
   it("uses dark slate on every preset", () => {
@@ -356,9 +431,9 @@ describe("visibility never disturbs colors", () => {
 
 describe("sticky headers keep their configured colors", () => {
   it("pinned name/phone resolve their semantic colors with readable text", () => {
-    expect(resolveHeaderColor("flow:name", "Name", {})).toBe(ORANGE);
+    expect(resolveHeaderColor("flow:name", "Name", {})).toBe(GRAY);
     expect(resolveHeaderColor("flow:phone", "Phone Number", {})).toBe(BLUE);
-    for (const hex of [ORANGE, BLUE, GREEN]) {
+    for (const hex of [GRAY, BLUE, GREEN]) {
       expect(headerTextColor(hex)).toBe(HEADER_TEXT_DARK);
     }
   });
@@ -436,9 +511,9 @@ describe("uniqueness beyond the palette (overflow ring)", () => {
     }
   });
 
-  it("semantic columns keep their palette colors in a full workspace", () => {
+  it("semantic columns keep their colors in a full workspace", () => {
     const map = buildHeaderColorMap(canonical, {});
-    expect(map["flow:name"]).toBe(ORANGE);
+    expect(map["flow:name"]).toBe(GRAY);
     expect(map["flow:phone"]).toBe(BLUE);
     expect(map["custom:fff"]).toBe(TEAL);
     expect(map["custom:lll"]).toBe(REMARK_GREEN);
@@ -541,12 +616,16 @@ describe("taller headers, sticky intact, functionality intact", () => {
     expect(page).toContain("text-[15px] font-bold");
   });
 
-  it("every header paints via the shared resolver", () => {
-    // One headStyle call site per header group (row, flow, custom);
-    // the uniqueness map + contrast run inside it.
-    const uses = page.split("headStyle(").length - 1;
+  it("every header paints via the shared positional resolver", () => {
+    // One headStyleAt call site per header group (row, flow,
+    // custom); the positional sequence + contrast run inside it.
+    // Positional (never key-lookup) so a system/flow key collision
+    // cannot share one slot and no miss falls back to green.
+    const uses = page.split("headStyleAt(").length - 1;
     expect(uses).toBeGreaterThanOrEqual(3);
-    expect(page).toContain("buildHeaderColorMap(");
+    expect(page).toContain("assignHeaderBackgrounds(");
+    expect(page).toContain("visibleHeaderOrder");
+    expect(page).toContain("headerBackgrounds");
     expect(page).toContain("headerTextColor(");
     expect(page).toContain("columnWidthStyle(");
     expect(page).not.toContain("resolveStickyLayouts(");

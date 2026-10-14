@@ -1,13 +1,15 @@
 // ============================================================
-// Departure country/city catalog — VERBATIM COPY of Travel CRM sources.
+// Departure country/city catalog.
 //
-// Provenance (do NOT hand-edit values below):
+// Provenance:
 //   Countries:  world-countries@5.1.0 name.common for all 250
 //               entries (the same package + accessor the Travel CRM
 //               lead form uses).
-//   India:      INDIAN_DEPARTURE_CITIES value/label pairs, copied
-//               verbatim from apps/web/src/features/queries/LeadForm.tsx
-//               (the list the form shows when country is India).
+//   India:      src/data/indian-cities.json { city, state } entries
+//               (country-state-city master plus legacy spelling
+//               aliases for previously stored values). Label shows the
+//               state in parentheses only when one city name spans
+//               several states — matching the Travel CRM lead form.
 //   Others:     the curated lookups.cities strings from
 //               queriesService.lookups() in
 //               apps/api/src/modules/queries/queries.service.ts
@@ -15,10 +17,12 @@
 //               as { value: city, label: city }).
 //
 // City to country rule mirrors the Travel CRM form exactly:
-// country India gives the INDIAN list; otherwise the curated list.
-// Stored identifiers ARE these display values (Travel CRM stores
+// country India gives the JSON-derived list; otherwise the curated list.
+// Stored identifiers ARE bare city names (Travel CRM stores
 // departureCountry/departureCity as free text, e.g. India/Delhi).
 // ============================================================
+
+import indianCitiesData from "@/data/indian-cities.json";
 
 /** All 250 country names (extraction order). */
 export const DEPARTURE_COUNTRIES: readonly string[] = [
@@ -274,233 +278,68 @@ export const DEPARTURE_COUNTRIES: readonly string[] = [
   "Zimbabwe",
 ];
 
-/** India departure cities (value = stored identifier). */
-export const INDIAN_DEPARTURE_CITIES: readonly { value: string; label: string }[] = [
-  {
-    "value": "Ahmedabad",
-    "label": "Ahmedabad (AMD)"
-  },
-  {
-    "value": "Agra",
-    "label": "Agra"
-  },
-  {
-    "value": "Ajmer",
-    "label": "Ajmer"
-  },
-  {
-    "value": "Alappuzha",
-    "label": "Alappuzha"
-  },
-  {
-    "value": "Amritsar",
-    "label": "Amritsar (ATQ)"
-  },
-  {
-    "value": "Aurangabad",
-    "label": "Aurangabad"
-  },
-  {
-    "value": "Bhopal",
-    "label": "Bhopal (BHO)"
-  },
-  {
-    "value": "Bhubaneswar",
-    "label": "Bhubaneswar (BBI)"
-  },
-  {
-    "value": "Bengaluru",
-    "label": "Bengaluru (BLR)"
-  },
-  {
-    "value": "Calicut",
-    "label": "Calicut (CCJ)"
-  },
-  {
-    "value": "Chandigarh",
-    "label": "Chandigarh (IXC)"
-  },
-  {
-    "value": "Chennai",
-    "label": "Chennai (MAA)"
-  },
-  {
-    "value": "Coimbatore",
-    "label": "Coimbatore (CJB)"
-  },
-  {
-    "value": "Darjeeling",
-    "label": "Darjeeling"
-  },
-  {
-    "value": "Dehradun",
-    "label": "Dehradun (DED)"
-  },
-  {
-    "value": "Delhi",
-    "label": "Delhi (DEL)"
-  },
-  {
-    "value": "Gangtok",
-    "label": "Gangtok"
-  },
-  {
-    "value": "Goa",
-    "label": "Goa (GOI)"
-  },
-  {
-    "value": "Guwahati",
-    "label": "Guwahati (GAU)"
-  },
-  {
-    "value": "Gwalior",
-    "label": "Gwalior (GWL)"
-  },
-  {
-    "value": "Hyderabad",
-    "label": "Hyderabad (HYD)"
-  },
-  {
-    "value": "Indore",
-    "label": "Indore (IDR)"
-  },
-  {
-    "value": "Jabalpur",
-    "label": "Jabalpur (JLR)"
-  },
-  {
-    "value": "Jaipur",
-    "label": "Jaipur (JAI)"
-  },
-  {
-    "value": "Jaisalmer",
-    "label": "Jaisalmer (JSA)"
-  },
-  {
-    "value": "Jodhpur",
-    "label": "Jodhpur (JDH)"
-  },
-  {
-    "value": "Kochi",
-    "label": "Kochi (COK)"
-  },
-  {
-    "value": "Kodaikanal",
-    "label": "Kodaikanal"
-  },
-  {
-    "value": "Kolkata",
-    "label": "Kolkata (CCU)"
-  },
-  {
-    "value": "Leh",
-    "label": "Leh (IXL)"
-  },
-  {
-    "value": "Lucknow",
-    "label": "Lucknow (LKO)"
-  },
-  {
-    "value": "Madurai",
-    "label": "Madurai (IXM)"
-  },
-  {
-    "value": "Manali",
-    "label": "Manali"
-  },
-  {
-    "value": "Mangalore",
-    "label": "Mangalore (IXE)"
-  },
-  {
-    "value": "Munnar",
-    "label": "Munnar"
-  },
-  {
-    "value": "Mumbai",
-    "label": "Mumbai (BOM)"
-  },
-  {
-    "value": "Mysuru",
-    "label": "Mysuru (MYQ)"
-  },
-  {
-    "value": "Nagpur",
-    "label": "Nagpur (NAG)"
-  },
-  {
-    "value": "Nainital",
-    "label": "Nainital"
-  },
-  {
-    "value": "Ooty",
-    "label": "Ooty"
-  },
-  {
-    "value": "Patna",
-    "label": "Patna (PAT)"
-  },
-  {
-    "value": "Port Blair",
-    "label": "Port Blair (IXZ)"
-  },
-  {
-    "value": "Pune",
-    "label": "Pune (PNQ)"
-  },
-  {
-    "value": "Raipur",
-    "label": "Raipur (RPR)"
-  },
-  {
-    "value": "Rajkot",
-    "label": "Rajkot (RAJ)"
-  },
-  {
-    "value": "Ranchi",
-    "label": "Ranchi (IXR)"
-  },
-  {
-    "value": "Rishikesh",
-    "label": "Rishikesh"
-  },
-  {
-    "value": "Shimla",
-    "label": "Shimla (SLV)"
-  },
-  {
-    "value": "Srinagar",
-    "label": "Srinagar (SXR)"
-  },
-  {
-    "value": "Surat",
-    "label": "Surat (STV)"
-  },
-  {
-    "value": "Tirupati",
-    "label": "Tirupati (TIR)"
-  },
-  {
-    "value": "Trivandrum",
-    "label": "Trivandrum (TRV)"
-  },
-  {
-    "value": "Udaipur",
-    "label": "Udaipur (UDR)"
-  },
-  {
-    "value": "Varanasi",
-    "label": "Varanasi (VNS)"
-  },
-  {
-    "value": "Vijayawada",
-    "label": "Vijayawada (VGA)"
-  },
-  {
-    "value": "Visakhapatnam",
-    "label": "Visakhapatnam (VTZ)"
+/**
+ * India departure cities, derived from the local JSON master
+ * (src/data/indian-cities.json: { city, state } entries).
+ *
+ * value = bare city name = stored identifier (Travel CRM persists
+ * departureCountry/departureCity as free text, e.g. India/Delhi), so the
+ * submitted departureCity is always the bare name — never the display
+ * label, never a database ID.
+ * label = city name, with the state in parentheses when the same city
+ * name exists in more than one state (e.g. Aurangabad (Bihar) vs
+ * Aurangabad (Maharashtra)) — matching the Travel CRM lead form.
+ * Duplicate-name states therefore yield distinct options sharing one
+ * value; renderers must key items by value + label, not value alone.
+ */
+
+interface IndianCityEntry {
+  city: string;
+  state: string;
+}
+
+function indianCityEntries(): IndianCityEntry[] {
+  const raw: unknown = (indianCitiesData as { entries?: unknown }).entries;
+  if (!Array.isArray(raw)) return [];
+  const out: IndianCityEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.city !== "string" || typeof rec.state !== "string") continue;
+    const city = rec.city.trim();
+    const state = rec.state.trim();
+    if (!city || !state) continue;
+    out.push({ city, state });
   }
-];
+  return out;
+}
+
+const INDIAN_CITY_ENTRIES: readonly IndianCityEntry[] = indianCityEntries();
+
+/** How many states each city name appears in (for duplicate labels). */
+const INDIAN_CITY_STATE_COUNT: ReadonlyMap<string, number> = (() => {
+  const statesByCity = new Map<string, Set<string>>();
+  for (const e of INDIAN_CITY_ENTRIES) {
+    let set = statesByCity.get(e.city);
+    if (!set) {
+      set = new Set<string>();
+      statesByCity.set(e.city, set);
+    }
+    set.add(e.state);
+  }
+  const counts = new Map<string, number>();
+  for (const [city, states] of statesByCity) counts.set(city, states.size);
+  return counts;
+})();
+
+export const INDIAN_DEPARTURE_CITIES: readonly { value: string; label: string }[] =
+  INDIAN_CITY_ENTRIES.map((e) => ({
+    value: e.city,
+    label:
+      (INDIAN_CITY_STATE_COUNT.get(e.city) ?? 1) > 1
+        ? `${e.city} (${e.state})`
+        : e.city,
+  }));
 
 /** Curated cities the form offers for non-India countries. */
 export const OTHER_DEPARTURE_CITIES: readonly { value: string; label: string }[] = [
@@ -550,6 +389,17 @@ export interface DepartureCityOption {
   value: string;
   label: string;
 }
+
+/**
+ * Workspace → Create in Travel CRM default departure country.
+ * Resolved from the copied Travel CRM country master data above
+ * (value = stored identifier = display name, e.g. India/Delhi) —
+ * never an invented identifier. Scoped to the Workspace creation
+ * dialog only; global defaults and other Travel CRM forms are
+ * untouched.
+ */
+export const DEFAULT_DEPARTURE_COUNTRY: string =
+  DEPARTURE_COUNTRIES.find((c) => c.toLowerCase() === "india") ?? "India";
 
 /**
  * Cities offered for one departure country — the exact rule from

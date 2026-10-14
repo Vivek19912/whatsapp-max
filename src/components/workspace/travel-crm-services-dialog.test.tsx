@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { buildDialogInputs } from "./travel-crm-action";
+import { TRAVEL_CRM_SERVICE_LABELS } from "@/lib/integrations/travel-crm/services";
 
 // ---------------------------------------------------------------------------
-// Services section visibility — the multi-select renders whenever
-// the mapping still needs services OR the dialog already carries
-// preselected services (flow defaults or lead data). Prefill
-// without a visible input was the reported bug: saved defaults
-// resolved server-side yet the dialog showed no Services section.
+// Services section visibility — the multi-select always renders every
+// supported service option in the Create in Travel CRM dialog, never
+// filtered by the per-flow Settings configuration. Prefilled services
+// (flow defaults or lead data) arrive pre-checked; all six stay
+// independently toggleable.
 // ---------------------------------------------------------------------------
 
 const LIVE_OPTIONS = {
@@ -51,8 +52,10 @@ describe("Services section appears in the completion dialog", () => {
     expect(services?.kind).toBe("multi");
     // Prefilled defaults ride along as the input value.
     expect(services?.value).toEqual(["HOTEL", "SIGHTSEEING"]);
-    // Live options flow through for the checkboxes.
-    expect(services?.options).toEqual(LIVE_OPTIONS.services);
+    // All six supported options render — never Settings-filtered.
+    expect(services?.options?.map((o) => o.label)).toEqual([
+      ...TRAVEL_CRM_SERVICE_LABELS,
+    ]);
   });
 
   it("2+3+4+5. each configured default is preselected; others are not", () => {
@@ -83,14 +86,18 @@ describe("Services section appears in the completion dialog", () => {
     expect(services?.value).toBeNull();
   });
 
-  it("stays hidden only when unneeded AND unprefilled", () => {
+  it("always renders, even when unneeded AND unprefilled", () => {
     const inputs = buildDialogInputs(
       mapping({ available: ["services", "customerName"], missing: ["travelStartDate"] }),
       { assignedToEmail: "agent@acme.com" },
       LIVE_OPTIONS,
       null,
     );
-    expect(inputs.find((i) => i.field === "services")).toBeUndefined();
+    const services = inputs.find((i) => i.field === "services");
+    expect(services?.kind).toBe("multi");
+    expect(services?.options?.map((o) => o.label)).toEqual([
+      ...TRAVEL_CRM_SERVICE_LABELS,
+    ]);
     expect(inputs.map((i) => i.field)).toContain("travelStartDate");
   });
 

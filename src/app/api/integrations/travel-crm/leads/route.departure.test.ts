@@ -347,8 +347,8 @@ describe("8. services and departure settings stay independent", () => {
   });
 });
 
-describe("8. no saved defaults leave both fields empty", () => {
-  it("prefill is null and fields stay missing (never invented)", async () => {
+describe("8. no saved defaults default the country to India; city stays empty", () => {
+  it("prefill country is India, city stays null, country leaves missing", async () => {
     h.workspace_values = [];
     // TEMPORARY owner assignment: simulate an unresolvable owner so
     // assignment stays missing and the dialog path (not a create) is
@@ -363,19 +363,47 @@ describe("8. no saved defaults leave both fields empty", () => {
       assignedOwnerEmail: unknown;
       assignmentIssue: unknown;
     };
-    // Seed has no departure answers and no flow defaults; assignment
-    // is missing so the dialog path (not a create) is observed.
+    // Seed has no departure answers and no flow defaults; the
+    // Workspace creation-dialog default supplies India while the
+    // city stays empty for the agent to pick. Assignment is missing
+    // so the dialog path (not a create) is observed.
     expect(json.success).toBe(false);
     expect(json.code).toBe("MISSING_FIELDS");
+    expect(json.mapping.missing).not.toContain("departureCountry");
     expect(json.mapping.missing).toEqual(
-      expect.arrayContaining(["departureCountry", "departureCity", "assignedToEmail"]),
+      expect.arrayContaining(["departureCity", "assignedToEmail"]),
     );
-    expect(json.prefill.departureCountry).toBeNull();
+    expect(json.prefill.departureCountry).toBe("India");
     expect(json.prefill.departureCity).toBeNull();
     expect(json.prefill.assignedToEmail).toBeNull();
     expect(json.assignedOwnerEmail).toBeNull();
     expect(json.assignmentIssue).toBe("assignment-required");
     expect(h.travelCalls.filter((c) => c.url.endsWith("/leads"))).toHaveLength(0);
+  });
+
+  it("new-entry default sends India with a null city when the agent picks no city", async () => {
+    const res = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }));
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls).toHaveLength(1);
+    expect(h.travelCalls[0].body).toMatchObject({
+      departureCountry: "India",
+      departureCity: null,
+    });
+  });
+
+  it("manual country change wins over the India default for one lead", async () => {
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: { ...FUNNEL, departureCountry: "United Arab Emirates", departureCity: "Dubai" },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls[0].body).toMatchObject({
+      departureCountry: "United Arab Emirates",
+      departureCity: "Dubai",
+    });
   });
 });
 

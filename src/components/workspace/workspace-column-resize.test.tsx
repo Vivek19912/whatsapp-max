@@ -40,7 +40,8 @@ describe("1/2. columns resize with header/body synchronized", () => {
   it("the page feeds one width source to header and body cells", () => {
     expect(pageSrc).toContain("columnWidthStyle(");
     expect(pageSrc).not.toContain("stickyLayouts[");
-    expect(pageSrc).toContain("headStyle(");
+    // Headers paint positionally; widths still come from the one source.
+    expect(pageSrc).toContain("headStyleAt(");
   });
 
   it("the handle renders a boundary grip with resize cursor", () => {

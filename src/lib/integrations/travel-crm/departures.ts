@@ -5,11 +5,11 @@
 // per (account, flow), next to services/itinerary in
 // travel_crm_flow_settings (migration 103).
 //
-// Source of truth: the COPIED Travel CRM catalog in
-// departure-catalog.ts (world-countries names, INDIAN departure
-// cities, curated cities) — WACRM never calls Travel CRM for
+// Source of truth: country names from the copied world-countries
+// list and Indian cities from src/data/indian-cities.json, both via
+// departure-catalog.ts — WACRM never calls Travel CRM for
 // this list and never hardcodes its own values. Stored values
-// ARE the catalog display values (Travel CRM persists
+// ARE bare city names (Travel CRM persists
 // departureCountry/departureCity as free text).
 // ============================================================
 
@@ -63,10 +63,11 @@ export function normalizeDepartureDefaults(
 }
 
 /**
- * Validate normalized defaults against the COPIED Travel CRM
- * catalog: the country must be listed, the city (when set) must
- * belong to that country's list. Throws with a human-readable
- * message otherwise. Case-insensitive, like the form's matching.
+ * Validate normalized defaults against the catalog: the country
+ * must be listed, the city (when set) must belong to that
+ * country's list (JSON-backed Indian list, else curated list).
+ * Throws with a human-readable message otherwise.
+ * Case-insensitive, like the form's matching.
  */
 export function validateDepartureCatalog(
   defaults: TravelCrmDepartureDefaults,

@@ -235,7 +235,9 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
   it("header and body size from one width source, nothing pinned", () => {
     expect(pageSrc).not.toContain("resolveStickyLayouts(");
     expect(pageSrc).not.toContain("stickyLayouts[");
-    expect(pageSrc).toContain("headStyle(");
+    // Headers paint positionally (index-aligned with the rendered
+    // order); widths still resolve from the one width source.
+    expect(pageSrc).toContain("headStyleAt(");
     expect(pageSrc).not.toContain("STICKY_Z.corner");
   });
 
@@ -254,7 +256,12 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
     // Vertical centering, background, sizing, and resizing come
     // from the untouched header path.
     expect(pageSrc).toContain("align-middle");
-    expect(pageSrc).toContain("headStyle(customFieldVisId(f.id), f.name)");
+    // Headers paint by rendered position (never by key lookup, so
+    // a system/flow key collision cannot share one slot); the
+    // business header passes its rendered index.
+    expect(pageSrc).toContain("headStyleAt(");
+    expect(pageSrc).toContain("flowColumnsVisible.length");
+    expect(pageSrc).toContain("customIdx");
     expect(pageSrc).toContain("ColumnResizeHandle");
     // Body cells keep no centering: the wide body cap and the text
     // trigger stay left-aligned (including two-line truncation).

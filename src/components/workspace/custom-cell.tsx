@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -114,9 +114,38 @@ export function filterCellOptions<T extends FilterableCellOption>(
 }
 
 /**
+ * Keys the search box lets through to the enclosing Select
+ * dropdown: Escape dismisses the menu, Tab moves focus out.
+ * Every other key (characters, space, backspace, arrows, Enter,
+ * shortcuts) is consumed by the text field — the Select popup's
+ * own typeahead/keyboard navigation must never see it.
+ */
+export function searchBoxKeyShouldPropagate(key: string): boolean {
+  return key === "Escape" || key === "Tab";
+}
+
+/**
+ * Keydown guard for the dropdown search box (shared by Workspace
+ * cell selects and the Travel CRM Departure Country/City
+ * selects): stops propagation so the Select popup's typeahead
+ * and list navigation — which `preventDefault()` printable keys
+ * without checking whether the target is an editable input —
+ * can never swallow keystrokes. Stopping propagation never
+ * blocks the input itself (default behavior still edits text),
+ * so typing, filtering, backspace, select-all, and caret keys
+ * all work while Escape/Tab keep their dropdown behavior.
+ */
+export function onSearchBoxKeyDown(
+  e: Pick<KeyboardEvent, "key" | "stopPropagation">,
+): void {
+  if (!searchBoxKeyShouldPropagate(e.key)) e.stopPropagation();
+}
+
+/**
  * Search box pinned to the top of long select dropdowns. Filters
- * the displayed options only; Escape/Enter/arrows keep their
- * existing dropdown behavior (the query resets on close).
+ * the displayed options only (the query resets on close);
+ * Escape dismisses and Tab moves focus out, while every other
+ * key edits the query text (see onSearchBoxKeyDown).
  *
  * Exported for reuse: the Travel CRM dialog's long funnel
  * dropdowns (Received, Stage) share this exact search behavior.
@@ -131,7 +160,7 @@ export function OptionSearchBox({
   fieldName: string;
 }) {
   return (
-    <div className="p-1">
+    <div className="p-1" onKeyDown={onSearchBoxKeyDown}>
       <Input
         value={query}
         onChange={(e) => onQuery(e.target.value)}

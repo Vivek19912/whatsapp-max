@@ -12,7 +12,7 @@
 // stored field name, uniqueness key, filters, select options,
 // Sheets mapping, and Travel CRM mapping keep the original:
 //   "Lead Type"     → "Type"
-//   "Lead Received" → "Received"
+//   "Lead Received" → "Lead Source"
 //
 //   "name"             → "Name"
 //   "height and weight"→ "Height and weight"
@@ -27,7 +27,7 @@
  */
 const DISPLAY_ALIASES: Readonly<Record<string, string>> = {
   "lead type": "Type",
-  "lead received": "Received",
+  "lead received": "Lead Source",
 };
 
 /** Display a stored column name with its first character capitalized. */

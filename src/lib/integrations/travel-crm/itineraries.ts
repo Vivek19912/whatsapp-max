@@ -33,6 +33,18 @@ export interface TravelCrmItineraryDefault {
 export interface TravelCrmDestinationOption {
   value: string;
   label: string;
+  /**
+   * Grouping country from the lookup feed (Travel CRM destination
+   * `countryName`), or null/undefined when the feed omits it.
+   * Never invented — grouping stays dormant without it.
+   */
+  countryName?: string | null;
+  /**
+   * Internal display name from the lookup feed (Travel CRM
+   * destination `privateName`), or null/undefined when absent.
+   * Search/display only — never submitted or stored.
+   */
+  privateName?: string | null;
 }
 
 export interface TravelCrmCityOption {
@@ -131,15 +143,35 @@ function readParentValue(raw: Record<string, unknown>): string | null {
   return null;
 }
 
+/** Fields on a destination record that may hold the grouping country. */
+const DESTINATION_COUNTRY_FIELDS = ["countryName", "country", "country_name"] as const;
+
+/** Fields on a destination record that may hold the private name. */
+const DESTINATION_PRIVATE_NAME_FIELDS = ["privateName", "private_name"] as const;
+
+/** Trimmed text or null (blank/missing degrade to null, never invented). */
+function readOptionalText(
+  raw: Record<string, unknown>,
+  keys: ReadonlyArray<string>,
+): string | null {
+  for (const key of keys) {
+    const v = raw[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 function pushUnique(
   list: TravelCrmDestinationOption[],
   seen: Set<string>,
   value: string,
   label: string,
+  countryName: string | null = null,
+  privateName: string | null = null,
 ): void {
   if (seen.has(value)) return;
   seen.add(value);
-  list.push({ value, label: label || value });
+  list.push({ value, label: label || value, countryName, privateName });
 }
 
 function parseOptionList(raw: unknown): Array<Record<string, unknown>> {
@@ -156,14 +188,21 @@ function parseOptionList(raw: unknown): Array<Record<string, unknown>> {
   return out;
 }
 
-/** Parse one raw list into deduped {value,label} destination pairs. */
+/** Parse one raw list into deduped destination pairs (metadata preserved). */
 function collectOptions(raw: unknown): TravelCrmDestinationOption[] {
   const out: TravelCrmDestinationOption[] = [];
   const seen = new Set<string>();
   for (const rec of parseOptionList(raw)) {
     const value = readOptionValue(rec);
     if (!value) continue;
-    pushUnique(out, seen, value, readOptionLabel(rec, value));
+    pushUnique(
+      out,
+      seen,
+      value,
+      readOptionLabel(rec, value),
+      readOptionalText(rec, DESTINATION_COUNTRY_FIELDS),
+      readOptionalText(rec, DESTINATION_PRIVATE_NAME_FIELDS),
+    );
   }
   return out;
 }
@@ -177,7 +216,9 @@ function collectOptions(raw: unknown): TravelCrmDestinationOption[] {
  * (one master entry by ID plus one legacy entry by display name)
  * and selecting the legacy one breaks city linkage. Returns [] when
  * nothing usable exists — callers must render loading/error
- * states, never fake values.
+ * states, never fake values. Country/private-name metadata rides
+ * along untouched (null when the feed omits it) for grouped,
+ * private-name-searchable dropdowns downstream.
  */
 export function extractDestinationOptions(
   lookups: Record<string, unknown> | null | undefined,

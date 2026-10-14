@@ -39,7 +39,8 @@ describe("1. row actions column (narrow, first, writers only)", () => {
     expect(pageSrc).toContain('aria-label="Row actions"');
     expect(pageSrc).toContain("w-12");
     const actionsIdx = pageSrc.indexOf('aria-label="Row actions"');
-    const rowIdx = pageSrc.indexOf("ROW_VIS_ID, 'Row'");
+    // Row header paints positionally at index 0 of the rendered order.
+    const rowIdx = pageSrc.indexOf("headStyleAt(0)");
     expect(actionsIdx).toBeGreaterThan(-1);
     expect(rowIdx).toBeGreaterThan(-1);
     expect(actionsIdx).toBeLessThan(rowIdx);

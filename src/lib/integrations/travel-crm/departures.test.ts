@@ -38,12 +38,57 @@ describe("1. country list comes from the copied Travel CRM source", () => {
 });
 
 describe("2. city list depends on country (Travel CRM form rule)", () => {
-  it("India yields the INDIAN departure cities with airport labels", () => {
+  it("India yields the JSON-backed Indian cities with bare-name values", () => {
     const cities = departureCityOptions("India");
-    expect(cities.length).toBeGreaterThan(50);
-    expect(cities).toContainEqual({ value: "Delhi", label: "Delhi (DEL)" });
-    expect(cities).toContainEqual({ value: "Mumbai", label: "Mumbai (BOM)" });
-    expect(INDIAN_DEPARTURE_CITIES.length).toBeGreaterThan(50);
+    expect(cities.length).toBeGreaterThan(4000);
+    expect(cities).toContainEqual({ value: "Delhi", label: "Delhi" });
+    expect(cities).toContainEqual({ value: "Mumbai", label: "Mumbai" });
+    expect(cities).toContainEqual({ value: "Agra", label: "Agra" });
+    expect(INDIAN_DEPARTURE_CITIES.length).toBeGreaterThan(4000);
+  });
+
+  it("duplicate city names show the state in parentheses (Travel CRM behavior)", () => {
+    const cities = departureCityOptions("India");
+    // Aurangabad exists in two states: both options share the bare
+    // value, labels disambiguate.
+    expect(cities).toContainEqual({
+      value: "Aurangabad",
+      label: "Aurangabad (Bihar)",
+    });
+    expect(cities).toContainEqual({
+      value: "Aurangabad",
+      label: "Aurangabad (Maharashtra)",
+    });
+    // Unique names render bare.
+    expect(cities).toContainEqual({ value: "Delhi", label: "Delhi" });
+  });
+
+  it("every India option value is a JSON master city name (never a display label)", () => {
+    const json = JSON.parse(
+      readFileSync(`${process.cwd()}/src/data/indian-cities.json`, "utf8"),
+    ) as { entries: Array<{ city: string; state: string }> };
+    const masterCities = new Set(json.entries.map((e) => e.city));
+    const statesByCity = new Map<string, Set<string>>();
+    for (const e of json.entries) {
+      let set = statesByCity.get(e.city);
+      if (!set) {
+        set = new Set<string>();
+        statesByCity.set(e.city, set);
+      }
+      set.add(e.state);
+    }
+    for (const o of departureCityOptions("India")) {
+      // The submitted value is always a bare master city name.
+      expect(masterCities.has(o.value)).toBe(true);
+      // The label is either the bare name or "City (State)" for a
+      // real state of that city — never an ID or airport code.
+      const states = statesByCity.get(o.value) ?? new Set<string>();
+      expect(
+        o.label === o.value ||
+          (states.size > 1 &&
+            [...states].some((s) => o.label === `${o.value} (${s})`)),
+      ).toBe(true);
+    }
   });
 
   it("other countries yield the curated cities", () => {
@@ -121,8 +166,8 @@ describe("validateDepartureCatalog (copied Travel CRM data)", () => {
   });
 });
 
-describe("4. no hardcoded country/city catalog outside the copied source", () => {
-  it("only departure-catalog.ts carries place names; logic files reference the copy", () => {
+describe("4. no hardcoded country/city catalog outside the JSON-backed source", () => {
+  it("only the catalog module + JSON carry place names; logic files reference them", () => {
     const logicFiles = [
       `${process.cwd()}/src/lib/integrations/travel-crm/departures.ts`,
       `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
@@ -142,24 +187,33 @@ describe("4. no hardcoded country/city catalog outside the copied source", () =>
       }
     }
     // Countries as bare words (India/Delhi/Dubai) legitimately appear
-    // in comments/tests — the catalog file itself is the single copy.
+    // in comments/tests — the catalog module plus the JSON file are the
+    // single source of city data.
     const catalog = readFileSync(
       `${process.cwd()}/src/lib/integrations/travel-crm/departure-catalog.ts`,
       "utf8",
     );
-    expect(catalog).toContain('"India"');
-    expect(catalog).toContain('"Delhi"');
+    expect(catalog).toContain("@/data/indian-cities.json");
+    const json = readFileSync(
+      `${process.cwd()}/src/data/indian-cities.json`,
+      "utf8",
+    );
+    // The JSON master carries { city, state } entries (no country
+    // literal — it is the India-only master by construction).
+    expect(json).toContain('"entries"');
+    expect(json).toContain('"Delhi"');
+    expect(json).toContain('"Maharashtra"');
   });
 
-  it("catalog values match the Travel CRM sources exactly", () => {
-    // Spot-checks against the audited Travel CRM form values.
+  it("catalog values follow the JSON master with state disambiguation", () => {
+    // Spot-checks against the local JSON master.
     expect(INDIAN_DEPARTURE_CITIES).toContainEqual({
       value: "Delhi",
-      label: "Delhi (DEL)",
+      label: "Delhi",
     });
     expect(INDIAN_DEPARTURE_CITIES).toContainEqual({
       value: "Mumbai",
-      label: "Mumbai (BOM)",
+      label: "Mumbai",
     });
     expect(OTHER_DEPARTURE_CITIES.map((c) => c.value)).toEqual([
       "Delhi",

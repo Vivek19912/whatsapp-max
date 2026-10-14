@@ -37,18 +37,46 @@ describe("Workspace page wiring", () => {
   });
 });
 
+describe("Services Vehicle rename (Travel CRM Settings modal)", () => {
+  const src = readFileSync(
+    `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+    "utf8",
+  );
+
+  it("renders labels from the shared list (Vehicle, never the retired label)", () => {
+    expect(src).toContain("TRAVEL_CRM_SERVICE_LABELS.map((label)");
+    // The retired label appears only in code comments documenting
+    // the alias — never as a rendered label, key, or aria value.
+    const code = src
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+    expect(code).not.toContain("Vehicle (disposal)");
+    // The offered list (asserted to contain "Vehicle" in
+    // services.test.ts) is the only label source for the checkboxes.
+    expect(code).toContain("TRAVEL_CRM_SERVICE_LABELS");
+  });
+
+  it("keeps retired selections checked and clears every spelling on toggle", () => {
+    // Toggle matcher and checkbox state both resolve retired labels.
+    expect(src.split("resolveDisplayServiceLabel(s)").length - 1).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("Itinerary Defaults display names — never raw UUIDs", () => {
-  it("renders the resolved destination/city label as SelectValue children", () => {
+  it("renders the destination through the shared grouped selector", () => {
     const src = readFileSync(
       `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
       "utf8",
     );
-    // Explicit ID → name resolution, stored UUIDs stay the Select value.
-    expect(src).toContain("destinationLabelForValue(destinations, row.destination)");
+    // Same country-grouped component as the creation dialog:
+    // groups appear when the feed carries country metadata.
+    expect(src).toContain("<ItineraryDestinationSelect");
+    expect(src).toContain("resolveSelectValue(destinations, row.destination)");
+    // City keeps its explicit ID → name resolution.
     expect(src).toContain("cityLabelForValue(cityOptions, row.city)");
-    expect(src).toContain("destinationLabel !== null ? destinationLabel : undefined");
     expect(src).toContain("cityLabel !== null ? cityLabel : undefined");
     // The stored UUID still travels as the option value (never the name).
-    expect(src).toContain("resolveSelectValue(destinations, row.destination)");
+    expect(src).toContain("onChange={(v) => setDestination(i, v ?? \"\")}");
   });
 });

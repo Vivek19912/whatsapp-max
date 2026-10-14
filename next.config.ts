@@ -62,6 +62,19 @@ const SECURITY_HEADERS = [
 
 const nextConfig: NextConfig = {
   /**
+   * Turbopack workspace root. The parent folder holds a sibling
+   * project's lockfile, which makes Turbopack infer the workspace
+   * root as the parent directory (it warns about multiple
+   * lockfiles on every `next dev` boot). Pinning the root to this
+   * project keeps module resolution — and the dev route tree —
+   * anchored here regardless of sibling checkouts.
+   */
+  turbopack: {
+    // process.cwd() is this project directory in every supported
+    // invocation (`next dev` / `next build` / `next start`).
+    root: process.cwd(),
+  },
+  /**
    * Cache-Control policy.
    *
    * Why this exists:

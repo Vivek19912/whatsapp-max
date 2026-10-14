@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  TRAVEL_CRM_LEGACY_SERVICE_LABELS,
   TRAVEL_CRM_MAX_SERVICES,
   TRAVEL_CRM_SERVICE_LABELS,
   TRAVEL_CRM_SERVICE_VALUE_BY_LABEL,
   isOfferedServiceLabel,
   joinServiceLabels,
   normalizeServiceLabels,
+  resolveDisplayServiceLabel,
   splitServiceLabels,
 } from "./services";
 
@@ -16,10 +18,15 @@ describe("TRAVEL_CRM_SERVICE_LABELS", () => {
       "Cruise",
       "Flight",
       "Hotel",
-      "Vehicle (disposal)",
+      "Vehicle",
       "Sightseeing",
       "Add-on Service (Rail, Passport, etc.)",
     ]);
+  });
+
+  it("never offers the retired label", () => {
+    expect([...TRAVEL_CRM_SERVICE_LABELS]).not.toContain("Vehicle (disposal)");
+    expect([...TRAVEL_CRM_LEGACY_SERVICE_LABELS]).toEqual(["Vehicle (disposal)"]);
   });
 });
 
@@ -28,16 +35,22 @@ describe("TRAVEL_CRM_SERVICE_VALUE_BY_LABEL", () => {
     expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Cruise"]).toBe("CRUISE");
     expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Flight"]).toBe("FLIGHT");
     expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Hotel"]).toBe("HOTEL");
-    expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Vehicle (disposal)"]).toBe("VEHICLE_TRANSFER");
+    expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Vehicle"]).toBe("VEHICLE_TRANSFER");
     expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Sightseeing"]).toBe("SIGHTSEEING");
     expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Add-on Service (Rail, Passport, etc.)"]).toBe(
       "OTHER_ADD_ON",
     );
   });
 
-  it("covers exactly the six offered labels (no drift between UI list and API values)", () => {
+  it("keeps resolving the retired label for previously stored values", () => {
+    expect(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL["Vehicle (disposal)"]).toBe(
+      "VEHICLE_TRANSFER",
+    );
+  });
+
+  it("covers the six offered labels plus the retired alias (no drift)", () => {
     expect(Object.keys(TRAVEL_CRM_SERVICE_VALUE_BY_LABEL).sort()).toEqual(
-      [...TRAVEL_CRM_SERVICE_LABELS].sort(),
+      [...TRAVEL_CRM_SERVICE_LABELS, ...TRAVEL_CRM_LEGACY_SERVICE_LABELS].sort(),
     );
   });
 });
@@ -64,9 +77,23 @@ describe("normalizeServiceLabels", () => {
 describe("isOfferedServiceLabel", () => {
   it("matches case-insensitively with trimming", () => {
     expect(isOfferedServiceLabel("hotel")).toBe(true);
-    expect(isOfferedServiceLabel("  Vehicle (Disposal) ")).toBe(true);
+    expect(isOfferedServiceLabel("Vehicle")).toBe(true);
     expect(isOfferedServiceLabel("Teleport")).toBe(false);
     expect(isOfferedServiceLabel("")).toBe(false);
+  });
+
+  it("keeps accepting the retired label from previously stored settings", () => {
+    expect(isOfferedServiceLabel("  Vehicle (Disposal) ")).toBe(true);
+  });
+});
+
+describe("resolveDisplayServiceLabel", () => {
+  it("maps the retired label to the current name, passes the rest through", () => {
+    expect(resolveDisplayServiceLabel("Vehicle (disposal)")).toBe("Vehicle");
+    expect(resolveDisplayServiceLabel("  VEHICLE (DISPOSAL) ")).toBe("Vehicle");
+    expect(resolveDisplayServiceLabel("Vehicle")).toBe("Vehicle");
+    expect(resolveDisplayServiceLabel("Hotel")).toBe("Hotel");
+    expect(resolveDisplayServiceLabel("Teleport")).toBe("Teleport");
   });
 });
 
