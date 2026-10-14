@@ -69,6 +69,9 @@ export interface TravelCrmCreatePayload {
   assignedToEmail: string;
   dateOfBirth?: string | null;
   travelStartDate?: string | null;
+  /** Month-based timing (both set or both null; never with a date). */
+  travelMonth?: number | null;
+  travelYear?: number | null;
   departureCountry?: string | null;
   departureCity?: string | null;
   rooms?: number | null;

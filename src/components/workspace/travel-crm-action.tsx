@@ -316,12 +316,9 @@ export function clearInactiveTravelTiming(
 }
 
 /**
- * Phase-2-ready timing payload shapes. Exact submits the date
- * string exactly as today; Month submits numeric month/year with
- * no invented day. NOTE: the current Travel CRM integration
- * contract accepts only the exact shape — submit() sends just
- * that; the month shape is prepared here (and unit-tested) for
- * the Phase 2 contract update, never transmitted before it.
+ * Timing payload shapes. Exact submits the date string exactly as
+ * before; Month submits numeric month/year with no invented day
+ * (the Phase 2 Travel CRM contract accepts both shapes).
  */
 export type TravelTimingPayload =
   | { mode: "exact"; travelStartDate: string }
@@ -1060,6 +1057,25 @@ export interface ItineraryDestinationOption {
 }
 
 /**
+ * Pinned placement for the itinerary Destination/City dropdowns
+ * (both dialog and Settings): always above the trigger, never
+ * flipping below on expand/select/search. Alignment may still
+ * shift to stay in the viewport; the popup height caps at the
+ * space available above via `--available-height`.
+ */
+export const ITINERARY_DROPDOWN_ABOVE: {
+  side: "top";
+  collisionAvoidance: {
+    side: "none";
+    align: "shift";
+    fallbackAxisSide: "none";
+  };
+} = {
+  side: "top",
+  collisionAvoidance: { side: "none", align: "shift", fallbackAxisSide: "none" },
+};
+
+/**
  * Native Travel CRM option-label convention: `Destination Name —
  * Private Name`, collapsing to the bare public name when the
  * private name is blank or identical (case/trim-insensitive).
@@ -1232,7 +1248,7 @@ export function ItineraryDestinationList({
               : "text-popover-foreground hover:bg-muted")
           }
         >
-          <span className="min-w-0 flex-1 truncate">
+          <span className="min-w-0 flex-1 whitespace-normal break-words">
             {destinationOptionLabel(o.label, o.privateName)}
           </span>
           {o.value === selectedValue && <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />}
@@ -1277,7 +1293,7 @@ export function ItineraryDestinationList({
                 }
                 aria-hidden
               />
-              <span className="min-w-0 flex-1 truncate text-left">{g.country}</span>
+              <span className="min-w-0 flex-1 text-left whitespace-normal break-words">{g.country}</span>
               <span className="shrink-0 tabular-nums">{g.options.length}</span>
             </button>
             {isOpen && rendered}
@@ -1425,9 +1441,9 @@ export function ItineraryDestinationSelect({
         id={inputId}
         aria-label="Destination"
         onClick={() => setOpen((v) => !v)}
-        className="flex h-8 w-full items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-2 pr-2 pl-2.5 text-sm whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 data-placeholder:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+        className="flex min-h-8 w-full items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-2 pr-2 pl-2.5 text-sm transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 data-placeholder:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
       >
-        <span className="min-w-0 flex-1 truncate text-left">
+        <span className="min-w-0 flex-1 text-left whitespace-normal break-words">
           {selectedLabel !== null && selectedLabel !== "" ? (
             selectedLabel
           ) : (
@@ -1436,7 +1452,11 @@ export function ItineraryDestinationSelect({
         </span>
         <ChevronDown className="size-4 shrink-0 text-muted-foreground" aria-hidden />
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-(--anchor-width) p-1.5">
+      <PopoverContent
+        align="start"
+        {...ITINERARY_DROPDOWN_ABOVE}
+        className="w-(--anchor-width) p-1.5"
+      >
         <Input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
@@ -1453,12 +1473,13 @@ export function ItineraryDestinationSelect({
             search input above stays pinned, and the container never
             re-scrolls while typing (highlight scrolling happens
             solely on arrow-key moves). overscroll-contain keeps
-            wheel scrolling from hijacking the dialog behind. */}
+            wheel scrolling from hijacking the dialog behind. Height
+            caps at the space available above the trigger. */}
         <div
           ref={listRef}
           role="listbox"
           aria-label="Destination options"
-          className="mt-1 max-h-60 overflow-y-auto overscroll-contain"
+          className="mt-1 max-h-[min(15rem,var(--available-height))] overflow-y-auto overscroll-contain"
         >
           <ItineraryDestinationList
             groups={groups}
@@ -2020,15 +2041,11 @@ export function TravelCrmAction({
 
   async function submit() {
     const inputs = dialogInputs();
+    const showTiming = inputs.some((i) => i.field === "travelStartDate");
     // Travel timing is required when shown: validate the ACTIVE mode
     // (dialog stays open) with an inline field error instead of
     // sending. Untouched when the timing field isn't rendered.
-    // Month selections are validated but never transmitted: the
-    // current Travel CRM integration contract accepts only exact
-    // dates, so month-based creation waits for the Phase 2
-    // contract update (buildTravelTimingPayload holds the prepared
-    // month shape). Exact-date behavior is unchanged.
-    if (inputs.some((i) => i.field === "travelStartDate")) {
+    if (showTiming) {
       const timingError = validateTravelTiming({
         mode: travelTiming,
         travelStartDate: values.travelStartDate ?? "",
@@ -2037,12 +2054,6 @@ export function TravelCrmAction({
       });
       setTravelDateError(timingError);
       if (timingError) return;
-      if (travelTiming === "month") {
-        setError(
-          "Month-based travel timing is ready in this dialog but needs the Phase 2 Travel CRM contract update before it can be submitted. Select Exact Date to create this lead now.",
-        );
-        return;
-      }
     }
     const overrides: Record<string, unknown> = {};
     for (const input of inputs) {
@@ -2058,6 +2069,25 @@ export function TravelCrmAction({
       const raw = (values[input.field] ?? "").trim();
       if (input.field === "phone") continue;
       if (raw) overrides[input.field === "assignedToEmail" ? "assignedUserId" : input.field] = raw;
+    }
+    // Month mode sends numeric travelMonth/travelYear (never an
+    // exact date — values.travelStartDate was cleared on switch, and
+    // any stale value is deleted defensively below). Only applies
+    // when the timing field is rendered (the only way Month mode
+    // can be active). Exact mode keeps sending travelStartDate via
+    // the generic loop above.
+    if (showTiming && travelTiming === "month") {
+      const timing = buildTravelTimingPayload({
+        mode: "month",
+        travelStartDate: "",
+        travelMonth,
+        travelYear,
+      });
+      if (timing.mode === "month") {
+        overrides.travelMonth = timing.travelMonth;
+        overrides.travelYear = timing.travelYear;
+      }
+      delete overrides.travelStartDate;
     }
     // Phone: the input shows the display form (Indian +91 stripped
     // for readability). Untouched values restore the exact stored
@@ -2364,18 +2394,22 @@ export function TravelCrmAction({
                         }
                         disabled={!row.destination}
                       >
-                        <SelectTrigger id={`lead-itin-city-${i}`} aria-label="City" className="h-8 w-full">
-                          <SelectValue placeholder={row.destination ? "Select" : "Pick destination first"}>
-                            {cityLabel !== null ? cityLabel : undefined}
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectContent>
-                          {cityOptions.map((o) => (
-                            <SelectItem key={`${o.destinationValue ?? ""}:${o.value}`} value={o.value}>
-                              {o.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
+                      <SelectTrigger id={`lead-itin-city-${i}`} aria-label="City" className="min-h-8 w-full *:[data-slot=select-value]:line-clamp-none *:[data-slot=select-value]:whitespace-normal">
+                        <SelectValue placeholder={row.destination ? "Select" : "Pick destination first"}>
+                          {cityLabel !== null ? cityLabel : undefined}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent {...ITINERARY_DROPDOWN_ABOVE}>
+                        {cityOptions.map((o) => (
+                          <SelectItem
+                            key={`${o.destinationValue ?? ""}:${o.value}`}
+                            value={o.value}
+                            className="[&>div]:whitespace-normal [&>div]:break-words"
+                          >
+                            {o.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
                       </Select>
                     </div>
                     <div className="grid gap-1">
@@ -2711,7 +2745,7 @@ export function TravelCrmAction({
         </p>
       )}
       <Dialog open={dialog !== null} onOpenChange={(v) => !v && setDialog(null)}>
-        <DialogContent className="flex max-h-[min(92vh,60rem)] flex-col sm:max-w-3xl">
+        <DialogContent className="flex max-h-[92dvh] w-[94vw] max-w-[94vw] flex-col sm:max-w-[62.5rem]">
           <DialogHeader>
             <DialogTitle>Complete Travel CRM fields</DialogTitle>
             <DialogDescription>

@@ -31,7 +31,7 @@ import {
   resolveSelectValue,
   validateNightsInput,
 } from "@/lib/integrations/travel-crm/itineraries";
-import { ItineraryDestinationSelect } from "./travel-crm-action";
+import { ItineraryDestinationSelect, ITINERARY_DROPDOWN_ABOVE } from "./travel-crm-action";
 
 export interface ItineraryEditRow {
   destination: string;
@@ -440,22 +440,26 @@ export function TravelCrmSettings({
                             onValueChange={(v) => setCity(i, v ?? "")}
                             disabled={!row.destination}
                           >
-                            <SelectTrigger id={`itin-city-${i}`} aria-label="City" className="h-8 w-full">
-                              <SelectValue
-                                placeholder={
-                                  row.destination ? "Select" : "Pick destination first"
-                                }
+                          <SelectTrigger id={`itin-city-${i}`} aria-label="City" className="min-h-8 w-full *:[data-slot=select-value]:line-clamp-none *:[data-slot=select-value]:whitespace-normal">
+                            <SelectValue
+                              placeholder={
+                                row.destination ? "Select" : "Pick destination first"
+                              }
+                            >
+                              {cityLabel !== null ? cityLabel : undefined}
+                            </SelectValue>
+                          </SelectTrigger>
+                          <SelectContent {...ITINERARY_DROPDOWN_ABOVE}>
+                            {cityOptions.map((o) => (
+                              <SelectItem
+                                key={`${o.destinationValue ?? ""}:${o.value}`}
+                                value={o.value}
+                                className="[&>div]:whitespace-normal [&>div]:break-words"
                               >
-                                {cityLabel !== null ? cityLabel : undefined}
-                              </SelectValue>
-                            </SelectTrigger>
-                            <SelectContent>
-                              {cityOptions.map((o) => (
-                                <SelectItem key={`${o.destinationValue ?? ""}:${o.value}`} value={o.value}>
-                                  {o.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
+                                {o.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
                           </Select>
                         </div>
                         <div className="grid gap-1">

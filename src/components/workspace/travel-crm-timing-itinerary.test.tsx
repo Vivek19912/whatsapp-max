@@ -12,6 +12,7 @@ import {
   groupDestinationOptionsByCountry,
   ItineraryDestinationList,
   ItineraryDestinationSelect,
+  ITINERARY_DROPDOWN_ABOVE,
   itineraryDialogRowsToOverrides,
   toggleCountryExpanded,
   TRAVEL_DATE_REQUIRED_ERROR,
@@ -24,9 +25,10 @@ import {
 
 // ---------------------------------------------------------------------------
 // Phase 1: Exact/Month travel timing + country-grouped itinerary
-// destination selection (WACRM-side only). Month/year payload shapes
-// are prepared and unit-tested here but never transmitted: the
-// current Travel CRM integration contract accepts exact dates only.
+// destination selection (WACRM-side only). Phase 3 transmits month
+// payloads to the Phase 2 Travel CRM contract: month/year travel
+// as numbers with no invented day, exact dates are unchanged, and
+// stale representations can never mix.
 // ---------------------------------------------------------------------------
 
 const SRC = () =>
@@ -181,7 +183,7 @@ describe("travel timing validation", () => {
   });
 });
 
-describe("travel timing payload preparation (Phase-2 ready, unsent)", () => {
+describe("travel timing payload submission (Phase 3: month transmits)", () => {
   it("never invents a day for month-based travel", () => {
     const payload = buildTravelTimingPayload({
       mode: "month",
@@ -193,14 +195,14 @@ describe("travel timing payload preparation (Phase-2 ready, unsent)", () => {
     expect(payload).not.toHaveProperty("travelStartDate");
   });
 
-  it("month payloads never enter backend overrides in this phase", () => {
+  it("month mode sends numeric travelMonth/travelYear and drops any stale date", () => {
     const src = SRC();
-    // The submit gate validates the active mode, then stops month
-    // submissions with an explicit Phase 2 notice.
-    expect(src).toContain('travelTiming === "month"');
-    expect(src).toContain("Phase 2");
-    expect(src).not.toContain("overrides.travelMonth");
-    expect(src).not.toContain("overrides.travelYear");
+    // The obsolete Phase 2 gate is gone: no blocking notice, no
+    // early return for valid month selections.
+    expect(src).not.toContain("needs the Phase 2 Travel CRM contract update");
+    expect(src).toContain("overrides.travelMonth = timing.travelMonth");
+    expect(src).toContain("overrides.travelYear = timing.travelYear");
+    expect(src).toContain("delete overrides.travelStartDate");
     // Exact-date request format and behavior preserved.
     expect(src).toContain("validateTravelDateValue");
     expect(src).toContain("TRAVEL_DATE_REQUIRED_ERROR");
@@ -512,13 +514,13 @@ describe("Month mode defaults the year to the current year", () => {
     ).toBeNull();
   });
 
-  it("mutual exclusion and the Month submission gate are preserved", () => {
+  it("mutual exclusion holds and month transmits (no gate)", () => {
     const src = SRC();
     expect(src).toContain("clearInactiveTravelTiming");
-    expect(src).toContain('travelTiming === "month"');
-    expect(src).toContain("Phase 2");
-    expect(src).not.toContain("overrides.travelMonth");
-    expect(src).not.toContain("overrides.travelYear");
+    expect(src).toContain("showTiming && travelTiming");
+    expect(src).toContain("overrides.travelMonth = timing.travelMonth");
+    expect(src).toContain("delete overrides.travelStartDate");
+    expect(src).not.toContain("needs the Phase 2 Travel CRM contract update");
   });
 });
 
@@ -585,5 +587,139 @@ describe("departure combobox keyboard behavior", () => {
     );
     expect(html).toContain("India");
     expect(html).toContain('aria-label="Departure Country"');
+  });
+});
+
+describe("itinerary dropdowns always open above their fields", () => {
+  it("pins placement above with flipping disabled", () => {
+    expect(ITINERARY_DROPDOWN_ABOVE.side).toBe("top");
+    expect(ITINERARY_DROPDOWN_ABOVE.collisionAvoidance).toEqual({
+      side: "none",
+      align: "shift",
+      fallbackAxisSide: "none",
+    });
+  });
+
+  it("destination dropdown uses the pinned placement (dialog + settings share it)", () => {
+    const src = SRC();
+    // ItineraryDestinationSelect renders in both the creation
+    // dialog and Settings Itinerary Defaults from one component.
+    expect(src).toContain("{...ITINERARY_DROPDOWN_ABOVE}");
+    const settings = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    expect(settings).toContain("<ItineraryDestinationSelect");
+  });
+
+  it("city dropdowns use the pinned placement in both locations", () => {
+    const action = SRC();
+    expect(action).toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
+    const settings = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    expect(settings).toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
+  });
+
+  it("wrappers forward collisionAvoidance to the positioner", () => {
+    const root = process.cwd();
+    const selectSrc = readFileSync(`${root}/src/components/ui/select.tsx`, "utf8");
+    expect(selectSrc).toContain('"collisionAvoidance"');
+    expect(selectSrc).toContain("collisionAvoidance={collisionAvoidance}");
+    const popoverSrc = readFileSync(`${root}/src/components/ui/popover.tsx`, "utf8");
+    expect(popoverSrc).toContain('"collisionAvoidance"');
+    expect(popoverSrc).toContain("collisionAvoidance={collisionAvoidance}");
+  });
+
+  it("dropdown lists cap height at the space available above", () => {
+    const src = SRC();
+    expect(src).toContain("max-h-[min(15rem,var(--available-height))]");
+  });
+});
+
+describe("destination names render complete, never truncated", () => {
+  const LONG_NAME =
+    "Hanoi | Danang | Ho Chi Minh City | Phu Quoc | Halong Bay | Sapa Valley Resort and Spa";
+
+  it("long option names wrap in full (no ellipsis, clamp, or nowrap)", () => {
+    const html = renderToStaticMarkup(
+      <ItineraryDestinationList
+        groups={[{ country: null, options: [{ value: "d-long", label: LONG_NAME }] }]}
+        grouped={false}
+        searching={false}
+        expanded={new Set()}
+        highlight={-1}
+        selectedValue=""
+        onToggleCountry={() => {}}
+        onPick={() => {}}
+        onHighlight={() => {}}
+        listRef={{ current: null }}
+      />,
+    );
+    expect(html).toContain(LONG_NAME);
+    expect(html).toContain("whitespace-normal");
+    expect(html).toContain("break-words");
+    expect(html).not.toContain("truncate");
+    expect(html).not.toContain("line-clamp");
+    expect(html).not.toContain("whitespace-nowrap");
+    expect(html).not.toContain("…");
+  });
+
+  it("grouped long names render complete under their country", () => {
+    const html = renderToStaticMarkup(
+      <ItineraryDestinationList
+        groups={groupDestinationOptionsByCountry([
+          { value: "d-long", label: LONG_NAME, countryName: "Vietnam", privateName: null },
+        ])}
+        grouped
+        searching={false}
+        expanded={new Set(["Vietnam"])}
+        highlight={-1}
+        selectedValue=""
+        onToggleCountry={() => {}}
+        onPick={() => {}}
+        onHighlight={() => {}}
+        listRef={{ current: null }}
+      />,
+    );
+    expect(html).toContain(LONG_NAME);
+    expect(html).toContain("Vietnam");
+    expect(html).not.toContain("truncate");
+  });
+
+  it("selected-value triggers wrap instead of clipping", () => {
+    const html = renderToStaticMarkup(
+      <ItineraryDestinationSelect
+        value="d-long"
+        options={[{ value: "d-long", label: LONG_NAME }]}
+        inputId="lead-itin-dest-0"
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain(LONG_NAME);
+    expect(html).toContain("whitespace-normal");
+    expect(html).not.toContain("truncate");
+  });
+
+  it("city triggers wrap instead of clamping to one line", () => {
+    for (const rel of [
+      "src/components/workspace/travel-crm-action.tsx",
+      "src/components/workspace/travel-crm-settings.tsx",
+    ]) {
+      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
+      expect(src).toContain("min-h-8 w-full *:[data-slot=select-value]:line-clamp-none");
+      expect(src).toContain("*:[data-slot=select-value]:whitespace-normal");
+    }
+  });
+
+  it("city options wrap instead of truncating", () => {
+    for (const rel of [
+      "src/components/workspace/travel-crm-action.tsx",
+      "src/components/workspace/travel-crm-settings.tsx",
+    ]) {
+      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
+      expect(src).toContain("[&>div]:whitespace-normal [&>div]:break-words");
+    }
   });
 });

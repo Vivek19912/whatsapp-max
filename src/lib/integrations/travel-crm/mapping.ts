@@ -101,6 +101,9 @@ export interface TravelCrmLeadDraft {
   assignedToEmail: string | null;
   dateOfBirth: string | null;
   travelStartDate: string | null;
+  /** Month-based travel timing (both set or both null; never a date). */
+  travelMonth: number | null;
+  travelYear: number | null;
   departureCountry: string | null;
   departureCity: string | null;
   rooms: number | null;
@@ -617,6 +620,8 @@ export function mapLeadToTravelCrm(
     assignedToEmail: null,
     dateOfBirth: null,
     travelStartDate: null,
+    travelMonth: null,
+    travelYear: null,
     departureCountry: null,
     departureCity: null,
     rooms: null,

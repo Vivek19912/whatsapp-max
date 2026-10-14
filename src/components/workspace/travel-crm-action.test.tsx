@@ -1237,16 +1237,19 @@ describe("Travel Date required validation (Create Lead dialog)", () => {
 });
 
 describe("Complete Travel CRM fields modal sizing", () => {
-  it("fills most of the viewport height with a wide content area (no cramped scrollbar)", () => {
+  it("fills most of the viewport with a wide content area (no cramped scrollbar)", () => {
     const src = readFileSync(`${process.cwd()}/src/components/workspace/travel-crm-action.tsx`, "utf8");
     const titleAt = src.indexOf("Complete Travel CRM fields");
     const dialogBlock = src.slice(src.lastIndexOf("DialogContent", titleAt));
-    // Wide modal on desktop; base dialog keeps max-w-[calc(100%-2rem)]
-    // so small screens stay responsive.
-    expect(dialogBlock).toContain("sm:max-w-3xl");
-    // The popup itself is capped to most of the viewport height and laid
-    // out as a flex column so the form area grows to fill it.
-    expect(dialogBlock).toContain("max-h-[min(92vh,60rem)]");
+    // Wide modal on desktop (~1000px max) at 94vw, so small screens
+    // stay responsive without horizontal overflow.
+    expect(dialogBlock).toContain("w-[94vw]");
+    expect(dialogBlock).toContain("max-w-[94vw]");
+    expect(dialogBlock).toContain("sm:max-w-[62.5rem]");
+    // The popup itself is capped to most of the dynamic viewport
+    // height and laid out as a flex column so the form area grows
+    // to fill it.
+    expect(dialogBlock).toContain("max-h-[92dvh]");
     expect(dialogBlock).toContain("flex-col");
     // The content area flexes to the remaining space and scrolls ONLY
     // when the viewport genuinely cannot fit the whole form (small
@@ -1254,6 +1257,9 @@ describe("Complete Travel CRM fields modal sizing", () => {
     expect(dialogBlock).toContain("min-h-0");
     expect(dialogBlock).toContain("flex-1");
     expect(dialogBlock).toContain("overflow-y-auto");
+    // Header stays visible with the footer accessible.
+    expect(dialogBlock).toContain("<DialogHeader>");
+    expect(dialogBlock).toContain("<DialogFooter>");
   });
 });
 

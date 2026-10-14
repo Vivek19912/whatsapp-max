@@ -465,6 +465,77 @@ export async function POST(request: Request) {
       }
     }
 
+    // --- Dialog travel-timing overrides (Month mode): validated
+    // --- month/year pair applied straight onto the draft (same
+    // --- direct pattern as services/travelers), so dialog edits
+    // --- never collide with mapped answers as false ambiguities.
+    // --- Exact and month representations are mutually exclusive end
+    // --- to end: a complete pair alongside a travelStartDate value
+    // --- rejects as conflicting rather than persisting ambiguity
+    // --- (mirrors the deployed Travel CRM conflict rule). Absent
+    // --- keys leave the mapped date path untouched.
+    {
+      const monthRaw = overrides.travelMonth;
+      const yearRaw = overrides.travelYear;
+      const monthText = asText(monthRaw);
+      const yearText = asText(yearRaw);
+      if (monthText !== null || yearText !== null) {
+        if (monthText === null || yearText === null) {
+          return invalidOverrides("Select both a travel month and year.", {
+            travelMonth: ["Select both a travel month and year."],
+            travelYear: ["Select both a travel month and year."],
+          });
+        }
+        if (!/^\d+$/.test(monthText)) {
+          return invalidOverrides("Travel month must be between 1 and 12.", {
+            travelMonth: ["Travel month must be between 1 and 12."],
+          });
+        }
+        const month = Number(monthText);
+        if (!Number.isSafeInteger(month) || month < 1 || month > 12) {
+          return invalidOverrides("Travel month must be between 1 and 12.", {
+            travelMonth: ["Travel month must be between 1 and 12."],
+          });
+        }
+        if (!/^\d+$/.test(yearText)) {
+          return invalidOverrides(
+            "Travel year must be between 1900 and 2100.",
+            { travelYear: ["Travel year must be between 1900 and 2100."] },
+          );
+        }
+        const year = Number(yearText);
+        if (!Number.isSafeInteger(year) || year < 1900 || year > 2100) {
+          return invalidOverrides(
+            "Travel year must be between 1900 and 2100.",
+            { travelYear: ["Travel year must be between 1900 and 2100."] },
+          );
+        }
+        if (draft.travelStartDate) {
+          return invalidOverrides(
+            "Travel timing must be either an exact date or a month/year pair, not both.",
+            {
+              travelStartDate: [
+                "Travel timing must be either an exact date or a month/year pair, not both.",
+              ],
+            },
+          );
+        }
+        draft.travelMonth = month;
+        draft.travelYear = year;
+        mapping.fields.travelStartDate = {
+          status: "available",
+          source: { kind: "flow-default", key: "override:travelMonth" },
+        };
+        if (!mapping.available.includes("travelStartDate")) {
+          mapping.available.push("travelStartDate");
+        }
+        mapping.missing = mapping.missing.filter((f) => f !== "travelStartDate");
+        mapping.ambiguous = mapping.ambiguous.filter((a) => a.field !== "travelStartDate");
+        mapping.invalid = mapping.invalid.filter((v) => v.field !== "travelStartDate");
+        mapping.ready = isTravelCrmReady(mapping.fields);
+      }
+    }
+
     // --- Dialog traveler overrides (Travelers section): validated
     // --- counts and age arrays applied straight onto the draft
     // --- (same direct pattern as Name/Phone), so dialog edits never
@@ -1104,6 +1175,8 @@ export async function POST(request: Request) {
         assignedToEmail: overrideEmail as string,
         dateOfBirth: draft.dateOfBirth,
         travelStartDate: draft.travelStartDate,
+        travelMonth: draft.travelMonth,
+        travelYear: draft.travelYear,
         departureCountry: draft.departureCountry,
         departureCity: draft.departureCity,
         rooms: draft.rooms,
