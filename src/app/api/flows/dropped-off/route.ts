@@ -5,11 +5,13 @@ export async function GET() {
   try {
     const ctx = await getCurrentAccount();
 
-    // Get all flows for this account
+    // Get all conversational flows for this account (Meta Lead Ads
+    // virtual flows are Workspace-only and have no dropped-off concept).
     const { data: flows } = await ctx.supabase
       .from("flows")
       .select("id, name")
-      .eq("account_id", ctx.accountId);
+      .eq("account_id", ctx.accountId)
+      .eq("kind", "whatsapp_flow");
 
     if (!flows || flows.length === 0) {
       return NextResponse.json({ flows: [] });

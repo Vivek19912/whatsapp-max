@@ -165,24 +165,28 @@ describe("8/9. tooltips, keyboard, toggle control", () => {
     expect(sidebarSrc).toContain("focus-visible:ring-2");
   });
 
-  it("toggle lives on the sidebar edge, not in the logo row", () => {
-    // ~16px hover zone straddling the right boundary (desktop only).
-    expect(sidebarSrc).toContain("group/edge");
-    expect(sidebarSrc).toContain("-right-2");
-    // Small circular control, vertically centered on the edge.
-    expect(sidebarSrc).toContain("rounded-full");
-    expect(sidebarSrc).toContain("top-1/2");
-    // Invisible until hover/focus — never a permanent button.
-    expect(sidebarSrc).toContain("opacity-0");
-    expect(sidebarSrc).toContain("group-hover/edge:opacity-100");
-    expect(sidebarSrc).toContain("focus-visible:opacity-100");
-    // No text selection or touch scrolling interference.
-    expect(sidebarSrc).toContain("touch-none");
-    expect(sidebarSrc).toContain("select-none");
-    // Logo row carries no collapse control.
-    const logoRow = sidebarSrc.split("Logo row")[1].split("Main navigation")[0];
-    expect(logoRow).not.toContain("onToggleCollapse");
-    expect(logoRow).not.toContain("Expand sidebar");
+  it("toggle lives in the header beside the branding, not on the sidebar edge", () => {
+    const headerRow = sidebarSrc
+      .split("Header row")[1]
+      .split("Main navigation")[0];
+    // The header carries the collapse/expand control (beside brand).
+    expect(headerRow).toContain("onToggleCollapse");
+    expect(headerRow).toContain("Collapse sidebar");
+    expect(headerRow).toContain("Expand sidebar");
+    // Small subtle chevron button, vertically centered in the header.
+    expect(headerRow).toContain("rounded-md");
+    expect(headerRow).toContain("items-center");
+    expect(headerRow).toContain("focus-visible:ring-2");
+    // The old hover-edge control is gone.
+    expect(sidebarSrc).not.toContain("group/edge");
+    expect(sidebarSrc).not.toContain("-right-2");
+    expect(sidebarSrc).not.toContain("top-1/2");
+    // Exactly one toggle control — no duplicate.
+    const toggles =
+      sidebarSrc.split(
+        'aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}',
+      ).length - 1;
+    expect(toggles).toBe(1);
   });
 });
 

@@ -278,6 +278,9 @@ export function ConversationList({
       const { data } = await supabase
         .from("flows")
         .select("id, name")
+        // Meta Lead Ads virtual flows have no conversations, so they
+        // never belong in the inbox conversation flow filter.
+        .eq("kind", "whatsapp_flow")
         .order("name");
       if (!cancelled && data) setFlows(data);
     })();

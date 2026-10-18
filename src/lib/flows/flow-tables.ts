@@ -58,6 +58,12 @@ export function flowColumnRenderKey(
 export interface FlowTableMeta {
   flowId: string;
   flowName: string;
+  /**
+   * Flow origin. `meta_lead_ads` flows are virtual (one per enabled
+   * Instant Form) and have no conversational builder — the Workspace
+   * hides the builder links for them. Optional for older responses.
+   */
+  kind?: string | null;
   /** Nullable: NULL = END node decides (backwards compatible). */
   completionNodeId: string | null;
   view: FlowTableView;
@@ -273,7 +279,8 @@ function answerText(value: unknown): string | null {
  *
  * Column order invariant (Workspace requirement): Submission Time
  * is ALWAYS index 0, followed by Name, Phone Number, the dynamic
- * flow columns, and Status last — for every flow, both views.
+ * flow columns, Latest Recording at the end of those flow columns,
+ * and Status last — for every flow, both views.
  *
  * When the flow itself collects a name, that flow-derived "Name"
  * column sits IMMEDIATELY after Submission Time (index 1), with
@@ -308,12 +315,6 @@ export function buildFlowTableColumns(
     { key: "submission_time", label: "Submission Time", system: true },
     { key: "name", label: "Name", system: true },
     { key: "phone", label: "Phone Number", system: true },
-    // Latest call recording, right after the contact identity it
-    // belongs to. A system column (never a flow answer, never
-    // sent to Sheets — Sheets derives its own columns from nodes
-    // via deriveFlowColumns/orderNodesForSheets, not from here).
-    // Renders through a dedicated audio cell, not cellText.
-    { key: "latest_recording", label: "Latest Recording", system: true },
   ];
   if (derived.name) {
     answerKeys.push(derived.name.key);
@@ -333,6 +334,13 @@ export function buildFlowTableColumns(
       options: choiceOptions.get(col.key),
     });
   }
+  // Latest call recording, placed at the END of the flow-derived
+  // headers (after every flow column, just before Status). A
+  // system column (never a flow answer, never sent to Sheets —
+  // Sheets derives its own columns from nodes via
+  // deriveFlowColumns/orderNodesForSheets, not from here).
+  // Renders through a dedicated audio cell, not cellText.
+  columns.push({ key: "latest_recording", label: "Latest Recording", system: true });
   columns.push({ key: "status", label: "Status", system: true });
   // Rename by column identity (system vs flow-derived), never by
   // blind label matching: only the SYSTEM name column is relabelled,

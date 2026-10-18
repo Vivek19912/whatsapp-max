@@ -191,9 +191,9 @@ describe("flow table columns", () => {
       "submission_time",
       "name",
       "phone",
-      "latest_recording",
       "Name",
       "TravelDate",
+      "latest_recording",
       "status",
     ]);
     expect(nameKey).toBe("Name");
@@ -252,11 +252,14 @@ describe("workspace column order invariant", () => {
     expect(statusIdx).toBe(columns.length - 1);
   });
 
-  it("Latest Recording is a system column immediately after Phone Number", () => {
+  it("Latest Recording is a system column at the end of the flow columns", () => {
     for (const keys of [[], [{ key: "A" }]]) {
       const { columns } = buildFlowTableColumns(nodesFor(keys), "start");
       const order = columns.map((c) => c.key);
-      expect(order[3]).toBe("latest_recording");
+      // After every flow-derived header, immediately before Status.
+      expect(order[order.length - 2]).toBe("latest_recording");
+      expect(order[order.length - 1]).toBe("status");
+      if (keys.length > 0) expect(order).toContain("A");
       const col = columns.find((c) => c.key === "latest_recording");
       expect(col?.system).toBe(true);
       expect(col?.label).toBe("Latest Recording");
@@ -419,9 +422,9 @@ describe("WhatsApp Name vs flow Name distinction (display-only)", () => {
       "Submission Time",
       "Name",
       "Phone Number",
-      "Latest Recording",
       "What is your TravelDate?",
       "What is your Hotel?",
+      "Latest Recording",
       "Status",
     ]);
   });
@@ -464,8 +467,8 @@ describe("flow Name column position (immediately after Phone Number)", () => {
       "Name",
       "WhatsApp Name",
       "Phone Number",
-      "Latest Recording",
       "Travel date?",
+      "Latest Recording",
       "Status",
     ]);
     expect(columns.map((c) => c.key)).toEqual([
@@ -473,8 +476,8 @@ describe("flow Name column position (immediately after Phone Number)", () => {
       "full_name",
       "name",
       "phone",
-      "latest_recording",
       "TravelDate",
+      "latest_recording",
       "status",
     ]);
     // No duplicate "Name" system header exists.

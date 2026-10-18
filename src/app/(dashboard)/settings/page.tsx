@@ -20,6 +20,7 @@ import { ReminderNumberSettings } from
 import { CallRecordingPanel } from '@/components/settings/call-recording-panel';
 import { BusinessProfileSettings } from '@/components/settings/business-profile';
 import { TravelCrmSettings } from '@/components/settings/travel-crm-settings';
+import { MetaLeadAdsSettings } from '@/components/settings/meta-lead-ads-settings';
 import { FieldsAndTagsPanel } from '@/components/settings/fields-and-tags-panel';
 import { DealsSettings } from '@/components/settings/deals-settings';
 import { ApiKeysSettings } from '@/components/settings/api-keys-settings';
@@ -98,6 +99,7 @@ export default function SettingsPage() {
     'call-recording': <CallRecordingPanel />,
     'business-profile': <BusinessProfileSettings />,
     'travel-crm': <TravelCrmSettings />,
+    'meta-lead-ads': <MetaLeadAdsSettings />,
     fields: <FieldsAndTagsPanel />,
     deals: <DealsSettings />,
     api: <ApiKeysSettings />,

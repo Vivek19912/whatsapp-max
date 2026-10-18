@@ -262,7 +262,7 @@ export async function GET(
 
   const { data: flow, error: flowErr } = await supabase
     .from('flows')
-    .select('id, name, account_id, completion_node_id, entry_node_id')
+    .select('id, name, account_id, completion_node_id, entry_node_id, kind')
     .eq('id', id)
     .maybeSingle()
   if (flowErr) {
@@ -508,6 +508,7 @@ export async function GET(
     meta: {
       flowId: (flow as { id: string }).id,
       flowName: (flow as { name: string }).name,
+      kind: (flow as { kind?: string | null }).kind ?? null,
       completionNodeId,
       view,
       total,

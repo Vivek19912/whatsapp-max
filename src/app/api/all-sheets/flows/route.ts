@@ -16,6 +16,9 @@ export async function GET() {
       .from("flows")
       .select("id, name")
       .eq("account_id", ctx.accountId)
+      // Meta Lead Ads virtual flows have no Google Sheets tab concept;
+      // keep this surface scoped to real conversational flows.
+      .eq("kind", "whatsapp_flow")
       .order("name", { ascending: true });
     if (flowsError) throw flowsError;
     if (!flows || flows.length === 0) return NextResponse.json({ flows: [] });

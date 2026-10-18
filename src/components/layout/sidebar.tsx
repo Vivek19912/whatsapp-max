@@ -216,24 +216,28 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
           "transition-[transform,width] duration-200 ease-out will-change-transform",
           open ? "translate-x-0" : "-translate-x-full",
           // Desktop: static in the flex row (content expands
-          // automatically); width animates full <-> rail. Relative
-          // so the hover-edge collapse control anchors to it.
+          // automatically); width animates full <-> rail.
           "lg:static lg:relative lg:z-0 lg:translate-x-0",
           collapsed ? "lg:w-16" : "lg:w-60",
         )}
         aria-label="Primary"
       >
-        {/* Logo row: brand lockup; brand text hides on the collapsed
-            rail (desktop). The mobile close button is untouched. No
-            collapse button lives here — see the hover-edge control
-            at the end of the aside. */}
+        {/* Header row: brand lockup on the left, desktop collapse/
+            expand toggle in the top-right corner (beside the logo and
+            branding, vertically centered), mobile close button on the
+            right. The toggle reuses the shell-owned onToggleCollapse
+            handler — never a second collapse implementation. */}
         <div
           className={cn(
             "flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-4",
-            collapsed && "lg:justify-center",
+            collapsed && "lg:gap-0 lg:px-1",
           )}
         >
-          <Link href="/dashboard" className="flex items-center gap-2" aria-label="Dashboard">
+          <Link
+            href="/dashboard"
+            className="flex items-center gap-2"
+            aria-label="Dashboard"
+          >
   <Image
     src="/logo.png"
     alt="WhatsApp Max"
@@ -246,6 +250,22 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   <p className="text-[9.8px] leading-tight text-muted-foreground">By Interscale Marketing</p>
 </span>
 </Link>
+          {onToggleCollapse && (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!collapsed}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none lg:flex"
+            >
+              {collapsed ? (
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+              )}
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -448,36 +468,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
             </NavTip>
           </div>
         ) : null}
-        {/* Hover-edge collapse control (desktop only): an invisible
-            ~16px hover zone straddling the sidebar's right boundary
-            reveals a small circular chevron centered on the edge.
-            Nothing permanent is shown — the rail stays clean. The
-            button is always in the DOM (keyboard-focusable; focus
-            reveals it), and hover intent never affects mobile, where
-            the drawer pattern rules. */}
-        {onToggleCollapse && (
-          <div className="group/edge absolute inset-y-0 -right-2 hidden w-4 touch-none select-none lg:block">
-            <button
-              type="button"
-              onClick={onToggleCollapse}
-              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-expanded={!collapsed}
-              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              className={cn(
-                "absolute top-1/2 left-1/2 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center",
-                "rounded-full border border-border bg-card text-muted-foreground shadow-sm",
-                "opacity-0 transition-all duration-150 hover:text-foreground",
-                "group-hover/edge:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
-              )}
-            >
-              {collapsed ? (
-                <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-              ) : (
-                <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-            </button>
-          </div>
-        )}
       </aside>
     </>
   );

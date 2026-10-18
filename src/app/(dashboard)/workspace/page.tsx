@@ -1324,7 +1324,12 @@ export default function WorkspacePage() {
             </div>
           </div>
 
-          {payload?.meta.completionNodeId ? (
+          {payload?.meta.kind === 'meta_lead_ads' ? (
+            <p className="text-muted-foreground text-xs">
+              Meta Lead Ads form — leads arrive automatically. Questions and
+              enablement are managed in Settings › Integrations.
+            </p>
+          ) : payload?.meta.completionNodeId ? (
             <p className="text-muted-foreground text-xs">
               Completion point:{' '}
               <code className="bg-muted rounded px-1 font-mono">

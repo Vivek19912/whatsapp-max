@@ -99,7 +99,7 @@ export default function FlowsPage() {
     (async () => {
       try {
         const [flowsRes, tmplRes] = await Promise.all([
-          fetch("/api/flows"),
+          fetch("/api/flows?kind=whatsapp_flow"),
           fetch("/api/flows/templates"),
         ]);
         if (!flowsRes.ok) {
@@ -237,7 +237,7 @@ export default function FlowsPage() {
   // Refresh the list in place (no full page reload) after a
   // same-account copy lands here.
   async function refreshFlows() {
-    const flowsRes = await fetch("/api/flows");
+    const flowsRes = await fetch("/api/flows?kind=whatsapp_flow");
     if (flowsRes.ok) {
       const flowsJson = (await flowsRes.json()) as { flows: FlowRow[] };
       setFlows(flowsJson.flows ?? []);

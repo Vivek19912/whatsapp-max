@@ -15,17 +15,27 @@ import { ensureWorkspaceDefaultFields } from '@/lib/flows/workspace-defaults'
  * routes themselves are open.
  */
 
-export async function GET() {
+export async function GET(request: Request) {
   const guard = await requireAuthenticatedUser()
   if (!guard.ok) {
     return NextResponse.json(guard.body, { status: guard.status })
   }
   const { supabase } = guard
 
-  const { data, error } = await supabase
+  // Optional `?kind=` filter. Omitted → every flow (Workspace needs
+  // WhatsApp + Meta sources together); `kind=whatsapp_flow` keeps the
+  // conversational builder list free of Meta Lead Ads virtual flows.
+  const kind = new URL(request.url).searchParams.get('kind')
+
+  let query = supabase
     .from('flows')
     .select('*')
     .order('created_at', { ascending: false })
+  if (kind === 'whatsapp_flow' || kind === 'meta_lead_ads') {
+    query = query.eq('kind', kind)
+  }
+
+  const { data, error } = await query
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
