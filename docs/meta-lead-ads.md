@@ -158,6 +158,14 @@ Page read (`GET /{page-id}`) asks for `id,name,access_token` — **never
 `tasks`**, which belongs to the `/me/accounts` user edge and makes Graph
 reject the whole call with `#100 Tried accessing nonexistent field (tasks)`.
 
+The same rule applies to the Lead node: `GET /{lead-id}` (and the
+`/{form-id}/leads` edge) request only `id,created_time,field_data,form_id,
+platform,ad_id,ad_name,campaign_name,is_organic`. `page_id` is **not** a Lead
+field — asking for it fails the read with
+`#100 Tried accessing nonexistent field (page_id)`, so the submission is
+recorded but no Workspace row is ever created. The Page is already known from
+the form/submission, so it is never re-requested from the Lead.
+
 | Call | Purpose | Token |
 | --- | --- | --- |
 | `GET /{page-id}?fields=id,name,access_token` | Verify the Page + obtain a Page token | System User |
@@ -237,9 +245,16 @@ No OAuth redirect URI is required.
     `AUTOMATION_CRON_SECRET` / `CRON_SECRET` (same as the other crons).
     Runs retries, resumes imports and polls enabled forms. Point a
     scheduler at it, e.g. every 5 minutes.
-- **Reauth.** If Meta rejects the token, the connection is marked
-  `needs_reauth` and the panel asks for a new token. Existing leads are
-  untouched.
+- **Reauth.** Only a definitive token rejection (Graph `#190`, `#102` or
+  `#463`, or a bare 401) marks the connection `needs_reauth`. Errors that
+  Meta also labels `OAuthException` — `#100` invalid field/parameter, `#200`
+  missing permission, `appsecret_proof`, rate limits, 5xx and network
+  failures — never invalidate the credential. The status endpoint is
+  read-only; refreshing Settings cannot change credential state. If a token
+  is flagged, re-check the stored one first by leaving the token field blank
+  and clicking **Save & verify** (existing leads are untouched); paste a new
+  token only if Meta still rejects it. A stale cron/poll worker cannot
+  overwrite a token saved after it started.
 
 ## Security notes
 

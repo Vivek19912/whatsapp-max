@@ -112,6 +112,39 @@ function fmt(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
 
+// A recorded lead is not a visible lead: only `processed` rows became a
+// Workspace run. Never report success based on `imported` alone.
+function describeImport(result: ImportResult): {
+  level: "success" | "error" | "info";
+  text: string;
+} {
+  const plural = (n: number) => (n === 1 ? "" : "s");
+  if (result.failed > 0) {
+    return {
+      level: "error",
+      text:
+        `${result.failed} lead${plural(result.failed)} could not be added to the Workspace` +
+        (result.processed > 0
+          ? ` (${result.processed} succeeded)`
+          : "") +
+        `. ${result.error ?? "They stay queued for automatic retry."}`,
+    };
+  }
+  if (result.processed > 0) {
+    return {
+      level: "success",
+      text: `Added ${result.processed} lead${plural(result.processed)} to the Workspace.`,
+    };
+  }
+  if (result.imported > 0) {
+    return {
+      level: "info",
+      text: `Recorded ${result.imported} lead${plural(result.imported)}; no new Workspace rows.`,
+    };
+  }
+  return { level: "info", text: "No new leads to import." };
+}
+
 function importLabel(form: FormRow): string {
   if (form.importStatus === "importing") {
     return `Importing… ${form.importedCount} saved`;
@@ -285,17 +318,18 @@ export function MetaLeadAdsSettings({
         }),
       )) as { import: ImportResult };
       const result = json.import;
+      const summary = describeImport(result);
       if (result.error) {
         toast.error(`Import paused: ${result.error}`);
+      } else if (summary.level === "error") {
+        toast.error(summary.text);
+      } else if (summary.level === "success") {
+        toast.success(summary.text);
       } else {
-        toast.success(
-          result.imported > 0
-            ? `Imported ${result.imported} existing lead${result.imported === 1 ? "" : "s"}.`
-            : "No new leads to import.",
-        );
-        if (result.hasMore) {
-          toast("The import is large — it continues in the background.");
-        }
+        toast(summary.text);
+      }
+      if (result.hasMore) {
+        toast("The import is large — it continues in the background.");
       }
       await load();
     });
@@ -313,17 +347,20 @@ export function MetaLeadAdsSettings({
       if (!enabled) {
         toast.success("Form disabled.");
       } else {
-        const imported = json.import?.imported ?? 0;
-        toast.success(
-          imported > 0
-            ? `Form enabled. Imported ${imported} existing lead${imported === 1 ? "" : "s"}.`
-            : "Form enabled.",
-        );
-        if (json.import?.hasMore) {
+        const result = json.import;
+        const summary = result ? describeImport(result) : null;
+        if (summary && summary.level === "success") {
+          toast.success(`Form enabled. ${summary.text}`);
+        } else if (summary && summary.level === "error") {
+          toast.error(`Form enabled. ${summary.text}`);
+        } else {
+          toast.success("Form enabled.");
+        }
+        if (result?.hasMore) {
           toast("Existing leads are still importing in the background.");
         }
-        if (json.import?.error) {
-          toast.error(`Historical import paused: ${json.import.error}`);
+        if (result?.error) {
+          toast.error(`Historical import paused: ${result.error}`);
         }
       }
       await load();
@@ -358,8 +395,9 @@ export function MetaLeadAdsSettings({
   }
 
   const disabled = !canEditSettings || profileLoading;
-  const connected = Boolean(status?.connected && status.status !== "needs_reauth");
-  const needsReauth = status?.status === "needs_reauth";
+  const needsReauth =
+    status?.status === "needs_reauth" || status?.status === "revoked";
+  const connected = Boolean(status?.connected && !needsReauth);
   const page = setup?.page ?? status?.pages[0] ?? null;
   const canReuseToken = Boolean(
     setup?.hasToken && setup.tokenSource === "capi" && !token.trim(),
@@ -413,8 +451,10 @@ export function MetaLeadAdsSettings({
                   <AlertCircle className="size-4 text-destructive" /> Token needs attention
                 </CardTitle>
                 <CardDescription className="text-muted-foreground">
-                  Meta rejected the stored token. Paste a new System User token below to
-                  resume syncing. Existing leads are not affected.
+                  Meta rejected the stored token during a sync attempt. Try the existing
+                  token first: leave the token field blank below and click Save &amp;
+                  verify to re-check it. Only paste a new System User token if Meta
+                  still rejects it. Existing leads are not affected.
                 </CardDescription>
               </CardHeader>
             </Card>

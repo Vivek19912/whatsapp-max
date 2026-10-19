@@ -261,6 +261,18 @@ export async function processSubmissionById(
     | null;
   if (!submission) return { outcome: "skipped" };
 
+  // Snapshot the connection BEFORE calling Meta. Only an auth failure
+  // on THIS stored credential may flag it, and only if it has not been
+  // replaced since. This prevents stale cron/poll workers from
+  // clobbering a newer token with `needs_reauth`.
+  const { data: conn } = await db
+    .from("meta_lead_connections")
+    .select("status, updated_at")
+    .eq("account_id", submission.account_id)
+    .maybeSingle();
+  const connectionUpdatedAt =
+    (conn as { updated_at: string } | null)?.updated_at ?? null;
+
   try {
     if (!submission.page_id) throw new Error("submission has no page id");
 
@@ -397,6 +409,7 @@ export async function processSubmissionById(
         db,
         submission.account_id,
         "Meta authorization expired or was revoked.",
+        { expectedUpdatedAt: connectionUpdatedAt },
       );
     }
 

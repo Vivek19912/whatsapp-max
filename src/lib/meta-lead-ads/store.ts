@@ -136,15 +136,34 @@ export async function getPageToken(
   return getUserToken(db, accountId);
 }
 
+/**
+ * Flag the connection as needing reauthorization.
+ *
+ * Callers that observed the connection BEFORE a Graph call must pass
+ * `expectedUpdatedAt` (the `updated_at` they read). The update then
+ * only applies when the row is still connected AND unchanged, so a
+ * slow/stale worker can never overwrite a token the customer re-saved
+ * in the meantime.
+ */
 export async function markNeedsReauth(
   db: SupabaseClient,
   accountId: string,
   error: string,
+  opts: { expectedUpdatedAt?: string | null } = {},
 ): Promise<void> {
-  await db
+  let query = db
     .from("meta_lead_connections")
-    .update({ status: "needs_reauth", last_error: error, updated_at: new Date().toISOString() })
-    .eq("account_id", accountId);
+    .update({
+      status: "needs_reauth",
+      last_error: error,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("account_id", accountId)
+    .eq("status", "connected");
+  if (opts.expectedUpdatedAt) {
+    query = query.eq("updated_at", opts.expectedUpdatedAt);
+  }
+  await query;
 }
 
 /** Remove the account authorization + selected pages. Historical

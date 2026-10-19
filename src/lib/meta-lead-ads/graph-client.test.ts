@@ -13,7 +13,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { MetaLeadAdsConfig } from "./config";
 import {
   getDataset,
+  getLead,
   getPage,
+  listFormLeads,
   listForms,
   probeFormLeadAccess,
 } from "./graph-client";
@@ -94,6 +96,58 @@ describe("listForms", () => {
   });
 });
 
+describe("lead field contract (regression: Graph #100 page_id)", () => {
+  const expected = [
+    "id",
+    "created_time",
+    "field_data",
+    "form_id",
+    "platform",
+    "ad_id",
+    "ad_name",
+    "campaign_name",
+    "is_organic",
+  ];
+
+  it("getLead never requests the nonexistent `page_id` field", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      urls.push(url);
+      return jsonResponse({
+        id: "L1",
+        created_time: "2026-01-01T00:00:00Z",
+        form_id: "F1",
+        field_data: [{ name: "full_name", values: ["Asha"] }],
+      });
+    }) as unknown as typeof fetch;
+
+    const lead = await getLead(CONFIG, "page-token", "L1", { fetchImpl });
+
+    expect(lead.id).toBe("L1");
+    const parsed = new URL(urls[0]);
+    expect(parsed.pathname).toBe("/v21.0/L1");
+    const fields = parsed.searchParams.get("fields") ?? "";
+    expect(fields.split(",")).toEqual(expected);
+    expect(fields).not.toContain("page_id");
+  });
+
+  it("listFormLeads requests the same valid Lead-node field set", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      urls.push(url);
+      return jsonResponse({ data: [] });
+    }) as unknown as typeof fetch;
+
+    await listFormLeads(CONFIG, "page-token", "F1", { fetchImpl });
+
+    const parsed = new URL(urls[0]);
+    expect(parsed.pathname).toBe("/v21.0/F1/leads");
+    const fields = parsed.searchParams.get("fields") ?? "";
+    expect(fields.split(",")).toEqual(expected);
+    expect(fields).not.toContain("page_id");
+  });
+});
+
 describe("getDataset", () => {
   it("reads the dataset by id", async () => {
     const urls: string[] = [];
@@ -122,5 +176,63 @@ describe("probeFormLeadAccess", () => {
     const parsed = new URL(urls[0]);
     expect(parsed.pathname).toBe("/v21.0/F1/leads");
     expect(parsed.searchParams.get("limit")).toBe("1");
+  });
+});
+
+describe("graphRequest — error status classification", () => {
+  it("returns an invalid-field #100 as 400, not 401", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: {
+            type: "OAuthException",
+            code: 100,
+            message: "(#100) Tried accessing nonexisting field (page_id)",
+          },
+        },
+        400,
+      ),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      getPage(CONFIG, "tok", "P1", { fetchImpl, maxAttempts: 1 }),
+    ).rejects.toMatchObject({
+      graphCode: 100,
+      graphType: "OAuthException",
+      status: 400,
+    });
+  });
+
+  it("returns a revoked-token #190 as 401", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: {
+            type: "OAuthException",
+            code: 190,
+            message: "Invalid OAuth access token.",
+          },
+        },
+        400,
+      ),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      getPage(CONFIG, "tok", "P1", { fetchImpl, maxAttempts: 1 }),
+    ).rejects.toMatchObject({ graphCode: 190, status: 401 });
+  });
+
+  it("returns a rate limit as 429 after bounded retries", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: { code: 4, message: "Rate limit" } }, 429),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      getPage(CONFIG, "tok", "P1", {
+        fetchImpl,
+        maxAttempts: 2,
+        backoffBaseMs: 0,
+      }),
+    ).rejects.toMatchObject({ code: "rate_limited", status: 429 });
   });
 });

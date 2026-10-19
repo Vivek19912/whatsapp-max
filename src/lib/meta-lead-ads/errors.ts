@@ -61,15 +61,32 @@ export class MetaGraphError extends MetaLeadAdsError {
 }
 
 /**
+ * Graph error codes that mean the TOKEN itself is invalid, expired or
+ * revoked. These are the only codes that justify marking the stored
+ * credential as needing reauthorization.
+ */
+const AUTH_GRAPH_CODES = new Set([102, 190, 463]);
+
+export function isAuthGraphCode(code: number | undefined): boolean {
+  return code !== undefined && AUTH_GRAPH_CODES.has(code);
+}
+
+/**
  * True for Graph errors that mean the token is no longer usable and
- * the account must re-authorize. Meta returns these as OAuthException
- * type=OAuthException, code 190 (with various subcodes), or a 401.
+ * the account must re-authorize.
+ *
+ * The Graph `code` is authoritative. Meta labels MANY unrelated
+ * failures as `type: "OAuthException"` — including `#100` invalid
+ * field/parameter errors and `#200` permission errors — so the type
+ * alone must NEVER be treated as a dead token. When Meta returns no
+ * code at all, an OAuthException or an HTTP 401 is still treated as an
+ * authentication failure.
  */
 export function isAuthGraphError(err: unknown): boolean {
   if (!(err instanceof MetaGraphError)) return false;
-  if (err.graphStatus === 401) return true;
+  if (err.graphCode !== undefined) return isAuthGraphCode(err.graphCode);
   if (err.graphType === "OAuthException") return true;
-  return err.graphCode === 190 || err.graphCode === 102 || err.graphCode === 463;
+  return err.graphStatus === 401;
 }
 
 /**
@@ -96,7 +113,15 @@ export function describeMetaGraphError(err: unknown): string {
         "assign this Page and dataset to the System User, then try again."
       );
     }
-    if (err.graphCode === 100 || err.graphCode === 803) {
+    if (err.graphCode === 100) {
+      const field = /nonexisting field \(([^)]+)\)/i.exec(err.message)?.[1];
+      return field
+        ? `Meta rejected the request field "${field}" — it is not valid for this endpoint. ` +
+            "This is not a token problem; no need to regenerate the token."
+        : `Meta rejected a request parameter. ${err.message} ` +
+            "This is not a token problem; no need to regenerate the token.";
+    }
+    if (err.graphCode === 803) {
       return (
         "Meta could not find that ID, or the token cannot access it. " +
         "Double-check the numeric ID and the System User's asset assignment."

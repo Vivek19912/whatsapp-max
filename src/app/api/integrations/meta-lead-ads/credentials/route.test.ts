@@ -234,6 +234,33 @@ describe("POST /credentials — save", () => {
     expect(json.tokenSource).toBe("capi");
   });
 
+  it("preserves the stored manual token when the token field is blank", async () => {
+    h.connection = {
+      dataset_id: "1234567890",
+      meta_user_name: "My Page",
+      status: "needs_reauth",
+      last_error: "Meta authorization expired or was revoked.",
+      updated_at: "2026-01-01T00:00:00Z",
+      access_token: "enc-manual-token",
+    };
+
+    const res = await POST(
+      post({ dataset_id: "1234567890", page_id: "1029384756" }),
+    );
+    expect(res.status).toBe(200);
+
+    // The server decrypted and re-verified the EXISTING token; the
+    // customer did not have to paste it again.
+    expect(h.connectCalls[0]).toMatchObject({
+      accountId: "acct-1",
+      token: "decrypted:enc-manual-token",
+    });
+    expect(h.saved[0]).toMatchObject({
+      accountId: "acct-1",
+      accessToken: "decrypted:enc-manual-token",
+    });
+  });
+
   it("maps a unique violation from connectPage to the generic conflict", async () => {
     h.connectError = {
       code: "23505",

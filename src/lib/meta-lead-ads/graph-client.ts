@@ -21,7 +21,7 @@
 import crypto from "node:crypto";
 
 import { graphBase, type MetaLeadAdsConfig } from "./config";
-import { MetaGraphError, isAuthGraphError } from "./errors";
+import { MetaGraphError, isAuthGraphCode, isAuthGraphError } from "./errors";
 
 /** appsecret_proof = HMAC-SHA256(accessToken, appSecret) hex. */
 export function appSecretProof(appSecret: string, accessToken: string): string {
@@ -135,15 +135,23 @@ export async function graphRequest<T = Record<string, unknown>>(
       res.status >= 500 ||
       (errorBody?.code !== undefined && RATE_LIMIT_GRAPH_CODES.has(errorBody.code));
 
+    // Classify by Meta's code, never by HTTP status or the error `type`
+    // alone: Meta returns `OAuthException` for non-auth failures such as
+    // #100 (invalid field) and #200 (missing permission).
+    const authFailure =
+      errorBody?.code !== undefined
+        ? isAuthGraphCode(errorBody.code)
+        : errorBody?.type === "OAuthException" || res.status === 401;
+    const rateLimited =
+      errorBody?.code !== undefined && RATE_LIMIT_GRAPH_CODES.has(errorBody.code);
+
     lastError = new MetaGraphError({
-      code:
-        errorBody?.code !== undefined && RATE_LIMIT_GRAPH_CODES.has(errorBody.code)
-          ? "rate_limited"
-          : "graph_error",
+      code: rateLimited ? "rate_limited" : "graph_error",
       message: errorBody?.message ?? `Meta Graph request failed (${res.status}).`,
-      status:
-        errorBody?.type === "OAuthException" || res.status === 401
-          ? 401
+      status: authFailure
+        ? 401
+        : rateLimited
+          ? 429
           : res.status >= 500
             ? 502
             : 400,
@@ -337,13 +345,20 @@ export interface MetaLeadDetail {
   created_time?: string;
   field_data?: MetaLeadFieldDatum[];
   form_id?: string;
-  page_id?: string;
   platform?: string;
   ad_id?: string;
   ad_name?: string;
   campaign_name?: string;
   is_organic?: boolean;
 }
+
+// Fields that exist on the Lead NODE only. `page_id` looks plausible but
+// is NOT part of the Lead object: requesting it makes Graph answer
+// `(#100) Tried accessing nonexisting field (page_id)` and the whole
+// fetch fails, so a lead is recorded but never becomes a Workspace run.
+// The Page is already known from the form/submission; never re-request it.
+const LEAD_FIELDS =
+  "id,created_time,field_data,form_id,platform,ad_id,ad_name,campaign_name,is_organic";
 
 export async function getLead(
   config: MetaLeadAdsConfig,
@@ -355,8 +370,7 @@ export async function getLead(
     config,
     token: pageToken,
     params: {
-      fields:
-        "id,created_time,field_data,form_id,page_id,platform,ad_id,ad_name,campaign_name,is_organic",
+      fields: LEAD_FIELDS,
     },
     ...opts,
   });
@@ -393,8 +407,7 @@ export async function listFormLeads(
     config,
     token: pageToken,
     params: {
-      fields:
-        "id,created_time,field_data,form_id,page_id,platform,ad_id,ad_name,campaign_name,is_organic",
+      fields: LEAD_FIELDS,
       limit,
       after: after ?? undefined,
     },

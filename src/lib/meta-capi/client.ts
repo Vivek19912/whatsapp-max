@@ -22,6 +22,7 @@ import { graphBase } from "@/lib/meta-lead-ads/config";
 import {
   MetaGraphError,
   MetaLeadAdsError,
+  isAuthGraphCode,
   isAuthGraphError,
 } from "@/lib/meta-lead-ads/errors";
 import { appSecretProof } from "@/lib/meta-lead-ads/graph-client";
@@ -112,15 +113,19 @@ export async function capiRequest<T = Record<string, unknown>>(
     return (parsed ?? {}) as T;
   }
 
+  const authFailure =
+    errorBody?.code !== undefined
+      ? isAuthGraphCode(errorBody.code)
+      : errorBody?.type === "OAuthException" || res.status === 401;
+
   throw new MetaGraphError({
     code: "graph_error",
     message: errorBody?.message ?? `Meta request failed (${res.status}).`,
-    status:
-      errorBody?.type === "OAuthException" || res.status === 401
-        ? 401
-        : res.status >= 500
-          ? 502
-          : 400,
+    status: authFailure
+      ? 401
+      : res.status >= 500
+        ? 502
+        : 400,
     graphStatus: res.status,
     graphType: errorBody?.type,
     graphCode: errorBody?.code,
