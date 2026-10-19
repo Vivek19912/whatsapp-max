@@ -1,8 +1,10 @@
 // GET /api/integrations/meta-lead-ads/cron
 //
 // Sweeps failed Meta lead retrievals whose bounded-backoff window has
-// elapsed. Auth re-uses AUTOMATION_CRON_SECRET / CRON_SECRET, matching
-// the other cron endpoints (see scripts/setup-automation-cron.sh).
+// elapsed, continues any interrupted historical import, and polls
+// enabled forms for new leads (the webhook fallback). Auth re-uses
+// AUTOMATION_CRON_SECRET / CRON_SECRET, matching the other cron
+// endpoints (see scripts/setup-automation-cron.sh).
 
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
@@ -10,6 +12,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
 import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { runDueRetries } from "@/lib/meta-lead-ads/process-lead";
+import { runLeadPolls } from "@/lib/meta-lead-ads/sync";
 
 export async function GET(request: Request) {
   const expectedSecrets = [
@@ -45,8 +48,10 @@ export async function GET(request: Request) {
   }
 
   try {
-    const result = await runDueRetries(supabaseAdmin(), config, 50);
-    return NextResponse.json(result);
+    const db = supabaseAdmin();
+    const retries = await runDueRetries(db, config, 50);
+    const sync = await runLeadPolls(db, config, 10);
+    return NextResponse.json({ ...retries, sync });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("[meta-lead-ads-cron] retry sweep failed:", message);

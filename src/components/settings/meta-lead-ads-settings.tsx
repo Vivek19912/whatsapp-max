@@ -2,7 +2,17 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Download,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+  XCircle,
+} from "lucide-react";
 
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
@@ -14,32 +24,55 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { SettingsPanelHead } from "./settings-panel-head";
+
+interface PageInfo {
+  pageId: string;
+  pageName: string | null;
+  subscribed: boolean;
+  webhookVerified: boolean;
+  lastError: string | null;
+  lastSyncedAt: string | null;
+  lastPolledAt: string | null;
+}
+
+interface SetupPayload {
+  configured: boolean;
+  connected: boolean;
+  datasetId: string | null;
+  hasToken: boolean;
+  tokenSource: "manual" | "capi" | null;
+  status: string | null;
+  lastError: string | null;
+  updatedAt: string | null;
+  page: PageInfo | null;
+  pages: PageInfo[];
+  capi: { datasetId: string | null; hasToken: boolean };
+}
 
 interface StatusPayload {
   configured: boolean;
   connected: boolean;
+  status: string | null;
   account: {
     userName: string | null;
     status: string;
-    scopes: string[];
-    tokenExpiry: string | null;
+    datasetId: string | null;
     lastError: string | null;
     updatedAt: string;
   } | null;
-  pages: Array<{ pageId: string; pageName: string | null }>;
-  formSummary: { total: number; enabled: number };
+  pages: PageInfo[];
+  formSummary: {
+    total: number;
+    enabled: number;
+    importing: number;
+    imported: number;
+  };
   lastSuccessAt: string | null;
-}
-
-interface PageRow {
-  pageId: string;
-  pageName: string | null;
-  selected: boolean;
-  subscribed: boolean;
-  webhookVerified: boolean;
-  lastError: string | null;
+  capi: { datasetId: string | null; hasToken: boolean };
 }
 
 interface FormRow {
@@ -51,8 +84,20 @@ interface FormRow {
   locale: string | null;
   enabled: boolean;
   questionCount: number;
+  importStatus: string;
+  importedCount: number;
   lastSyncedAt: string | null;
+  lastPolledAt: string | null;
+  lastLeadAt: string | null;
   lastError: string | null;
+}
+
+interface ImportResult {
+  imported: number;
+  processed: number;
+  failed: number;
+  hasMore: boolean;
+  error: string | null;
 }
 
 interface Check {
@@ -67,6 +112,25 @@ function fmt(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
 
+function importLabel(form: FormRow): string {
+  if (form.importStatus === "importing") {
+    return `Importing… ${form.importedCount} saved`;
+  }
+  if (form.importStatus === "error") {
+    return form.lastError ? `Import paused · ${form.lastError}` : "Import paused";
+  }
+  if (form.importedCount > 0) {
+    return `Imported ${form.importedCount} existing lead${
+      form.importedCount === 1 ? "" : "s"
+    }`;
+  }
+  return "No leads imported yet";
+}
+
+function pageLabel(page: PageInfo): string {
+  return page.pageName ?? page.pageId;
+}
+
 export function MetaLeadAdsSettings({
   embedded = false,
 }: {
@@ -75,13 +139,17 @@ export function MetaLeadAdsSettings({
 } = {}) {
   const { canEditSettings, profileLoading } = useAuth();
   const [status, setStatus] = useState<StatusPayload | null>(null);
-  const [pages, setPages] = useState<PageRow[]>([]);
+  const [setup, setSetup] = useState<SetupPayload | null>(null);
   const [forms, setForms] = useState<FormRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [pagesError, setPagesError] = useState<string | null>(null);
   const [checks, setChecks] = useState<Check[] | null>(null);
-  const notified = useRef(false);
+
+  const [datasetId, setDatasetId] = useState("");
+  const [pageId, setPageId] = useState("");
+  const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const prefilled = useRef(false);
 
   const readJson = async (res: Response) => {
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -95,24 +163,34 @@ export function MetaLeadAdsSettings({
 
   const load = useCallback(async () => {
     setLoading(true);
-    setPagesError(null);
     try {
-      const s = (await readJson(
-        await fetch("/api/integrations/meta-lead-ads/status", { cache: "no-store" }),
-      )) as unknown as StatusPayload;
-      setStatus(s);
-      if (s.connected) {
-        const p = (await readJson(
-          await fetch("/api/integrations/meta-lead-ads/pages", { cache: "no-store" }),
-        )) as { pages: PageRow[]; error: { message: string } | null };
-        setPages(p.pages ?? []);
-        if (p.error) setPagesError(p.error.message);
+      const [s, c] = await Promise.all([
+        readJson(
+          await fetch("/api/integrations/meta-lead-ads/status", { cache: "no-store" }),
+        ),
+        readJson(
+          await fetch("/api/integrations/meta-lead-ads/credentials", {
+            cache: "no-store",
+          }),
+        ),
+      ]);
+      const nextStatus = s as unknown as StatusPayload;
+      const nextSetup = c as unknown as SetupPayload;
+      setStatus(nextStatus);
+      setSetup(nextSetup);
+
+      if (!prefilled.current) {
+        prefilled.current = true;
+        setDatasetId(nextSetup.datasetId ?? "");
+        setPageId(nextSetup.page?.pageId ?? "");
+      }
+
+      if (nextStatus.connected) {
         const f = (await readJson(
           await fetch("/api/integrations/meta-lead-ads/forms", { cache: "no-store" }),
         )) as { forms: FormRow[] };
         setForms(f.forms ?? []);
       } else {
-        setPages([]);
         setForms([]);
       }
     } catch (err) {
@@ -126,19 +204,6 @@ export function MetaLeadAdsSettings({
     void load();
   }, [load]);
 
-  // Surface the OAuth redirect result once.
-  useEffect(() => {
-    if (notified.current) return;
-    notified.current = true;
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const result = params.get("meta");
-    if (result === "connected") toast.success("Meta account connected.");
-    if (result === "error") {
-      toast.error(`Meta connection failed (${params.get("reason") ?? "unknown"}).`);
-    }
-  }, []);
-
   async function act(key: string, fn: () => Promise<void>) {
     setBusy(key);
     try {
@@ -150,12 +215,114 @@ export function MetaLeadAdsSettings({
     }
   }
 
-  function connect() {
-    window.location.href = "/api/integrations/meta-lead-ads/connect";
+  function saveSetup() {
+    void act("save", async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/credentials", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            dataset_id: datasetId.trim(),
+            page_id: pageId.trim(),
+            ...(token.trim() !== "" ? { access_token: token.trim() } : {}),
+          }),
+        }),
+      )) as {
+        page?: { warning?: string | null };
+        tokenSource?: string;
+      };
+      toast.success("Meta setup saved and verified.");
+      if (json.page?.warning) {
+        toast("Meta was saved, but the webhook could not be subscribed. Polling will still import new leads.", {
+          description: json.page.warning,
+        });
+      }
+      setToken("");
+      setShowToken(false);
+      await load();
+    });
   }
 
-  function disconnectAccount() {
-    if (!window.confirm("Disconnect Meta? Existing leads stay; no new leads will sync.")) {
+  function loadForms() {
+    const targetPage = setup?.page?.pageId ?? pageId.trim();
+    if (!targetPage) {
+      toast.error("Save a Page ID first.");
+      return;
+    }
+    void act("load-forms", async () => {
+      await readJson(
+        await fetch("/api/integrations/meta-lead-ads/forms", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ page_id: targetPage }),
+        }),
+      );
+      toast.success("Forms loaded from Meta.");
+      await load();
+    });
+  }
+
+  function importLeads(form: FormRow) {
+    void act(`import:${form.formId}`, async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/forms/import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ form_id: form.formId }),
+        }),
+      )) as { import: ImportResult };
+      const result = json.import;
+      if (result.error) {
+        toast.error(`Import paused: ${result.error}`);
+      } else {
+        toast.success(
+          result.imported > 0
+            ? `Imported ${result.imported} existing lead${result.imported === 1 ? "" : "s"}.`
+            : "No new leads to import.",
+        );
+        if (result.hasMore) {
+          toast("The import is large — it continues in the background.");
+        }
+      }
+      await load();
+    });
+  }
+
+  function toggleForm(form: FormRow, enabled: boolean) {
+    void act(`form:${form.formId}`, async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/forms", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ form_id: form.formId, enabled }),
+        }),
+      )) as { import?: ImportResult | null };
+      if (!enabled) {
+        toast.success("Form disabled.");
+      } else {
+        const imported = json.import?.imported ?? 0;
+        toast.success(
+          imported > 0
+            ? `Form enabled. Imported ${imported} existing lead${imported === 1 ? "" : "s"}.`
+            : "Form enabled.",
+        );
+        if (json.import?.hasMore) {
+          toast("Existing leads are still importing in the background.");
+        }
+        if (json.import?.error) {
+          toast.error(`Historical import paused: ${json.import.error}`);
+        }
+      }
+      await load();
+    });
+  }
+
+  function disconnect() {
+    if (
+      !window.confirm(
+        "Disconnect Meta? Existing leads stay; no new leads will sync.",
+      )
+    ) {
       return;
     }
     void act("disconnect", async () => {
@@ -163,58 +330,7 @@ export function MetaLeadAdsSettings({
         await fetch("/api/integrations/meta-lead-ads/disconnect", { method: "POST" }),
       );
       toast.success("Meta disconnected.");
-      await load();
-    });
-  }
-
-  function togglePage(page: PageRow) {
-    void act(`page:${page.pageId}`, async () => {
-      if (page.selected) {
-        await readJson(
-          await fetch(
-            `/api/integrations/meta-lead-ads/pages?page_id=${encodeURIComponent(page.pageId)}`,
-            { method: "DELETE" },
-          ),
-        );
-        toast.success(`${page.pageName ?? page.pageId} removed.`);
-      } else {
-        await readJson(
-          await fetch("/api/integrations/meta-lead-ads/pages", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ page_id: page.pageId }),
-          }),
-        );
-        toast.success(`${page.pageName ?? page.pageId} connected.`);
-      }
-      await load();
-    });
-  }
-
-  function syncForms(pageId: string) {
-    void act(`sync:${pageId}`, async () => {
-      await readJson(
-        await fetch("/api/integrations/meta-lead-ads/forms", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ page_id: pageId }),
-        }),
-      );
-      toast.success("Forms synced from Meta.");
-      await load();
-    });
-  }
-
-  function toggleForm(form: FormRow, enabled: boolean) {
-    void act(`form:${form.formId}`, async () => {
-      await readJson(
-        await fetch("/api/integrations/meta-lead-ads/forms", {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ form_id: form.formId, enabled }),
-        }),
-      );
-      toast.success(enabled ? "Form enabled." : "Form disabled.");
+      setToken("");
       await load();
     });
   }
@@ -229,16 +345,21 @@ export function MetaLeadAdsSettings({
   }
 
   const disabled = !canEditSettings || profileLoading;
-  const selectedPages = pages.filter((p) => p.selected);
+  const connected = Boolean(status?.connected && status.status !== "needs_reauth");
+  const needsReauth = status?.status === "needs_reauth";
+  const page = setup?.page ?? status?.pages[0] ?? null;
+  const canReuseToken = Boolean(
+    setup?.hasToken && setup.tokenSource === "capi" && !token.trim(),
+  );
 
   return (
     <section className="space-y-5">
       {embedded ? null : (
         <SettingsPanelHead
           title="Meta Lead Ads"
-          description="Connect Facebook Pages and choose which Instant Forms feed leads into your Workspace. Each enabled form appears as its own Workspace table."
+          description="Connect a Facebook Page and choose which Instant Forms feed leads into your Workspace. Each enabled form appears as its own Workspace table."
           action={
-            status?.connected ? (
+            connected ? (
               <Button variant="outline" onClick={runTest} disabled={busy === "test"}>
                 {busy === "test" ? (
                   <Loader2 className="size-4 animate-spin" />
@@ -270,144 +391,209 @@ export function MetaLeadAdsSettings({
             </CardDescription>
           </CardHeader>
         </Card>
-      ) : !status.connected ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-foreground">Connect Meta</CardTitle>
-            <CardDescription className="text-muted-foreground">
-              Authorize the app to read your Pages&apos; Instant Forms and receive
-              lead notifications. You&apos;ll be redirected to Meta to grant access.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={connect} disabled={disabled}>
-              Connect Meta account
-            </Button>
-            {!canEditSettings && !profileLoading && (
-              <p className="mt-2 text-xs text-muted-foreground">
-                Only account admins can connect integrations.
-              </p>
-            )}
-          </CardContent>
-        </Card>
       ) : (
         <>
+          {needsReauth ? (
+            <Card className="border-destructive/40">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-foreground">
+                  <AlertCircle className="size-4 text-destructive" /> Token needs attention
+                </CardTitle>
+                <CardDescription className="text-muted-foreground">
+                  Meta rejected the stored token. Paste a new System User token below to
+                  resume syncing. Existing leads are not affected.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-foreground">
-                <CheckCircle2 className="size-4 text-primary" /> Connected
+                {connected ? (
+                  <CheckCircle2 className="size-4 text-primary" />
+                ) : (
+                  <KeyRound className="size-4 text-muted-foreground" />
+                )}
+                Meta setup
               </CardTitle>
               <CardDescription className="text-muted-foreground">
-                {status.account?.userName ?? "Meta user"} · status{" "}
-                <Badge variant={status.account?.status === "connected" ? "secondary" : "destructive"}>
-                  {status.account?.status ?? "unknown"}
-                </Badge>
-                {status.account?.tokenExpiry
-                  ? ` · token expires ${fmt(status.account.tokenExpiry)}`
-                  : null}
+                No Facebook login needed. In Meta Business Settings, create a System
+                User, assign the Page and your dataset, then generate a token. Paste
+                the three values below once — they are encrypted and never shown to
+                the browser again.
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-wrap items-center gap-3">
-              <Button variant="outline" onClick={disconnectAccount} disabled={disabled || busy === "disconnect"}>
-                {busy === "disconnect" ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
-                Disconnect
-              </Button>
-              <span className="text-xs text-muted-foreground">
-                Last lead synced: {fmt(status.lastSuccessAt)} · {status.formSummary.enabled}/
-                {status.formSummary.total} forms enabled
-              </span>
-              {status.account?.lastError ? (
-                <span className="text-xs text-destructive">{status.account.lastError}</span>
+            <CardContent className="space-y-4">
+              {connected ? (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge variant="secondary">Connected</Badge>
+                  {page ? (
+                    <Badge variant="outline">
+                      {page.pageName ?? page.pageId}
+                    </Badge>
+                  ) : null}
+                  {page?.webhookVerified ? (
+                    <Badge variant="secondary">Webhook subscribed</Badge>
+                  ) : page ? (
+                    <Badge variant="outline">Polling fallback</Badge>
+                  ) : null}
+                  <span className="text-muted-foreground">
+                    Last lead: {fmt(status?.lastSuccessAt ?? null)}
+                  </span>
+                  {status?.account?.lastError ? (
+                    <span className="text-destructive">{status.account.lastError}</span>
+                  ) : null}
+                </div>
               ) : null}
-            </CardContent>
-          </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-foreground">Facebook Pages</CardTitle>
-              <CardDescription className="text-muted-foreground">
-                Select the Pages whose forms you want to capture. Selecting a Page
-                subscribes the app to its lead webhook.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {pagesError ? (
-                <p className="text-xs text-destructive">{pagesError}</p>
-              ) : null}
-              {pages.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No Pages available.</p>
-              ) : (
-                pages.map((page) => (
-                  <div
-                    key={page.pageId}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="meta-dataset">Dataset / Pixel ID</Label>
+                  <Input
+                    id="meta-dataset"
+                    inputMode="numeric"
+                    placeholder="e.g. 1234567890"
+                    value={datasetId}
+                    onChange={(e) => setDatasetId(e.target.value)}
+                    disabled={disabled}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Events Manager → Data sources → your dataset.
+                  </p>
+                </div>
+                <div>
+                  <Label htmlFor="meta-page">Facebook Page ID</Label>
+                  <Input
+                    id="meta-page"
+                    inputMode="numeric"
+                    placeholder="e.g. 1029384756"
+                    value={pageId}
+                    onChange={(e) => setPageId(e.target.value)}
+                    disabled={disabled}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    The numeric Page ID, not the Page username.
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="meta-token">System User access token</Label>
+                <div className="relative">
+                  <Input
+                    id="meta-token"
+                    type={showToken ? "text" : "password"}
+                    autoComplete="off"
+                    className="pr-10"
+                    placeholder={
+                      canReuseToken
+                        ? "Using the token saved in Conversions API"
+                        : setup?.hasToken
+                          ? "•••••••• (stored — leave blank to keep)"
+                          : "Paste the long-lived token"
+                    }
+                    value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    disabled={disabled}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="absolute top-1/2 right-1 -translate-y-1/2"
+                    onClick={() => setShowToken((v) => !v)}
+                    aria-label={showToken ? "Hide token" : "Show token"}
+                    disabled={disabled}
                   >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-foreground">
-                        {page.pageName ?? page.pageId}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {page.pageId}
-                        {page.selected
-                          ? page.webhookVerified
-                            ? " · webhook verified"
-                            : " · webhook not verified"
-                          : ""}
-                        {page.lastError ? ` · ${page.lastError}` : ""}
-                      </p>
-                    </div>
-                    <Button
-                      variant={page.selected ? "outline" : "default"}
-                      size="sm"
-                      onClick={() => togglePage(page)}
-                      disabled={disabled || busy === `page:${page.pageId}`}
-                    >
-                      {busy === `page:${page.pageId}` ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : null}
-                      {page.selected ? "Remove" : "Connect"}
-                    </Button>
-                  </div>
-                ))
-              )}
+                    {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </Button>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Needs <code>leads_retrieval</code>,{" "}
+                  <code>pages_read_engagement</code> and{" "}
+                  <code>pages_manage_metadata</code> (for the webhook). Without the
+                  webhook permission, leads still arrive through polling.
+                  {setup?.capi.hasToken && !setup.hasToken ? (
+                    <> A token saved in Conversions API can be reused by leaving this blank.</>
+                  ) : null}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  onClick={saveSetup}
+                  disabled={
+                    disabled ||
+                    busy === "save" ||
+                    datasetId.trim() === "" ||
+                    pageId.trim() === ""
+                  }
+                >
+                  {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : null}
+                  Save &amp; verify
+                </Button>
+                {connected ? (
+                  <Button
+                    variant="outline"
+                    onClick={disconnect}
+                    disabled={disabled || busy === "disconnect"}
+                  >
+                    {busy === "disconnect" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <XCircle className="size-4" />
+                    )}
+                    Disconnect
+                  </Button>
+                ) : null}
+                {connected ? (
+                  <Button variant="outline" onClick={runTest} disabled={disabled || busy === "test"}>
+                    {busy === "test" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-4" />
+                    )}
+                    Run diagnostics
+                  </Button>
+                ) : null}
+              </div>
             </CardContent>
           </Card>
 
-          {selectedPages.map((page) => {
-            const pageForms = forms.filter((f) => f.pageId === page.pageId);
-            return (
-              <Card key={page.pageId}>
+          {connected ? (
+            <>
+              <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center justify-between gap-2 text-foreground">
-                    <span className="truncate">
-                      Forms · {page.pageName ?? page.pageId}
-                    </span>
+                  <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-foreground">
+                    <span>Instant Forms</span>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => syncForms(page.pageId)}
-                      disabled={disabled || busy === `sync:${page.pageId}`}
+                      onClick={loadForms}
+                      disabled={disabled || busy === "load-forms"}
                     >
-                      {busy === `sync:${page.pageId}` ? (
+                      {busy === "load-forms" ? (
                         <Loader2 className="size-4 animate-spin" />
                       ) : (
-                        <RefreshCw className="size-4" />
+                        <Download className="size-4" />
                       )}
-                      Sync
+                      Load My Forms
                     </Button>
                   </CardTitle>
                   <CardDescription className="text-muted-foreground">
-                    Enable a form to publish it as a Workspace table and start
-                    capturing leads.
+                    Load the forms for{" "}
+                    {page ? pageLabel(page) : "your Page"}. Enabling a form publishes
+                    it as a Workspace table and imports the leads Meta already has.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {pageForms.length === 0 ? (
+                  {forms.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
-                      No forms synced yet — click Sync.
+                      No forms loaded yet — click Load My Forms.
                     </p>
                   ) : (
-                    pageForms.map((form) => (
+                    forms.map((form) => (
                       <div
                         key={form.id}
                         className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
@@ -420,10 +606,34 @@ export function MetaLeadAdsSettings({
                             {form.questionCount} question
                             {form.questionCount === 1 ? "" : "s"}
                             {form.status ? ` · ${form.status}` : ""}
-                            {form.lastError ? ` · ${form.lastError}` : ""}
+                            {` · ${importLabel(form)}`}
                           </p>
+                          <p className="text-xs text-muted-foreground">
+                            Last lead: {fmt(form.lastLeadAt)} · Last checked:{" "}
+                            {fmt(form.lastPolledAt)}
+                          </p>
+                          {form.lastError ? (
+                            <p className="text-xs text-destructive">{form.lastError}</p>
+                          ) : null}
                         </div>
                         <div className="flex items-center gap-2">
+                          {form.enabled ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => importLeads(form)}
+                              disabled={
+                                disabled || busy === `import:${form.formId}`
+                              }
+                            >
+                              {busy === `import:${form.formId}` ? (
+                                <Loader2 className="size-4 animate-spin" />
+                              ) : (
+                                <Download className="size-4" />
+                              )}
+                              Import leads
+                            </Button>
+                          ) : null}
                           {busy === `form:${form.formId}` ? (
                             <Loader2 className="size-4 animate-spin text-muted-foreground" />
                           ) : null}
@@ -439,16 +649,40 @@ export function MetaLeadAdsSettings({
                   )}
                 </CardContent>
               </Card>
-            );
-          })}
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-foreground">Sync</CardTitle>
+                  <CardDescription className="text-muted-foreground">
+                    New leads arrive through the Page webhook when it is subscribed.
+                    The cron also polls enabled forms every few minutes, so lead
+                    capture keeps working even if Meta refuses the subscription.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  <span>
+                    {status?.formSummary.enabled ?? 0}/{status?.formSummary.total ?? 0}{" "}
+                    forms enabled
+                  </span>
+                  <span>
+                    {status?.formSummary.importing ?? 0} importing ·{" "}
+                    {status?.formSummary.imported ?? 0} historical leads
+                  </span>
+                  <span>
+                    Page last checked: {fmt(page?.lastPolledAt ?? null)}
+                  </span>
+                </CardContent>
+              </Card>
+            </>
+          ) : null}
 
           {checks ? (
             <Card>
               <CardHeader>
                 <CardTitle className="text-foreground">Diagnostics</CardTitle>
                 <CardDescription className="text-muted-foreground">
-                  Configuration, permissions and per-Page webhook checks. This does
-                  not prove a live lead was received — submit a test lead to confirm.
+                  Configuration, token, Page access and webhook checks. This does not
+                  prove a live lead was received — submit a test lead to confirm.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2">

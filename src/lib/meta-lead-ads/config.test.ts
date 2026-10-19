@@ -2,10 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   graphBase,
+  metaGraphVersion,
   metaLeadAdsConfig,
   metaLeadAdsConfigured,
-  oauthBase,
-  redirectUriFromRequest,
 } from "./config";
 
 function env(overrides: Record<string, string | undefined> = {}) {
@@ -57,20 +56,27 @@ describe("metaLeadAdsConfig", () => {
   });
 });
 
-describe("graph/oauth bases", () => {
-  it("version the host roots", () => {
+describe("graph base", () => {
+  it("versions the Graph host", () => {
     expect(graphBase("v21.0")).toBe("https://graph.facebook.com/v21.0");
-    expect(oauthBase("v20.0")).toBe("https://www.facebook.com/v20.0/dialog/oauth");
   });
 });
 
-describe("redirectUriFromRequest", () => {
-  it("derives the callback URL from forwarded headers", () => {
-    const req = new Request("https://internal.local/api", {
-      headers: { "x-forwarded-proto": "https", "x-forwarded-host": "app.example.com" },
-    });
-    expect(redirectUriFromRequest(req)).toBe(
-      "https://app.example.com/api/integrations/meta-lead-ads/callback",
-    );
+describe("metaGraphVersion", () => {
+  it("returns only a valid version and nothing for malformed input", () => {
+    expect(metaGraphVersion(env())).toBe("v21.0");
+    expect(metaGraphVersion(env({ META_GRAPH_VERSION: "21.0" }))).toBeNull();
+    expect(metaGraphVersion(env({ META_GRAPH_VERSION: undefined }))).toBeNull();
+  });
+
+  it("does not require the Lead Ads app credentials", () => {
+    expect(
+      metaGraphVersion(
+        env({
+          META_LEAD_ADS_APP_ID: undefined,
+          META_LEAD_ADS_APP_SECRET: undefined,
+        }),
+      ),
+    ).toBe("v21.0");
   });
 });

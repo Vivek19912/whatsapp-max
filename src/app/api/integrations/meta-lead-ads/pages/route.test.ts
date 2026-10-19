@@ -1,11 +1,13 @@
-// Meta Lead Ads — Pages route tenant guard.
+// Meta Lead Ads — manual Page connection route.
 //
-// Covers the multi-tenant rules for connecting/disconnecting a
-// Facebook Page:
-//   * a Page already owned by another account is REJECTED (generic
-//     409 — no leak of the other account) and nothing is subscribed;
-//   * a connection that can't be verified is NOT persisted (no
-//     partial subscription / inconsistent record) and is rolled back;
+// Covers the multi-tenant and manual-setup contracts:
+//   * GET lists only this account's stored Pages (no OAuth discovery);
+//   * a Page owned by another account is REJECTED with a generic 409
+//     before any side effect;
+//   * a valid Page is verified with the stored token, subscribed and
+//     persisted with an encrypted Page token;
+//   * a failed webhook subscription still keeps the valid connection
+//     (polling fallback) and reports the warning;
 //   * a racing unique violation maps to the same 409;
 //   * deletion is scoped to the caller's account.
 
@@ -19,7 +21,14 @@ const h = vi.hoisted(() => ({
   upserts: [] as Array<Record<string, unknown>>,
   disconnected: [] as Array<{ accountId: string; pageId: string }>,
   calls: [] as string[],
-  pages: [] as Array<Record<string, unknown>>,
+  page: {
+    id: "P1",
+    name: "My Page",
+    access_token: "page-tok",
+    tasks: ["MANAGE"],
+  } as Record<string, unknown> | null,
+  getPageError: null as Error | null,
+  subscribed: true,
   verified: true,
   storedRows: [] as Array<Record<string, unknown>>,
   accountFilters: [] as unknown[],
@@ -90,10 +99,13 @@ vi.mock("@/lib/flows/admin-client", () => ({
 }));
 
 vi.mock("@/lib/meta-lead-ads/graph-client", () => ({
-  listPages: async () => h.pages,
+  getPage: async () => {
+    if (h.getPageError) throw h.getPageError;
+    return h.page;
+  },
   subscribePageToLeadgen: async () => {
     h.calls.push("subscribe");
-    return true;
+    return h.subscribed;
   },
   getPageSubscriptions: async () => {
     h.calls.push("verify");
@@ -107,7 +119,6 @@ vi.mock("@/lib/meta-lead-ads/graph-client", () => ({
 
 vi.mock("@/lib/meta-lead-ads/store", () => ({
   getUserToken: async () => "user-token",
-  getConnection: async () => ({ id: "conn-1", account_id: h.accountId }),
   getPageToken: async () => "page-token",
   disconnectPage: async (
     _db: unknown,
@@ -144,7 +155,14 @@ beforeEach(() => {
   h.upserts = [];
   h.disconnected = [];
   h.calls = [];
-  h.pages = [{ id: "P1", name: "My Page", access_token: "page-tok", tasks: ["MANAGE"] }];
+  h.page = {
+    id: "1029384756",
+    name: "My Page",
+    access_token: "page-tok",
+    tasks: ["MANAGE"],
+  };
+  h.getPageError = null;
+  h.subscribed = true;
   h.verified = true;
   h.storedRows = [];
   h.accountFilters = [];
@@ -154,11 +172,11 @@ beforeEach(() => {
   process.env.META_GRAPH_VERSION = "v21.0";
 });
 
-describe("POST /pages — duplicate protection", () => {
+describe("POST /pages — manual Page connection", () => {
   it("rejects a Page already connected to another account", async () => {
     h.foreign = [{ account_id: "acct-2" }];
 
-    const res = await POST(post({ page_id: "P1" }));
+    const res = await POST(post({ page_id: "1029384756" }));
 
     expect(res.status).toBe(409);
     const json = (await res.json()) as Record<string, unknown>;
@@ -170,32 +188,40 @@ describe("POST /pages — duplicate protection", () => {
     expect(h.upserts).toHaveLength(0);
   });
 
-  it("connects an unclaimed Page and stores it encrypted", async () => {
-    const res = await POST(post({ page_id: "P1" }));
+  it("verifies, subscribes and stores the Page token encrypted", async () => {
+    const res = await POST(post({ page_id: "1029384756" }));
 
     expect(res.status).toBe(200);
     expect(h.calls).toContain("subscribe");
     expect(h.upserts).toHaveLength(1);
     expect(h.upserts[0]).toMatchObject({
       account_id: "acct-1",
-      page_id: "P1",
+      page_id: "1029384756",
+      page_name: "My Page",
       subscribed: true,
       webhook_verified: true,
     });
     expect(h.upserts[0].access_token).toBe("enc:page-tok");
   });
 
-  it("leaves NO partial connection when the subscription can't be verified", async () => {
+  it("keeps a valid Page when the webhook cannot be subscribed", async () => {
+    h.subscribed = false;
     h.verified = false;
 
-    const res = await POST(post({ page_id: "P1" }));
+    const res = await POST(post({ page_id: "1029384756" }));
 
-    expect(res.status).toBe(502);
-    const json = (await res.json()) as Record<string, unknown>;
-    expect(json.code).toBe("subscription_failed");
-    expect(h.upserts).toHaveLength(0);
-    // Half-open subscription is rolled back.
-    expect(h.calls).toContain("unsubscribe");
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      ok: boolean;
+      page: { subscribed: boolean; webhookVerified: boolean; warning: string | null };
+    };
+    expect(json.ok).toBe(true);
+    expect(json.page.subscribed).toBe(false);
+    expect(json.page.webhookVerified).toBe(false);
+    expect(h.upserts[0]).toMatchObject({
+      subscribed: false,
+      webhook_verified: false,
+    });
   });
 
   it("maps a racing unique violation to the duplicate error", async () => {
@@ -204,12 +230,19 @@ describe("POST /pages — duplicate protection", () => {
       message: "duplicate key value violates unique constraint",
     };
 
-    const res = await POST(post({ page_id: "P1" }));
+    const res = await POST(post({ page_id: "1029384756" }));
 
     expect(res.status).toBe(409);
     expect(((await res.json()) as Record<string, unknown>).code).toBe(
       "page_already_connected",
     );
+  });
+
+  it("rejects a non-numeric Page ID before calling Meta", async () => {
+    const res = await POST(post({ page_id: "my-page-name" }));
+
+    expect(res.status).toBe(400);
+    expect(h.calls).toHaveLength(0);
   });
 });
 
@@ -218,14 +251,12 @@ describe("DELETE /pages — cross-account safety", () => {
     const res = await DELETE(del("P1"));
 
     expect(res.status).toBe(200);
-    // Only the caller's account is passed to the delete helper, so a
-    // like-named Page owned by another account can never be removed.
     expect(h.disconnected).toEqual([{ accountId: "acct-1", pageId: "P1" }]);
   });
 });
 
-describe("GET /pages — tenant scoping", () => {
-  it("queries stored Pages only for the caller's account", async () => {
+describe("GET /pages — tenant scoping without discovery", () => {
+  it("returns stored Pages only for the caller's account", async () => {
     h.storedRows = [
       {
         page_id: "P1",
@@ -234,13 +265,25 @@ describe("GET /pages — tenant scoping", () => {
         subscribed: true,
         webhook_verified: true,
         last_error: null,
+        last_synced_at: null,
+        last_polled_at: null,
+      },
+      {
+        page_id: "P2",
+        account_id: "acct-2",
+        page_name: "Other",
+        subscribed: true,
+        webhook_verified: true,
+        last_error: null,
+        last_synced_at: null,
+        last_polled_at: null,
       },
     ];
 
     const res = await GET();
     const json = (await res.json()) as { pages: Array<{ pageId: string }> };
 
-    expect(json.pages.map((p) => p.pageId)).toContain("P1");
+    expect(json.pages.map((p) => p.pageId)).toEqual(["P1"]);
     expect(h.accountFilters).toContain("acct-1");
   });
 });

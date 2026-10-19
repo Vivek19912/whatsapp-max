@@ -1,9 +1,13 @@
 // /api/integrations/meta-lead-ads/forms
 //
-// GET   — the Instant Forms discovered for this account (stored).
-// POST  — re-sync a Page's forms from Meta.
-// PATCH — enable or disable a form. Enabling refreshes its questions
-//         and materializes the virtual Workspace flow.
+// GET   — the Instant Forms loaded for this account (stored).
+// POST  — "Load My Forms": list the Page's forms from Meta and upsert.
+// PATCH — enable or disable a form. Enabling refreshes its questions,
+//         materializes the virtual Workspace flow, and starts a
+//         bounded historical import of leads Meta already holds.
+//
+// Historical imports are continued by the cron until the cursor is
+// exhausted; see `sync.ts`.
 
 import { NextResponse } from "next/server";
 
@@ -17,6 +21,11 @@ import { metaErrorResponse } from "@/lib/meta-lead-ads/error-response";
 import { getForm, listForms } from "@/lib/meta-lead-ads/graph-client";
 import type { MetaFormQuestion } from "@/lib/meta-lead-ads/graph-client";
 import { getPageToken } from "@/lib/meta-lead-ads/store";
+import {
+  getFormForImport,
+  importFormLeads,
+  type ImportResult,
+} from "@/lib/meta-lead-ads/sync";
 import { ensureVirtualFlow } from "@/lib/meta-lead-ads/virtual-flow";
 
 interface FormRow {
@@ -28,9 +37,17 @@ interface FormRow {
   locale: string | null;
   questions: unknown;
   enabled: boolean;
+  import_status: string;
+  import_cursor: string | null;
+  imported_count: number;
   last_synced_at: string | null;
+  last_polled_at: string | null;
+  last_lead_at: string | null;
   last_error: string | null;
 }
+
+const FORM_COLUMNS =
+  "id, page_id, form_id, form_name, status, locale, questions, enabled, import_status, import_cursor, imported_count, last_synced_at, last_polled_at, last_lead_at, last_error";
 
 function questionList(raw: MetaFormQuestion[] | undefined): Array<{
   key: string | null;
@@ -54,9 +71,19 @@ function serializeForms(rows: FormRow[]) {
     locale: f.locale,
     enabled: f.enabled,
     questionCount: Array.isArray(f.questions) ? f.questions.length : 0,
+    importStatus: f.import_status,
+    importedCount: f.imported_count,
     lastSyncedAt: f.last_synced_at,
+    lastPolledAt: f.last_polled_at,
+    lastLeadAt: f.last_lead_at,
     lastError: f.last_error,
   }));
+}
+
+function importErrorMessage(err: unknown): string {
+  return err instanceof MetaLeadAdsError
+    ? err.message
+    : "The historical import could not reach Meta.";
 }
 
 export async function GET(request: Request) {
@@ -66,9 +93,7 @@ export async function GET(request: Request) {
 
     let query = ctx.supabase
       .from("meta_lead_forms")
-      .select(
-        "id, page_id, form_id, form_name, status, locale, questions, enabled, last_synced_at, last_error",
-      )
+      .select(FORM_COLUMNS)
       .eq("account_id", ctx.accountId)
       .order("form_name", { ascending: true });
     if (pageId) query = query.eq("page_id", pageId);
@@ -145,16 +170,23 @@ export async function POST(request: Request) {
       }
     }
 
+    await admin
+      .from("meta_lead_pages")
+      .update({ last_synced_at: now, updated_at: now })
+      .eq("account_id", ctx.accountId)
+      .eq("page_id", pageId);
+
     const { data: refreshed } = await ctx.supabase
       .from("meta_lead_forms")
-      .select(
-        "id, page_id, form_id, form_name, status, locale, questions, enabled, last_synced_at, last_error",
-      )
+      .select(FORM_COLUMNS)
       .eq("account_id", ctx.accountId)
       .eq("page_id", pageId)
       .order("form_name", { ascending: true });
 
-    return NextResponse.json({ ok: true, forms: serializeForms((refreshed ?? []) as FormRow[]) });
+    return NextResponse.json({
+      ok: true,
+      forms: serializeForms((refreshed ?? []) as FormRow[]),
+    });
   } catch (err) {
     return metaErrorResponse(err);
   }
@@ -180,7 +212,8 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "form_id is required." }, { status: 400 });
     }
 
-    const { data: formRow } = await ctx.supabase
+    const admin = supabaseAdmin();
+    const { data: formRow } = await admin
       .from("meta_lead_forms")
       .select("*")
       .eq("account_id", ctx.accountId)
@@ -192,7 +225,6 @@ export async function PATCH(request: Request) {
     }
 
     if (!enabled) {
-      const admin = supabaseAdmin();
       const { error: disableErr } = await admin
         .from("meta_lead_forms")
         .update({ enabled: false, updated_at: new Date().toISOString() })
@@ -224,7 +256,10 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const admin = supabaseAdmin();
+    // First enable starts a historical import. A form that already
+    // finished importing keeps its cursor; polling picks up new leads.
+    const startImport = form.import_status !== "done";
+
     const { error: enableErr } = await admin
       .from("meta_lead_forms")
       .update({
@@ -235,6 +270,13 @@ export async function PATCH(request: Request) {
         last_synced_at: new Date().toISOString(),
         last_error: null,
         updated_at: new Date().toISOString(),
+        ...(startImport
+          ? {
+              import_status: "importing",
+              import_cursor: null,
+              imported_count: 0,
+            }
+          : {}),
       })
       .eq("id", form.id);
     if (enableErr) throw enableErr;
@@ -251,7 +293,34 @@ export async function PATCH(request: Request) {
       },
     });
 
-    return NextResponse.json({ ok: true, enabled: true, flowId });
+    let importResult: ImportResult | null = null;
+    if (startImport) {
+      try {
+        const fresh = await getFormForImport(admin, ctx.accountId, form.form_id);
+        if (fresh) {
+          importResult = await importFormLeads(admin, config, {
+            accountId: ctx.accountId,
+            form: fresh,
+            maxPages: 2,
+          });
+        }
+      } catch (err) {
+        importResult = {
+          imported: 0,
+          processed: 0,
+          failed: 0,
+          hasMore: true,
+          error: importErrorMessage(err),
+        };
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      enabled: true,
+      flowId,
+      import: importResult,
+    });
   } catch (err) {
     return metaErrorResponse(err);
   }

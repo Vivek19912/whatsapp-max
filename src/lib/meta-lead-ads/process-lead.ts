@@ -70,6 +70,14 @@ function safeError(err: unknown): string {
 
 export type RecordOutcome = "received" | "duplicate" | "ignored" | "no_page";
 
+export interface RecordResult {
+  outcome: RecordOutcome;
+  submissionId: string | null;
+  accountId: string | null;
+  /** True when this call created the ledger row (not a redelivery). */
+  inserted: boolean;
+}
+
 /**
  * Idempotently record an inbound `leadgen` notification. Resolves the
  * tenant from the Page (never trusts a client-supplied account) and
@@ -79,7 +87,7 @@ export type RecordOutcome = "received" | "duplicate" | "ignored" | "no_page";
 export async function recordLeadgenNotification(
   db: SupabaseClient,
   input: { pageId: string; formId: string | null; leadgenId: string },
-): Promise<{ outcome: RecordOutcome; submissionId: string | null; accountId: string | null }> {
+): Promise<RecordResult> {
   // A Page is connected to at most one account (global unique index,
   // migration 120), but resolve defensively: read EVERY match and pick
   // the earliest deterministically. The old `.maybeSingle()` collapsed
@@ -102,7 +110,12 @@ export async function recordLeadgenNotification(
     console.warn(
       `[meta-lead-ads] leadgen for unconnected page ${input.pageId} ignored`,
     );
-    return { outcome: "no_page", submissionId: null, accountId: null };
+    return {
+      outcome: "no_page",
+      submissionId: null,
+      accountId: null,
+      inserted: false,
+    };
   }
   if (matches.length > 1) {
     console.warn(
@@ -144,13 +157,30 @@ export async function recordLeadgenNotification(
     .maybeSingle();
   const submission = row as { id: string; status: string } | null;
 
+  const inserted = !insertErr;
+
   if (!enabled) {
-    return { outcome: "ignored", submissionId: submission?.id ?? null, accountId };
+    return {
+      outcome: "ignored",
+      submissionId: submission?.id ?? null,
+      accountId,
+      inserted,
+    };
   }
   if (insertErr && submission?.status === "processed") {
-    return { outcome: "duplicate", submissionId: submission.id, accountId };
+    return {
+      outcome: "duplicate",
+      submissionId: submission.id,
+      accountId,
+      inserted,
+    };
   }
-  return { outcome: "received", submissionId: submission?.id ?? null, accountId };
+  return {
+    outcome: "received",
+    submissionId: submission?.id ?? null,
+    accountId,
+    inserted,
+  };
 }
 
 async function findOrCreateContact(

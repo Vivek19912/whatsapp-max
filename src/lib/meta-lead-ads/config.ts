@@ -17,12 +17,17 @@
 //                                     answer Meta's GET challenge
 //   META_GRAPH_VERSION              — e.g. "v21.0" (see docs/meta-lead-ads.md)
 //
+// Customers do NOT go through OAuth: an account admin pastes a
+// System User token into Settings. The platform env values are only
+// used for the shared webhook (HMAC verification) and the Graph
+// version. The customer token may belong to a different Meta app.
+//
 // The App Secret is also used to validate the X-Hub-Signature-256
 // header on inbound leadgen webhooks (HMAC-SHA256 over the raw body).
 // ============================================================
 
-/** Permissions required for Page discovery, form listing, lead retrieval
- *  and webhook subscription. Requested incrementally at consent time. */
+/** Permissions the pasted System User token must hold for Page
+ *  access, form listing, lead retrieval and webhook subscription. */
 export const META_LEAD_ADS_SCOPES = [
   "pages_show_list",
   "pages_read_engagement",
@@ -88,29 +93,4 @@ export function metaGraphVersion(
 /** Graph host root for the configured version, e.g. https://graph.facebook.com/v21.0 */
 export function graphBase(graphVersion: string): string {
   return `https://graph.facebook.com/${graphVersion}`;
-}
-
-/** OAuth dialog host (same versioned base). */
-export function oauthBase(graphVersion: string): string {
-  return `https://www.facebook.com/${graphVersion}/dialog/oauth`;
-}
-
-/**
- * Build the OAuth redirect URI from the incoming request origin.
- * Must be whitelisted in the Meta App Dashboard as a Valid OAuth
- * Redirect URI: `{origin}/api/integrations/meta-lead-ads/callback`.
- */
-export function redirectUriFromRequest(request: Request): string {
-  const explicit = process.env.NEXT_PUBLIC_SITE_URL;
-  const base = explicit
-    ? explicit.replace(/\/$/, "")
-    : originFromHeaders(request);
-  return `${base}/api/integrations/meta-lead-ads/callback`;
-}
-
-function originFromHeaders(request: Request): string {
-  const proto = request.headers.get("x-forwarded-proto") ?? "https";
-  const host =
-    request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  return `${proto}://${host}`;
 }

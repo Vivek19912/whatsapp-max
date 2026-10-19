@@ -1,25 +1,30 @@
 // POST /api/integrations/meta-lead-ads/test
 //
-// Diagnostics only — verifies configuration, token validity, granted
-// permissions, Page access and the `leadgen` webhook subscription per
-// selected Page. It NEVER claims a live lead was received; that can
+// Diagnostics only — verifies configuration, the stored manual
+// credentials, Page access, form access and the `leadgen` webhook
+// subscription. It NEVER claims a live lead was received; that can
 // only be proven by an actual submission appearing in the Workspace.
+//
+// Token validation deliberately uses an authenticated Page read with
+// the customer's own token. `debug_token` is bound to the token's Meta
+// app and would fail for a System User token issued by another app.
 
 import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth/account";
-import {
-  META_LEAD_ADS_SCOPES,
-  metaLeadAdsConfig,
-} from "@/lib/meta-lead-ads/config";
+import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { MetaLeadAdsError } from "@/lib/meta-lead-ads/errors";
 import { metaErrorResponse } from "@/lib/meta-lead-ads/error-response";
 import {
-  debugToken,
+  getPage,
   getPageSubscriptions,
   listForms,
 } from "@/lib/meta-lead-ads/graph-client";
-import { getConnection, getPageToken, getUserToken } from "@/lib/meta-lead-ads/store";
+import {
+  getConnection,
+  getPageToken,
+  getUserToken,
+} from "@/lib/meta-lead-ads/store";
 
 interface Check {
   name: string;
@@ -54,62 +59,67 @@ export async function POST() {
     const conn = await getConnection(ctx.supabase, ctx.accountId);
     if (!conn) {
       checks.push({
-        name: "Authorization",
+        name: "Credentials",
         ok: false,
-        detail: "No Meta account is connected.",
+        detail: "Add your Dataset ID, access token and Page ID in the setup form.",
       });
       return NextResponse.json({ ok: false, checks });
     }
+
+    checks.push({
+      name: "Dataset ID",
+      ok: Boolean(conn.dataset_id),
+      detail: conn.dataset_id
+        ? "A Dataset/Pixel ID is stored."
+        : "No Dataset/Pixel ID is stored.",
+    });
 
     let token: string;
     try {
       token = await getUserToken(ctx.supabase, ctx.accountId);
     } catch (err) {
-      checks.push({ name: "Authorization", ok: false, detail: message(err) });
+      checks.push({ name: "Access token", ok: false, detail: message(err) });
       return NextResponse.json({ ok: false, checks });
-    }
-
-    try {
-      const info = await debugToken(config, token);
-      checks.push({
-        name: "Authorization",
-        ok: info.isValid,
-        detail: info.isValid ? "Access token is valid." : "Access token is invalid or expired.",
-      });
-      const missing = META_LEAD_ADS_SCOPES.filter(
-        (scope) => !info.scopes.includes(scope),
-      );
-      checks.push({
-        name: "Permissions",
-        ok: missing.length === 0,
-        detail:
-          missing.length === 0
-            ? "All required permissions are granted."
-            : `Missing permissions: ${missing.join(", ")}.`,
-      });
-    } catch (err) {
-      checks.push({ name: "Authorization", ok: false, detail: message(err) });
     }
 
     const { data: pageRows } = await ctx.supabase
       .from("meta_lead_pages")
-      .select("page_id, page_name")
+      .select("page_id, page_name, subscribed, webhook_verified")
       .eq("account_id", ctx.accountId);
-    const pages = (pageRows ?? []) as Array<{ page_id: string; page_name: string | null }>;
+    const pages = (pageRows ?? []) as Array<{
+      page_id: string;
+      page_name: string | null;
+      subscribed: boolean;
+      webhook_verified: boolean;
+    }>;
 
     if (pages.length === 0) {
       checks.push({
-        name: "Pages",
+        name: "Facebook Page",
         ok: false,
-        detail: "No Pages selected yet.",
+        detail: "No Page is connected yet.",
       });
+      return NextResponse.json({ ok: false, checks });
     }
 
     for (const p of pages) {
       const label = p.page_name ?? p.page_id;
       try {
-        const pageToken = await getPageToken(ctx.supabase, ctx.accountId, p.page_id);
-        const subscribed = await getPageSubscriptions(config, pageToken, p.page_id);
+        const page = await getPage(config, token, p.page_id);
+        checks.push({
+          name: `Token → Page: ${label}`,
+          ok: Boolean(page.id),
+          detail: page.id
+            ? "The stored token can read this Page."
+            : "Meta did not return this Page.",
+        });
+
+        const pageToken = await getPageToken(
+          ctx.supabase,
+          ctx.accountId,
+          p.page_id,
+        );
+
         let formsOk = true;
         try {
           await listForms(config, pageToken, p.page_id);
@@ -117,14 +127,25 @@ export async function POST() {
           formsOk = false;
         }
         checks.push({
-          name: `Page: ${label}`,
-          ok: subscribed && formsOk,
-          detail:
-            subscribed && formsOk
-              ? "Page access and leadgen subscription OK."
-              : [subscribed ? null : "Webhook subscription missing.", formsOk ? null : "Forms not accessible."]
-                  .filter(Boolean)
-                  .join(" "),
+          name: `Forms: ${label}`,
+          ok: formsOk,
+          detail: formsOk
+            ? "Instant Forms are readable."
+            : "Meta refused the form list. Check leads_retrieval and the Page role.",
+        });
+
+        let subscribed = false;
+        try {
+          subscribed = await getPageSubscriptions(config, pageToken, p.page_id);
+        } catch {
+          subscribed = false;
+        }
+        checks.push({
+          name: `Webhook: ${label}`,
+          ok: subscribed,
+          detail: subscribed
+            ? "The app is subscribed to leadgen."
+            : "Not subscribed. Polling still imports new leads; re-save the Page to retry the subscription.",
         });
       } catch (err) {
         checks.push({ name: `Page: ${label}`, ok: false, detail: message(err) });

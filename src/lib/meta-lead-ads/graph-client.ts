@@ -2,10 +2,16 @@
 // Meta Lead Ads — Graph API client.
 //
 // Thin REST wrapper (no SDK) over the versioned Graph host
-// configured via META_GRAPH_VERSION. Every server call includes
-// `appsecret_proof` (HMAC-SHA256 of the access token with the App
-// Secret) as Meta recommends for server-to-server calls, and maps
-// Graph error bodies onto the shared error taxonomy.
+// configured via META_GRAPH_VERSION and maps Graph error bodies onto
+// the shared error taxonomy.
+//
+// appsecret_proof: the manually-pasted System User token may belong
+// to a DIFFERENT Meta app than the platform app whose secret lives in
+// META_LEAD_ADS_APP_SECRET. Computing a proof with the wrong secret
+// makes every call fail with "Invalid appsecret_proof" (the same bug
+// we fixed for the Conversions API). We therefore send a proof only
+// when the caller explicitly supplies the matching appSecret; by
+// default the token alone authenticates the call, which Meta accepts.
 //
 // Rate limiting: 429 / usage-limit Graph codes are retried with
 // BOUNDED exponential backoff (max attempt count + cap) and then
@@ -27,6 +33,12 @@ export interface GraphRequestOptions {
   params?: Record<string, string | number | boolean | undefined | null>;
   /** Access token to authenticate the call (user or page token). */
   token?: string;
+  /**
+   * App Secret that issued `token`. When supplied, an
+   * `appsecret_proof` is sent. Never pass the platform App Secret for
+   * a customer token that belongs to another Meta app.
+   */
+  appSecret?: string | null;
   config: MetaLeadAdsConfig;
   /** Bounded retry attempts for rate-limit / 5xx (default 3). */
   maxAttempts?: number;
@@ -65,6 +77,7 @@ export async function graphRequest<T = Record<string, unknown>>(
     method = "GET",
     params = {},
     token,
+    appSecret,
     config,
     maxAttempts = 3,
     backoffBaseMs = 500,
@@ -78,7 +91,9 @@ export async function graphRequest<T = Record<string, unknown>>(
   }
   if (token) {
     url.searchParams.set("access_token", token);
-    url.searchParams.set("appsecret_proof", appSecretProof(config.appSecret, token));
+    if (appSecret) {
+      url.searchParams.set("appsecret_proof", appSecretProof(appSecret, token));
+    }
   }
 
   let lastError: MetaGraphError | null = null;
@@ -159,18 +174,25 @@ export interface MetaPage {
   tasks?: string[];
 }
 
-export async function listPages(
+/**
+ * Read one Page by id. Manual setup pastes the Page id instead of
+ * discovering Pages through `/me/accounts` (a System User token
+ * generally cannot list a user's Pages). Requesting `access_token`
+ * yields a Page token when the token can act on the Page; when Meta
+ * omits it the caller falls back to the pasted token.
+ */
+export async function getPage(
   config: MetaLeadAdsConfig,
-  userToken: string,
+  token: string,
+  pageId: string,
   opts: Partial<GraphRequestOptions> = {},
-): Promise<MetaPage[]> {
-  const data = await graphRequest<{ data?: MetaPage[] }>("/me/accounts", {
+): Promise<MetaPage> {
+  return graphRequest<MetaPage>(`/${pageId}`, {
     config,
-    token: userToken,
-    params: { fields: "id,name,access_token,tasks", limit: 100 },
+    token,
+    params: { fields: "id,name,access_token,tasks" },
     ...opts,
   });
-  return data.data ?? [];
 }
 
 export interface MetaForm {
@@ -267,6 +289,58 @@ export async function getLead(
   });
 }
 
+export interface MetaLeadListPage {
+  leads: MetaLeadDetail[];
+  nextCursor: string | null;
+}
+
+/**
+ * List the leads already stored for one Instant Form. Used for the
+ * historical import (walk pages with `after`) and for the polling
+ * fallback when the leadgen webhook is not subscribed. Idempotency is
+ * enforced downstream by `meta_lead_submissions`' unique key.
+ */
+export async function listFormLeads(
+  config: MetaLeadAdsConfig,
+  pageToken: string,
+  formId: string,
+  opts: Partial<GraphRequestOptions> & {
+    limit?: number;
+    after?: string | null;
+  } = {},
+): Promise<MetaLeadListPage> {
+  const { limit = 50, after, ...rest } = opts;
+  const data = await graphRequest<{
+    data?: MetaLeadDetail[];
+    paging?: {
+      cursors?: { after?: string };
+      next?: string;
+    };
+  }>(`/${formId}/leads`, {
+    config,
+    token: pageToken,
+    params: {
+      fields:
+        "id,created_time,field_data,form_id,page_id,platform,ad_id,ad_name,campaign_name,is_organic",
+      limit,
+      after: after ?? undefined,
+    },
+    ...rest,
+  });
+
+  const leads = data.data ?? [];
+  let nextCursor = data.paging?.cursors?.after ?? null;
+  if (!nextCursor && data.paging?.next) {
+    // Older Graph responses omit cursors but include a full next URL.
+    try {
+      nextCursor = new URL(data.paging.next).searchParams.get("after");
+    } catch {
+      nextCursor = null;
+    }
+  }
+  return { leads, nextCursor: leads.length > 0 ? nextCursor : null };
+}
+
 export async function subscribePageToLeadgen(
   config: MetaLeadAdsConfig,
   pageToken: string,
@@ -286,19 +360,31 @@ export async function subscribePageToLeadgen(
   return data.success === true;
 }
 
-/** Whether the app is subscribed to `leadgen` on this Page. */
+/**
+ * Whether THIS deployment's shared app is subscribed to `leadgen` on
+ * the Page. The endpoint can return apps other than ours when the
+ * pasted token belongs to a different Meta app, so an entry is only
+ * counted when its id matches `config.appId` (or when Meta omits the
+ * id entirely).
+ */
 export async function getPageSubscriptions(
   config: MetaLeadAdsConfig,
   pageToken: string,
   pageId: string,
   opts: Partial<GraphRequestOptions> = {},
 ): Promise<boolean> {
-  const data = await graphRequest<{ data?: Array<{ subscribed_fields?: string[] }> }>(
-    `/${pageId}/subscribed_apps`,
-    { config, token: pageToken, ...opts },
-  );
-  return (data.data ?? []).some((entry) =>
-    (entry.subscribed_fields ?? []).includes("leadgen"),
+  const data = await graphRequest<{
+    data?: Array<{ id?: string; subscribed_fields?: string[] }>;
+  }>(`/${pageId}/subscribed_apps`, {
+    config,
+    token: pageToken,
+    params: { fields: "id,subscribed_fields" },
+    ...opts,
+  });
+  return (data.data ?? []).some(
+    (entry) =>
+      (entry.id === undefined || entry.id === config.appId) &&
+      (entry.subscribed_fields ?? []).includes("leadgen"),
   );
 }
 
@@ -356,24 +442,6 @@ export async function debugToken(
     type: d.type ?? null,
     error: d.error?.message ?? null,
   };
-}
-
-export interface MetaUser {
-  id: string;
-  name?: string;
-}
-
-export async function getMe(
-  config: MetaLeadAdsConfig,
-  token: string,
-  opts: Partial<GraphRequestOptions> = {},
-): Promise<MetaUser> {
-  return graphRequest<MetaUser>("/me", {
-    config,
-    token,
-    params: { fields: "id,name" },
-    ...opts,
-  });
 }
 
 export { isAuthGraphError };

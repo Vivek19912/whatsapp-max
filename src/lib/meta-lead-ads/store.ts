@@ -24,6 +24,8 @@ export interface ConnectionRow {
   access_token: string;
   token_expiry: string | null;
   scopes: string | null;
+  dataset_id: string | null;
+  setup_source: "oauth" | "manual";
   status: "connected" | "needs_reauth" | "revoked";
   last_error: string | null;
   connected_by: string | null;
@@ -31,29 +33,33 @@ export interface ConnectionRow {
   updated_at: string;
 }
 
-export async function saveConnection(
+/**
+ * Store the manually-pasted credentials. The token is encrypted at
+ * rest and never returned. A pasted System User token is treated as
+ * long-lived (no refresh loop); a revoked token is surfaced as
+ * `needs_reauth` by the processing path.
+ */
+export async function saveCredentials(
   db: SupabaseClient,
   accountId: string,
-  grant: {
+  input: {
     accessToken: string;
-    expiresAt: Date | null;
-    metaUserId?: string | null;
-    metaUserName?: string | null;
-    scopes?: string | null;
+    datasetId: string | null;
+    pageName: string | null;
+    connectedBy: string | null;
   },
-  connectedBy: string | null,
 ): Promise<void> {
   const { error } = await db.from("meta_lead_connections").upsert(
     {
       account_id: accountId,
-      meta_user_id: grant.metaUserId ?? null,
-      meta_user_name: grant.metaUserName ?? null,
-      access_token: encrypt(grant.accessToken),
-      token_expiry: grant.expiresAt ? grant.expiresAt.toISOString() : null,
-      scopes: grant.scopes ?? null,
+      meta_user_name: input.pageName,
+      access_token: encrypt(input.accessToken),
+      dataset_id: input.datasetId,
+      setup_source: "manual",
+      token_expiry: null,
       status: "connected",
       last_error: null,
-      connected_by: connectedBy,
+      connected_by: input.connectedBy,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "account_id" },
@@ -79,7 +85,7 @@ export function isConnectionExpired(row: ConnectionRow, now = Date.now()): boole
   return new Date(row.token_expiry).getTime() - EXPIRY_SKEW_MS <= now;
 }
 
-/** Decrypted long-lived user token; throws `needs_reauth` when unusable. */
+/** Decrypted System User access token; throws `needs_reauth` when unusable. */
 export async function getUserToken(
   db: SupabaseClient,
   accountId: string,
