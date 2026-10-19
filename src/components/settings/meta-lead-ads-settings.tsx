@@ -39,12 +39,29 @@ interface PageInfo {
   lastPolledAt: string | null;
 }
 
+interface OAuthPageOption {
+  pageId: string;
+  pageName: string | null;
+  tasks: string[];
+}
+
+interface OAuthSessionPayload {
+  active: boolean;
+  expiresAt?: string;
+  userName?: string | null;
+  scopes?: string[];
+  pages?: OAuthPageOption[];
+}
+
 interface SetupPayload {
   configured: boolean;
   connected: boolean;
   datasetId: string | null;
   hasToken: boolean;
-  tokenSource: "manual" | "capi" | null;
+  tokenSource: "manual" | "oauth" | "capi" | null;
+  setupSource?: string | null;
+  tokenAppId?: string | null;
+  scopes?: string[];
   status: string | null;
   lastError: string | null;
   updatedAt: string | null;
@@ -61,6 +78,9 @@ interface StatusPayload {
     userName: string | null;
     status: string;
     datasetId: string | null;
+    scopes?: string[];
+    setupSource?: string | null;
+    tokenAppId?: string | null;
     lastError: string | null;
     updatedAt: string;
   } | null;
@@ -104,6 +124,18 @@ interface Check {
   name: string;
   ok: boolean;
   detail: string;
+}
+
+interface OAuthPageResult {
+  pageId: string;
+  ok: boolean;
+  pageName: string | null;
+  subscribed: boolean;
+  webhookVerified: boolean;
+  warning: string | null;
+  error: string | null;
+  code: string | null;
+  checks: Check[];
 }
 
 function fmt(iso: string | null): string {
@@ -182,7 +214,10 @@ export function MetaLeadAdsSettings({
   const [pageId, setPageId] = useState("");
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
+  const [oauthSession, setOAuthSession] = useState<OAuthSessionPayload | null>(null);
+  const [selectedOAuthPages, setSelectedOAuthPages] = useState<string[]>([]);
   const prefilled = useRef(false);
+  const oauthAnnounced = useRef(false);
 
   const readJson = async (res: Response) => {
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -197,7 +232,20 @@ export function MetaLeadAdsSettings({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c] = await Promise.all([
+      if (!oauthAnnounced.current && typeof window !== "undefined") {
+        oauthAnnounced.current = true;
+        const params = new URLSearchParams(window.location.search);
+        const oauth = params.get("meta_oauth");
+        const oauthError = params.get("meta_oauth_error");
+        if (oauth === "select") {
+          toast.success("Meta authorization received. Select the Pages to connect.");
+        } else if (oauth === "cancelled") {
+          toast("Meta authorization was cancelled. Existing connections are unchanged.");
+        } else if (oauthError) {
+          toast.error(`Meta authorization failed (${oauthError}). Existing connections are unchanged.`);
+        }
+      }
+      const [s, c, o] = await Promise.all([
         readJson(
           await fetch("/api/integrations/meta-lead-ads/status", { cache: "no-store" }),
         ),
@@ -206,11 +254,30 @@ export function MetaLeadAdsSettings({
             cache: "no-store",
           }),
         ),
+        await fetch("/api/integrations/meta-lead-ads/oauth/session", {
+          cache: "no-store",
+        })
+          .then(async (res) => {
+            if (res.status === 403 || res.status === 401) return { active: false };
+            return (await res.json().catch(() => ({ active: false }))) as OAuthSessionPayload;
+          })
+          .catch(() => ({ active: false }) as OAuthSessionPayload),
       ]);
       const nextStatus = s as unknown as StatusPayload;
       const nextSetup = c as unknown as SetupPayload;
+      const nextSession = o as OAuthSessionPayload;
       setStatus(nextStatus);
       setSetup(nextSetup);
+      setOAuthSession(nextSession.active ? nextSession : null);
+      if (!nextSession.active) {
+        setSelectedOAuthPages([]);
+      } else {
+        setSelectedOAuthPages((current) =>
+          current.filter((pageId) =>
+            (nextSession.pages ?? []).some((page) => page.pageId === pageId),
+          ),
+        );
+      }
 
       if (!prefilled.current) {
         prefilled.current = true;
@@ -304,6 +371,80 @@ export function MetaLeadAdsSettings({
         }),
       );
       toast.success("Forms loaded from Meta.");
+      await load();
+    });
+  }
+
+  function loadFormsForPages(pageIds: string[]) {
+    return Promise.all(
+      pageIds.map(async (targetPage) => {
+        await readJson(
+          await fetch("/api/integrations/meta-lead-ads/forms", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ page_id: targetPage }),
+          }),
+        );
+      }),
+    );
+  }
+
+  function connectWithFacebook() {
+    if (typeof window === "undefined") return;
+    window.location.href = "/api/integrations/meta-lead-ads/oauth/connect";
+  }
+
+  function toggleOAuthPage(pageId: string, checked: boolean) {
+    setSelectedOAuthPages((current) =>
+      checked
+        ? [...new Set([...current, pageId])]
+        : current.filter((id) => id !== pageId),
+    );
+  }
+
+  function connectOAuthPages() {
+    if (selectedOAuthPages.length === 0) {
+      toast.error("Select at least one eligible Facebook Page.");
+      return;
+    }
+    void act("oauth-pages", async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/oauth/pages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ page_ids: selectedOAuthPages }),
+        }),
+      )) as { ok: boolean; pages: OAuthPageResult[] };
+      const pages = json.pages ?? [];
+      const checks = pages.flatMap((page) =>
+        page.checks.map((check) => ({
+          ...check,
+          name: `${page.pageName ?? page.pageId} · ${check.name}`,
+        })),
+      );
+      if (checks.length > 0) setChecks(checks);
+      const succeeded = pages.filter((page) => page.ok);
+      const failed = pages.filter((page) => !page.ok);
+      if (succeeded.length > 0) {
+        try {
+          await loadFormsForPages(succeeded.map((page) => page.pageId));
+          toast.success(
+            `Connected ${succeeded.length} Page${succeeded.length === 1 ? "" : "s"}. Forms were loaded; enable the forms to import.`,
+          );
+        } catch {
+          toast.success(
+            `Connected ${succeeded.length} Page${succeeded.length === 1 ? "" : "s"}. Open Instant Forms and click Load My Forms.`,
+          );
+        }
+      }
+      if (failed.length > 0) {
+        toast.error(
+          `${failed.length} Page${failed.length === 1 ? "" : "s"} could not be connected: ${failed
+            .map((page) => page.pageName ?? page.pageId)
+            .join(", ")}. Existing leads and polling are unchanged.`,
+          { description: failed[0]?.error ?? undefined },
+        );
+      }
       await load();
     });
   }
@@ -463,18 +604,111 @@ export function MetaLeadAdsSettings({
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-foreground">
+                <KeyRound className="size-4 text-muted-foreground" />
+                Connect with Facebook
+              </CardTitle>
+              <CardDescription className="text-muted-foreground">
+                Recommended. Authorize your own Pages through the shared app, then
+                explicitly select the Pages to connect. Tokens stay encrypted on the
+                server and are never shown to the browser. Existing manual
+                connections and historical leads are preserved.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={connectWithFacebook} disabled={disabled}>
+                  Connect with Facebook
+                </Button>
+                {oauthSession?.active ? (
+                  <Badge variant="secondary">Authorization received</Badge>
+                ) : null}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Requests <code>pages_show_list</code>,{" "}
+                <code>pages_read_engagement</code>,{" "}
+                <code>pages_manage_metadata</code>, <code>leads_retrieval</code>{" "}
+                and <code>ads_management</code>. These permissions require
+                Advanced Access/App Review before public onboarding.
+              </p>
+            </CardContent>
+          </Card>
+
+          {oauthSession?.active ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-foreground">Select Facebook Pages</CardTitle>
+                <CardDescription className="text-muted-foreground">
+                  Choose which authorized Pages feed leads into this workspace
+                  only. Authorization expires {fmt(oauthSession.expiresAt ?? null)}.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(oauthSession.pages ?? []).length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Meta did not return any manageable Pages for this authorization.
+                    Check the Page role and permissions, then start Connect with
+                    Facebook again.
+                  </p>
+                ) : (
+                  (oauthSession.pages ?? []).map((page) => (
+                    <label
+                      key={page.pageId}
+                      className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={selectedOAuthPages.includes(page.pageId)}
+                        onChange={(e) => toggleOAuthPage(page.pageId, e.target.checked)}
+                        disabled={disabled || busy === "oauth-pages"}
+                      />
+                      <span>
+                        <span className="font-medium text-foreground">
+                          {page.pageName ?? page.pageId}
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          {page.pageId}
+                          {page.tasks.length > 0 ? ` · ${page.tasks.join(", ")}` : " · no Page role returned"}
+                        </span>
+                      </span>
+                    </label>
+                  ))
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    onClick={connectOAuthPages}
+                    disabled={
+                      disabled ||
+                      busy === "oauth-pages" ||
+                      selectedOAuthPages.length === 0
+                    }
+                  >
+                    {busy === "oauth-pages" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : null}
+                    Connect selected Pages
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-foreground">
                 {connected ? (
                   <CheckCircle2 className="size-4 text-primary" />
                 ) : (
                   <KeyRound className="size-4 text-muted-foreground" />
                 )}
-                Meta setup
+                Manual setup
               </CardTitle>
               <CardDescription className="text-muted-foreground">
-                No Facebook login needed. In Meta Business Settings, create a System
-                User, assign the Page and your dataset, then generate a token. Paste
-                the three values below once — they are encrypted and never shown to
-                the browser again.
+                Legacy fallback. In Meta Business Settings, create a System User,
+                assign the Page and your dataset, then generate a token. Paste the
+                three values below once — they are encrypted and never shown to
+                the browser again. A token from another Meta app can poll/read, but
+                cannot install this shared app&apos;s webhook.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -487,9 +721,9 @@ export function MetaLeadAdsSettings({
                     </Badge>
                   ) : null}
                   {page?.webhookVerified ? (
-                    <Badge variant="secondary">Webhook subscribed</Badge>
+                    <Badge variant="secondary">Real-time webhook + polling</Badge>
                   ) : page ? (
-                    <Badge variant="outline">Polling fallback</Badge>
+                    <Badge variant="outline">Polling active — webhook not verified</Badge>
                   ) : null}
                   <span className="text-muted-foreground">
                     Last lead: {fmt(status?.lastSuccessAt ?? null)}
@@ -564,9 +798,11 @@ export function MetaLeadAdsSettings({
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   Needs <code>leads_retrieval</code>,{" "}
-                  <code>pages_read_engagement</code> and{" "}
-                  <code>pages_manage_metadata</code> (for the webhook). Without the
-                  webhook permission, leads still arrive through polling.
+                  <code>pages_read_engagement</code>,{" "}
+                  <code>pages_show_list</code>, <code>pages_manage_metadata</code>{" "}
+                  and <code>ads_management</code> for real-time webhook
+                  installation. Without the webhook permissions, leads still
+                  arrive through polling.
                   {setup?.capi.hasToken && !setup.hasToken ? (
                     <> A token saved in Conversions API can be reused by leaving this blank.</>
                   ) : null}
@@ -707,9 +943,14 @@ export function MetaLeadAdsSettings({
                 <CardHeader>
                   <CardTitle className="text-foreground">Sync</CardTitle>
                   <CardDescription className="text-muted-foreground">
-                    New leads arrive through the Page webhook when it is subscribed.
-                    The cron also polls enabled forms every few minutes, so lead
+                    Polling runs on a schedule for every enabled form, so lead
                     capture keeps working even if Meta refuses the subscription.
+                    Real-time delivery additionally needs app-level leadgen plus a
+                    verified Page installation for each Page.
+                    {(status?.pages ?? []).length > 0 &&
+                    (status?.pages ?? []).every((p) => p.webhookVerified)
+                      ? " All connected Pages are verified for real-time delivery."
+                      : " One or more Pages are polling-only; run diagnostics for the exact Graph error."}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-wrap gap-3 text-xs text-muted-foreground">

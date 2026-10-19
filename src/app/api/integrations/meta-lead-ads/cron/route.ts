@@ -12,7 +12,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
 import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { runDueRetries } from "@/lib/meta-lead-ads/process-lead";
-import { runLeadPolls } from "@/lib/meta-lead-ads/sync";
+import { POLL_DEFAULT_LIMIT, runLeadPolls } from "@/lib/meta-lead-ads/sync";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +65,7 @@ export async function GET(request: Request) {
       console.error("[meta-lead-ads-cron] retry sweep failed:", retryError);
     }
 
-    const sync = await runLeadPolls(db, config, 10);
+    const sync = await runLeadPolls(db, config, POLL_DEFAULT_LIMIT);
     return NextResponse.json({
       ...retries,
       sync,

@@ -127,6 +127,24 @@ describe("GET /status", () => {
     expect(h.writes).toEqual([]);
   });
 
+  it("reports an OAuth connection's provenance without exposing the token", async () => {
+    h.connection = {
+      ...h.connection,
+      setup_source: "oauth",
+      token_app_id: "1831465341391155",
+      token_type: "USER",
+      scopes: "pages_show_list,leads_retrieval",
+    };
+    const json = (await (await GET()).json()) as Record<string, unknown>;
+
+    expect(json.tokenSource).toBe("oauth");
+    expect((json.account as Record<string, unknown>).setupSource).toBe("oauth");
+    expect((json.account as Record<string, unknown>).tokenAppId).toBe(
+      "1831465341391155",
+    );
+    expect(JSON.stringify(json)).not.toContain("enc-stored-ciphertext");
+  });
+
   it("reports a definitively revoked connection honestly", async () => {
     h.connection = { ...h.connection, status: "needs_reauth" };
     const json = (await (await GET()).json()) as Record<string, unknown>;

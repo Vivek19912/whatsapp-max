@@ -20,6 +20,7 @@ import {
   getPageToken,
   markNeedsReauth,
   saveCredentials,
+  saveOAuthConnection,
 } from "./store";
 
 type Row = Record<string, unknown>;
@@ -242,5 +243,36 @@ describe("saveCredentials", () => {
     ]);
     // Never stored in plaintext.
     expect(JSON.stringify(tables)).not.toContain('"secret-token"');
+  });
+
+  it("stores an OAuth connection with provenance and preserves an existing dataset", async () => {
+    const { db, tables } = makeDb({
+      meta_lead_connections: [
+        { ...connected("2026-01-01T00:00:00Z"), dataset_id: "D1" },
+      ],
+    });
+
+    await saveOAuthConnection(db, "acct-1", {
+      accessToken: "oauth-token",
+      tokenExpiry: "2026-04-01T00:00:00.000Z",
+      scopes: ["pages_show_list", "ads_management"],
+      metaUserId: "U1",
+      metaUserName: "Olive",
+      tokenAppId: "1",
+      tokenType: "USER",
+      datasetId: undefined,
+      connectedBy: "user-1",
+    });
+
+    expect(tables.meta_lead_connections[0]).toMatchObject({
+      account_id: "acct-1",
+      dataset_id: "D1",
+      setup_source: "oauth",
+      token_app_id: "1",
+      token_type: "USER",
+      scopes: "pages_show_list,ads_management",
+      status: "connected",
+    });
+    expect(JSON.stringify(tables)).not.toContain('"oauth-token"');
   });
 });

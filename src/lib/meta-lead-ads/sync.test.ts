@@ -66,6 +66,7 @@ import {
   importFormLeads,
   pollFormLeads,
   runLeadPolls,
+  selectPollForms,
   type SyncFormRow,
 } from "./sync";
 
@@ -423,5 +424,82 @@ describe("runLeadPolls", () => {
     expect(first.received).toBe(1);
     expect(second.received).toBe(0);
     expect(h.seen.size).toBe(1);
+  });
+
+  it("rotates fairly across accounts instead of taking one tenant's oldest forms", async () => {
+    const { db } = makeDb({
+      meta_lead_forms: [
+        { ...FORM, id: "a-oldest", account_id: "acct-a", form_id: "FA1", last_polled_at: null },
+        { ...FORM, id: "a-newer", account_id: "acct-a", form_id: "FA2", last_polled_at: "2026-02-01T00:00:00Z" },
+        { ...FORM, id: "b-oldest", account_id: "acct-b", form_id: "FB1", last_polled_at: null },
+        { ...FORM, id: "c-oldest", account_id: "acct-c", form_id: "FC1", last_polled_at: "2026-02-02T00:00:00Z" },
+        { ...FORM, id: "d-newest", account_id: "acct-d", form_id: "FD1", last_polled_at: "2026-02-03T00:00:00Z" },
+      ],
+      meta_lead_pages: [],
+    });
+
+    const selected = await selectPollForms(db, 4);
+
+    expect(selected.map((form) => form.account_id).sort()).toEqual([
+      "acct-a",
+      "acct-b",
+      "acct-c",
+      "acct-d",
+    ]);
+    expect(selected.map((form) => form.id)).toContain("a-oldest");
+    expect(selected.map((form) => form.id)).not.toContain("a-newer");
+  });
+
+  it("uses the SQL round-robin selector when available", async () => {
+    const rpcArgs: Array<{ fn: string; limit: number }> = [];
+    const rpcForms = [
+      { ...FORM, id: "rpc-1", account_id: "acct-1", form_id: "F1" },
+      { ...FORM, id: "rpc-2", account_id: "acct-2", form_id: "F2" },
+    ];
+    const rpcDb = {
+      rpc: async (fn: string, args: { p_limit: number }) => {
+        rpcArgs.push({ fn, limit: args.p_limit });
+        return { data: rpcForms, error: null };
+      },
+    } as unknown as SupabaseClient;
+
+    const selected = await selectPollForms(rpcDb, 5);
+
+    expect(rpcArgs).toEqual([{ fn: "meta_lead_forms_for_poll", limit: 5 }]);
+    expect(selected.map((form) => form.id)).toEqual(["rpc-1", "rpc-2"]);
+  });
+
+  it("processes one oldest form per tenant in a multi-tenant sweep", async () => {
+    h.pages = Array.from({ length: 6 }, (_, index) => ({
+      leads: [
+        {
+          id: `FAIR-${index + 1}`,
+          created_time: "2026-02-03T10:00:00Z",
+        },
+      ],
+      nextCursor: null,
+    }));
+    const forms = Array.from({ length: 6 }, (_, index) => ({
+      ...FORM,
+      id: `fair-${index + 1}`,
+      account_id: `acct-${index + 1}`,
+      page_id: `P${index + 1}`,
+      form_id: `F${index + 1}`,
+      import_status: "done",
+      last_polled_at: null,
+    }));
+    const { db } = makeDb({
+      meta_lead_forms: forms,
+      meta_lead_pages: forms.map((form) => ({
+        account_id: form.account_id,
+        page_id: form.page_id,
+      })),
+    });
+
+    const result = await runLeadPolls(db, CONFIG, 6);
+
+    expect(result).toMatchObject({ forms: 6, received: 6, errors: 0 });
+    const accounts = new Set(h.listCalls.map((call) => call.formId));
+    expect(accounts.size).toBe(6);
   });
 });

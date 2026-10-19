@@ -89,6 +89,76 @@ export function isAuthGraphError(err: unknown): boolean {
   return err.graphStatus === 401;
 }
 
+export interface GraphErrorDetails {
+  code: MetaLeadAdsErrorCode;
+  graphCode?: number;
+  graphSubcode?: number;
+  graphType?: string;
+  graphStatus?: number;
+  message: string;
+}
+
+function redactGraphMessage(message: string): string {
+  return message
+    .replace(/(access_token=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(appsecret_proof=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/(client_secret=)[^&\s]+/gi, "$1[redacted]")
+    .slice(0, 400);
+}
+
+/** Safe diagnostic fields for the UI/logs. Never contains credentials. */
+export function graphErrorDetails(err: unknown): GraphErrorDetails {
+  if (err instanceof MetaGraphError) {
+    return {
+      code: err.code,
+      graphCode: err.graphCode,
+      graphSubcode: err.graphSubcode,
+      graphType: err.graphType,
+      graphStatus: err.graphStatus,
+      message: redactGraphMessage(err.message),
+    };
+  }
+  if (err instanceof MetaLeadAdsError) {
+    return { code: err.code, message: redactGraphMessage(err.message) };
+  }
+  return {
+    code: "unknown",
+    message: redactGraphMessage(
+      err instanceof Error ? err.message : "Could not reach Meta.",
+    ),
+  };
+}
+
+/** One-line diagnostic for a capability check, e.g. Graph #100 (subcode 33, OAuthException). */
+export function graphErrorDiagnostic(err: unknown): string {
+  const d = graphErrorDetails(err);
+  const parts: string[] = [];
+  if (d.graphCode !== undefined) parts.push(`Graph #${d.graphCode}`);
+  if (d.graphSubcode !== undefined) parts.push(`subcode ${d.graphSubcode}`);
+  if (d.graphType) parts.push(d.graphType);
+  const prefix = parts.length > 0 ? `${parts.join(", ")}: ` : "";
+  return `${prefix}${d.message}`;
+}
+
+/**
+ * Subscription-specific explanation. `#100` here can mean a missing
+ * effective permission, a non-Page token, or an app that cannot
+ * install our shared app — never assume token expiry.
+ */
+export function describeSubscriptionError(err: unknown): string {
+  const d = graphErrorDetails(err);
+  if (d.graphCode === 100 || d.graphCode === 200 || d.graphCode === 10) {
+    return (
+      `${graphErrorDiagnostic(err)}. ` +
+      "Verify the token is a Page access token issued by the shared app with " +
+      "pages_manage_metadata, pages_show_list, pages_read_engagement, leads_retrieval and " +
+      "ads_management, and that the customer has an eligible Page role. " +
+      "Polling remains active."
+    );
+  }
+  return `${graphErrorDiagnostic(err)}. Polling remains active.`;
+}
+
 /**
  * Actionable, secret-free description of a Graph failure for the
  * Settings UI. Distinguishes a dead token, a valid-but-unauthorized

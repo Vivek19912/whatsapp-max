@@ -20,7 +20,7 @@
 
 import crypto from "node:crypto";
 
-import { graphBase, type MetaLeadAdsConfig } from "./config";
+import { appAccessToken, graphBase, type MetaLeadAdsConfig } from "./config";
 import { MetaGraphError, isAuthGraphCode, isAuthGraphError } from "./errors";
 
 /** appsecret_proof = HMAC-SHA256(accessToken, appSecret) hex. */
@@ -433,7 +433,7 @@ export async function subscribePageToLeadgen(
   pageId: string,
   opts: Partial<GraphRequestOptions> = {},
 ): Promise<boolean> {
-  const data = await graphRequest<{ success?: boolean }>(
+  const data = await graphRequest<{ success?: boolean | string }>(
     `/${pageId}/subscribed_apps`,
     {
       config,
@@ -443,15 +443,67 @@ export async function subscribePageToLeadgen(
       ...opts,
     },
   );
-  return data.success === true;
+  return data.success === true || data.success === "true";
+}
+
+export interface PageSubscriptionEntry {
+  id?: string;
+  name?: string;
+  subscribedFields: string[];
+}
+
+export interface PageSubscriptionInspection {
+  /** True only when our app id has `leadgen` in its readback entry. */
+  subscribed: boolean;
+  appIdMatched: boolean;
+  entries: PageSubscriptionEntry[];
+}
+
+/**
+ * Read back which apps are installed on a Page. Meta returns an entry
+ * per installed app; an entry counts for this deployment only when its
+ * id equals `config.appId`. A readback without our app id is reported
+ * as not verified, never assumed to be ours.
+ */
+export async function inspectPageSubscriptions(
+  config: MetaLeadAdsConfig,
+  pageToken: string,
+  pageId: string,
+  opts: Partial<GraphRequestOptions> = {},
+): Promise<PageSubscriptionInspection> {
+  const data = await graphRequest<{
+    data?: Array<{
+      id?: string;
+      name?: string;
+      subscribed_fields?: unknown;
+    }>;
+  }>(`/${pageId}/subscribed_apps`, {
+    config,
+    token: pageToken,
+    params: { fields: "id,name,subscribed_fields" },
+    ...opts,
+  });
+  const entries: PageSubscriptionEntry[] = (data.data ?? []).map((entry) => ({
+    id: typeof entry.id === "string" ? entry.id : undefined,
+    name: typeof entry.name === "string" ? entry.name : undefined,
+    subscribedFields: Array.isArray(entry.subscribed_fields)
+      ? entry.subscribed_fields.filter(
+          (field): field is string => typeof field === "string",
+        )
+      : [],
+  }));
+  const appIdMatched = entries.some(
+    (entry) =>
+      entry.id === config.appId &&
+      entry.subscribedFields.includes("leadgen"),
+  );
+  return { subscribed: appIdMatched, appIdMatched, entries };
 }
 
 /**
  * Whether THIS deployment's shared app is subscribed to `leadgen` on
  * the Page. The endpoint can return apps other than ours when the
- * pasted token belongs to a different Meta app, so an entry is only
- * counted when its id matches `config.appId` (or when Meta omits the
- * id entirely).
+ * supplied token belongs to a different Meta app.
  */
 export async function getPageSubscriptions(
   config: MetaLeadAdsConfig,
@@ -459,19 +511,13 @@ export async function getPageSubscriptions(
   pageId: string,
   opts: Partial<GraphRequestOptions> = {},
 ): Promise<boolean> {
-  const data = await graphRequest<{
-    data?: Array<{ id?: string; subscribed_fields?: string[] }>;
-  }>(`/${pageId}/subscribed_apps`, {
+  const inspection = await inspectPageSubscriptions(
     config,
-    token: pageToken,
-    params: { fields: "id,subscribed_fields" },
-    ...opts,
-  });
-  return (data.data ?? []).some(
-    (entry) =>
-      (entry.id === undefined || entry.id === config.appId) &&
-      (entry.subscribed_fields ?? []).includes("leadgen"),
+    pageToken,
+    pageId,
+    opts,
   );
+  return inspection.subscribed;
 }
 
 /** Unsubscribe our app from `leadgen` on this Page (best-effort). */
@@ -481,15 +527,16 @@ export async function unsubscribePageFromLeadgen(
   pageId: string,
   opts: Partial<GraphRequestOptions> = {},
 ): Promise<boolean> {
-  const data = await graphRequest<{ success?: boolean }>(
+  const data = await graphRequest<{ success?: boolean | string }>(
     `/${pageId}/subscribed_apps`,
     { config, token: pageToken, method: "DELETE", ...opts },
   );
-  return data.success === true;
+  return data.success === true || data.success === "true";
 }
 
 export interface TokenDebugInfo {
   isValid: boolean;
+  appId: string | null;
   scopes: string[];
   expiresAt: number | null;
   userId: string | null;
@@ -501,20 +548,20 @@ export interface TokenDebugInfo {
  * Validate a token + read its granted scopes (server-side only).
  *
  * NOTE: `debug_token` can only inspect a token issued by the app whose
- * access token is used here (the platform app). A customer System User
- * token from ANOTHER Meta app cannot be introspected this way, which is
- * why Save & verify probes real Page/Forms/Lead endpoints instead. Only
- * use this helper for tokens known to belong to the platform app.
+ * access token is used here (the platform app). A token from ANOTHER
+ * Meta app cannot be introspected this way. OAuth tokens are issued by
+ * the shared app, so this succeeds for the supported flow; manual
+ * foreign-app tokens are handled as unverifiable, not valid.
  */
 export async function debugToken(
   config: MetaLeadAdsConfig,
   inputToken: string,
   opts: Partial<GraphRequestOptions> = {},
 ): Promise<TokenDebugInfo> {
-  const appAccessToken = `${config.appId}|${config.appSecret}`;
   const data = await graphRequest<{
     data?: {
       is_valid?: boolean;
+      app_id?: string;
       scopes?: string[];
       expires_at?: number;
       user_id?: string;
@@ -523,19 +570,246 @@ export async function debugToken(
     };
   }>("/debug_token", {
     config,
-    token: appAccessToken,
+    token: appAccessToken(config),
     params: { input_token: inputToken },
     ...opts,
   });
   const d = data.data ?? {};
   return {
     isValid: d.is_valid === true,
+    appId: d.app_id ?? null,
     scopes: d.scopes ?? [],
     expiresAt: d.expires_at ?? null,
     userId: d.user_id ?? null,
     type: d.type ?? null,
     error: d.error?.message ?? null,
   };
+}
+
+export interface MetaOAuthUser {
+  id: string;
+  name?: string;
+}
+
+/** Read the user identity behind an OAuth user token (server-side only). */
+export async function getOAuthUser(
+  config: MetaLeadAdsConfig,
+  userToken: string,
+  opts: Partial<GraphRequestOptions> = {},
+): Promise<MetaOAuthUser> {
+  return graphRequest<MetaOAuthUser>(`/me`, {
+    config,
+    token: userToken,
+    params: { fields: "id,name" },
+    ...opts,
+  });
+}
+
+export interface MetaManagedPage {
+  id: string;
+  name?: string;
+  tasks?: string[];
+}
+
+/**
+ * List Pages accessible to an OAuth user token. Page access tokens are
+ * deliberately not requested here: the callback stores page metadata
+ * only, and a Page token is fetched later for an explicitly selected
+ * Page.
+ */
+export async function listManagedPages(
+  config: MetaLeadAdsConfig,
+  userToken: string,
+  opts: Partial<GraphRequestOptions> & { maxPages?: number } = {},
+): Promise<MetaManagedPage[]> {
+  const { maxPages = 10, ...rest } = opts;
+  const pages: MetaManagedPage[] = [];
+  let after: string | null = null;
+
+  for (let page = 0; page < Math.max(1, maxPages); page += 1) {
+    const data: {
+      data?: Array<{ id?: unknown; name?: unknown; tasks?: unknown }>;
+      paging?: { cursors?: { after?: string }; next?: string };
+    } = await graphRequest(`/me/accounts`, {
+      config,
+      token: userToken,
+      params: { fields: "id,name,tasks", limit: 100, after: after ?? undefined },
+      ...rest,
+    });
+
+    const batch: MetaManagedPage[] = (data.data ?? [])
+      .map((row) => ({
+        id: String(row.id ?? ""),
+        name: typeof row.name === "string" ? row.name : undefined,
+        tasks: Array.isArray(row.tasks)
+          ? row.tasks.filter((task): task is string => typeof task === "string")
+          : [],
+      }))
+      .filter((row) => row.id !== "");
+    pages.push(...batch);
+
+    const next: string | null =
+      data.paging?.cursors?.after ??
+      (data.paging?.next ? cursorFromNextUrl(data.paging.next) : null);
+    if (!next || batch.length === 0) break;
+    after = next;
+  }
+
+  return pages;
+}
+
+export interface AppWebhookSubscription {
+  /** True only when the Page object has the `leadgen` field at app level. */
+  configured: boolean;
+  callbackUrl: string | null;
+  fields: string[];
+}
+
+/**
+ * Check the shared app's own webhook configuration. This is the
+ * app-level half of leadgen delivery; Page-level installation alone is
+ * not enough. Enabling the field remains a manual App Dashboard action.
+ */
+export async function getAppPageSubscriptions(
+  config: MetaLeadAdsConfig,
+  opts: Partial<GraphRequestOptions> = {},
+): Promise<AppWebhookSubscription> {
+  const data = await graphRequest<{
+    data?: Array<{
+      object?: string;
+      callback_url?: string;
+      fields?: Array<string | { name?: string }>;
+    }>;
+  }>(`/${config.appId}/subscriptions`, {
+    config,
+    token: appAccessToken(config),
+    ...opts,
+  });
+
+  const pageSubscriptions = (data.data ?? []).filter(
+    (entry) => entry.object === "page",
+  );
+  const fields = [
+    ...new Set(
+      pageSubscriptions.flatMap((entry) =>
+        (entry.fields ?? [])
+          .map((field) => (typeof field === "string" ? field : field.name ?? ""))
+          .filter((field) => field !== ""),
+      ),
+    ),
+  ];
+  return {
+    configured: fields.includes("leadgen"),
+    callbackUrl: pageSubscriptions[0]?.callback_url ?? null,
+    fields,
+  };
+}
+
+export interface OAuthTokenGrant {
+  accessToken: string;
+  tokenType: string | null;
+  expiresAt: string | null;
+  scopes: string[];
+}
+
+interface OAuthTokenResponse {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number | string;
+  scope?: string;
+  error?: { message?: string; type?: string; code?: number };
+}
+
+function oauthExpiry(expiresIn: number | string | undefined): string | null {
+  const seconds = typeof expiresIn === "string" ? Number(expiresIn) : expiresIn;
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+async function requestOAuthToken(
+  config: MetaLeadAdsConfig,
+  params: Record<string, string>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OAuthTokenGrant> {
+  const url = new URL(`${graphBase(config.graphVersion)}/oauth/access_token`);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  const res = await fetchImpl(url.toString(), { method: "GET" });
+  const text = await res.text();
+  let body: OAuthTokenResponse | null = null;
+  try {
+    body = text ? (JSON.parse(text) as OAuthTokenResponse) : null;
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok || !body?.access_token) {
+    const message = body?.error?.message ?? `Meta OAuth token request failed (${res.status}).`;
+    throw new MetaGraphError({
+      code: "exchange_failed",
+      message: message.slice(0, 300),
+      status: res.status === 400 ? 400 : 502,
+      graphStatus: res.status,
+      graphType: body?.error?.type,
+      graphCode: body?.error?.code,
+    });
+  }
+
+  return {
+    accessToken: body.access_token,
+    tokenType: body.token_type ?? null,
+    expiresAt: oauthExpiry(body.expires_in),
+    scopes:
+      body.scope
+        ?.split(/[,\s]+/)
+        .map((scope) => scope.trim())
+        .filter((scope) => scope !== "") ?? [],
+  };
+}
+
+/** Exchange a one-time OAuth authorization code for a user token. */
+export async function exchangeCodeForToken(
+  config: MetaLeadAdsConfig,
+  code: string,
+  redirectUri: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OAuthTokenGrant> {
+  return requestOAuthToken(
+    config,
+    {
+      client_id: config.appId,
+      redirect_uri: redirectUri,
+      client_secret: config.appSecret,
+      code,
+    },
+    fetchImpl,
+  );
+}
+
+/**
+ * Exchange a short-lived user token for a long-lived token. Callers
+ * should treat failure as non-fatal: the short-lived token can still
+ * finish page selection, but expiry must be tracked.
+ */
+export async function exchangeForLongLivedToken(
+  config: MetaLeadAdsConfig,
+  shortLivedToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<OAuthTokenGrant> {
+  return requestOAuthToken(
+    config,
+    {
+      grant_type: "fb_exchange_token",
+      client_id: config.appId,
+      client_secret: config.appSecret,
+      fb_exchange_token: shortLivedToken,
+    },
+    fetchImpl,
+  );
 }
 
 export { isAuthGraphError };

@@ -17,24 +17,34 @@
 //                                     answer Meta's GET challenge
 //   META_GRAPH_VERSION              — e.g. "v21.0" (see docs/meta-lead-ads.md)
 //
-// Customers do NOT go through OAuth: an account admin pastes a
-// System User token into Settings. The platform env values are only
-// used for the shared webhook (HMAC verification) and the Graph
-// version. The customer token may belong to a different Meta app.
+// The primary onboarding flow is per-tenant Facebook Login (OAuth):
+// the customer authorizes their own Pages through the shared app.
+// The legacy manual System User token path remains available, but a
+// foreign-app token cannot install our shared webhook app.
 //
 // The App Secret is also used to validate the X-Hub-Signature-256
 // header on inbound leadgen webhooks (HMAC-SHA256 over the raw body).
 // ============================================================
 
-/** Permissions the pasted System User token must hold for Page
- *  access, form listing, lead retrieval and webhook subscription. */
+/** Permissions required for Page discovery, Instant Form/lead
+ *  retrieval and Page-level leadgen webhook installation.
+ *
+ *  `ads_management` is required by Meta's leadgen webhook docs in
+ *  addition to `pages_manage_metadata`; `pages_show_list` and
+ *  `pages_read_engagement` cover discovery/forms. These permissions
+ *  need Advanced Access/App Review before public SaaS onboarding. */
 export const META_LEAD_ADS_SCOPES = [
   "pages_show_list",
   "pages_read_engagement",
   "pages_manage_metadata",
   "leads_retrieval",
-  "business_management",
+  "ads_management",
 ] as const;
+
+/** Space-separated scope string for the OAuth dialog. */
+export function metaLeadAdsScopeString(): string {
+  return META_LEAD_ADS_SCOPES.join(" ");
+}
 
 /** Graph API versions look like v21.0 — reject anything else so a
  *  misconfigured value can never be spliced into a Graph URL. */
@@ -93,4 +103,9 @@ export function metaGraphVersion(
 /** Graph host root for the configured version, e.g. https://graph.facebook.com/v21.0 */
 export function graphBase(graphVersion: string): string {
   return `https://graph.facebook.com/${graphVersion}`;
+}
+
+/** App access token used only for app-level diagnostics (never logged). */
+export function appAccessToken(config: MetaLeadAdsConfig): string {
+  return `${config.appId}|${config.appSecret}`;
 }

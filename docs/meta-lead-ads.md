@@ -10,10 +10,26 @@ becomes a normal `flow_runs` row with the form answers as its columns.
 > Settings › Integrations › **Meta** (tabs: *Lead capture* and *Conversions
 > API*) and share the one deployment-level Meta app.
 
-## Manual setup (no Facebook OAuth)
+## Connect with Facebook (recommended)
 
-There is **no “Connect Meta account” button and no OAuth redirect**. An
-account admin pastes three values once:
+Each workspace connects its own Pages through **Connect with Facebook**.
+The admin authorizes Pages in the shared app, then explicitly selects which
+authorized Pages to connect. Tokens are exchanged server-side, encrypted with
+AES-256-GCM, and never returned to the browser:
+
+1. **Connect with Facebook** starts a server-side authorization-code flow bound
+   to the signed-in workspace with a one-time hashed OAuth state.
+2. The callback validates the state, checks that the token belongs to the
+   shared app, discovers manageable Pages, and stores a short-lived
+   Page-selection session.
+3. The admin selects Pages; each Page is verified, installed for `leadgen`,
+   and persisted under the same account.
+4. **Load My Forms**, enable forms, and submit a test lead.
+
+### Manual setup (legacy fallback)
+
+The legacy path remains for existing connections. An account admin pastes
+three values once:
 
 | Value | Where to find it |
 | --- | --- |
@@ -21,18 +37,20 @@ account admin pastes three values once:
 | **System User access token** | Meta Business Settings → Users → System users → assign the Page + dataset → Generate token. |
 | **Facebook Page ID** | The numeric Page id (Page → About → Page transparency, or the Page URL settings). |
 
-The token is encrypted with AES-256-GCM and never returned to the browser.
-Saving verifies that the token can read the Page, then attempts to subscribe
-the shared app to the Page's `leadgen` webhook. A subscription failure is
-reported as a warning — **polling still imports leads**, so setup is not
-blocked.
+A legacy foreign-app token can still read/import through polling, but it
+cannot install this shared app's webhook. Saving verifies the readable stages
+and reports subscription failures with Graph diagnostics — **polling still
+imports leads**, so setup is not blocked.
 
 ```
 Admin (Settings › Integrations › Meta → Lead capture)
-        │  paste Dataset ID + token + Page ID
+        │  Connect with Facebook (or legacy manual values)
         ▼
-meta_lead_connections  ── encrypted token + dataset id
-        │  verify Page + subscribe (best-effort)
+meta_lead_oauth_states/sessions ── one-time handshake only
+        │  verify app + select Pages explicitly
+        ▼
+meta_lead_connections  ── encrypted token + scopes/expiry/app id
+        │  verify Page + subscribe (with Graph diagnostics)
         ▼
 meta_lead_pages        ── encrypted Page token, last sync/poll
         │  "Load My Forms" → enable forms
@@ -93,10 +111,12 @@ already holds for that form. The Graph pagination cursor is persisted
 
 New leads arrive through either path:
 
-1. **Webhook** — when the app is subscribed to the Page's `leadgen` field.
-2. **Polling** — the cron reads the latest leads for every enabled form.
-   This is the fallback when the token lacks `pages_manage_metadata`, or
-   when Meta refuses the subscription for any other reason.
+1. **Webhook** — only when app-level `leadgen` is enabled **and** the Page
+   readback contains the shared app with `leadgen`.
+2. **Polling** — the cron reads the latest leads for enabled forms across
+   tenants with a fair round-robin selector. This is the fallback when the
+   token lacks `pages_manage_metadata`/`ads_management`, uses another app,
+   or when Meta refuses the subscription for any other reason.
 
 Both paths feed the **same** idempotent pipeline, so running both is safe.
 Polling is the fallback that must not depend on the webhook: if
@@ -194,11 +214,12 @@ All four are **required**; if any is missing the integration is disabled
 | `META_LEAD_ADS_WEBHOOK_VERIFY_TOKEN` | Any long random string; typed into the App Dashboard webhook config and echoed back to Meta's GET challenge. |
 | `META_GRAPH_VERSION` | e.g. `v21.0`. **Never hardcoded** — pin a currently-supported version. Validated against `^v\d+\.\d+$`. |
 
-The customer's System User token does **not** need to be issued by this
-shared app. Graph calls authenticate with the token alone; the platform App
-Secret is **never** used to compute an `appsecret_proof` for a customer
-token (that would fail with `Invalid appsecret_proof` when the token belongs
-to a different app).
+OAuth tokens are issued by the shared app and verified with `debug_token`.
+Legacy manual System User tokens may belong to another app. Graph calls
+authenticate with the token alone; the platform App Secret is **never** used
+to compute an `appsecret_proof` for a customer token (that would fail with
+`Invalid appsecret_proof` when the token belongs to a different app). Only a
+token from the shared app can install the shared app's webhook.
 
 ## Graph API calls
 
@@ -223,13 +244,17 @@ the form/submission, so it is never re-requested from the Lead.
 | `GET /{form-id}?fields=id,name,status,locale,questions` | Refresh form questions on enable | Page |
 | `GET /{form-id}/leads?fields=…&limit=50` | Historical import + polling | Page |
 | `GET /{lead-id}?fields=…` | Retrieve a full submission | Page |
-| `POST /{page-id}/subscribed_apps` | Subscribe the app to `leadgen` | Page |
-| `GET /{page-id}/subscribed_apps?fields=id,subscribed_fields` | Verify the subscription is ours | Page |
+| `GET /{app-id}/subscriptions` | Check app-level `leadgen` configuration | App token |
+| `POST /{page-id}/subscribed_apps` | Install the app on the Page for `leadgen` | Page (shared app) |
+| `GET /{page-id}/subscribed_apps?fields=id,name,subscribed_fields` | Verify our app id has `leadgen` | Page |
+| `GET /oauth/access_token` + `debug_token` | OAuth code exchange, app/token/scope verification | App secret, then app token |
+| `GET /me/accounts?fields=id,name,tasks` | Discover manageable Pages without requesting Page tokens | OAuth user token |
 
-`Save & verify` runs these as separate capability checks (Page access,
-dataset access, form listing, lead retrieval, webhook subscription) and
-reports exactly which stage failed — a valid-looking ID is never reported as
-success on its own.
+`Save & verify`, **Run diagnostics**, and OAuth Page selection run separate
+capability checks (token app, app-level webhook, Page access, dataset access,
+form listing, lead retrieval, Page installation). A webhook failure keeps
+polling active and reports the Graph code/subcode/type instead of a generic
+success.
 
 ## Meta App Dashboard setup
 
@@ -239,24 +264,32 @@ success on its own.
    **`leadgen`** field. Callback URL:
    `https://<your-host>/api/integrations/meta-lead-ads/webhook`
    Verify token: the value of `META_LEAD_ADS_WEBHOOK_VERIFY_TOKEN`.
-3. **Permissions for the customer's System User token**:
-   `leads_retrieval`, `pages_read_engagement`, `pages_manage_metadata`
-   (webhook subscription), plus access to the Page and dataset.
-4. Set the four env vars in the deployment / secrets manager and redeploy.
-
-No OAuth redirect URI is required.
+   **Manual action:** enabling app-level `leadgen` cannot be done by code;
+   confirm it in the dashboard before expecting real-time delivery.
+3. **Add the Facebook Login product** and whitelist the production OAuth
+   callback:
+   `https://whatsappmax.in/api/integrations/meta-lead-ads/oauth/callback`.
+4. **Permissions for OAuth and webhook installation**:
+   `pages_show_list`, `pages_read_engagement`, `pages_manage_metadata`,
+   `leads_retrieval`, and `ads_management`, plus an eligible Page role and
+   dataset access. These require Business Verification, Advanced Access/App
+   Review, and Live mode before public onboarding. Code changes alone do not
+   grant these approvals.
+5. Set the four env vars in the deployment / secrets manager and redeploy.
 
 ## In-app flow
 
-1. **Settings › Integrations › Meta → Lead capture.** Paste the Dataset ID,
-   Page ID and System User token, then **Save & verify**.
-2. **Load My Forms.** This reads the Page's Instant Forms and stores them.
+1. **Settings › Integrations › Meta → Lead capture.** Click **Connect with
+   Facebook**, authorize Pages, then select the Pages to connect.
+2. **Load My Forms.** This reads each selected Page's Instant Forms and stores
+   them.
 3. **Enable a form.** Its questions are refreshed, a Workspace table is
    created, and the historical import starts.
-4. **Run diagnostics** checks configuration, the token → Page read, dataset
-   access, form access, lead retrieval and the webhook subscription, and
-   prints the exact failing stage. Diagnostics do **not** prove a live lead
-   was received — only a real submission can.
+4. **Run diagnostics** checks configuration, token/app ownership, app-level
+   webhook configuration, token → Page read, dataset access, form access,
+   lead retrieval and Page installation, and prints the exact failing stage.
+   Diagnostics do **not** prove a live lead was received — only a real
+   submission can.
 
 ## Testing with a real lead
 
@@ -269,6 +302,19 @@ No OAuth redirect URI is required.
    `[meta-lead-ads]` entries. The cron's polling path picks it up even when
    the webhook is not subscribed.
 
+## Two-company staging verification
+
+Use two separate staging Meta test assets and two WhatsApp Max workspaces:
+
+1. Company A connects Page A/Form A through OAuth; Company B connects Page
+   B/Form B through OAuth.
+2. Submit a test lead for Form A and verify it appears only in Workspace A.
+3. Submit a test lead for Form B and verify it appears only in Workspace B.
+4. Verify cross-workspace reads by Page/form/submission id return 404 or are
+   blocked, replayed webhooks do not duplicate rows, disconnecting A leaves B
+   unaffected, and polling continues to serve both tenants.
+5. Do not use production customer credentials or real lead PII for staging.
+
 ## Reliability
 
 - **Idempotent.** `meta_lead_submissions` is unique on
@@ -280,6 +326,11 @@ No OAuth redirect URI is required.
   never made to re-deliver a whole batch.
 - **Bounded imports.** Each call imports at most a few Graph pages; the
   cursor is saved after every page. The cron resumes `importing` forms.
+- **Fair multi-tenant polling.** The scheduler serves enabled forms
+  round-robin by account (`meta_lead_forms_for_poll`, default 20 forms per
+  run), preserving per-form cursors, deduplication, retries, and tenant
+  credential isolation. One tenant's backlog cannot permanently starve other
+  tenants.
 - **Catch-up polling.** Each poll walks newest-first pages until a page adds
   no new leads (or a page budget is hit), so a burst larger than one page
   between sweeps is not missed.
@@ -312,7 +363,9 @@ No OAuth redirect URI is required.
 
 - Tokens are stored **AES-256-GCM-encrypted** with `ENCRYPTION_KEY` and are
   never returned to the browser.
-- There is no OAuth state/redirect surface any more.
+- OAuth uses a hashed one-time state, a same-site HttpOnly state cookie, and
+  account/user binding. The callback never accepts a destination account id,
+  and sessions hold Page metadata only.
 - Inbound webhooks are rejected unless `X-Hub-Signature-256` matches an
   HMAC-SHA256 of the **raw** body under the platform App Secret.
 - The **account is resolved server-side** from the Page id; it is never taken
@@ -332,10 +385,15 @@ Deployment / platform (do once):
       see [`meta-capi.md`](./meta-capi.md)).
 - [ ] Apply migration `122_meta_capi_app_secret.sql` (CAPI only).
 - [ ] Apply migration `123_meta_lead_manual_setup.sql`.
-- [ ] Configure the Page webhook (`leadgen`) in the App Dashboard.
-- [ ] Complete Business Verification and request Advanced Access for the
-      permissions, then **switch the app to Live mode** — required before
-      arbitrary customers can use it.
+- [ ] Apply migration `124_meta_lead_oauth.sql`.
+- [ ] Configure the Page webhook (`leadgen`) at app level in the App
+      Dashboard. This remains a manual dashboard action.
+- [ ] Whitelist the OAuth callback in Facebook Login and verify the
+      production URL.
+- [ ] Complete Business Verification and request Advanced Access for
+      `pages_show_list`, `pages_read_engagement`, `pages_manage_metadata`,
+      `leads_retrieval`, and `ads_management`, then **switch the app to Live
+      mode** — required before arbitrary customers can use it.
 - [ ] Add a privacy policy link and a data-deletion route (Meta requirement).
 - [ ] Schedule the cron endpoint (`scripts/setup-automation-cron.sh` on
       EC2/VPS with the real public URL, or `vercel.json` on Vercel) and
@@ -343,12 +401,13 @@ Deployment / platform (do once):
 
 First customer:
 
-- [ ] Create a System User token with Page + dataset access.
-- [ ] Paste Dataset ID + Page ID + token and **Save & verify**.
-- [ ] **Load My Forms**, enable a form, and submit a test lead to confirm
-      end-to-end (webhook or polling).
+- [ ] Connect with Facebook, select the customer's Page, verify app-level and
+      Page-level webhook diagnostics, then **Load My Forms**.
+- [ ] Enable a form and submit a test lead to confirm end-to-end (webhook or
+      polling). Legacy manual setup remains available for existing connections.
 
 Each additional customer:
 
-- [ ] That customer's account admin pastes their own Dataset ID, Page ID and
-      token, loads forms and enables them (no platform/app changes needed).
+- [ ] That customer's account admin uses Connect with Facebook, selects only
+      their own Pages, loads forms, and enables them (no platform/app changes
+      needed).

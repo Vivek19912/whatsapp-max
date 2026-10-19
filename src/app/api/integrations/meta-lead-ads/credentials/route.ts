@@ -71,7 +71,7 @@ export async function GET() {
       ctx.supabase
         .from("meta_lead_connections")
         .select(
-          "dataset_id, meta_user_name, status, last_error, updated_at, access_token",
+          "dataset_id, meta_user_name, status, scopes, token_app_id, token_type, setup_source, last_error, updated_at, access_token",
         )
         .eq("account_id", ctx.accountId)
         .maybeSingle(),
@@ -90,6 +90,10 @@ export async function GET() {
           dataset_id: string | null;
           meta_user_name: string | null;
           status: string;
+          scopes: string | null;
+          token_app_id: string | null;
+          token_type: string | null;
+          setup_source: string | null;
           last_error: string | null;
           updated_at: string;
           access_token: string | null;
@@ -103,10 +107,16 @@ export async function GET() {
       datasetId: connection?.dataset_id ?? capi?.dataset_id ?? null,
       hasToken: Boolean(connection?.access_token) || Boolean(capi?.access_token),
       tokenSource: connection?.access_token
-        ? "manual"
+        ? connection.setup_source === "oauth"
+          ? "oauth"
+          : "manual"
         : capi?.access_token
           ? "capi"
           : null,
+      setupSource: connection?.setup_source ?? null,
+      tokenAppId: connection?.token_app_id ?? null,
+      tokenType: connection?.token_type ?? null,
+      scopes: connection?.scopes ? connection.scopes.split(",") : [],
       status: connection?.status ?? null,
       lastError: connection?.last_error ?? null,
       updatedAt: connection?.updated_at ?? null,

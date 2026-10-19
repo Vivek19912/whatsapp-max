@@ -28,6 +28,9 @@ const h = vi.hoisted(() => ({
     tasks: ["MANAGE"],
   } as Record<string, unknown> | null,
   getPageError: null as Error | null,
+  tokenAppId: "1" as string | null,
+  tokenValid: true,
+  appConfigured: true,
   subscribed: true,
   verified: true,
   storedRows: [] as Array<Record<string, unknown>>,
@@ -106,9 +109,33 @@ vi.mock("@/lib/meta-lead-ads/graph-client", () => ({
   listForms: async () => [],
   probeFormLeadAccess: async () => true,
   getDataset: async () => ({ id: "D1" }),
+  debugToken: async () => ({
+    isValid: h.tokenValid,
+    appId: h.tokenAppId,
+    scopes: ["pages_show_list"],
+    expiresAt: null,
+    userId: "u1",
+    type: "USER",
+    error: null,
+  }),
+  getAppPageSubscriptions: async () => ({
+    configured: h.appConfigured,
+    callbackUrl: "https://app.test/api/integrations/meta-lead-ads/webhook",
+    fields: h.appConfigured ? ["leadgen"] : [],
+  }),
   subscribePageToLeadgen: async () => {
     h.calls.push("subscribe");
     return h.subscribed;
+  },
+  inspectPageSubscriptions: async () => {
+    h.calls.push("verify");
+    return {
+      subscribed: h.verified,
+      appIdMatched: h.verified,
+      entries: h.verified
+        ? [{ id: "1", name: "App", subscribedFields: ["leadgen"] }]
+        : [],
+    };
   },
   getPageSubscriptions: async () => {
     h.calls.push("verify");
@@ -165,6 +192,9 @@ beforeEach(() => {
     tasks: ["MANAGE"],
   };
   h.getPageError = null;
+  h.tokenAppId = "1";
+  h.tokenValid = true;
+  h.appConfigured = true;
   h.subscribed = true;
   h.verified = true;
   h.storedRows = [];
@@ -223,6 +253,28 @@ describe("POST /pages — manual Page connection", () => {
     expect(json.page.webhookVerified).toBe(false);
     expect(h.upserts[0]).toMatchObject({
       subscribed: false,
+      webhook_verified: false,
+    });
+  });
+
+  it("keeps the connection when app-level leadgen is not configured", async () => {
+    h.appConfigured = false;
+    h.verified = true;
+    h.subscribed = true;
+
+    const res = await POST(post({ page_id: "1029384756" }));
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      page: { subscribed: boolean; webhookVerified: boolean; warning: string | null };
+    };
+    expect(json.page.subscribed).toBe(true);
+    expect(json.page.webhookVerified).toBe(false);
+    expect(json.page.warning ?? "").toContain("App webhook (leadgen)");
+    expect(h.upserts).toHaveLength(1);
+    expect(h.upserts[0]).toMatchObject({
+      account_id: "acct-1",
+      page_id: "1029384756",
       webhook_verified: false,
     });
   });

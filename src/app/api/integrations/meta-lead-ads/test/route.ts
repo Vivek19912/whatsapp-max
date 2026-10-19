@@ -15,10 +15,12 @@ import { requireRole } from "@/lib/auth/account";
 import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { MetaLeadAdsError } from "@/lib/meta-lead-ads/errors";
 import { metaErrorResponse } from "@/lib/meta-lead-ads/error-response";
+import { graphErrorDiagnostic } from "@/lib/meta-lead-ads/errors";
 import {
+  getAppPageSubscriptions,
   getDataset,
   getPage,
-  getPageSubscriptions,
+  inspectPageSubscriptions,
   listForms,
   probeFormLeadAccess,
 } from "@/lib/meta-lead-ads/graph-client";
@@ -101,6 +103,25 @@ export async function POST() {
       }
     }
 
+    let appConfigured = false;
+    try {
+      const app = await getAppPageSubscriptions(config);
+      appConfigured = app.configured;
+      checks.push({
+        name: "App webhook (leadgen)",
+        ok: appConfigured,
+        detail: appConfigured
+          ? "The shared app has leadgen enabled at app level."
+          : "The shared app does not have leadgen enabled at app level. Complete Webhooks → Page → leadgen in the Meta App Dashboard; Page installation alone cannot deliver events. Polling remains active.",
+      });
+    } catch (err) {
+      checks.push({
+        name: "App webhook (leadgen)",
+        ok: false,
+        detail: `Could not read the shared app's webhook configuration: ${graphErrorDiagnostic(err)}. Polling remains active.`,
+      });
+    }
+
     const { data: pageRows } = await ctx.supabase
       .from("meta_lead_pages")
       .select("page_id, page_name, subscribed, webhook_verified")
@@ -175,18 +196,32 @@ export async function POST() {
           });
         }
 
-        let subscribed = false;
+        let pageInstalled = false;
+        let webhookDetail: string;
         try {
-          subscribed = await getPageSubscriptions(config, pageToken, p.page_id);
-        } catch {
-          subscribed = false;
+          const inspection = await inspectPageSubscriptions(
+            config,
+            pageToken,
+            p.page_id,
+          );
+          pageInstalled = inspection.subscribed;
+          if (inspection.subscribed) {
+            webhookDetail = appConfigured
+              ? "Real-time delivery is configured: the shared app readback contains leadgen."
+              : "The Page readback contains the shared app, but app-level leadgen is not enabled. Complete the App Dashboard webhook action; polling still imports new leads.";
+          } else {
+            webhookDetail = appConfigured
+              ? "The Page readback does not contain the shared app with leadgen. Check pages_manage_metadata, ads_management, the Page token, and whether the token belongs to the shared app. Polling still imports new leads."
+              : "Neither the Page readback nor app-level leadgen is configured. Polling still imports new leads; fix installation for real-time delivery.";
+          }
+        } catch (err) {
+          pageInstalled = false;
+          webhookDetail = `Could not verify the Page subscription: ${graphErrorDiagnostic(err)}. Polling still imports new leads.`;
         }
         checks.push({
           name: `Webhook: ${label}`,
-          ok: subscribed,
-          detail: subscribed
-            ? "The app is subscribed to leadgen."
-            : "Not subscribed. Polling still imports new leads; re-save the Page to retry the subscription.",
+          ok: appConfigured && pageInstalled,
+          detail: webhookDetail,
         });
       } catch (err) {
         checks.push({ name: `Page: ${label}`, ok: false, detail: message(err) });

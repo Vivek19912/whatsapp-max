@@ -33,6 +33,8 @@ export const POLL_PAGE_SIZE = 25;
 /** Newest-first pages walked per poll so a burst larger than one page
  *  is not silently missed. */
 export const POLL_MAX_PAGES = 5;
+/** Default bounded batch for a scheduler sweep. */
+export const POLL_DEFAULT_LIMIT = 20;
 
 export interface SyncFormRow {
   id: string;
@@ -305,6 +307,70 @@ export async function pollFormLeads(
   }
 }
 
+function comparePollOrder(a: SyncFormRow, b: SyncFormRow): number {
+  const aTime = a.last_polled_at ? Date.parse(a.last_polled_at) : Number.NaN;
+  const bTime = b.last_polled_at ? Date.parse(b.last_polled_at) : Number.NaN;
+  if (Number.isNaN(aTime) && !Number.isNaN(bTime)) return -1;
+  if (!Number.isNaN(aTime) && Number.isNaN(bTime)) return 1;
+  if (aTime !== bTime) return (Number.isNaN(aTime) ? 0 : aTime) - (Number.isNaN(bTime) ? 0 : bTime);
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Fair, bounded form selection. Production uses the SQL round-robin
+ * selector (one oldest form per account per round); older deployments
+ * fall back to an in-memory account rotation over the oldest candidates.
+ */
+export async function selectPollForms(
+  db: SupabaseClient,
+  limit = POLL_DEFAULT_LIMIT,
+): Promise<SyncFormRow[]> {
+  const bounded = Math.max(1, Math.min(limit, 200));
+  if (typeof db.rpc === "function") {
+    try {
+      const { data, error } = await db.rpc("meta_lead_forms_for_poll", {
+        p_limit: bounded,
+      });
+      if (!error && Array.isArray(data)) {
+        return (data as SyncFormRow[]).slice(0, bounded);
+      }
+    } catch {
+      // Fall through to the compatible selector below.
+    }
+  }
+
+  const candidateLimit = Math.min(Math.max(bounded * 10, bounded), 500);
+  const { data, error } = await db
+    .from("meta_lead_forms")
+    .select(FORM_COLUMNS)
+    .eq("enabled", true)
+    .order("last_polled_at", { ascending: true, nullsFirst: true })
+    .order("id", { ascending: true })
+    .limit(candidateLimit);
+  if (error) throw error;
+
+  const candidates = ((data ?? []) as SyncFormRow[]).sort(comparePollOrder);
+  const byAccount = new Map<string, SyncFormRow[]>();
+  for (const form of candidates) {
+    const forms = byAccount.get(form.account_id) ?? [];
+    forms.push(form);
+    byAccount.set(form.account_id, forms);
+  }
+  const accounts = [...byAccount.keys()].sort((a, b) =>
+    comparePollOrder(byAccount.get(a)![0], byAccount.get(b)![0]),
+  );
+  if (accounts.length === 0) return [];
+  const perAccountCap = Math.max(1, Math.ceil(bounded / accounts.length));
+
+  const selected: SyncFormRow[] = [];
+  for (const accountId of accounts) {
+    const forms = byAccount.get(accountId) ?? [];
+    selected.push(...forms.slice(0, perAccountCap));
+    if (selected.length >= bounded) break;
+  }
+  return selected.slice(0, bounded);
+}
+
 /**
  * Sweep enabled forms: resume an interrupted historical import first,
  * then poll for new leads. Bounded so the cron invocation stays fast.
@@ -312,7 +378,7 @@ export async function pollFormLeads(
 export async function runLeadPolls(
   db: SupabaseClient,
   config: MetaLeadAdsConfig,
-  limit = 10,
+  limit = POLL_DEFAULT_LIMIT,
 ): Promise<{
   forms: number;
   imported: number;
@@ -321,15 +387,7 @@ export async function runLeadPolls(
   failed: number;
   errors: number;
 }> {
-  const { data, error } = await db
-    .from("meta_lead_forms")
-    .select(FORM_COLUMNS)
-    .eq("enabled", true)
-    .order("last_polled_at", { ascending: true, nullsFirst: true })
-    .limit(limit);
-  if (error) throw error;
-
-  const forms = (data ?? []) as SyncFormRow[];
+  const forms = await selectPollForms(db, limit);
   let imported = 0;
   let received = 0;
   let processed = 0;

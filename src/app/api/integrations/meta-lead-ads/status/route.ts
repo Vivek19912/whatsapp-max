@@ -17,6 +17,9 @@ interface ConnectionRow {
   meta_user_name: string | null;
   status: string;
   scopes: string | null;
+  token_app_id: string | null;
+  token_type: string | null;
+  setup_source: string | null;
   token_expiry: string | null;
   last_error: string | null;
   updated_at: string;
@@ -54,7 +57,7 @@ export async function GET() {
       ctx.supabase
         .from("meta_lead_connections")
         .select(
-          "dataset_id, meta_user_name, status, scopes, token_expiry, last_error, updated_at, access_token",
+          "dataset_id, meta_user_name, status, scopes, token_app_id, token_type, setup_source, token_expiry, last_error, updated_at, access_token",
         )
         .eq("account_id", ctx.accountId)
         .maybeSingle(),
@@ -89,7 +92,7 @@ export async function GET() {
       datasetId: connection?.dataset_id ?? capi?.dataset_id ?? null,
       hasToken: Boolean(connection?.access_token) || Boolean(capi?.access_token),
       tokenSource: connection?.access_token
-        ? "manual"
+        ? (connection.setup_source === "oauth" ? "oauth" : "manual")
         : capi?.access_token
           ? "capi"
           : null,
@@ -99,6 +102,9 @@ export async function GET() {
             status: connection.status,
             datasetId: connection.dataset_id,
             scopes: connection.scopes ? connection.scopes.split(",") : [],
+            tokenAppId: connection.token_app_id,
+            tokenType: connection.token_type,
+            setupSource: connection.setup_source,
             tokenExpiry: connection.token_expiry,
             lastError: connection.last_error,
             updatedAt: connection.updated_at,

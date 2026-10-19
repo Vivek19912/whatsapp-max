@@ -46,6 +46,7 @@ vi.mock("@/lib/meta-lead-ads/process-lead", () => ({
 }));
 
 vi.mock("@/lib/meta-lead-ads/sync", () => ({
+  POLL_DEFAULT_LIMIT: 20,
   runLeadPolls: async () => {
     h.pollCalls += 1;
     if (h.pollError) throw h.pollError;
