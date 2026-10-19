@@ -103,6 +103,9 @@ vi.mock("@/lib/meta-lead-ads/graph-client", () => ({
     if (h.getPageError) throw h.getPageError;
     return h.page;
   },
+  listForms: async () => [],
+  probeFormLeadAccess: async () => true,
+  getDataset: async () => ({ id: "D1" }),
   subscribePageToLeadgen: async () => {
     h.calls.push("subscribe");
     return h.subscribed;

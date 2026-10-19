@@ -171,7 +171,6 @@ export interface MetaPage {
   id: string;
   name?: string;
   access_token?: string;
-  tasks?: string[];
 }
 
 /**
@@ -180,6 +179,11 @@ export interface MetaPage {
  * generally cannot list a user's Pages). Requesting `access_token`
  * yields a Page token when the token can act on the Page; when Meta
  * omits it the caller falls back to the pasted token.
+ *
+ * Only fields that exist on the Page NODE are requested. `tasks` is a
+ * field of the `/me/accounts` USER edge, NOT the Page node, and asking
+ * for it here makes Graph reject the whole call with
+ * "#100 Tried accessing nonexistent field (tasks)". Never add it back.
  */
 export async function getPage(
   config: MetaLeadAdsConfig,
@@ -190,7 +194,22 @@ export async function getPage(
   return graphRequest<MetaPage>(`/${pageId}`, {
     config,
     token,
-    params: { fields: "id,name,access_token,tasks" },
+    params: { fields: "id,name,access_token" },
+    ...opts,
+  });
+}
+
+/** Read a Dataset/Pixel id to confirm the token can reach it. */
+export async function getDataset(
+  config: MetaLeadAdsConfig,
+  token: string,
+  datasetId: string,
+  opts: Partial<GraphRequestOptions> = {},
+): Promise<{ id: string; name?: string }> {
+  return graphRequest<{ id: string; name?: string }>(`/${datasetId}`, {
+    config,
+    token,
+    params: { fields: "id,name" },
     ...opts,
   });
 }
@@ -202,22 +221,76 @@ export interface MetaForm {
   locale?: string;
 }
 
+/** Extract the `after` cursor from a full `paging.next` URL. */
+function cursorFromNextUrl(next: string): string | null {
+  try {
+    return new URL(next).searchParams.get("after");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * List the Page's Instant Forms, following pagination up to a bound.
+ * A single call returns up to 100 forms; a Page with more must be
+ * walked, otherwise `Load My Forms` would silently hide forms.
+ */
 export async function listForms(
   config: MetaLeadAdsConfig,
   pageToken: string,
   pageId: string,
-  opts: Partial<GraphRequestOptions> = {},
+  opts: Partial<GraphRequestOptions> & { maxPages?: number } = {},
 ): Promise<MetaForm[]> {
-  const data = await graphRequest<{ data?: MetaForm[] }>(
-    `/${pageId}/leadgen_forms`,
-    {
+  const { maxPages = 10, ...rest } = opts;
+  const forms: MetaForm[] = [];
+  let after: string | null = null;
+
+  for (let page = 0; page < Math.max(1, maxPages); page += 1) {
+    const data: {
+      data?: MetaForm[];
+      paging?: { cursors?: { after?: string }; next?: string };
+    } = await graphRequest<{
+      data?: MetaForm[];
+      paging?: { cursors?: { after?: string }; next?: string };
+    }>(`/${pageId}/leadgen_forms`, {
       config,
       token: pageToken,
-      params: { fields: "id,name,status,locale", limit: 100 },
-      ...opts,
-    },
-  );
-  return data.data ?? [];
+      params: { fields: "id,name,status,locale", limit: 100, after: after ?? undefined },
+      ...rest,
+    });
+
+    const batch: MetaForm[] = data.data ?? [];
+    forms.push(...batch);
+
+    const next: string | null =
+      data.paging?.cursors?.after ??
+      (data.paging?.next ? cursorFromNextUrl(data.paging.next) : null);
+    if (!next || batch.length === 0) break;
+    after = next;
+  }
+
+  return forms;
+}
+
+/**
+ * Confirm the token can actually READ leads for a form. Listing forms
+ * does not prove lead access (a token can see a form but not its
+ * submissions), so Save & verify probes the first form explicitly.
+ * Returns true when Meta answers with a (possibly empty) lead list.
+ */
+export async function probeFormLeadAccess(
+  config: MetaLeadAdsConfig,
+  pageToken: string,
+  formId: string,
+  opts: Partial<GraphRequestOptions> = {},
+): Promise<boolean> {
+  const data = await graphRequest<{ data?: unknown[] }>(`/${formId}/leads`, {
+    config,
+    token: pageToken,
+    params: { fields: "id", limit: 1 },
+    ...opts,
+  });
+  return Array.isArray(data.data);
 }
 
 export interface MetaFormQuestionOption {
@@ -411,7 +484,15 @@ export interface TokenDebugInfo {
   error: string | null;
 }
 
-/** Validate a token + read its granted scopes (server-side only). */
+/**
+ * Validate a token + read its granted scopes (server-side only).
+ *
+ * NOTE: `debug_token` can only inspect a token issued by the app whose
+ * access token is used here (the platform app). A customer System User
+ * token from ANOTHER Meta app cannot be introspected this way, which is
+ * why Save & verify probes real Page/Forms/Lead endpoints instead. Only
+ * use this helper for tokens known to belong to the platform app.
+ */
 export async function debugToken(
   config: MetaLeadAdsConfig,
   inputToken: string,

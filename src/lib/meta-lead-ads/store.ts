@@ -104,19 +104,34 @@ export async function getUserToken(
   return decrypt(row.access_token);
 }
 
-/** Decrypted Page token; falls back to the user token when absent. */
+/**
+ * Decrypted Page token for a Page that THIS account has connected.
+ *
+ * The Page row MUST exist for `accountId`: falling back to the user
+ * token for an arbitrary Page would let an account read leads from a
+ * Page it never connected (a cross-tenant leak). When the row exists
+ * but Meta omitted a Page token, the user token is used as documented.
+ */
 export async function getPageToken(
   db: SupabaseClient,
   accountId: string,
   pageId: string,
 ): Promise<string> {
-  const { data } = await db
+  const { data, error } = await db
     .from("meta_lead_pages")
     .select("access_token")
     .eq("account_id", accountId)
     .eq("page_id", pageId)
     .maybeSingle();
-  const encrypted = (data as { access_token: string | null } | null)?.access_token;
+  if (error) throw error;
+  if (!data) {
+    throw new MetaLeadAdsError(
+      "page_not_found",
+      "Connect this Facebook Page first.",
+      409,
+    );
+  }
+  const encrypted = (data as { access_token: string | null }).access_token;
   if (encrypted) return decrypt(encrypted);
   return getUserToken(db, accountId);
 }

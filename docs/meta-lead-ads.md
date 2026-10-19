@@ -151,6 +151,29 @@ Secret is **never** used to compute an `appsecret_proof` for a customer
 token (that would fail with `Invalid appsecret_proof` when the token belongs
 to a different app).
 
+## Graph API calls
+
+Only fields that exist on the target node are requested. In particular the
+Page read (`GET /{page-id}`) asks for `id,name,access_token` — **never
+`tasks`**, which belongs to the `/me/accounts` user edge and makes Graph
+reject the whole call with `#100 Tried accessing nonexistent field (tasks)`.
+
+| Call | Purpose | Token |
+| --- | --- | --- |
+| `GET /{page-id}?fields=id,name,access_token` | Verify the Page + obtain a Page token | System User |
+| `GET /{dataset-id}?fields=id,name` | Verify dataset reachability | System User |
+| `GET /{page-id}/leadgen_forms?fields=id,name,status,locale&limit=100` | Load My Forms (follows pagination) | Page |
+| `GET /{form-id}?fields=id,name,status,locale,questions` | Refresh form questions on enable | Page |
+| `GET /{form-id}/leads?fields=…&limit=50` | Historical import + polling | Page |
+| `GET /{lead-id}?fields=…` | Retrieve a full submission | Page |
+| `POST /{page-id}/subscribed_apps` | Subscribe the app to `leadgen` | Page |
+| `GET /{page-id}/subscribed_apps?fields=id,subscribed_fields` | Verify the subscription is ours | Page |
+
+`Save & verify` runs these as separate capability checks (Page access,
+dataset access, form listing, lead retrieval, webhook subscription) and
+reports exactly which stage failed — a valid-looking ID is never reported as
+success on its own.
+
 ## Meta App Dashboard setup
 
 1. **Create / pick an app** (Business type) at
@@ -173,9 +196,10 @@ No OAuth redirect URI is required.
 2. **Load My Forms.** This reads the Page's Instant Forms and stores them.
 3. **Enable a form.** Its questions are refreshed, a Workspace table is
    created, and the historical import starts.
-4. **Run diagnostics** checks configuration, the token → Page read, form
-   access and the webhook subscription. Diagnostics do **not** prove a live
-   lead was received — only a real submission can.
+4. **Run diagnostics** checks configuration, the token → Page read, dataset
+   access, form access, lead retrieval and the webhook subscription, and
+   prints the exact failing stage. Diagnostics do **not** prove a live lead
+   was received — only a real submission can.
 
 ## Testing with a real lead
 
@@ -199,6 +223,12 @@ No OAuth redirect URI is required.
   never made to re-deliver a whole batch.
 - **Bounded imports.** Each call imports at most a few Graph pages; the
   cursor is saved after every page. The cron resumes `importing` forms.
+- **Catch-up polling.** Each poll walks newest-first pages until a page adds
+  no new leads (or a page budget is hit), so a burst larger than one page
+  between sweeps is not missed.
+- **Connected Pages only.** Form listing, importing and polling resolve the
+  Page token only for a Page the account has connected; an unconnected Page
+  can never be read with the account token (cross-tenant safety).
 - **Retry / sync endpoints.**
   - `POST /api/integrations/meta-lead-ads/retry` — admin. Optional body
     `{ "submission_id": "..." }` retries one; otherwise sweeps this

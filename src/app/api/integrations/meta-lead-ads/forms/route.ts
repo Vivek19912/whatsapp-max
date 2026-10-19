@@ -123,10 +123,15 @@ export async function POST(request: Request) {
       | { page_id?: string }
       | null;
     const pageId = body?.page_id?.trim();
-    if (!pageId) {
-      return NextResponse.json({ error: "page_id is required." }, { status: 400 });
+    if (!pageId || !/^\d{5,32}$/.test(pageId)) {
+      return NextResponse.json(
+        { error: "Enter the numeric Facebook Page ID." },
+        { status: 400 },
+      );
     }
 
+    // `getPageToken` refuses a Page this account has not connected, so
+    // Load My Forms can never pull another tenant's Page/forms.
     const pageToken = await getPageToken(ctx.supabase, ctx.accountId, pageId);
     const metaForms = await listForms(config, pageToken, pageId);
     const now = new Date().toISOString();

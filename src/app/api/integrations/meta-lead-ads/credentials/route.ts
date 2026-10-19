@@ -228,6 +228,7 @@ export async function POST(request: Request) {
         accountId: ctx.accountId,
         token,
         pageId,
+        datasetId,
       });
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -246,10 +247,12 @@ export async function POST(request: Request) {
       connectedBy: ctx.userId,
     });
 
+    const checks = connected.checks ?? [];
     return NextResponse.json({
-      ok: true,
+      ok: checks.every((c) => c.ok),
       datasetId,
       tokenSource,
+      checks,
       page: {
         pageId: connected.pageId,
         pageName: connected.pageName,

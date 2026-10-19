@@ -228,10 +228,23 @@ export function MetaLeadAdsSettings({
           }),
         }),
       )) as {
+        ok?: boolean;
+        checks?: Check[];
         page?: { warning?: string | null };
         tokenSource?: string;
       };
-      toast.success("Meta setup saved and verified.");
+      if (json.checks) setChecks(json.checks);
+      const failed = (json.checks ?? []).filter((c) => !c.ok);
+      if (failed.length > 0) {
+        toast.error(
+          `Saved, but ${failed.length} check${failed.length === 1 ? "" : "s"} failed: ${failed
+            .map((c) => c.name)
+            .join(", ")}.`,
+          { description: failed[0]?.detail },
+        );
+      } else {
+        toast.success("Meta setup saved and verified.");
+      }
       if (json.page?.warning) {
         toast("Meta was saved, but the webhook could not be subscribed. Polling will still import new leads.", {
           description: json.page.warning,

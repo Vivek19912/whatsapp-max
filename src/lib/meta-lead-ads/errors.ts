@@ -71,3 +71,39 @@ export function isAuthGraphError(err: unknown): boolean {
   if (err.graphType === "OAuthException") return true;
   return err.graphCode === 190 || err.graphCode === 102 || err.graphCode === 463;
 }
+
+/**
+ * Actionable, secret-free description of a Graph failure for the
+ * Settings UI. Distinguishes a dead token, a valid-but-unauthorized
+ * token, and a missing/unreachable asset so the customer knows exactly
+ * what to fix in Meta Business Settings. Never includes the token,
+ * App Secret or proof.
+ */
+export function describeMetaGraphError(err: unknown): string {
+  if (err instanceof MetaGraphError) {
+    if (isAuthGraphError(err)) {
+      return (
+        "Meta rejected the access token (invalid, expired, or revoked). " +
+        "Generate a new System User token with access to this Page and dataset, then paste it again."
+      );
+    }
+    if (err.code === "rate_limited") {
+      return "Meta rate limit reached. Wait a minute and try again.";
+    }
+    if (err.graphCode === 200 || err.graphCode === 10) {
+      return (
+        "The token is valid but is not authorized for this asset. In Meta Business Settings, " +
+        "assign this Page and dataset to the System User, then try again."
+      );
+    }
+    if (err.graphCode === 100 || err.graphCode === 803) {
+      return (
+        "Meta could not find that ID, or the token cannot access it. " +
+        "Double-check the numeric ID and the System User's asset assignment."
+      );
+    }
+    return err.message;
+  }
+  if (err instanceof MetaLeadAdsError) return err.message;
+  return "Could not reach Meta.";
+}

@@ -16,9 +16,11 @@ import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { MetaLeadAdsError } from "@/lib/meta-lead-ads/errors";
 import { metaErrorResponse } from "@/lib/meta-lead-ads/error-response";
 import {
+  getDataset,
   getPage,
   getPageSubscriptions,
   listForms,
+  probeFormLeadAccess,
 } from "@/lib/meta-lead-ads/graph-client";
 import {
   getConnection,
@@ -33,7 +35,9 @@ interface Check {
 }
 
 function message(err: unknown): string {
-  return err instanceof MetaLeadAdsError ? err.message : "Unexpected error.";
+  return err instanceof MetaLeadAdsError
+    ? err.message
+    : "Unexpected error.";
 }
 
 export async function POST() {
@@ -82,6 +86,21 @@ export async function POST() {
       return NextResponse.json({ ok: false, checks });
     }
 
+    if (conn.dataset_id) {
+      try {
+        const dataset = await getDataset(config, token, conn.dataset_id);
+        checks.push({
+          name: "Dataset access",
+          ok: Boolean(dataset.id),
+          detail: dataset.name
+            ? `The token can reach dataset "${dataset.name}".`
+            : "The token can reach the dataset.",
+        });
+      } catch (err) {
+        checks.push({ name: "Dataset access", ok: false, detail: message(err) });
+      }
+    }
+
     const { data: pageRows } = await ctx.supabase
       .from("meta_lead_pages")
       .select("page_id, page_name, subscribed, webhook_verified")
@@ -121,8 +140,12 @@ export async function POST() {
         );
 
         let formsOk = true;
+        let formCount = 0;
+        let firstFormId: string | null = null;
         try {
-          await listForms(config, pageToken, p.page_id);
+          const forms = await listForms(config, pageToken, p.page_id);
+          formCount = forms.length;
+          firstFormId = forms[0]?.id ?? null;
         } catch {
           formsOk = false;
         }
@@ -130,9 +153,27 @@ export async function POST() {
           name: `Forms: ${label}`,
           ok: formsOk,
           detail: formsOk
-            ? "Instant Forms are readable."
+            ? formCount === 0
+              ? "No Instant Forms on this Page yet."
+              : `${formCount} Instant Form${formCount === 1 ? "" : "s"} readable.`
             : "Meta refused the form list. Check leads_retrieval and the Page role.",
         });
+
+        if (formsOk && firstFormId) {
+          let leadsOk = true;
+          try {
+            await probeFormLeadAccess(config, pageToken, firstFormId);
+          } catch {
+            leadsOk = false;
+          }
+          checks.push({
+            name: `Lead retrieval: ${label}`,
+            ok: leadsOk,
+            detail: leadsOk
+              ? "Existing form submissions are readable."
+              : "Meta refused the lead list. Grant leads_retrieval and the Page role.",
+          });
+        }
 
         let subscribed = false;
         try {

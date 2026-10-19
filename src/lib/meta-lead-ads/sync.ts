@@ -30,6 +30,9 @@ import { getPageToken } from "./store";
 export const IMPORT_PAGE_SIZE = 50;
 export const IMPORT_MAX_PAGES_PER_RUN = 4;
 export const POLL_PAGE_SIZE = 25;
+/** Newest-first pages walked per poll so a burst larger than one page
+ *  is not silently missed. */
+export const POLL_MAX_PAGES = 5;
 
 export interface SyncFormRow {
   id: string;
@@ -232,20 +235,37 @@ export async function pollFormLeads(
 
   try {
     const pageToken = await getPageToken(db, form.account_id, form.page_id);
-    const result = await listFormLeads(config, pageToken, form.form_id, {
-      limit: POLL_PAGE_SIZE,
-    });
+    let cursor: string | null = null;
 
-    for (const lead of result.leads) {
-      newest = newestIso(newest, lead.created_time);
-      const outcome = await ingestLead(db, config, {
-        pageId: form.page_id,
-        formId: form.form_id,
-        leadId: lead.id,
+    // Meta returns leads newest-first. Walk pages until a page adds no
+    // NEW leads (we have caught up to what we already stored) or the
+    // bounded page budget runs out, so a burst > POLL_PAGE_SIZE between
+    // sweeps cannot be missed.
+    for (let page = 0; page < POLL_MAX_PAGES; page += 1) {
+      const result = await listFormLeads(config, pageToken, form.form_id, {
+        limit: POLL_PAGE_SIZE,
+        after: cursor,
       });
-      if (outcome.recorded) received += 1;
-      if (outcome.processed) processed += 1;
-      if (outcome.failed) failed += 1;
+      if (result.leads.length === 0) break;
+
+      let newOnPage = 0;
+      for (const lead of result.leads) {
+        newest = newestIso(newest, lead.created_time);
+        const outcome = await ingestLead(db, config, {
+          pageId: form.page_id,
+          formId: form.form_id,
+          leadId: lead.id,
+        });
+        if (outcome.recorded) {
+          received += 1;
+          newOnPage += 1;
+        }
+        if (outcome.processed) processed += 1;
+        if (outcome.failed) failed += 1;
+      }
+
+      cursor = result.nextCursor;
+      if (!cursor || newOnPage === 0) break;
     }
 
     const now = new Date().toISOString();
