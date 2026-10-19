@@ -9,6 +9,8 @@ export interface MetaCapiConfigRow {
   account_id: string;
   dataset_id: string | null;
   access_token: string | null;
+  /** Optional, encrypted App Secret of the app that issued access_token. */
+  app_secret: string | null;
   status: "incomplete" | "connected" | "error";
   test_event_code: string | null;
   action_source: string;

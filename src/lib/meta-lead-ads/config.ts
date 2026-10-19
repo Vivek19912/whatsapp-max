@@ -71,6 +71,20 @@ export function metaLeadAdsConfigured(
   return metaLeadAdsConfig(env) !== null;
 }
 
+/**
+ * The validated Graph API version on its own. Conversions API only
+ * needs the version — it never uses the platform Lead Ads App
+ * Secret (a customer's System User token may belong to a different
+ * Meta app), so it must not be gated on those credentials.
+ */
+export function metaGraphVersion(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const graphVersion = env.META_GRAPH_VERSION?.trim();
+  if (!graphVersion || !GRAPH_VERSION_PATTERN.test(graphVersion)) return null;
+  return graphVersion;
+}
+
 /** Graph host root for the configured version, e.g. https://graph.facebook.com/v21.0 */
 export function graphBase(graphVersion: string): string {
   return `https://graph.facebook.com/${graphVersion}`;

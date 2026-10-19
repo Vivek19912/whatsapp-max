@@ -18,12 +18,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   config: null as Record<string, unknown> | null,
   token: "tok" as string | null,
+  appSecret: null as string | null,
   mappings: [] as Array<Record<string, unknown>>,
   inserted: [] as Array<Record<string, unknown>>,
   sent: [] as Array<{ id: string; attempts: number }>,
   failed: [] as Array<{ id: string; error: string; nextRetryAt: string | null }>,
   eventIds: new Set<string>(),
   sendCalls: [] as Array<Record<string, unknown>>,
+  sendOpts: [] as Array<Record<string, unknown>>,
   sendImpl: null as null | ((body: Record<string, unknown>) => Record<string, unknown>),
   claimResult: null as Record<string, unknown> | null,
 }));
@@ -31,6 +33,7 @@ const h = vi.hoisted(() => ({
 vi.mock("./store", () => ({
   getConfig: async () => h.config,
   getDecryptedToken: async () => h.token,
+  getDecryptedAppSecret: async () => h.appSecret,
   listEnabledMappingsForAction: async (
     _db: unknown,
     accountId: string,
@@ -82,8 +85,10 @@ vi.mock("./client", () => ({
     _dataset: unknown,
     _token: unknown,
     body: Record<string, unknown>,
+    opts?: Record<string, unknown>,
   ) => {
     h.sendCalls.push(body);
+    h.sendOpts.push(opts ?? {});
     if (!h.sendImpl) return { events_received: 1, fbtrace_id: "trace" };
     return h.sendImpl(body);
   },
@@ -92,7 +97,7 @@ vi.mock("./client", () => ({
 const { fireCapiForAction, runDueDeliveries } = await import("./deliver");
 
 const db = {} as SupabaseClient;
-const platform = { graphVersion: "v21.0", appSecret: "secret" };
+const platform = { graphVersion: "v21.0" };
 
 function mapping(overrides: Record<string, unknown> = {}) {
   return {
@@ -125,12 +130,14 @@ beforeEach(() => {
     action_source: "business_messaging",
   };
   h.token = "tok";
+  h.appSecret = null;
   h.mappings = [mapping()];
   h.inserted = [];
   h.sent = [];
   h.failed = [];
   h.eventIds = new Set();
   h.sendCalls = [];
+  h.sendOpts = [];
   h.sendImpl = null;
   h.claimResult = null;
 });
@@ -148,6 +155,27 @@ describe("fireCapiForAction", () => {
     expect(h.sendCalls).toHaveLength(1);
     expect(firstEvent(h.sendCalls[0]).event_name).toBe("Lead");
     expect(h.sent).toHaveLength(1);
+  });
+
+  it("forwards the customer App Secret when one is stored", async () => {
+    h.appSecret = "customer-app-secret";
+    await fireCapiForAction(db, platform, {
+      accountId: "acct-1",
+      action: "meta_lead_received",
+      flowRunId: "run-1",
+    });
+
+    expect(h.sendOpts[0]).toMatchObject({ appSecret: "customer-app-secret" });
+  });
+
+  it("never fabricates a proof when no App Secret is stored", async () => {
+    await fireCapiForAction(db, platform, {
+      accountId: "acct-1",
+      action: "meta_lead_received",
+      flowRunId: "run-1",
+    });
+
+    expect(h.sendOpts[0]).toMatchObject({ appSecret: null });
   });
 
   it("is idempotent — the same conversion is never sent twice", async () => {

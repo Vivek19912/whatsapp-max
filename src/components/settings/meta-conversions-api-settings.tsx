@@ -39,6 +39,7 @@ interface PublicConfig {
   hasDataset: boolean;
   datasetId: string | null;
   hasToken: boolean;
+  hasAppSecret: boolean;
   status: "incomplete" | "connected" | "error";
   testEventCode: string | null;
   actionSource: string;
@@ -122,6 +123,7 @@ export function MetaConversionsApiSettings({
 
   const [datasetInput, setDatasetInput] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [appSecretInput, setAppSecretInput] = useState("");
   const [testCodeInput, setTestCodeInput] = useState("");
   const [form, setForm] = useState({ ...EMPTY_FORM });
 
@@ -185,6 +187,7 @@ export function MetaConversionsApiSettings({
         json.datasetName ? `${okMsg} Found “${json.datasetName}”.` : okMsg,
       );
       setTokenInput("");
+      setAppSecretInput("");
       await load();
     });
   }
@@ -372,34 +375,87 @@ export function MetaConversionsApiSettings({
               <CardDescription className="text-muted-foreground">
                 Generate a System User access token in Meta Business Settings with
                 access to this dataset. It is encrypted at rest and never shown again.
+                If the token was issued by a different Meta app than this platform
+                app, also paste that app&apos;s App Secret so we can send a valid
+                appsecret_proof. Leave it blank and no proof is sent — the platform
+                app&apos;s secret is never used for your token.
                 {config?.hasToken ? " A token is currently stored." : ""}
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-wrap items-end gap-2">
-              <div className="min-w-56 flex-1">
-                <Label htmlFor="capi-token">Access token</Label>
-                <Input
-                  id="capi-token"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={config?.hasToken ? "•••••••• (stored)" : "Paste token"}
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  disabled={disabled}
-                />
-              </div>
-              <Button
-                onClick={() => saveConfig({ access_token: tokenInput.trim() }, "token", "Token saved and verified.")}
-                disabled={disabled || busy === "token" || !tokenInput.trim()}
-              >
-                {busy === "token" ? <Loader2 className="size-4 animate-spin" /> : null}
-                Save & verify
-              </Button>
-              {config?.hasToken ? (
-                <Button variant="outline" onClick={disconnect} disabled={disabled || busy === "disconnect"}>
-                  Remove
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-56 flex-1">
+                  <Label htmlFor="capi-token">Access token</Label>
+                  <Input
+                    id="capi-token"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={config?.hasToken ? "•••••••• (stored)" : "Paste token"}
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    disabled={disabled}
+                  />
+                </div>
+                <Button
+                  onClick={() => saveConfig({ access_token: tokenInput.trim() }, "token", "Token saved and verified.")}
+                  disabled={disabled || busy === "token" || !tokenInput.trim()}
+                >
+                  {busy === "token" ? <Loader2 className="size-4 animate-spin" /> : null}
+                  Save & verify
                 </Button>
-              ) : null}
+                {config?.hasToken ? (
+                  <Button variant="outline" onClick={disconnect} disabled={disabled || busy === "disconnect"}>
+                    Remove
+                  </Button>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-56 flex-1">
+                  <Label htmlFor="capi-appsecret">App Secret (optional)</Label>
+                  <Input
+                    id="capi-appsecret"
+                    type="password"
+                    autoComplete="off"
+                    placeholder={
+                      config?.hasAppSecret
+                        ? "•••••••• (stored)"
+                        : "Only if the token belongs to another Meta app"
+                    }
+                    value={appSecretInput}
+                    onChange={(e) => setAppSecretInput(e.target.value)}
+                    disabled={disabled}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Used only to compute appsecret_proof. Leave blank if you do not
+                    know it — Meta does not require it unless your app enforces it.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    saveConfig(
+                      { app_secret: appSecretInput.trim() },
+                      "appsecret",
+                      "App Secret saved and verified.",
+                    )
+                  }
+                  disabled={disabled || busy === "appsecret" || !appSecretInput.trim()}
+                >
+                  {busy === "appsecret" ? <Loader2 className="size-4 animate-spin" /> : null}
+                  Save App Secret
+                </Button>
+                {config?.hasAppSecret ? (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      saveConfig({ app_secret: null }, "appsecret", "App Secret removed.")
+                    }
+                    disabled={disabled || busy === "appsecret"}
+                  >
+                    Remove
+                  </Button>
+                ) : null}
+              </div>
             </CardContent>
           </Card>
 

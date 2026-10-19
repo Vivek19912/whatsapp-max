@@ -31,6 +31,7 @@ import {
 import {
   claimDelivery,
   getConfig,
+  getDecryptedAppSecret,
   getDecryptedToken,
   getDelivery,
   insertDelivery,
@@ -66,13 +67,16 @@ export interface FireResult {
 async function loadCredentials(
   db: SupabaseClient,
   accountId: string,
-): Promise<{ datasetId: string; token: string } | null> {
+): Promise<{ datasetId: string; token: string; appSecret: string | null } | null> {
   const config = await getConfig(db, accountId);
   if (!config?.dataset_id || !config.access_token) return null;
   try {
     const token = await getDecryptedToken(db, accountId);
     if (!token) return null;
-    return { datasetId: config.dataset_id, token };
+    // Optional: only present when the customer supplied the secret of the
+    // app that issued their token. Never falls back to the platform secret.
+    const appSecret = await getDecryptedAppSecret(db, accountId).catch(() => null);
+    return { datasetId: config.dataset_id, token, appSecret };
   } catch {
     return null;
   }
@@ -84,11 +88,12 @@ async function attemptDelivery(
   delivery: MetaCapiDeliveryRow,
   datasetId: string,
   token: string,
+  appSecret: string | null,
 ): Promise<"sent" | "failed"> {
   const attempts = delivery.attempts + 1;
   const payload = (delivery.request_payload ?? { data: [] }) as Record<string, unknown>;
   try {
-    const res = await sendEvents(platform, datasetId, token, payload);
+    const res = await sendEvents(platform, datasetId, token, payload, { appSecret });
     if ((res.events_received ?? 0) >= 1) {
       await markDeliverySent(db, delivery.id, res as Record<string, unknown>, attempts);
       return "sent";
@@ -190,7 +195,14 @@ export async function fireCapiForAction(
     // logical conversion was already enqueued. Idempotent no-op.
     if (!delivery) continue;
 
-    const outcome = await attemptDelivery(db, platform, delivery, creds.datasetId, creds.token);
+    const outcome = await attemptDelivery(
+      db,
+      platform,
+      delivery,
+      creds.datasetId,
+      creds.token,
+      creds.appSecret,
+    );
     if (outcome === "sent") result.fired++;
     else result.failed++;
   }
@@ -218,7 +230,14 @@ export async function retryDeliveryById(
   if (!creds) return "skipped";
   const claimed = await claimDelivery(db, id);
   if (!claimed) return "skipped";
-  return attemptDelivery(db, platform, claimed, creds.datasetId, creds.token);
+  return attemptDelivery(
+    db,
+    platform,
+    claimed,
+    creds.datasetId,
+    creds.token,
+    creds.appSecret,
+  );
 }
 
 /** Retry every failed delivery whose backoff window has elapsed. */
@@ -232,7 +251,10 @@ export async function runDueDeliveries(
   let sent = 0;
   let failed = 0;
   let skipped = 0;
-  const credsByAccount = new Map<string, { datasetId: string; token: string } | null>();
+  const credsByAccount = new Map<
+    string,
+    { datasetId: string; token: string; appSecret: string | null } | null
+  >();
 
   for (const row of rows) {
     let creds = credsByAccount.get(row.account_id);
@@ -249,7 +271,14 @@ export async function runDueDeliveries(
       skipped++;
       continue;
     }
-    const outcome = await attemptDelivery(db, platform, claimed, creds.datasetId, creds.token);
+    const outcome = await attemptDelivery(
+      db,
+      platform,
+      claimed,
+      creds.datasetId,
+      creds.token,
+      creds.appSecret,
+    );
     if (outcome === "sent") sent++;
     else failed++;
   }

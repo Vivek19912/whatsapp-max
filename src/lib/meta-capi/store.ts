@@ -46,6 +46,19 @@ export async function getDecryptedToken(
   return decrypt(row.access_token);
 }
 
+/**
+ * Decrypted App Secret of the Meta app that issued the token, or null.
+ * Used only to compute appsecret_proof; never exposed to the browser.
+ */
+export async function getDecryptedAppSecret(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<string | null> {
+  const row = await getConfig(db, accountId);
+  if (!row?.app_secret) return null;
+  return decrypt(row.app_secret);
+}
+
 async function upsertConfig(
   db: SupabaseClient,
   accountId: string,
@@ -100,6 +113,26 @@ export async function clearToken(
   });
 }
 
+/** Store the optional, encrypted App Secret that matches the token. */
+export async function saveAppSecret(
+  db: SupabaseClient,
+  accountId: string,
+  appSecret: string,
+): Promise<void> {
+  await upsertConfig(db, accountId, {
+    app_secret: encrypt(appSecret),
+    last_error: null,
+  });
+}
+
+/** Forget the stored App Secret (token and dataset are kept). */
+export async function clearAppSecret(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<void> {
+  await upsertConfig(db, accountId, { app_secret: null });
+}
+
 export async function markConfigStatus(
   db: SupabaseClient,
   accountId: string,
@@ -140,6 +173,7 @@ export async function clearCredentials(
 ): Promise<void> {
   await upsertConfig(db, accountId, {
     access_token: null,
+    app_secret: null,
     dataset_id: null,
     status: "incomplete",
     test_event_code: null,

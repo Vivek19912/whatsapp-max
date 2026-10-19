@@ -38,6 +38,24 @@ source. A user can map the "Workspace column" trigger to any column + value
 they actually use (including an explicit "confirmed" stage) to send `Purchase`
 — but see the Purchase rule below.
 
+## appsecret_proof
+
+`appsecret_proof` is an **optional** Graph argument. When sent it must be
+`HMAC-SHA256(access_token, <App Secret of the app that issued the token>)`. A
+customer's System User token can belong to **their own** Meta app, so the shared
+platform `META_LEAD_ADS_APP_SECRET` is not necessarily the matching secret;
+using it produced:
+
+> Invalid appsecret_proof provided in the API argument
+
+CAPI therefore **never** derives the proof from the platform secret:
+
+- If the customer supplied their app's **App Secret**, the proof is computed
+  from the exact token in that request with that secret.
+- If they did **not**, no `appsecret_proof` parameter is sent (never a proof
+  computed with a mismatched secret). The app only needs it if the owning app
+  is configured to *require* app secret proof.
+
 ## Data, privacy and correctness
 
 - **Hashed PII.** `email`, `phone`, `first/last name` and `external_id` are
@@ -101,6 +119,12 @@ they actually use (including an explicit "confirmed" stage) to send `Purchase`
    access that dataset. Both halves are **verified against Meta** before the
    integration is marked connected. The token is encrypted at rest and never
    returned to the browser.
+   If the token was issued by a **different Meta app** than the platform app,
+   also paste that app's **App Secret**. It is only ever used to compute
+   `appsecret_proof`, is encrypted at rest, and is never returned to the
+   browser. With no App Secret we send **no proof at all** — the platform
+   `META_LEAD_ADS_APP_SECRET` is never used for a customer token (see
+   "appsecret_proof" below).
 3. **Step 3 (optional).** Paste a **Test Event Code** (Events Manager → Test
    Events) and click **Send test event** to confirm end-to-end. Test events are
    labelled and are not production conversions.
@@ -108,10 +132,12 @@ they actually use (including an explicit "confirmed" stage) to send `Purchase`
 
 ## Environment / platform
 
-Uses the same deployment-level Meta app settings as Lead Ads —
-`META_LEAD_ADS_APP_ID`, `META_LEAD_ADS_APP_SECRET`, `META_GRAPH_VERSION`. If
-they are missing, the Conversions API panel shows "Unavailable on this server"
-and its routes return `501`.
+Only needs `META_GRAPH_VERSION`. It deliberately does **not** use the Lead Ads
+app credentials: a customer's System User token can belong to their own Meta
+app, so an `appsecret_proof` computed with the platform
+`META_LEAD_ADS_APP_SECRET` is rejected by Meta. If `META_GRAPH_VERSION` is
+missing, the Conversions API panel shows "Unavailable on this server" and its
+routes return `501`.
 
 ## Database
 
@@ -133,7 +159,9 @@ the browser.
 - [ ] Create (or reuse) a System User with access to that dataset and generate
       a token.
 - [ ] In Settings › Integrations › Meta → Conversions API: save the dataset and
-      token (both verified), add an optional Test Event Code, send a test event.
+      token (both verified). If the token belongs to a different Meta app, also
+      save that app's App Secret; otherwise leave it blank. Add an optional Test
+      Event Code and send a test event.
 - [ ] Add the event mappings you want and enable them.
 - [ ] Confirm real events appear under the dataset's event activity (a test event
       only proves connectivity, not production tracking).

@@ -14,6 +14,7 @@ import { sendEvents } from "@/lib/meta-capi/client";
 import { buildCapiEvent, buildRequestPayload } from "@/lib/meta-capi/payload";
 import {
   getConfig,
+  getDecryptedAppSecret,
   getDecryptedToken,
   insertDelivery,
   markDeliveryFailed,
@@ -58,6 +59,10 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    // Optional: only the customer's own app secret is ever used here.
+    const appSecret = await getDecryptedAppSecret(ctx.supabase, ctx.accountId).catch(
+      () => null,
+    );
 
     const body = (await request.json().catch(() => null)) as
       | { event_name?: string }
@@ -94,7 +99,9 @@ export async function POST(request: Request) {
     });
 
     try {
-      const res = await sendEvents(platform, config.dataset_id, token, payload);
+      const res = await sendEvents(platform, config.dataset_id, token, payload, {
+        appSecret,
+      });
       if (delivery) {
         await markDeliverySent(admin, delivery.id, res as Record<string, unknown>, 1);
       }

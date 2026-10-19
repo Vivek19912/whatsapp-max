@@ -12,15 +12,18 @@ import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth/account";
 import { isValidActionSource } from "@/lib/meta-capi/catalog";
-import { validateDataset } from "@/lib/meta-capi/client";
+import { describeCapiVerificationError, validateDataset } from "@/lib/meta-capi/client";
 import { toPublicConfig } from "@/lib/meta-capi/serialize";
 import {
+  clearAppSecret,
   clearCredentials,
   clearToken,
   getConfig,
+  getDecryptedAppSecret,
   getDecryptedToken,
   markConfigStatus,
   saveActionSource,
+  saveAppSecret,
   saveDataset,
   saveSetupStep,
   saveTestEventCode,
@@ -130,6 +133,33 @@ export async function PUT(request: Request) {
       }
     }
 
+    if (has("app_secret")) {
+      const raw = body.app_secret;
+      if (raw === null) {
+        await clearAppSecret(ctx.supabase, ctx.accountId);
+      } else {
+        if (typeof raw !== "string") {
+          return NextResponse.json(
+            { error: "The App Secret must be text." },
+            { status: 400 },
+          );
+        }
+        const appSecret = raw.trim();
+        // Meta app secrets are long opaque hex strings. Reject obvious
+        // typos early; we never echo the value back.
+        if (appSecret.length < 16 || /\s/.test(appSecret)) {
+          return NextResponse.json(
+            {
+              error:
+                "That does not look like a Meta App Secret (expected a long, whitespace-free value).",
+            },
+            { status: 400 },
+          );
+        }
+        await saveAppSecret(ctx.supabase, ctx.accountId, appSecret);
+      }
+    }
+
     // Verify once both halves exist.
     const config = await getConfig(ctx.supabase, ctx.accountId);
     if (config?.dataset_id && config?.access_token) {
@@ -148,7 +178,15 @@ export async function PUT(request: Request) {
         if (!token) {
           throw new MetaLeadAdsError("not_configured", "No token is stored.", 400);
         }
-        const info = await validateDataset(platform, config.dataset_id, token);
+        // Only the customer's own app secret is ever used, and only when
+        // they supplied one. Never fall back to the platform app secret.
+        const appSecret = await getDecryptedAppSecret(
+          ctx.supabase,
+          ctx.accountId,
+        ).catch(() => null);
+        const info = await validateDataset(platform, config.dataset_id, token, {
+          appSecret,
+        });
         await markConfigStatus(ctx.supabase, ctx.accountId, "connected", null);
         const fresh = await getConfig(ctx.supabase, ctx.accountId);
         return NextResponse.json({
@@ -157,10 +195,7 @@ export async function PUT(request: Request) {
           config: toPublicConfig(fresh),
         });
       } catch (err) {
-        const message =
-          err instanceof MetaLeadAdsError
-            ? err.message
-            : "Could not verify these details with Meta.";
+        const message = describeCapiVerificationError(err);
         await markConfigStatus(ctx.supabase, ctx.accountId, "error", message);
         return NextResponse.json(
           { error: message, code: "verification_failed" },

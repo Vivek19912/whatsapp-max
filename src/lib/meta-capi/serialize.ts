@@ -12,6 +12,7 @@ export interface PublicCapiConfig {
   hasDataset: boolean;
   datasetId: string | null;
   hasToken: boolean;
+  hasAppSecret: boolean;
   status: MetaCapiConfigRow["status"];
   testEventCode: string | null;
   actionSource: string;
@@ -26,6 +27,7 @@ export function toPublicConfig(row: MetaCapiConfigRow | null): PublicCapiConfig 
     hasDataset: Boolean(row?.dataset_id),
     datasetId: row?.dataset_id ?? null,
     hasToken: Boolean(row?.access_token),
+    hasAppSecret: Boolean(row?.app_secret),
     status: row?.status ?? "incomplete",
     testEventCode: row?.test_event_code ?? null,
     actionSource: row?.action_source ?? "business_messaging",

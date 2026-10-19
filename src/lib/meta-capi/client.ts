@@ -4,20 +4,31 @@
 // The Lead Ads `graphRequest` helper only performs GET/DELETE with
 // query params; CAPI needs a JSON POST body, so this is a small,
 // purpose-built wrapper. It still reuses the shared Google/Meta
-// conventions: versioned host from config, `appsecret_proof` on every
-// call, a bounded timeout, and the SAME error taxonomy
-// (MetaGraphError / MetaLeadAdsError) so routes map failures
-// identically. Tokens and response bodies are never logged.
+// conventions: versioned host from config, a bounded timeout, and the
+// SAME error taxonomy (MetaGraphError / MetaLeadAdsError) so routes map
+// failures identically. Tokens and response bodies are never logged.
+//
+// appsecret_proof is OPTIONAL on Graph API calls. When we send one it
+// MUST be HMAC-SHA256(access_token, <secret of the app that issued the
+// token>). A customer's System User token can belong to their own app,
+// not the shared platform app, so CAPI NEVER derives the proof from the
+// platform META_LEAD_ADS_APP_SECRET. If the customer has not provided
+// their matching App Secret, the proof parameter is omitted entirely —
+// sending a wrong proof is rejected by Meta ("Invalid appsecret_proof")
+// even though omitting it is allowed.
 // ============================================================
 
 import { graphBase } from "@/lib/meta-lead-ads/config";
-import { MetaGraphError } from "@/lib/meta-lead-ads/errors";
+import {
+  MetaGraphError,
+  MetaLeadAdsError,
+  isAuthGraphError,
+} from "@/lib/meta-lead-ads/errors";
 import { appSecretProof } from "@/lib/meta-lead-ads/graph-client";
 
-/** The subset of the shared Meta app config CAPI needs. */
+/** CAPI only needs the Graph version — never the platform app secret. */
 export interface CapiPlatform {
   graphVersion: string;
-  appSecret: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -26,6 +37,11 @@ export interface CapiRequestOptions {
   method?: "GET" | "POST";
   params?: Record<string, string | number | undefined | null>;
   token?: string;
+  /**
+   * The App Secret of the Meta app that issued `token`. Only used to
+   * compute `appsecret_proof`; when omitted, no proof is sent.
+   */
+  appSecret?: string | null;
   body?: unknown;
   fetchImpl?: typeof fetch;
   /** Tests pass 0. */
@@ -41,6 +57,7 @@ export async function capiRequest<T = Record<string, unknown>>(
     method = "GET",
     params = {},
     token,
+    appSecret = null,
     body,
     fetchImpl = fetch,
     timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -53,7 +70,11 @@ export async function capiRequest<T = Record<string, unknown>>(
   }
   if (token) {
     url.searchParams.set("access_token", token);
-    url.searchParams.set("appsecret_proof", appSecretProof(platform.appSecret, token));
+    // Only send a proof we can compute with the matching secret. A proof
+    // derived from a different app's secret is fatal to the whole call.
+    if (appSecret) {
+      url.searchParams.set("appsecret_proof", appSecretProof(appSecret, token));
+    }
   }
 
   const controller = new AbortController();
@@ -148,4 +169,44 @@ export async function sendEvents(
     body,
     ...opts,
   });
+}
+
+/**
+ * Turn a verification failure into an actionable, secret-free message
+ * for Settings. Never includes the token, App Secret or proof.
+ */
+export function describeCapiVerificationError(err: unknown): string {
+  if (err instanceof MetaGraphError) {
+    const text = err.message.toLowerCase();
+    if (text.includes("appsecret_proof") || text.includes("app secret proof")) {
+      return (
+        "Meta rejected appsecret_proof. This happens when the access token " +
+        "was issued by a different Meta app than the App Secret we used. " +
+        "Add the App Secret of the app that issued this token (Step 2), or " +
+        "leave it blank so no proof is sent. Do not use this platform app's " +
+        "secret for another app's token."
+      );
+    }
+    if (isAuthGraphError(err)) {
+      return (
+        "Meta rejected the access token (invalid, expired, or revoked). " +
+        "Generate a new System User token with access to this dataset and " +
+        "paste it again."
+      );
+    }
+    if (
+      err.graphCode === 200 ||
+      text.includes("permission") ||
+      text.includes("(#200)")
+    ) {
+      return (
+        "The token is valid but lacks permission for this dataset. In " +
+        "Business Settings, give the System User access to this dataset and " +
+        "the business that owns it, then try again."
+      );
+    }
+    return err.message;
+  }
+  if (err instanceof MetaLeadAdsError) return err.message;
+  return "Could not verify these details with Meta.";
 }

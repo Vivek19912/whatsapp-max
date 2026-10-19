@@ -14,17 +14,22 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
+import { metaGraphVersion } from "@/lib/meta-lead-ads/config";
 
 import type { CapiPlatform } from "./client";
 import { fireCapiForAction } from "./deliver";
 import type { UserDataInput } from "./hash";
 
-/** The shared platform Meta app provides the Graph version + app secret. */
+/**
+ * CAPI needs only the Graph version. It deliberately does NOT use the
+ * platform Lead Ads app credentials: a customer's System User token can
+ * belong to a different Meta app, and an `appsecret_proof` computed with
+ * the wrong (platform) secret is rejected by Meta.
+ */
 export function metaCapiPlatform(): CapiPlatform | null {
-  const config = metaLeadAdsConfig();
-  if (!config) return null;
-  return { graphVersion: config.graphVersion, appSecret: config.appSecret };
+  const graphVersion = metaGraphVersion();
+  if (!graphVersion) return null;
+  return { graphVersion };
 }
 
 async function loadMatchData(
