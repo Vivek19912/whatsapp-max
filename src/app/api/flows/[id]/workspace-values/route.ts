@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
+import { supabaseAdmin } from "@/lib/flows/admin-client";
 import {
   validateWorkspaceValue,
   type WorkspaceField,
@@ -10,6 +11,7 @@ import {
   isAssigneeField,
   validateAssigneeValue,
 } from "@/lib/flows/workspace-assignee";
+import { onWorkspaceValueChanged } from "@/lib/meta-capi/triggers";
 
 /**
  * PUT /api/flows/[id]/workspace-values — set or clear ONE custom
@@ -86,11 +88,15 @@ export async function PUT(
     // cannot be attached across flows).
     const { data: run, error: runErr } = await supabase
       .from("flow_runs")
-      .select("id, account_id, flow_id")
+      .select("id, account_id, flow_id, contact_id")
       .eq("id", runId)
       .maybeSingle();
     if (runErr) throw runErr;
-    const typed = run as { account_id: string; flow_id: string } | null;
+    const typed = run as {
+      account_id: string;
+      flow_id: string;
+      contact_id: string | null;
+    } | null;
     if (!typed || typed.account_id !== accountId || typed.flow_id !== id) {
       return NextResponse.json({ error: "Run not found." }, { status: 404 });
     }
@@ -126,6 +132,19 @@ export async function PUT(
       );
     }
 
+    // Current stored value, so a Conversions API trigger only fires on
+    // a genuine CHANGE (never on a re-save of the same value).
+    const { data: existingRow, error: existingErr } = await supabase
+      .from("workspace_values")
+      .select("value_text")
+      .eq("field_id", fieldId)
+      .eq("flow_run_id", runId)
+      .eq("account_id", accountId)
+      .maybeSingle();
+    if (existingErr) throw existingErr;
+    const previous =
+      (existingRow as { value_text: string | null } | null)?.value_text ?? null;
+
     if (stored === null) {
       const { error } = await supabase
         .from("workspace_values")
@@ -151,9 +170,26 @@ export async function PUT(
       .select("value_text")
       .single();
     if (error) throw error;
-    return NextResponse.json({
-      value: (data as { value_text: string | null }).value_text,
-    });
+    const storedValue = (data as { value_text: string | null }).value_text;
+
+    // ADDITIVE Meta Conversions API hook — best-effort and isolated so it
+    // can never fail the save. Fires only when the value actually changed
+    // to a new, non-empty value.
+    if (storedValue !== null && storedValue !== previous) {
+      try {
+        await onWorkspaceValueChanged(supabaseAdmin(), {
+          accountId,
+          flowRunId: runId,
+          contactId: typed.contact_id,
+          fieldName: field.name,
+          value: storedValue,
+        });
+      } catch (err) {
+        console.error("[meta-capi] workspace trigger failed:", err);
+      }
+    }
+
+    return NextResponse.json({ value: storedValue });
   } catch (err) {
     return toErrorResponse(err);
   }

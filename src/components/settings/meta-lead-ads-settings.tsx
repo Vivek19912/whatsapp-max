@@ -67,7 +67,12 @@ function fmt(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
 }
 
-export function MetaLeadAdsSettings() {
+export function MetaLeadAdsSettings({
+  embedded = false,
+}: {
+  /** When rendered inside the Meta tabbed wrapper, the wrapper owns the head. */
+  embedded?: boolean;
+} = {}) {
   const { canEditSettings, profileLoading } = useAuth();
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [pages, setPages] = useState<PageRow[]>([]);
@@ -228,22 +233,24 @@ export function MetaLeadAdsSettings() {
 
   return (
     <section className="space-y-5">
-      <SettingsPanelHead
-        title="Meta Lead Ads"
-        description="Connect Facebook Pages and choose which Instant Forms feed leads into your Workspace. Each enabled form appears as its own Workspace table."
-        action={
-          status?.connected ? (
-            <Button variant="outline" onClick={runTest} disabled={busy === "test"}>
-              {busy === "test" ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <RefreshCw className="size-4" />
-              )}
-              Run diagnostics
-            </Button>
-          ) : undefined
-        }
-      />
+      {embedded ? null : (
+        <SettingsPanelHead
+          title="Meta Lead Ads"
+          description="Connect Facebook Pages and choose which Instant Forms feed leads into your Workspace. Each enabled form appears as its own Workspace table."
+          action={
+            status?.connected ? (
+              <Button variant="outline" onClick={runTest} disabled={busy === "test"}>
+                {busy === "test" ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-4" />
+                )}
+                Run diagnostics
+              </Button>
+            ) : undefined
+          }
+        />
+      )}
 
       {loading ? (
         <Card>

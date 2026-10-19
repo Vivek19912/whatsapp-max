@@ -26,6 +26,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { findExistingContact, isUniqueViolation } from "@/lib/contacts/dedupe";
 import { resolveAuditUserId } from "@/lib/api/v1/contacts";
+import { onMetaLeadReceived } from "@/lib/meta-capi/triggers";
 import { isValidE164, sanitizePhoneForMeta } from "@/lib/whatsapp/phone-utils";
 
 import type { MetaLeadAdsConfig } from "./config";
@@ -335,6 +336,21 @@ export async function processSubmissionById(
         claimed_at: null,
       })
       .eq("id", submissionId);
+
+    // ADDITIVE Meta Conversions API hook — the lead now exists in the
+    // Workspace, so fire any configured conversion mapping. Best-effort
+    // and fully isolated: it can never fail lead processing.
+    await onMetaLeadReceived(db, {
+      accountId: submission.account_id,
+      flowRunId: (run as { id: string }).id,
+      contactId,
+      occurredAt: startedAt,
+      matchData: {
+        phone: normalized.standard.phone ?? null,
+        email: normalized.standard.email ?? null,
+        fullName: normalized.standard.name ?? null,
+      },
+    });
 
     return { outcome: "processed" };
   } catch (err) {

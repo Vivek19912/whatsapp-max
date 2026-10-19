@@ -5,10 +5,15 @@ in the existing **Workspace** — one table per enabled form — alongside your
 WhatsApp flow leads. No parallel lead UI, no new contact pipeline: a lead
 becomes a normal `flow_runs` row with the form answers as its columns.
 
+> Looking to send **conversion events** back to Meta? That is a separate
+> capability — see [Meta Conversions API](./meta-capi.md). Both live under
+> Settings › Integrations › **Meta** (tabs: *Lead capture* and *Conversions
+> API*) and share the one deployment-level Meta app.
+
 ## How it works
 
 ```
-Admin (Settings › Integrations › Meta Lead Ads)
+Admin (Settings › Integrations › Meta → Lead capture)
         │  OAuth (code → short-lived → long-lived user token)
         ▼
 meta_lead_connections  ── encrypted user token
@@ -102,7 +107,7 @@ are not admins/testers/developers of the app) can authorize it:
    app, webhook URL and redirect URI.
 
 To onboard a further customer: their Cub account **admin** opens
-**Settings › Integrations › Meta Lead Ads → Connect Meta account**, then
+**Settings › Integrations › Meta → Lead capture → Connect Meta account**, then
 selects their Pages, syncs forms and enables the forms they want. Done.
 
 ## Environment variables
@@ -139,7 +144,7 @@ use whichever app owns the Pages/forms you connect.
 
 ## In-app flow
 
-1. **Settings › Integrations › Meta Lead Ads → Connect Meta account.** You are
+1. **Settings › Integrations › Meta → Lead capture → Connect Meta account.** You are
    redirected to Meta; on success you return to the panel.
 2. **Select Pages.** Selecting a Page verifies its Page token, subscribes the
    app to `leadgen`, and stores the token **encrypted**. The panel refuses to
@@ -204,6 +209,8 @@ Deployment / platform (do once):
       `META_LEAD_ADS_WEBHOOK_VERIFY_TOKEN`, `META_GRAPH_VERSION` in prod.
 - [ ] Apply migration `119_meta_lead_ads.sql`.
 - [ ] Apply migration `120_meta_lead_pages_global_unique.sql`.
+- [ ] Apply migration `121_meta_capi.sql` (only if you use the Conversions API —
+      see [`meta-capi.md`](./meta-capi.md)).
 - [ ] Configure the Page webhook (`leadgen`) + OAuth redirect URI in the App
       Dashboard.
 - [ ] Complete Business Verification and request Advanced Access for the

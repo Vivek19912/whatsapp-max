@@ -1,0 +1,141 @@
+// Meta Conversions API — config route.
+//
+// Guarantees: input validation, tenant scoping, and that a dataset +
+// token pair is verified with Meta before being marked connected.
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const h = vi.hoisted(() => ({
+  accountId: "acct-1",
+  roleOk: true,
+  config: null as Record<string, unknown> | null,
+  saved: [] as Array<{ fn: string; args: unknown[] }>,
+  verifyThrows: false,
+}));
+
+vi.mock("@/lib/auth/account", () => ({
+  requireRole: async () => {
+    if (!h.roleOk) {
+      throw Object.assign(new Error("Forbidden"), { status: 403 });
+    }
+    return { supabase: {}, accountId: h.accountId, userId: "u1" };
+  },
+  getCurrentAccount: async () => ({
+    supabase: {},
+    accountId: h.accountId,
+    userId: "u1",
+  }),
+  toErrorResponse: (err: unknown) =>
+    Response.json(
+      { error: err instanceof Error ? err.message : "error" },
+      { status: (err as { status?: number })?.status ?? 500 },
+    ),
+}));
+
+vi.mock("@/lib/meta-capi/triggers", () => ({
+  metaCapiPlatform: () => ({ graphVersion: "v21.0", appSecret: "secret" }),
+}));
+
+vi.mock("@/lib/meta-capi/client", () => ({
+  validateDataset: async (_p: unknown, datasetId: string) => {
+    if (h.verifyThrows) throw new Error("bad");
+    return { id: datasetId, name: "My Dataset" };
+  },
+}));
+
+vi.mock("@/lib/meta-capi/store", () => ({
+  getConfig: async () => h.config,
+  getDecryptedToken: async () => "tok",
+  saveDataset: async (_db: unknown, accountId: string, datasetId: string) => {
+    h.saved.push({ fn: "saveDataset", args: [accountId, datasetId] });
+    h.config = { ...(h.config ?? {}), account_id: accountId, dataset_id: datasetId };
+  },
+  saveToken: async (_db: unknown, accountId: string) => {
+    h.saved.push({ fn: "saveToken", args: [accountId] });
+    h.config = { ...(h.config ?? {}), account_id: accountId, access_token: "enc" };
+  },
+  markConfigStatus: async (
+    _db: unknown,
+    accountId: string,
+    status: string,
+    lastError: string | null,
+  ) => {
+    h.saved.push({ fn: "markConfigStatus", args: [accountId, status, lastError] });
+    h.config = { ...(h.config ?? {}), status, last_error: lastError };
+  },
+  clearCredentials: async () => {
+    h.saved.push({ fn: "clearCredentials", args: [] });
+    h.config = null;
+  },
+  clearToken: async () => {},
+  saveActionSource: async () => {},
+  saveSetupStep: async () => {},
+  saveTestEventCode: async () => {},
+}));
+
+const { PUT, DELETE } = await import("./route");
+
+const put = (body: unknown) =>
+  new Request("https://app.test/api/integrations/meta-capi/config", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+beforeEach(() => {
+  h.accountId = "acct-1";
+  h.roleOk = true;
+  h.config = null;
+  h.saved = [];
+  h.verifyThrows = false;
+});
+
+describe("PUT /meta-capi/config", () => {
+  it("rejects a non-numeric dataset id before saving", async () => {
+    const res = await PUT(put({ dataset_id: "not-a-number" }));
+    expect(res.status).toBe(400);
+    expect(h.saved.some((s) => s.fn === "saveDataset")).toBe(false);
+  });
+
+  it("saves the dataset + token (encrypted) and verifies, then marks connected", async () => {
+    const res = await PUT(
+      put({ dataset_id: "1234567890", access_token: "EAAG-token-value-1234567890" }),
+    );
+
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { config: { status: string; hasToken: boolean } };
+    expect(json.config.status).toBe("connected");
+    expect(json.config.hasToken).toBe(true);
+    // Tenant scoping: writes carry the caller's account.
+    expect(h.saved.find((s) => s.fn === "saveDataset")?.args[0]).toBe("acct-1");
+    // Token never returned.
+    expect(JSON.stringify(json)).not.toContain("EAAG-token-value");
+  });
+
+  it("marks the integration errored when Meta rejects the pair", async () => {
+    h.verifyThrows = true;
+    const res = await PUT(
+      put({ dataset_id: "1234567890", access_token: "EAAG-token-value-1234567890" }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe("verification_failed");
+    expect(
+      h.saved.find((s) => s.fn === "markConfigStatus")?.args[1],
+    ).toBe("error");
+  });
+
+  it("requires an admin role", async () => {
+    h.roleOk = false;
+    const res = await PUT(put({ dataset_id: "1234567890" }));
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("DELETE /meta-capi/config", () => {
+  it("clears credentials for the caller's account only", async () => {
+    const res = await DELETE();
+    expect(res.status).toBe(200);
+    expect(h.saved.filter((s) => s.fn === "clearCredentials")).toHaveLength(1);
+  });
+});

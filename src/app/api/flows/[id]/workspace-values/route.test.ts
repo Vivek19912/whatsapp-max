@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   deletes: 0,
   roster: [] as string[],
   profileEqFilters: [] as Array<[string, unknown]>,
+  triggers: [] as Array<Record<string, unknown>>,
 }));
 
 function statusError(status: number, message: string) {
@@ -52,6 +53,19 @@ vi.mock("@/lib/auth/account", () => ({
       { error: err instanceof Error ? err.message : "Internal server error" },
       { status },
     );
+  },
+}));
+
+vi.mock("@/lib/flows/admin-client", () => ({
+  supabaseAdmin: () => ({}),
+}));
+
+vi.mock("@/lib/meta-capi/triggers", () => ({
+  onWorkspaceValueChanged: async (
+    _db: unknown,
+    args: Record<string, unknown>,
+  ) => {
+    h.triggers.push(args);
   },
 }));
 
@@ -117,6 +131,7 @@ beforeEach(() => {
   h.deletes = 0;
   h.roster = [];
   h.profileEqFilters = [];
+  h.triggers = [];
   h.field = {
     id: "field-1",
     account_id: "acct-1",
@@ -174,6 +189,45 @@ describe("PUT workspace values", () => {
     expect(res.status).toBe(200);
     expect(h.deletes).toBe(1);
     expect(h.upserts).toHaveLength(0);
+  });
+
+  it("fires the Conversions API trigger only when the value actually changes", async () => {
+    // No stored value yet → a new value is a genuine change → trigger once.
+    const first = await PUT(
+      put({ field_id: "field-1", flow_run_id: "run-1", value: "Contacted" }),
+      params,
+    );
+    expect(first.status).toBe(200);
+    expect(h.triggers).toEqual([
+      {
+        accountId: "acct-1",
+        flowRunId: "run-1",
+        contactId: undefined,
+        fieldName: "Status",
+        value: "Contacted",
+      },
+    ]);
+
+    // Re-saving the SAME value must not re-fire.
+    h.triggers = [];
+    h.run = {
+      id: "run-1",
+      account_id: "acct-1",
+      flow_id: "flow-1",
+      value_text: "Contacted",
+    };
+    await PUT(
+      put({ field_id: "field-1", flow_run_id: "run-1", value: "Contacted" }),
+      params,
+    );
+    expect(h.triggers).toHaveLength(0);
+
+    // A different value does fire again.
+    await PUT(
+      put({ field_id: "field-1", flow_run_id: "run-1", value: "New" }),
+      params,
+    );
+    expect(h.triggers).toHaveLength(1);
   });
 
   it("404s cross-account fields and cross-flow runs", async () => {

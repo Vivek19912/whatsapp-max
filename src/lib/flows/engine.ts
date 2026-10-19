@@ -38,6 +38,10 @@ import { withFlowAdvanceLock } from "./advance-lock";
 // feeds the best-effort handler in endRun. It never alters existing Google
 // Sheets logic, imports, or flow behavior.
 import { handleAllSheetCompletion } from "@/lib/all-sheets/completion";
+// ADDITIVE Meta Conversions API completion hook: best-effort, fully
+// isolated in a try/catch. It never throws and never touches flow state,
+// so flow execution can never fail because of CAPI.
+import { onFlowCompleted } from "@/lib/meta-capi/triggers";
 import { reserveAssignmentsForTagTrigger } from "@/lib/automations/assignment";
 import { getValidAccessToken } from "@/lib/google/oauth";
 import {
@@ -770,6 +774,13 @@ async function endRun(
       await handleAllSheetCompletion(db, runId);
     } catch (err) {
       console.error("[all-sheets] completion hook failed:", err);
+    }
+    // ADDITIVE Meta Conversions API hook — fires only for engine-driven
+    // completions, best-effort and fully isolated (never throws).
+    try {
+      await onFlowCompleted(db, runId);
+    } catch (err) {
+      console.error("[meta-capi] completion hook failed:", err);
     }
   }
 }
