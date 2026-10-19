@@ -1,13 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import {
-  Inter,
-  Lato,
-  Montserrat,
-  Nunito_Sans,
-  Open_Sans,
-  Poppins,
-  Roboto,
-} from "next/font/google";
+import localFont from "next/font/local";
 import Script from "next/script";
 import "./globals.css";
 import { ThemeProvider } from "@/hooks/use-theme";
@@ -25,10 +17,15 @@ import {
   THEME_IDS,
 } from "@/lib/themes";
 
+// Fonts are vendored as WOFF2 files in ./fonts so the production build
+// never fetches from Google. `adjustFontFallback` (on by default) keeps
+// the metric-adjusted fallback the previous declarations produced.
+//
 // Default face — preloaded, since most sessions render with it.
-const inter = Inter({
+const inter = localFont({
+  src: "./fonts/inter-latin-wght-normal.woff2",
   variable: "--font-inter",
-  subsets: ["latin"],
+  weight: "100 900",
 });
 
 // Alternative faces the Appearance → Font family picker can switch to.
@@ -36,37 +33,48 @@ const inter = Inter({
 // fetched by the browser once a `html[data-font]` block actually
 // references its CSS variable. Helvetica / Arial / SF Pro are system
 // stacks and need no loading at all.
-const roboto = Roboto({
+const roboto = localFont({
+  src: "./fonts/roboto-latin-wght-normal.woff2",
   variable: "--font-roboto",
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "700"],
+  weight: "300 700",
   preload: false,
 });
-const openSans = Open_Sans({
+const openSans = localFont({
+  src: "./fonts/open-sans-latin-wght-normal.woff2",
   variable: "--font-open-sans",
-  subsets: ["latin"],
+  weight: "300 800",
   preload: false,
 });
-const poppins = Poppins({
+const poppins = localFont({
+  src: [
+    { path: "./fonts/poppins-latin-300-normal.woff2", weight: "300" },
+    { path: "./fonts/poppins-latin-400-normal.woff2", weight: "400" },
+    { path: "./fonts/poppins-latin-500-normal.woff2", weight: "500" },
+    { path: "./fonts/poppins-latin-600-normal.woff2", weight: "600" },
+    { path: "./fonts/poppins-latin-700-normal.woff2", weight: "700" },
+  ],
   variable: "--font-poppins",
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700"],
   preload: false,
 });
-const montserrat = Montserrat({
+const montserrat = localFont({
+  src: "./fonts/montserrat-latin-wght-normal.woff2",
   variable: "--font-montserrat",
-  subsets: ["latin"],
+  weight: "100 900",
   preload: false,
 });
-const lato = Lato({
+const lato = localFont({
+  src: [
+    { path: "./fonts/lato-latin-300-normal.woff2", weight: "300" },
+    { path: "./fonts/lato-latin-400-normal.woff2", weight: "400" },
+    { path: "./fonts/lato-latin-700-normal.woff2", weight: "700" },
+  ],
   variable: "--font-lato",
-  subsets: ["latin"],
-  weight: ["300", "400", "700"],
   preload: false,
 });
-const nunitoSans = Nunito_Sans({
+const nunitoSans = localFont({
+  src: "./fonts/nunito-sans-latin-wght-normal.woff2",
   variable: "--font-nunito-sans",
-  subsets: ["latin"],
+  weight: "200 1000",
   preload: false,
 });
 

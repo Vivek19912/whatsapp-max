@@ -63,10 +63,10 @@
  * Selected with `document.documentElement.dataset.font` (catalog in
  * src/lib/themes.ts, boot-script replay in layout.tsx). Each block
  * overrides `--font-sans`, which every `font-sans` utility resolves
- * against. The Google-hosted faces reference `next/font` variables
- * declared on <html> in layout.tsx; Helvetica / Arial / SF Pro are
- * pure system stacks (SF Pro renders only on Apple devices and
- * falls back to the platform UI font elsewhere).
+ * against. The web faces reference `next/font/local` variables declared
+ * on <html> in layout.tsx (WOFF2 files live in src/app/fonts);
+ * Helvetica / Arial / SF Pro are pure system stacks (SF Pro renders
+ * only on Apple devices and falls back to the platform UI font elsewhere).
  *
  * `:root` carries the Inter default so text renders correctly
  * before the boot script runs.

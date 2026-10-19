@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { DM_Sans } from 'next/font/google';
+import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { Inbox, Plus, Search, Table2 } from 'lucide-react';
@@ -80,9 +80,9 @@ import { formatColumnLabel } from '@/lib/flows/column-label';
  * the rest of the application keeps its own font — nothing global
  * changes.
  */
-const dmSans = DM_Sans({
-  subsets: ['latin'],
-  weight: ['400', '500', '700'],
+const dmSans = localFont({
+  src: '../../fonts/dm-sans-latin-wght-normal.woff2',
+  weight: '400 700',
 });
 import {
   headerTextColor,

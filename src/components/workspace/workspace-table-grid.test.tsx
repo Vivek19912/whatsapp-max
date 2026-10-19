@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-// next/font/google only resolves inside a Next.js build — stub the
+// next/font/local only resolves inside a Next.js build — stub the
 // loader so importing the page module works under vitest.
-vi.mock("next/font/google", () => ({
-  DM_Sans: () => ({ className: "font-dm-sans-stub" }),
+vi.mock("next/font/local", () => ({
+  default: () => ({ className: "font-dm-sans-stub" }),
 }));
 
 import { cellText } from "@/app/(dashboard)/workspace/page";

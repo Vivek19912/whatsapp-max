@@ -609,7 +609,10 @@ describe("taller headers, sticky intact, functionality intact", () => {
 
   it("workspace uses DM Sans locally with a larger type scale", () => {
     // Scoped to the Workspace page only — the app font system is untouched.
-    expect(page).toContain("DM_Sans");
+    // The face is vendored and loaded through next/font/local so builds
+    // never depend on Google Fonts.
+    expect(page).toContain("localFont");
+    expect(page).toContain("dm-sans-latin-wght-normal.woff2");
     expect(page).toContain("dmSans.className");
     expect(page).toContain("text-[30px]");
     // Prominent headers: 64px, 15–16px, weight 700.

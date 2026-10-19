@@ -110,15 +110,15 @@ export function isThemeId(value: unknown): value is ThemeId {
  * FONT — the typeface dimension, orthogonal to accent + mode.
  *
  * The CSS lives in `src/app/globals.css` under `html[data-font="..."]`
- * blocks, each overriding `--font-sans`. Google-hosted faces are loaded
- * via `next/font/google` in `src/app/layout.tsx` (with `preload: false`
- * for the non-default ones); Helvetica / Arial / SF Pro are system
- * stacks — SF Pro only renders on Apple devices and falls back to the
- * platform UI font elsewhere.
+ * blocks, each overriding `--font-sans`. Web faces are vendored as WOFF2
+ * files and loaded with `next/font/local` in `src/app/layout.tsx` (with
+ * `preload: false` for the non-default ones); Helvetica / Arial / SF Pro
+ * are system stacks — SF Pro only renders on Apple devices and falls
+ * back to the platform UI font elsewhere.
  *
- * Adding a font is a three-step change: load it in layout.tsx (if
- * Google-hosted), add its `html[data-font="<id>"]` block in
- * globals.css, and add an entry below.
+ * Adding a font is a three-step change: add its WOFF2 file under
+ * src/app/fonts and load it in layout.tsx, add its
+ * `html[data-font="<id>"]` block in globals.css, and add an entry below.
  */
 
 export const FONT_IDS = [
