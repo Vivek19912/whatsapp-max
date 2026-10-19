@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   }>,
   listError: null as Error | null,
   listCalls: [] as Array<{ formId: string; after: string | null }>,
+  failTokenFor: new Set<string>(),
 }));
 
 vi.mock("./graph-client", () => ({
@@ -38,7 +39,10 @@ vi.mock("./graph-client", () => ({
 }));
 
 vi.mock("./store", () => ({
-  getPageToken: async () => "page-token",
+  getPageToken: async (_db: unknown, accountId: string) => {
+    if (h.failTokenFor.has(accountId)) throw new Error("page token missing");
+    return "page-token";
+  },
 }));
 
 vi.mock("./process-lead", () => ({
@@ -58,7 +62,12 @@ vi.mock("./process-lead", () => ({
   processSubmissionById: async () => ({ outcome: "processed" }),
 }));
 
-import { importFormLeads, pollFormLeads, type SyncFormRow } from "./sync";
+import {
+  importFormLeads,
+  pollFormLeads,
+  runLeadPolls,
+  type SyncFormRow,
+} from "./sync";
 
 function makeDb(initial: Record<string, Row[]>) {
   const data: Record<string, Row[]> = {};
@@ -128,6 +137,7 @@ beforeEach(() => {
   h.pages = [];
   h.listError = null;
   h.listCalls = [];
+  h.failTokenFor = new Set();
 });
 
 describe("importFormLeads", () => {
@@ -165,6 +175,7 @@ describe("importFormLeads", () => {
       import_status: "done",
       import_cursor: null,
       imported_count: 3,
+      last_lead_at: "2026-01-01T00:00:00.000Z",
       last_error: null,
     });
   });
@@ -230,5 +241,187 @@ describe("pollFormLeads", () => {
     );
     expect(data.meta_lead_forms[0].last_polled_at).toBeTruthy();
     expect(data.meta_lead_pages[0].last_polled_at).toBeTruthy();
+  });
+
+  it("does not advance the watermark when Meta fails", async () => {
+    h.listError = new Error("temporary graph outage");
+    const { db, data } = makeDb({
+      meta_lead_forms: [
+        {
+          ...FORM,
+          import_status: "done",
+          last_lead_at: "2026-02-02T10:00:00Z",
+        },
+      ],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const result = await pollFormLeads(db, CONFIG, {
+      ...FORM,
+      import_status: "done",
+      last_lead_at: "2026-02-02T10:00:00Z",
+    });
+
+    expect(result.error).toContain("temporary graph outage");
+    expect(data.meta_lead_forms[0].last_lead_at).toBe("2026-02-02T10:00:00Z");
+    expect(data.meta_lead_forms[0].last_error).toContain(
+      "temporary graph outage",
+    );
+  });
+
+  it("walks every page of a burst larger than one page", async () => {
+    h.pages = [
+      {
+        leads: [{ id: "B1", created_time: "2026-02-02T10:00:00Z" }],
+        nextCursor: "c1",
+      },
+      {
+        leads: [{ id: "B2", created_time: "2026-02-02T10:00:01Z" }],
+        nextCursor: null,
+      },
+    ];
+    const { db } = makeDb({
+      meta_lead_forms: [{ ...FORM, import_status: "done" }],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const result = await pollFormLeads(db, CONFIG, {
+      ...FORM,
+      import_status: "done",
+    });
+
+    expect(result.received).toBe(2);
+    expect(h.listCalls.map((call) => call.after)).toEqual([null, "c1"]);
+  });
+
+  it("does not duplicate a lead already stored by the webhook", async () => {
+    h.seen.add("W1");
+    h.pages = [
+      {
+        leads: [{ id: "W1", created_time: "2026-02-02T10:00:00Z" }],
+        nextCursor: null,
+      },
+    ];
+    const { db } = makeDb({
+      meta_lead_forms: [{ ...FORM, import_status: "done" }],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const result = await pollFormLeads(db, CONFIG, {
+      ...FORM,
+      import_status: "done",
+    });
+
+    expect(result).toMatchObject({ received: 0, processed: 0, error: null });
+    expect(h.seen.size).toBe(1);
+  });
+});
+
+describe("runLeadPolls", () => {
+  it("picks up a new lead automatically, without a manual Import", async () => {
+    h.pages = [
+      {
+        leads: [{ id: "AUTO-1", created_time: "2026-02-03T10:00:00Z" }],
+        nextCursor: null,
+      },
+    ];
+    const { db, data } = makeDb({
+      meta_lead_forms: [
+        {
+          ...FORM,
+          import_status: "done",
+          last_lead_at: "2026-02-02T10:00:00Z",
+        },
+      ],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const result = await runLeadPolls(db, CONFIG);
+
+    expect(result).toMatchObject({
+      forms: 1,
+      received: 1,
+      processed: 1,
+      errors: 0,
+    });
+    expect(h.seen.has("AUTO-1")).toBe(true);
+    expect(data.meta_lead_forms[0].last_lead_at).toBe(
+      "2026-02-03T10:00:00.000Z",
+    );
+  });
+
+  it("does not poll a disabled form", async () => {
+    const { db } = makeDb({
+      meta_lead_forms: [
+        { ...FORM, import_status: "done", enabled: false },
+      ],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const result = await runLeadPolls(db, CONFIG);
+
+    expect(result.forms).toBe(0);
+    expect(h.listCalls).toEqual([]);
+  });
+
+  it("keeps polling other tenants when one form cannot get a token", async () => {
+    h.failTokenFor.add("acct-1");
+    h.pages = [
+      {
+        leads: [{ id: "TENANT-2", created_time: "2026-02-03T10:00:00Z" }],
+        nextCursor: null,
+      },
+    ];
+    const { db, data } = makeDb({
+      meta_lead_forms: [
+        { ...FORM, id: "row-1", import_status: "done" },
+        {
+          ...FORM,
+          id: "row-2",
+          account_id: "acct-2",
+          page_id: "P2",
+          form_id: "F2",
+          import_status: "done",
+        },
+      ],
+      meta_lead_pages: [
+        { account_id: "acct-1", page_id: "P1" },
+        { account_id: "acct-2", page_id: "P2" },
+      ],
+    });
+
+    const result = await runLeadPolls(db, CONFIG);
+
+    expect(result.forms).toBe(2);
+    expect(result.errors).toBe(1);
+    expect(result.received).toBe(1);
+    expect(h.seen.has("TENANT-2")).toBe(true);
+    expect(
+      data.meta_lead_forms.find((form) => form.id === "row-1")?.last_error,
+    ).toContain("page token missing");
+  });
+
+  it("is idempotent across repeated sweeps", async () => {
+    h.pages = [
+      {
+        leads: [{ id: "ONCE-1", created_time: "2026-02-03T10:00:00Z" }],
+        nextCursor: null,
+      },
+      {
+        leads: [{ id: "ONCE-1", created_time: "2026-02-03T10:00:00Z" }],
+        nextCursor: null,
+      },
+    ];
+    const { db } = makeDb({
+      meta_lead_forms: [{ ...FORM, import_status: "done" }],
+      meta_lead_pages: [{ account_id: "acct-1", page_id: "P1" }],
+    });
+
+    const first = await runLeadPolls(db, CONFIG);
+    const second = await runLeadPolls(db, CONFIG);
+
+    expect(first.received).toBe(1);
+    expect(second.received).toBe(0);
+    expect(h.seen.size).toBe(1);
   });
 });

@@ -3,6 +3,7 @@
     { "path": "/api/flows/cron", "schedule": "* * * * *" },
     { "path": "/api/followups/cron", "schedule": "* * * * *" },
     { "path": "/api/automations/cron", "schedule": "*/5 * * * *" },
-    { "path": "/api/all-sheets/cron", "schedule": "* * * * *" }
+    { "path": "/api/all-sheets/cron", "schedule": "* * * * *" },
+    { "path": "/api/integrations/meta-lead-ads/cron", "schedule": "*/5 * * * *" }
   ]
 }

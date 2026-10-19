@@ -41,7 +41,7 @@ describe("EC2 reminder scheduler trigger", () => {
     // so the secret resolves at cron runtime, not at install time.)
     expect(SCRIPT).toContain("AUTOMATION_CRON_SECRET");
     const headerUses = SCRIPT.match(/-H \\"x-cron-secret: \\\$S\\"/g) ?? [];
-    expect(headerUses.length).toBeGreaterThanOrEqual(4);
+    expect(headerUses.length).toBeGreaterThanOrEqual(5);
     expect(SCRIPT).not.toContain("x-cron-secret: \"\"");
   });
 
@@ -54,13 +54,25 @@ describe("EC2 reminder scheduler trigger", () => {
   it("introduces no second scheduler implementation", () => {
     expect(SCRIPT).not.toMatch(/setInterval|setTimeout/);
     expect(SCRIPT).not.toMatch(/while\s+true|for\s+\(\(\s*;\s*;\s*\)\)/);
-    // Only the four known application cron endpoints are pinged.
-    const endpoints = SCRIPT.match(/\/api\/[a-z-]+\/cron/g) ?? [];
+    // Only the known application cron endpoints are pinged.
+    const endpoints = SCRIPT.match(/\/api\/[a-z0-9/-]+\/cron/g) ?? [];
     expect([...new Set(endpoints)].sort()).toEqual([
       "/api/all-sheets/cron",
       "/api/automations/cron",
       "/api/flows/cron",
       "/api/followups/cron",
+      "/api/integrations/meta-lead-ads/cron",
     ]);
+  });
+
+  it("schedules Meta Lead Ads polling on its own five-minute line", () => {
+    expect(SCRIPT).toContain(
+      'LEAD_ADS_CRON_URL="${PUBLIC_URL%/}/api/integrations/meta-lead-ads/cron"',
+    );
+    expect(SCRIPT).toMatch(/LEAD_ADS_CRON_LINE="\*\/5 \* \* \* \*/);
+    expect(SCRIPT).toContain("wacrm-meta-lead-ads-cron");
+    // It must be a separate crontab entry, not chained after the
+    // per-minute drains.
+    expect(SCRIPT).not.toMatch(/ALL_SHEETS_CRON_URL.*LEAD_ADS_CRON_URL/);
   });
 });

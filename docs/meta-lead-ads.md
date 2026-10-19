@@ -99,6 +99,42 @@ New leads arrive through either path:
    when Meta refuses the subscription for any other reason.
 
 Both paths feed the **same** idempotent pipeline, so running both is safe.
+Polling is the fallback that must not depend on the webhook: if
+`meta_lead_pages.webhook_verified` is false, a lead only appears
+automatically when the cron endpoint below is actually scheduled.
+
+### Scheduling the poll (required)
+
+Nothing polls by itself. Pick **one** scheduler for the deployment:
+
+- **Self-hosted EC2/VPS (production `whatsappmax.in`):** after deploying,
+  run the installer with the real public URL (the script's default URL is
+  different):
+
+  ```bash
+  bash scripts/setup-automation-cron.sh /path/to/app https://whatsappmax.in
+  crontab -l | grep meta-lead-ads-cron
+  ```
+
+  It installs a separate `*/5 * * * *` line that calls
+  `GET /api/integrations/meta-lead-ads/cron` with `x-cron-secret`. A
+  separate line keeps a slow/failing Graph poll from delaying the
+  per-minute automations/reminders/flows/sheets drains.
+
+- **Vercel:** `vercel.json` lists the same path on a `*/5` schedule.
+  Vercel sends `Authorization: Bearer $CRON_SECRET`; the route accepts it.
+
+Do not run both schedulers against the same deployment. Verify manually:
+
+```bash
+curl -fsS -H "x-cron-secret: $AUTOMATION_CRON_SECRET" \
+  https://whatsappmax.in/api/integrations/meta-lead-ads/cron
+```
+
+`sync.forms` is the number of enabled forms swept; `sync.received` counts
+new rows. An empty `forms` means no form is enabled (or no account has
+connected a Page). A `503` means the integration is not configured on
+that server.
 
 ## Reusing Conversions API credentials
 
@@ -256,8 +292,11 @@ No OAuth redirect URI is required.
     account's due failures.
   - `GET /api/integrations/meta-lead-ads/cron` — protected by
     `AUTOMATION_CRON_SECRET` / `CRON_SECRET` (same as the other crons).
-    Runs retries, resumes imports and polls enabled forms. Point a
-    scheduler at it, e.g. every 5 minutes.
+    Runs retries, resumes imports and polls enabled forms. A retry-sweep
+    failure is reported as `retryError` but does not stop the polling
+    pass; per-form failures are isolated and counted in `sync.errors`.
+    See [Scheduling the poll](#scheduling-the-poll-required) — an
+    unscheduled endpoint means polling never runs.
 - **Reauth.** Only a definitive token rejection (Graph `#190`, `#102` or
   `#463`, or a bare 401) marks the connection `needs_reauth`. Errors that
   Meta also labels `OAuthException` — `#100` invalid field/parameter, `#200`
@@ -298,7 +337,9 @@ Deployment / platform (do once):
       permissions, then **switch the app to Live mode** — required before
       arbitrary customers can use it.
 - [ ] Add a privacy policy link and a data-deletion route (Meta requirement).
-- [ ] Schedule the cron endpoint.
+- [ ] Schedule the cron endpoint (`scripts/setup-automation-cron.sh` on
+      EC2/VPS with the real public URL, or `vercel.json` on Vercel) and
+      confirm `crontab -l | grep meta-lead-ads-cron`.
 
 First customer:
 

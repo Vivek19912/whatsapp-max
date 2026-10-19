@@ -14,6 +14,8 @@ import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { runDueRetries } from "@/lib/meta-lead-ads/process-lead";
 import { runLeadPolls } from "@/lib/meta-lead-ads/sync";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   const expectedSecrets = [
     process.env.CRON_SECRET,
@@ -49,12 +51,29 @@ export async function GET(request: Request) {
 
   try {
     const db = supabaseAdmin();
-    const retries = await runDueRetries(db, config, 50);
+
+    // A failure sweeping old failed submissions must not stop new-lead
+    // polling: the two paths are independent, and one broken retry
+    // row/tenant must never stall every form. Polling itself isolates
+    // per-form failures inside runLeadPolls.
+    let retries = { attempted: 0, processed: 0, failed: 0, skipped: 0 };
+    let retryError: string | null = null;
+    try {
+      retries = await runDueRetries(db, config, 50);
+    } catch (error) {
+      retryError = error instanceof Error ? error.message : String(error);
+      console.error("[meta-lead-ads-cron] retry sweep failed:", retryError);
+    }
+
     const sync = await runLeadPolls(db, config, 10);
-    return NextResponse.json({ ...retries, sync });
+    return NextResponse.json({
+      ...retries,
+      sync,
+      ...(retryError ? { retryError } : {}),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error("[meta-lead-ads-cron] retry sweep failed:", message);
+    console.error("[meta-lead-ads-cron] sync sweep failed:", message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -10,7 +10,8 @@
 #   2. restarts the app so it picks the secret up
 #   3. installs a per-minute user cron that drains due runs
 #      (automations + personal reminders + flows + all-sheets)
-#   4. verifies the endpoint answers
+#   4. installs a per-five-minute Meta Lead Ads poll (retries + new leads)
+#   5. verifies the endpoints answer
 #
 # Idempotent — safe to run again after rotating the secret or redeploying.
 #
@@ -19,6 +20,10 @@
 # Defaults:
 #   APP_DIR   = the repo this script lives in
 #   PUBLIC_URL= https://interscalechat.co.in
+#
+# Pass the deployment's real public URL when it is not the default, e.g.
+#   bash scripts/setup-automation-cron.sh /var/www/wacrm https://whatsappmax.in
+# Otherwise the cron jobs will ping the wrong host and do nothing.
 set -euo pipefail
 
 APP_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -28,13 +33,16 @@ AUTOMATION_CRON_URL="${PUBLIC_URL%/}/api/automations/cron"
 FOLLOWUPS_CRON_URL="${PUBLIC_URL%/}/api/followups/cron"
 FLOW_CRON_URL="${PUBLIC_URL%/}/api/flows/cron"
 ALL_SHEETS_CRON_URL="${PUBLIC_URL%/}/api/all-sheets/cron"
+LEAD_ADS_CRON_URL="${PUBLIC_URL%/}/api/integrations/meta-lead-ads/cron"
 MARKER="# wacrm-automation-cron"
+LEAD_ADS_MARKER="# wacrm-meta-lead-ads-cron"
 
 echo "▸ App dir     : $APP_DIR"
 echo "▸ Cron targets: $AUTOMATION_CRON_URL"
 echo "               $FOLLOWUPS_CRON_URL"
 echo "               $FLOW_CRON_URL"
 echo "               $ALL_SHEETS_CRON_URL"
+echo "               $LEAD_ADS_CRON_URL (every 5 minutes)"
 
 # 1) Ensure the secret exists ------------------------------------------------
 if [ ! -f "$ENV_FILE" ]; then
@@ -81,13 +89,18 @@ fi
 # automations-cron && flows-cron sequence is otherwise unchanged.
 CRON_LINE="* * * * * S=\$(grep -E '^AUTOMATION_CRON_SECRET=' \"$ENV_FILE\" | head -1 | cut -d= -f2-); [ -n \"\$S\" ] && curl -fsS -H \"x-cron-secret: \$S\" \"$AUTOMATION_CRON_URL\" >/dev/null 2>&1 && curl -fsS -H \"x-cron-secret: \$S\" \"$FOLLOWUPS_CRON_URL\" >/dev/null 2>&1 && curl -fsS -H \"x-cron-secret: \$S\" \"$FLOW_CRON_URL\" >/dev/null 2>&1 && curl -fsS -H \"x-cron-secret: \$S\" \"$ALL_SHEETS_CRON_URL\" >/dev/null 2>&1 $MARKER"
 
-# Replace any prior line we installed, keep everything else. Both `crontab -l`
+# Meta Lead Ads has its own line so a slow/failing Graph poll can never
+# delay the per-minute drains. Without this line the webhook fallback
+# (polling) never runs and new leads only appear after a manual Import.
+LEAD_ADS_CRON_LINE="*/5 * * * * S=\$(grep -E '^AUTOMATION_CRON_SECRET=' \"$ENV_FILE\" | head -1 | cut -d= -f2-); [ -n \"\$S\" ] && curl -fsS -m 60 -H \"x-cron-secret: \$S\" \"$LEAD_ADS_CRON_URL\" >/dev/null 2>&1 $LEAD_ADS_MARKER"
+
+# Replace any prior lines we installed, keep everything else. Both `crontab -l`
 # (no crontab yet) and `grep -v` (empty input) legitimately exit non-zero, so
 # each gets `|| true` — otherwise `set -e` kills the script silently here.
 EXISTING="$(crontab -l 2>/dev/null || true)"
-KEPT="$(printf '%s\n' "$EXISTING" | grep -vF "$MARKER" || true)"
-printf '%s\n%s\n' "$KEPT" "$CRON_LINE" | grep -v '^[[:space:]]*$' | crontab -
-echo "▸ Cron        : installed (every minute)"
+KEPT="$(printf '%s\n' "$EXISTING" | grep -vF "$MARKER" | grep -vF "$LEAD_ADS_MARKER" || true)"
+printf '%s\n%s\n%s\n' "$KEPT" "$CRON_LINE" "$LEAD_ADS_CRON_LINE" | grep -v '^[[:space:]]*$' | crontab -
+echo "▸ Cron        : installed (drains every minute, Meta Lead Ads every 5 minutes)"
 
 # 4) Verify ------------------------------------------------------------------
 # Retry, because the app is usually still booting right after the restart.
@@ -119,6 +132,20 @@ if [ "$FLOW_CODE" != "200" ]; then
 fi
 echo "✓ Flow sweep working — endpoint responded: $FLOW_RESP"
 
+# Meta Lead Ads is optional: a deployment without META_LEAD_ADS_* config
+# correctly answers 503. The schedule is still installed and starts
+# polling as soon as the integration is configured. A 401 is fatal
+# because it means the running app and .env.local disagree.
+LEAD_OUT="$(curl -sS -m 60 -w $'\n%{http_code}' -H "x-cron-secret: $SECRET" "$LEAD_ADS_CRON_URL" 2>/dev/null || true)"
+LEAD_CODE="${LEAD_OUT##*$'\n'}"
+LEAD_RESP="${LEAD_OUT%$'\n'*}"
+case "$LEAD_CODE" in
+  200) echo "✓ Meta Lead Ads poll working — endpoint responded: $LEAD_RESP" ;;
+  503) echo "▸ Meta Lead Ads : scheduled, but not configured on this server yet (HTTP 503). Polling starts once META_LEAD_ADS_* is set." ;;
+  401) echo "✗ Secret mismatch (HTTP 401) on the Meta Lead Ads cron. Restart the app and re-run." >&2; exit 1 ;;
+  *) echo "⚠ Meta Lead Ads cron scheduled, but verification returned HTTP $LEAD_CODE: $LEAD_RESP (will retry every 5 minutes)" >&2 ;;
+esac
+
 echo
-echo "Done. Wait-step automations, personal reminders, incomplete-flow sheets, and All Sheets lifecycle now update every minute."
-echo "Watch it run:  crontab -l | grep automation-cron"
+echo "Done. Wait-step automations, personal reminders, incomplete-flow sheets, and All Sheets lifecycle now update every minute; Meta Lead Ads polling runs every 5 minutes."
+echo "Watch it run:  crontab -l | grep -E 'automation-cron|meta-lead-ads-cron'"

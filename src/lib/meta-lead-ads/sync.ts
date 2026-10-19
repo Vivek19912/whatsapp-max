@@ -151,6 +151,7 @@ export async function importFormLeads(
   let imported = 0;
   let processed = 0;
   let failed = 0;
+  let newest = args.form.last_lead_at;
 
   if (args.form.enabled !== true) {
     return { imported, processed, failed, hasMore: false, error: null };
@@ -169,6 +170,7 @@ export async function importFormLeads(
       });
 
       for (const lead of result.leads) {
+        newest = newestIso(newest, lead.created_time);
         const outcome = await ingestLead(db, config, {
           pageId: args.form.page_id,
           formId: args.form.form_id,
@@ -186,6 +188,7 @@ export async function importFormLeads(
           import_cursor: cursor,
           import_status: cursor ? "importing" : "done",
           imported_count: args.form.imported_count + imported,
+          last_lead_at: newest,
           last_polled_at: new Date().toISOString(),
           last_error: null,
           updated_at: new Date().toISOString(),
@@ -240,7 +243,8 @@ export async function pollFormLeads(
     // Meta returns leads newest-first. Walk pages until a page adds no
     // NEW leads (we have caught up to what we already stored) or the
     // bounded page budget runs out, so a burst > POLL_PAGE_SIZE between
-    // sweeps cannot be missed.
+    // sweeps cannot be missed. Duplicates are a no-op, so this never
+    // re-inserts history; it stops at the first fully-known page.
     for (let page = 0; page < POLL_MAX_PAGES; page += 1) {
       const result = await listFormLeads(config, pageToken, form.form_id, {
         limit: POLL_PAGE_SIZE,
