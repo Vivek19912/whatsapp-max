@@ -459,12 +459,19 @@ export function findFlowNameAnswerKey(
   return col?.key ?? null;
 }
 
+/** Display fallback for a run that has no contact row (see below). */
+export interface FlowTableIdentityFallback {
+  name?: string | null;
+  phone?: string | null;
+}
+
 /** Shape one RPC row into a table row (identity = flow_run_id). */
 export function toFlowTableRow(
   rpc: FlowTableRpcRow,
   completionNodeId: string | null,
   nameKey: string | null,
   answerKeys: string[],
+  identityFallback?: FlowTableIdentityFallback | null,
 ): FlowTableRow {
   const status = classifyFlowRun({
     status: rpc.status,
@@ -485,8 +492,14 @@ export function toFlowTableRow(
     // asked for one (that value lives in `answers` under its own
     // question key and renders in its own "Name" column). No
     // inference, no merging: the two values stay separate.
-    name: rpc.contact_name,
-    phone: rpc.contact_phone,
+    //
+    // Exception: a Meta Instant Form lead with no contact row (its
+    // phone was absent/unusable) still HAS the name/phone Meta
+    // supplied. Callers pass that normalized pair as a display
+    // fallback; it is used ONLY when the contact field is empty and
+    // is never written back. Contact data always wins.
+    name: rpc.contact_name ?? identityFallback?.name ?? null,
+    phone: rpc.contact_phone ?? identityFallback?.phone ?? null,
     startedAt: rpc.started_at,
     lastAdvancedAt: rpc.last_advanced_at,
     completedAt: completedAtFor({

@@ -37,7 +37,7 @@ const h = vi.hoisted(() => ({
       created_at: "2026-01-01T00:00:02.000Z",
     },
     { node_key: "end", node_type: "end", config: {} },
-  ],
+  ] as Array<Record<string, unknown>>,
   rpc: {
     total: 2,
     rows: [
@@ -70,7 +70,7 @@ const h = vi.hoisted(() => ({
         vars: {},
       },
     ],
-  },
+  } as Record<string, unknown>,
   rpcArgs: null as Record<string, unknown> | null,
   // Agent flow-answer overrides (workspace_flow_overrides rows).
   overrides: [] as Array<Record<string, unknown>>,
@@ -840,5 +840,149 @@ describe("GET table with latest-recording enrichment", () => {
     expect(json.latestRecordingByContact["c-1"].uploader_name).toBe(
       "Unknown"
     );
+  });
+});
+
+describe("GET table � Meta Instant Form identity mapping", () => {
+  const metaRows = () => [
+    {
+      run_id: "run-test-lead",
+      contact_id: null,
+      contact_name: null,
+      contact_phone: null,
+      conversation_id: null,
+      status: "completed",
+      started_at: "2026-10-19T20:10:33.000Z",
+      last_advanced_at: null,
+      ended_at: "2026-10-19T20:10:33.000Z",
+      reached_at: null,
+      is_completed: true,
+      vars: {
+        full_name: "<test lead: dummy data for full_name>",
+        phone_number: "<test lead: dummy data for phone_number>",
+        email: "test@meta.com",
+        meta_lead_source: "Other",
+      },
+    },
+    {
+      run_id: "run-real-lead",
+      contact_id: "c-9",
+      contact_name: "Rahul Sharma",
+      contact_phone: "+919999999999",
+      conversation_id: null,
+      status: "completed",
+      started_at: "2026-10-19T21:00:00.000Z",
+      last_advanced_at: null,
+      ended_at: "2026-10-19T21:00:00.000Z",
+      reached_at: null,
+      is_completed: true,
+      vars: {
+        full_name: "Rahul Kumar",
+        phone_number: "+919888888888",
+        email: "rahul@example.com",
+        meta_lead_source: "Facebook",
+      },
+    },
+  ];
+
+  it("shows Meta's name/phone when no contact exists; contact data still wins", async () => {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    try {
+      h.nodes = [
+        {
+          node_key: "meta_source_node",
+          node_type: "collect_input",
+          config: {
+            var_key: "meta_lead_source",
+            prompt_text: "Source",
+            next_node_key: "q_full_name",
+          },
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          node_key: "q_full_name",
+          node_type: "collect_input",
+          config: {
+            var_key: "full_name",
+            prompt_text: "Full name",
+            next_node_key: "q_phone",
+          },
+          created_at: "2026-01-01T00:00:01.000Z",
+        },
+        {
+          node_key: "q_phone",
+          node_type: "collect_input",
+          config: {
+            var_key: "phone_number",
+            prompt_text: "Phone number",
+            next_node_key: "q_email",
+          },
+          created_at: "2026-01-01T00:00:02.000Z",
+        },
+        {
+          node_key: "q_email",
+          node_type: "collect_input",
+          config: { var_key: "email", prompt_text: "Email" },
+          created_at: "2026-01-01T00:00:03.000Z",
+        },
+      ];
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads � Travel Agency Customers",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+      };
+      h.rpc = { total: 2, rows: metaRows() };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{
+          runId: string;
+          name: string | null;
+          phone: string | null;
+          answers: Record<string, string | null>;
+        }>;
+      };
+      const testLead = json.rows.find((r) => r.runId === "run-test-lead");
+      expect(testLead?.name).toBe("<test lead: dummy data for full_name>");
+      expect(testLead?.phone).toBe("<test lead: dummy data for phone_number>");
+      expect(testLead?.answers.email).toBe("test@meta.com");
+      expect(testLead?.answers.meta_lead_source).toBe("Other");
+
+      const realLead = json.rows.find((r) => r.runId === "run-real-lead");
+      expect(realLead?.name).toBe("Rahul Sharma");
+      expect(realLead?.phone).toBe("+919999999999");
+      expect(realLead?.answers.meta_lead_source).toBe("Facebook");
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+    }
+  });
+
+  it("never applies the Meta fallback to non-Meta flows", async () => {
+    const previousRpc = h.rpc;
+    try {
+      h.rpc = { total: 1, rows: [metaRows()[0]] };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-1/table"),
+        { params: Promise.resolve({ id: "flow-1" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{ name: string | null; phone: string | null }>;
+      };
+      expect(json.rows[0].name).toBeNull();
+      expect(json.rows[0].phone).toBeNull();
+    } finally {
+      h.rpc = previousRpc;
+    }
   });
 });

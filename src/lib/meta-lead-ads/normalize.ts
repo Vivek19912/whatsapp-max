@@ -57,6 +57,44 @@ function pick(answers: Record<string, string>, keys: string[]): string | null {
   return null;
 }
 
+export interface StandardContact {
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+}
+
+/**
+ * Resolve the standard contact fields from an already-normalized
+ * answer map (question key → value). Missing keys stay null — a
+ * value is NEVER invented. Shared by ingestion (from `field_data`)
+ * and the Workspace read path (from `flow_runs.vars`), so both
+ * resolve the same standard fields from the same keys.
+ */
+export function standardContactFromAnswers(
+  answers: Record<string, string | null | undefined> | null | undefined,
+): StandardContact {
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries(answers ?? {})) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed !== "") values[key] = trimmed;
+  }
+
+  let name = pick(values, FULL_NAME_KEYS);
+  if (!name) {
+    const first = pick(values, FIRST_NAME_KEYS);
+    const last = pick(values, LAST_NAME_KEYS);
+    const combined = [first, last].filter(Boolean).join(" ").trim();
+    name = combined !== "" ? combined : null;
+  }
+
+  return {
+    name,
+    phone: pick(values, PHONE_KEYS),
+    email: pick(values, EMAIL_KEYS),
+  };
+}
+
 /**
  * Normalize Meta `field_data` into a stable answers map plus the
  * best-effort standard contact fields. Keys that collide after
@@ -75,21 +113,9 @@ export function normalizeLeadFieldData(
     if (!(key in answers)) answers[key] = value;
   });
 
-  let name = pick(answers, FULL_NAME_KEYS);
-  if (!name) {
-    const first = pick(answers, FIRST_NAME_KEYS);
-    const last = pick(answers, LAST_NAME_KEYS);
-    const combined = [first, last].filter(Boolean).join(" ").trim();
-    name = combined !== "" ? combined : null;
-  }
-
   return {
     answers,
-    standard: {
-      name,
-      phone: pick(answers, PHONE_KEYS),
-      email: pick(answers, EMAIL_KEYS),
-    },
+    standard: standardContactFromAnswers(answers),
   };
 }
 
@@ -98,9 +124,21 @@ export function sourceFromPlatform(
   platform: string | null | undefined,
 ): "facebook" | "instagram" | "unknown" {
   const value = (platform ?? "").trim().toLowerCase();
-  if (value === "facebook") return "facebook";
-  if (value === "instagram") return "instagram";
+  // Meta returns the short codes `fb` / `ig` on the Lead node; accept
+  // the long names too (docs/exports and older payloads use them).
+  if (value === "fb" || value === "facebook") return "facebook";
+  if (value === "ig" || value === "instagram") return "instagram";
   return "unknown";
+}
+
+/** Display label for the Workspace Source column. Unknown stays
+ *  explicitly unattributed — never guessed as Facebook/Instagram. */
+export function sourceLabel(
+  source: "facebook" | "instagram" | "unknown",
+): string {
+  if (source === "facebook") return "Facebook";
+  if (source === "instagram") return "Instagram";
+  return "Other";
 }
 
 /**

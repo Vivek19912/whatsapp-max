@@ -66,6 +66,19 @@ flow_runs (virtual flow) + optional contact (only when a phone exists)
   number (`contacts.phone` is NOT NULL). Dedupe reuses the same helpers as
   the rest of the CRM. **No WhatsApp message or conversation is ever
   created** on lead arrival.
+- **Standard fields.** `full_name` (or `first_name`+`last_name`), `phone_number`
+  and `email` are read from the same keys Meta returns in `field_data`; they
+  are also projected onto the Workspace system Name/Phone columns. When the
+  phone is absent or unusable (for example a Meta Testing Tool placeholder)
+  no contact exists, so the table shows the name/phone Meta supplied as a
+  read-only fallback; contact data always wins, and absent fields stay blank.
+  The raw answers remain visible in their own question columns.
+- **Source attribution.** Meta reports the Lead node's `platform` as `fb` or
+  `ig` (long names are accepted too) and it becomes **Facebook** or
+  **Instagram**. When Meta omits `platform` — Meta Testing Tool leads have no
+  platform and `is_organic: true` — the Source stays **Other** rather than
+  guessing a channel. Instagram is additionally inferred only from an
+  explicit Instagram question key.
 
 ## Historical import + continuous sync
 

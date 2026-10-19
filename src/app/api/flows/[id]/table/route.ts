@@ -26,6 +26,7 @@ import {
 } from '@/lib/flows/flow-tables'
 import { latestByContact } from '@/lib/recordings/recordings'
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders'
+import { standardContactFromAnswers } from '@/lib/meta-lead-ads/normalize'
 
 /**
  * GET /api/flows/[id]/table?view=all|completed|incomplete&search=&page=&pageSize=&dateFrom=&dateTo=&assignee=
@@ -328,7 +329,26 @@ export async function GET(
   )
   const rpcRows = ((payload as { rows?: unknown }).rows ?? []) as FlowTableRpcRow[]
   const total = Number((payload as { total?: unknown }).total ?? 0) || 0
-  const rows = rpcRows.map((r) => toFlowTableRow(r, completionNodeId, nameKey, answerKeys));
+  // Meta Instant Form leads without a contact row (no usable phone)
+  // still carry the name/phone Meta supplied. Surface those in the
+  // system Name/Phone columns as a read-only fallback — contact data
+  // wins whenever it exists, and nothing is invented for absent
+  // fields. Other flow kinds are untouched.
+  const isMetaLeadFlow = (flow as { kind?: string | null }).kind === 'meta_lead_ads'
+  const rows = rpcRows.map((r) => {
+    const identityFallback = isMetaLeadFlow
+      ? standardContactFromAnswers(
+          (r.vars ?? {}) as Record<string, string | null | undefined>,
+        )
+      : null
+    return toFlowTableRow(
+      r,
+      completionNodeId,
+      nameKey,
+      answerKeys,
+      identityFallback,
+    )
+  });
 
   // Contact source URLs for this page: one batched contacts lookup
   // (flow_run.contact_id → contacts.source_url), never N+1.

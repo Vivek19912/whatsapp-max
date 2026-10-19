@@ -32,7 +32,12 @@ import { isValidE164, sanitizePhoneForMeta } from "@/lib/whatsapp/phone-utils";
 import type { MetaLeadAdsConfig } from "./config";
 import { isAuthGraphError, MetaLeadAdsError } from "./errors";
 import { getLead } from "./graph-client";
-import { normalizeLeadFieldData, sourceFromPlatform, inferSourceFromQuestions } from "./normalize";
+import {
+  inferSourceFromQuestions,
+  normalizeLeadFieldData,
+  sourceFromPlatform,
+  sourceLabel,
+} from "./normalize";
 import { getPageToken, markNeedsReauth } from "./store";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
 
@@ -45,12 +50,6 @@ const RETRY_CAP_MS = 30 * 60_000;
 export function nextRetryDelayMs(attempt: number): number {
   const step = Math.max(0, attempt - 1);
   return Math.min(RETRY_BASE_MS * 2 ** step, RETRY_CAP_MS);
-}
-
-function sourceLabel(source: "facebook" | "instagram" | "unknown"): string {
-  if (source === "facebook") return "Facebook";
-  if (source === "instagram") return "Instagram";
-  return "Other";
 }
 
 function isoOrNow(value: string | null | undefined): string {

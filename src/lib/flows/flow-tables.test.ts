@@ -179,6 +179,58 @@ describe("flow table rows", () => {
     expect(row.name).toBe("WA User");
     expect(row.answers).toEqual({ Name: "Akash" });
   });
+
+  it("uses the supplied identity fallback only when the contact is missing", () => {
+    const noContact = toFlowTableRow(
+      rpcRow({
+        contact_id: null,
+        contact_name: null,
+        contact_phone: null,
+        vars: {
+          full_name: "<test lead: dummy data for full_name>",
+          phone_number: "<test lead: dummy data for phone_number>",
+        },
+      }),
+      null,
+      null,
+      ["full_name", "phone_number"],
+      {
+        name: "<test lead: dummy data for full_name>",
+        phone: "<test lead: dummy data for phone_number>",
+      },
+    );
+    expect(noContact.name).toBe("<test lead: dummy data for full_name>");
+    expect(noContact.phone).toBe("<test lead: dummy data for phone_number>");
+    // The same values stay available as normal answer columns.
+    expect(noContact.answers.full_name).toBe(
+      "<test lead: dummy data for full_name>",
+    );
+
+    // Contact data always wins over the fallback.
+    const withContact = toFlowTableRow(
+      rpcRow({
+        contact_name: "Rahul",
+        contact_phone: "+919999999999",
+        vars: { full_name: "Rahul Kumar", phone_number: "+91111" },
+      }),
+      null,
+      null,
+      ["full_name", "phone_number"],
+      { name: "Rahul Kumar", phone: "+91111" },
+    );
+    expect(withContact.name).toBe("Rahul");
+    expect(withContact.phone).toBe("+919999999999");
+
+    // Absent fallback keeps the contact-only behavior (blank when no contact).
+    const blank = toFlowTableRow(
+      rpcRow({ contact_id: null, contact_name: null, contact_phone: null }),
+      null,
+      null,
+      [],
+    );
+    expect(blank.name).toBeNull();
+    expect(blank.phone).toBeNull();
+  });
 });
 
 describe("flow table columns", () => {
