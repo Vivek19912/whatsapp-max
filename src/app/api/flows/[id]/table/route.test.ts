@@ -1212,6 +1212,161 @@ describe("GET table – Meta option labels with raw-answer preservation", () => 
       expect("rawAnswers" in row).toBe(false);
     }
   });
+
+  it("REGRESSION: choice questions with NO option metadata still prettify", async () => {
+    // Production gap: forms enabled before options were persisted
+    // store questions WITHOUT options. The table must still render
+    // `davinci resolve` (persisted type CUSTOM marks the choice)
+    // while rawAnswers keeps `davinci_resolve` byte-identical.
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    const previousMetaForm = h.metaForm;
+    try {
+      h.nodes = [
+        {
+          node_key: "meta_source_node",
+          node_type: "collect_input",
+          config: {
+            var_key: "meta_lead_source",
+            prompt_text: "Source",
+            next_node_key: "meta_q_0_software",
+          },
+          created_at: "2026-01-01T00:00:00Z",
+        },
+        {
+          node_key: "meta_q_0_software",
+          node_type: "collect_input",
+          config: {
+            var_key: "software",
+            prompt_text: "Which software?",
+            next_node_key: "meta_q_1_experience",
+          },
+          created_at: "2026-01-01T00:00:01Z",
+        },
+        {
+          node_key: "meta_q_1_experience",
+          node_type: "collect_input",
+          config: {
+            var_key: "experience",
+            prompt_text: "Experience?",
+            next_node_key: "meta_q_2_editor",
+          },
+          created_at: "2026-01-01T00:00:02Z",
+        },
+        {
+          node_key: "meta_q_2_editor",
+          node_type: "collect_input",
+          config: {
+            var_key: "editor",
+            prompt_text: "Editor?",
+            next_node_key: "meta_q_3_tool",
+          },
+          created_at: "2026-01-01T00:00:03Z",
+        },
+        {
+          node_key: "meta_q_3_tool",
+          node_type: "collect_input",
+          config: {
+            var_key: "tool",
+            prompt_text: "Tool?",
+            next_node_key: "meta_q_4_full_name",
+          },
+          created_at: "2026-01-01T00:00:04Z",
+        },
+        {
+          node_key: "meta_q_4_full_name",
+          node_type: "collect_input",
+          config: { var_key: "full_name", prompt_text: "Full name" },
+          created_at: "2026-01-01T00:00:05Z",
+        },
+      ];
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads · No Options Form",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+        meta_form_id: "form-1",
+      };
+      // Stored exactly like an older enabled form: types present,
+      // options entirely absent — except `tool`, which proves an
+      // exact label still wins when one exists.
+      h.metaForm = {
+        id: "form-1",
+        questions: [
+          { key: "software", label: "Which software?", type: "CUSTOM" },
+          { key: "experience", label: "Experience?", type: "CUSTOM" },
+          { key: "editor", label: "Editor?", type: "CUSTOM" },
+          {
+            key: "tool",
+            label: "Tool?",
+            type: "CUSTOM",
+            options: [{ key: "after_effects", value: "After Effects" }],
+          },
+          { key: "full_name", label: "Full name", type: "FULL_NAME" },
+        ],
+      } as unknown as Record<string, unknown>;
+      h.rpc = {
+        total: 1,
+        rows: [
+          {
+            run_id: "run-nometa",
+            contact_id: null,
+            contact_name: null,
+            contact_phone: null,
+            conversation_id: null,
+            status: "completed",
+            started_at: "2026-10-21T04:29:00.000Z",
+            last_advanced_at: null,
+            ended_at: "2026-10-21T04:29:00.000Z",
+            reached_at: null,
+            is_completed: true,
+            vars: {
+              software: "davinci_resolve",
+              experience: "2–3_years",
+              editor: "adobe_premiere_pro",
+              tool: "after_effects",
+              full_name: "rahul_kumar",
+              meta_lead_source: "Facebook",
+            },
+          },
+        ],
+      };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{
+          answers: Record<string, string | null>;
+          rawAnswers?: Record<string, string | null>;
+        }>;
+      };
+      const row = json.rows[0];
+      // Display: spaces for the option-less choice questions …
+      expect(row.answers.software).toBe("davinci resolve");
+      expect(row.answers.experience).toBe("2–3 years");
+      expect(row.answers.editor).toBe("adobe premiere pro");
+      // … the exact label when one exists …
+      expect(row.answers.tool).toBe("After Effects");
+      // … verbatim for the standard-typed name …
+      expect(row.answers.full_name).toBe("rahul_kumar");
+      // … and raw values untouched everywhere.
+      expect(row.rawAnswers?.software).toBe("davinci_resolve");
+      expect(row.rawAnswers?.experience).toBe("2–3_years");
+      expect(row.rawAnswers?.editor).toBe("adobe_premiere_pro");
+      expect(row.rawAnswers?.tool).toBe("after_effects");
+      expect(row.rawAnswers?.full_name).toBe("rahul_kumar");
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+      h.metaForm = previousMetaForm;
+    }
+  });
 });
 
 describe("GET table – Meta Source column position", () => {

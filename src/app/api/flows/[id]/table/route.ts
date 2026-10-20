@@ -30,6 +30,7 @@ import { standardContactFromAnswers } from '@/lib/meta-lead-ads/normalize'
 import {
   applyOptionLabelsToAnswers,
   buildOptionLabelMap,
+  choiceQuestionKeys,
   type StoredFormQuestion,
 } from '@/lib/meta-lead-ads/option-labels'
 import {
@@ -362,11 +363,14 @@ export async function GET(
   }
 
   // Meta-only display mapping: human-readable Instant Form option
-  // labels resolved from the form's stored question metadata.
-  // Display-only: stored answers, keys, filtering, Sheets exports,
-  // and Travel CRM reads are untouched — only the rendered cell
-  // text changes, and only on exact option-key matches.
+  // labels resolved from the form's stored question metadata, plus
+  // an underscore-to-spaces fallback for known choice questions
+  // whose options were never synced (older enabled forms). Display-
+  // only: stored answers, keys, filtering, Sheets exports, and
+  // Travel CRM reads are untouched — only the rendered cell text
+  // changes, preferring exact option-key matches first.
   let metaOptionLabels: Map<string, Map<string, string>> | null = null
+  let metaChoiceKeys: Set<string> | null = null
   if (isMetaLeadFlow) {
     const formId = (flow as { meta_form_id?: string | null }).meta_form_id ?? null
     if (formId) {
@@ -402,9 +406,9 @@ export async function GET(
           }),
         }
       })
-      if (stored.some((q) => q.options && q.options.length > 0)) {
-        metaOptionLabels = buildOptionLabelMap(stored, questionVarKeys(stored))
-      }
+      const keys = questionVarKeys(stored)
+      metaOptionLabels = buildOptionLabelMap(stored, keys)
+      metaChoiceKeys = choiceQuestionKeys(stored, keys)
     }
   }
 
@@ -427,8 +431,15 @@ export async function GET(
     // Original Answer); `answers` carries the display mapping.
     if (isMetaLeadFlow) {
       row.rawAnswers = { ...row.answers }
-      if (metaOptionLabels && metaOptionLabels.size > 0) {
-        row.answers = applyOptionLabelsToAnswers(row.answers, metaOptionLabels)
+      if (
+        (metaOptionLabels && metaOptionLabels.size > 0) ||
+        (metaChoiceKeys && metaChoiceKeys.size > 0)
+      ) {
+        row.answers = applyOptionLabelsToAnswers(
+          row.answers,
+          metaOptionLabels ?? new Map(),
+          metaChoiceKeys ?? new Set(),
+        )
       }
     }
     return row

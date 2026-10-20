@@ -3,11 +3,13 @@
 // Pins the display contract:
 //   * a stored raw answer renders as its option `value` on an exact
 //     `key` match (preferred — the label the lead saw);
-//   * for a question WITH option metadata, an unmatched
-//     underscore-separated value renders with spaces instead of
-//     underscores (`davinci_resolve` → `davinci resolve`);
-//   * free text, answers without underscores, and questions with no
-//     option metadata render verbatim — never guessed;
+//   * for a KNOWN choice question (option metadata present OR
+//     persisted type CUSTOM), an unmatched underscore-separated value
+//     renders with spaces instead of underscores (`davinci_resolve`
+//     → `davinci resolve`) — even when options were never synced;
+//   * free text, answers without underscores, standard-typed
+//     questions (FULL_NAME, PHONE_NUMBER, EMAIL, …), and unknown
+//     question types render verbatim — never guessed;
 //   * multi-select answers resolve per item; separators survive
 //     byte-for-byte, unmatched items survive;
 //   * stored answers and field identifiers are never modified.
@@ -18,6 +20,8 @@ import { questionVarKeys } from "./virtual-flow";
 import {
   applyOptionLabelsToAnswers,
   buildOptionLabelMap,
+  choiceQuestionKeys,
+  isChoiceQuestionType,
   mapAnswerValue,
   type StoredFormQuestion,
 } from "./option-labels";
@@ -85,26 +89,39 @@ describe("mapAnswerValue", () => {
   });
 
   it("renders unmatched underscore values with spaces on choice questions", () => {
-    expect(mapAnswerValue(labels, "davinci_resolve")).toBe("davinci resolve");
-    expect(mapAnswerValue(labels, "2–3_years")).toBe("2–3 years");
+    expect(mapAnswerValue(labels, "davinci_resolve", true)).toBe("davinci resolve");
+    expect(mapAnswerValue(labels, "2–3_years", true)).toBe("2–3 years");
     // Exact labels still win over the fallback.
-    expect(mapAnswerValue(labels, "adobe_premiere_pro")).toBe("Adobe Premiere Pro");
+    expect(mapAnswerValue(labels, "adobe_premiere_pro", true)).toBe(
+      "Adobe Premiere Pro",
+    );
+  });
+
+  it("renders verbatim when the question is not a known choice", () => {
+    // Same labels, same values — but without choice eligibility the
+    // fallback must not fire (this was the production bug: the old
+    // code keyed the fallback off label presence instead).
+    expect(mapAnswerValue(labels, "davinci_resolve")).toBe("davinci_resolve");
+    expect(mapAnswerValue(labels, "davinci_resolve", false)).toBe("davinci_resolve");
+    expect(mapAnswerValue(undefined, "davinci_resolve", false)).toBe(
+      "davinci_resolve",
+    );
   });
 
   it("resolves multi-select answers per item, keeping unmatched parts", () => {
-    expect(mapAnswerValue(labels, "adobe_premiere_pro, custom text")).toBe(
+    expect(mapAnswerValue(labels, "adobe_premiere_pro, custom text", true)).toBe(
       "Adobe Premiere Pro, custom text",
     );
-    expect(mapAnswerValue(labels, "adobe_premiere_pro, davinci_resolve")).toBe(
+    expect(mapAnswerValue(labels, "adobe_premiere_pro, davinci_resolve", true)).toBe(
       "Adobe Premiere Pro, davinci resolve",
     );
   });
 
   it("never alters separators or unmatched values (no space-padding changes)", () => {
     expect(mapAnswerValue(new Map(), "a,b")).toBe("a,b");
-    expect(mapAnswerValue(labels, "a,b")).toBe("a,b");
-    expect(mapAnswerValue(labels, "a_b,c")).toBe("a b,c");
-    expect(mapAnswerValue(labels, "")).toBe("");
+    expect(mapAnswerValue(labels, "a,b", true)).toBe("a,b");
+    expect(mapAnswerValue(labels, "a_b,c", true)).toBe("a b,c");
+    expect(mapAnswerValue(labels, "", true)).toBe("");
   });
 });
 
@@ -119,17 +136,81 @@ describe("applyOptionLabelsToAnswers", () => {
 
   it("prefers labels, falls back to spaces, leaves free text alone", () => {
     const map = buildOptionLabelMap(QUESTIONS, KEYS);
+    const choiceKeys = choiceQuestionKeys(QUESTIONS, KEYS);
     const out = applyOptionLabelsToAnswers(
       {
         service: "davinci_resolve",
         full_name: "rahul_kumar",
       },
       map,
+      choiceKeys,
     );
     // `service` is a choice question: unmatched key prettified.
     expect(out.service).toBe("davinci resolve");
-    // `full_name` has no options: free text verbatim, even with underscores.
+    // `full_name` (FULL_NAME, no options): free text verbatim, even
+    // with underscores.
     expect(out.full_name).toBe("rahul_kumar");
+  });
+
+  it("without choice keys only exact labels apply", () => {
+    const map = buildOptionLabelMap(QUESTIONS, KEYS);
+    const out = applyOptionLabelsToAnswers({ service: "davinci_resolve" }, map);
+    expect(out.service).toBe("davinci_resolve");
+  });
+});
+
+describe("isChoiceQuestionType", () => {
+  it("treats Meta custom questions as choice questions", () => {
+    expect(isChoiceQuestionType("CUSTOM")).toBe(true);
+    expect(isChoiceQuestionType(" custom ")).toBe(true);
+  });
+
+  it("never treats standard or unknown types as choices", () => {
+    for (const type of [
+      "FULL_NAME",
+      "FIRST_NAME",
+      "LAST_NAME",
+      "PHONE_NUMBER",
+      "EMAIL",
+      "CITY",
+      null,
+      undefined,
+      "",
+    ]) {
+      expect(isChoiceQuestionType(type)).toBe(false);
+    }
+  });
+});
+
+describe("choiceQuestionKeys", () => {
+  it("marks questions with options and CUSTOM questions without options", () => {
+    const questions: StoredFormQuestion[] = [
+      {
+        key: "software",
+        label: "Software?",
+        type: "CUSTOM",
+        options: [{ key: "davinci_resolve", value: "DaVinci Resolve" }],
+      },
+      // No options synced (older enabled form) — still a choice.
+      { key: "experience", label: "Experience?", type: "CUSTOM" },
+      { key: "full_name", label: "Full name", type: "FULL_NAME" },
+      { key: "email", label: "Email", type: "EMAIL" },
+      { key: "mystery", label: "Mystery?" },
+    ];
+    const keys = ["software", "experience", "full_name", "email", "mystery"];
+    expect(choiceQuestionKeys(questions, keys)).toEqual(
+      new Set(["software", "experience"]),
+    );
+  });
+
+  it("ignores unusable options and misaligned indexes safely", () => {
+    const questions: StoredFormQuestion[] = [
+      { key: "q", type: "CUSTOM", options: [{ key: "", value: "X" }] },
+    ];
+    // Empty option is unusable, but CUSTOM type still marks it.
+    expect(choiceQuestionKeys(questions, ["q"])).toEqual(new Set(["q"]));
+    expect(choiceQuestionKeys(questions, [])).toEqual(new Set());
+    expect(choiceQuestionKeys(null, ["q"])).toEqual(new Set());
   });
 });
 

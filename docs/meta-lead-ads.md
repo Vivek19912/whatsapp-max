@@ -304,12 +304,14 @@ success.
   and survive refreshes and new imports.
 - **Multiple-choice answers** render the option's human-readable label
   when the stored raw value exactly matches the option's key from the
-  form's stored metadata. When a choice question has option metadata
-  but the stored value matches no key, underscore-separated values
-  render with spaces (`davinci_resolve` → `davinci resolve`).
-  Anything else — free text, answers without underscores, questions
-  with no option metadata — renders verbatim. Stored answers and API
-  values are never rewritten.
+  form's stored metadata. When a known choice question (option
+  metadata present, or persisted type `CUSTOM`) has no matching key —
+  including older forms whose options were never synced —
+  underscore-separated values render with spaces (`davinci_resolve`
+  → `davinci resolve`). Anything else — free text, answers without
+  underscores, standard-typed questions (`FULL_NAME`,
+  `PHONE_NUMBER`, `EMAIL`, …), unknown types — renders verbatim.
+  Stored answers and API values are never rewritten.
 
 ## Testing with a real lead
 

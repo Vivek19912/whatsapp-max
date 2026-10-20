@@ -145,13 +145,14 @@ describe("table route — Meta-only option labels", () => {
   it("applies option labels only inside the Meta branch", () => {
     const src = tableRoute();
     const gate = src.indexOf("const isMetaLeadFlow");
-    const apply = src.indexOf("applyOptionLabelsToAnswers(row.answers");
+    const apply = src.indexOf("applyOptionLabelsToAnswers(");
     expect(gate).toBeGreaterThan(-1);
     expect(apply).toBeGreaterThan(gate);
-    // The shared row builder is untouched; mapping applies after it.
-    expect(src).toContain(
-      "row.answers = applyOptionLabelsToAnswers(row.answers, metaOptionLabels)",
-    );
+    // The shared row builder is untouched; mapping applies after it,
+    // with exact labels first and the type-based choice fallback.
+    expect(src).toContain("row.answers = applyOptionLabelsToAnswers(");
+    expect(src).toContain("metaChoiceKeys");
+    expect(src).toContain("choiceQuestionKeys(stored, keys)");
   });
 
   it("never touches the stored row, keys, or system columns", () => {
