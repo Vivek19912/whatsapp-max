@@ -389,11 +389,6 @@ export function MetaLeadAdsSettings({
     );
   }
 
-  function connectWithFacebook() {
-    if (typeof window === "undefined") return;
-    window.location.href = "/api/integrations/meta-lead-ads/oauth/connect";
-  }
-
   function toggleOAuthPage(pageId: string, checked: boolean) {
     setSelectedOAuthPages((current) =>
       checked
@@ -600,38 +595,6 @@ export function MetaLeadAdsSettings({
               </CardHeader>
             </Card>
           ) : null}
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-foreground">
-                <KeyRound className="size-4 text-muted-foreground" />
-                Connect with Facebook
-              </CardTitle>
-              <CardDescription className="text-muted-foreground">
-                Recommended. Authorize your own Pages through the shared app, then
-                explicitly select the Pages to connect. Tokens stay encrypted on the
-                server and are never shown to the browser. Existing manual
-                connections and historical leads are preserved.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button onClick={connectWithFacebook} disabled={disabled}>
-                  Connect with Facebook
-                </Button>
-                {oauthSession?.active ? (
-                  <Badge variant="secondary">Authorization received</Badge>
-                ) : null}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Requests <code>pages_show_list</code>,{" "}
-                <code>pages_read_engagement</code>,{" "}
-                <code>pages_manage_metadata</code>, <code>leads_retrieval</code>{" "}
-                and <code>ads_management</code>. These permissions require
-                Advanced Access/App Review before public onboarding.
-              </p>
-            </CardContent>
-          </Card>
 
           {oauthSession?.active ? (
             <Card>
