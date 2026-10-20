@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   flowSettings: [] as Row[],
   travelCalls: [] as Array<{ url: string; body: unknown }>,
   lookupsOverride: null as null | Record<string, unknown>,
+  triggers: [] as Array<Record<string, unknown>>,
 }));
 
 function statusError(status: number, message: string) {
@@ -29,6 +30,20 @@ function statusError(status: number, message: string) {
   err.status = status;
   return err;
 }
+
+vi.mock("@/lib/flows/admin-client", () => ({
+  supabaseAdmin: () => ({}),
+}));
+
+vi.mock("@/lib/meta-capi/triggers", () => ({
+  recordWorkspaceStatusChanged: async (
+    _db: unknown,
+    change: Record<string, unknown>,
+  ) => {
+    h.triggers.push(change);
+    return true;
+  },
+}));
 
 vi.mock("@/lib/auth/account", () => ({
   requireRole: async (min: string) => {
@@ -113,7 +128,16 @@ function fakeSupabase() {
         select: () => ({ single: async () => ({ data: created, error: null }) }),
       };
     };
-    q.update = (patch: Row) => {
+    q.upsert = (obj: Row) => {
+    const rows = storeFor(table);
+    const idx = rows.findIndex(
+      (r) => (r as Row).field_id === obj.field_id && (r as Row).flow_run_id === obj.flow_run_id,
+    );
+    if (idx >= 0) rows[idx] = { ...rows[idx], ...obj };
+    else rows.push({ ...obj });
+    return { error: null };
+  };
+  q.update = (patch: Row) => {
       const chain: Record<string, unknown> = {};
       chain.eq = () => chain;
       chain.then = (resolve: (v: unknown) => void) => {
@@ -232,6 +256,7 @@ beforeEach(() => {
   h.userId = "user-1";
   h.travelCalls = [];
   h.lookupsOverride = null;
+  h.triggers = [];
   seed();
   mockTravel();
   vi.stubEnv("TRAVEL_CRM_BASE_URL", BASE);
@@ -293,6 +318,35 @@ describe("Workspace row is the source of truth for Type/Stage/Received", () => {
       leadStage: "NEW_LEAD",
       leadSource: "INSTAGRAM_ADS",
     });
+  });
+
+  it("CAPI stays silent when the sync writes nothing new", async () => {
+    setRowValues("Fresh", "New Lead", "Instagram Ads");
+    const res = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1" }));
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.triggers).toHaveLength(0);
+  });
+
+  it("a Travel CRM Stage change triggers exactly one status event", async () => {
+    setRowValues("Fresh", "New Lead", "Instagram Ads");
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: { leadStage: "QUOTATION_SENT" },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.triggers).toEqual([
+      {
+        accountId: "acct-1",
+        flowRunId: "run-1",
+        contactId: "c-1",
+        fieldName: "Stage",
+        previousValue: "New Lead",
+        newValue: "Quotation Sent",
+      },
+    ]);
   });
 
   it("stale row values block with an informative invalid state (never substituted)", async () => {

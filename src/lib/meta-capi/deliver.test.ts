@@ -163,6 +163,7 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
 
     expect(h.sendOpts[0]).toMatchObject({ appSecret: "customer-app-secret" });
@@ -173,9 +174,23 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
 
     expect(h.sendOpts[0]).toMatchObject({ appSecret: null });
+  });
+
+  it("skips a production event with no customer matching data", async () => {
+    const result = await fireCapiForAction(db, platform, {
+      accountId: "acct-1",
+      action: "meta_lead_received",
+      flowRunId: "run-1",
+    });
+
+    expect(result).toEqual({ fired: 0, failed: 0, skipped: 1 });
+    expect(h.sendCalls).toHaveLength(0);
+    expect(h.inserted[0].status).toBe("skipped");
+    expect(h.inserted[0].last_error).toContain("matching data");
   });
 
   it("is idempotent — the same conversion is never sent twice", async () => {
@@ -183,11 +198,44 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received" as const,
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     };
 
     await fireCapiForAction(db, platform, event);
     const second = await fireCapiForAction(db, platform, event);
 
+    expect(second.fired).toBe(0);
+    expect(h.sendCalls).toHaveLength(1);
+  });
+
+  it("collapses concurrent identical status transitions to one delivery", async () => {
+    h.mappings = [
+      mapping({
+        source_action: "workspace_field_changed",
+        source_field: "Stage",
+        source_value: "Qualified",
+      }),
+    ];
+    const transition = {
+      accountId: "acct-1",
+      action: "workspace_field_changed" as const,
+      flowRunId: "run-1",
+      fieldName: "Stage",
+      previousValue: "New",
+      value: "Qualified",
+      matchData: { phone: "+15551234567" },
+    };
+
+    const first = await fireCapiForAction(db, platform, {
+      ...transition,
+      occurredAt: new Date("2026-01-02T03:04:05.000Z"),
+    });
+    const second = await fireCapiForAction(db, platform, {
+      ...transition,
+      occurredAt: new Date("2026-01-02T03:04:05.250Z"),
+    });
+
+    expect(first.fired).toBe(1);
     expect(second.fired).toBe(0);
     expect(h.sendCalls).toHaveLength(1);
   });
@@ -212,6 +260,7 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
 
     expect(result.fired).toBe(0);
@@ -234,6 +283,7 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
 
     const event = firstEvent(h.sendCalls[0]);
@@ -255,6 +305,7 @@ describe("fireCapiForAction", () => {
       flowRunId: "run-1",
       fieldName: "Stage",
       value: "New Lead",
+      matchData: { phone: "+15551234567" },
     });
     expect(noMatch.fired).toBe(0);
 
@@ -264,6 +315,7 @@ describe("fireCapiForAction", () => {
       flowRunId: "run-1",
       fieldName: "Stage",
       value: "Booking Confirmed",
+      matchData: { phone: "+15551234567" },
     });
     expect(match.fired).toBe(1);
     expect(h.sendCalls).toHaveLength(1);
@@ -278,6 +330,7 @@ describe("fireCapiForAction", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
 
     expect(result.failed).toBe(1);
@@ -295,6 +348,7 @@ describe("runDueDeliveries", () => {
       accountId: "acct-1",
       action: "meta_lead_received",
       flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
     });
     const originalId = firstEvent(h.sendCalls[0]).event_id;
 

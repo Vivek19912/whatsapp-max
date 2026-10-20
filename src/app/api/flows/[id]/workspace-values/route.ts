@@ -11,7 +11,7 @@ import {
   isAssigneeField,
   validateAssigneeValue,
 } from "@/lib/flows/workspace-assignee";
-import { onWorkspaceValueChanged } from "@/lib/meta-capi/triggers";
+import { recordWorkspaceStatusChanged } from "@/lib/meta-capi/triggers";
 
 /**
  * PUT /api/flows/[id]/workspace-values — set or clear ONE custom
@@ -173,20 +173,19 @@ export async function PUT(
     const storedValue = (data as { value_text: string | null }).value_text;
 
     // ADDITIVE Meta Conversions API hook — best-effort and isolated so it
-    // can never fail the save. Fires only when the value actually changed
-    // to a new, non-empty value.
-    if (storedValue !== null && storedValue !== previous) {
-      try {
-        await onWorkspaceValueChanged(supabaseAdmin(), {
-          accountId,
-          flowRunId: runId,
-          contactId: typed.contact_id,
-          fieldName: field.name,
-          value: storedValue,
-        });
-      } catch (err) {
-        console.error("[meta-capi] workspace trigger failed:", err);
-      }
+    // can never fail the save. The shared helper fires only when the value
+    // actually changed to a new, non-empty value.
+    try {
+      await recordWorkspaceStatusChanged(supabaseAdmin(), {
+        accountId,
+        flowRunId: runId,
+        contactId: typed.contact_id,
+        fieldName: field.name,
+        previousValue: previous,
+        newValue: storedValue,
+      });
+    } catch (err) {
+      console.error("[meta-capi] workspace trigger failed:", err);
     }
 
     return NextResponse.json({ value: storedValue });

@@ -140,6 +140,7 @@ export async function fireCapiForAction(
 
   const occurredAt = event.occurredAt ?? new Date();
   const userData = buildUserData(event.matchData ?? {});
+  const hasMatchData = Object.keys(userData).length > 0;
 
   for (const mapping of mappings) {
     if (!matchesMapping(mapping, event)) continue;
@@ -147,7 +148,7 @@ export async function fireCapiForAction(
     const actionSource = mapping.action_source || "business_messaging";
     const eventId = buildEventId(mapping, event, occurredAt);
 
-    if (!valueCriteriaMet(mapping)) {
+    const recordSkipped = async (reason: string): Promise<void> => {
       const skipped = await insertDelivery(db, {
         account_id: event.accountId,
         mapping_id: mapping.id,
@@ -160,10 +161,26 @@ export async function fireCapiForAction(
         action_source: actionSource,
         is_test: false,
         status: "skipped",
-        last_error: `${mapping.meta_event_name} requires a value and currency; nothing was sent.`,
+        last_error: reason,
         request_payload: null,
       });
       if (skipped) result.skipped++;
+    };
+
+    if (!valueCriteriaMet(mapping)) {
+      await recordSkipped(
+        `${mapping.meta_event_name} requires a value and currency; nothing was sent.`,
+      );
+      continue;
+    }
+
+    // Never send a production event Meta cannot match to a person.
+    // Test events bypass this (the test-event route builds its own
+    // payload with a Test Event Code instead).
+    if (!hasMatchData) {
+      await recordSkipped(
+        "No customer matching data (email, phone, name, or click ID) was available; nothing was sent.",
+      );
       continue;
     }
 

@@ -31,7 +31,11 @@ Meta event\>**.*
 | --- | --- | --- |
 | **Meta Instant Form lead received** | a `leadgen` submission is ingested into the Workspace | fired from lead processing (`process-lead.ts`) |
 | **WhatsApp flow completed** | a flow run ends as `completed` | fired from the flow engine's completion path only — never for `handed_off` / `failed` / `timed_out` |
-| **Workspace column set to a value** | a Workspace cell is changed to a specific value (e.g. `Stage = Booking Confirmed`) | fired from the workspace-values route **only on an actual change**, never on a re-save of the same value |
+| **Workspace column set to a value** | a Workspace cell is changed to a specific value (e.g. `Stage = Booking Confirmed`) | fired from the workspace-values route **and** the Travel CRM lead sync, **only on an actual change** to a non-empty value — never on a re-save of the same value, never on clear |
+
+Status edits made through conversational flow-answer overrides do **not**
+fire Conversions API events: overrides are display edits to submitted
+answers, not lead-status transitions.
 
 There is deliberately **no** "page view", no UI-click and no artificial stage
 source. A user can map the "Workspace column" trigger to any column + value
@@ -73,12 +77,22 @@ CAPI therefore **never** derives the proof from the platform secret:
 
 - **Idempotent by event id.** Every delivery is keyed
   `UNIQUE(account_id, event_id)`. The `event_id` is derived from the mapping +
-  flow run (+ column/value/time for workspace transitions), so a logical
-  conversion is enqueued and sent **at most once**. Concurrent triggers, retries
-  and duplicate webhook deliveries all collapse to one event.
+  flow run (+ column + from-value → to-value for workspace transitions, never
+  wall-clock time), so a logical conversion is enqueued and sent **at most
+  once**. Concurrent duplicates of the same transition, retries and duplicate
+  webhook deliveries all collapse to one event.
 - **Retries reuse the stored payload** (same `event_id`), so Meta de-duplicates
   rather than double-counting. Bounded backoff: 1m → 2m → 4m → 8m, capped at
   30m, max 5 attempts.
+- **Re-qualification.** Because a from → to transition fires once per mapping
+  and lead, returning to an earlier status and setting it again (e.g.
+  Qualified → Lost → Qualified) resolves to the same event id and does not
+  send again. To report a genuine re-qualification, configure a distinct value
+  (for example a "Re-Qualified" stage) or a separate mapping.
+- **Empty match data is skipped.** A production event with no customer
+  matching data (email, phone, name, or click ID) is recorded as `skipped`
+  with a clear reason instead of being sent. Test events with a Test Event
+  Code are unaffected.
 - **The ledger is the truth.** Each delivery is `pending` / `sent` / `failed` /
   `skipped`, with attempts and last error. `sent` means Meta returned
   `events_received >= 1` — it does **not** by itself prove attribution in Ads
@@ -98,6 +112,26 @@ CAPI therefore **never** derives the proof from the platform secret:
 - `Purchase` (or any mapping flagged value-bearing) requires value > 0 **and** a
   3-letter currency.
 
+## Recommended status presets
+
+Settings → Conversions API → Events to send → **Add recommended status
+events** creates disabled presets from the workspace's actual stored Stage
+values — never enabled, never `Purchase`:
+
+- `Stage = Qualified` → custom event `QualifiedLead`
+- `Stage = Contacted` → standard event `Contact` (optional)
+- `Stage = Converted` → custom event `ConvertedLead` (no value)
+
+Rules enforced by the presets endpoint and UI:
+
+- Presets match only exact stored values; a missing value is reported with
+  the workspace's available Stage values instead of guessing.
+- `Converted` is never mapped to `Purchase` without evidence of a real
+  payment plus a configured amount and currency.
+- If lead ingestion already sends the standard `Lead` event, changing a
+  qualification preset to send `Lead` as well will count two Leads for the
+  same person — prefer the custom `QualifiedLead` event.
+
 ## API surface
 
 | Route | Method | Who | Purpose |
@@ -109,6 +143,7 @@ CAPI therefore **never** derives the proof from the platform secret:
 | `/api/integrations/meta-capi/test-event` | POST | admin | send one labelled TEST event |
 | `/api/integrations/meta-capi/deliveries` | GET | member | recent delivery ledger |
 | `/api/integrations/meta-capi/retry` | POST | admin | retry one delivery (`delivery_id`) or sweep due failures |
+| `/api/integrations/meta-capi/presets` | POST | admin | create disabled status presets from stored Stage values |
 | `/api/integrations/meta-capi/cron` | GET | cron secret | global retry sweep (point a scheduler at it) |
 
 ## Configuration (per customer)

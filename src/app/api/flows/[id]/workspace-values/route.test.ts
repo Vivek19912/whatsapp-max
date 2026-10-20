@@ -67,6 +67,21 @@ vi.mock("@/lib/meta-capi/triggers", () => ({
   ) => {
     h.triggers.push(args);
   },
+  recordWorkspaceStatusChanged: async (
+    _db: unknown,
+    args: Record<string, unknown> & {
+      previousValue?: string | null;
+      newValue?: string | null;
+    },
+  ) => {
+    // Mirror the production guard: unchanged or cleared saves never fire.
+    if (!args.newValue || args.newValue === (args.previousValue ?? null)) {
+      return false;
+    }
+    const { newValue, ...rest } = args;
+    h.triggers.push({ ...rest, value: newValue });
+    return true;
+  },
 }));
 
 function fakeSupabase() {
@@ -205,6 +220,7 @@ describe("PUT workspace values", () => {
         contactId: undefined,
         fieldName: "Status",
         value: "Contacted",
+        previousValue: null,
       },
     ]);
 

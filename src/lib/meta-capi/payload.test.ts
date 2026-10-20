@@ -103,12 +103,27 @@ describe("buildEventId", () => {
 
   it("distinguishes two workspace transitions but collapses the same one", () => {
     const m = mapping({ source_action: "workspace_field_changed" });
-    const base = { accountId: "acct-1", action: "workspace_field_changed" as const, flowRunId: "run-1", fieldName: "Stage" };
+    const base = { accountId: "acct-1", action: "workspace_field_changed" as const, flowRunId: "run-1", fieldName: "Stage", previousValue: "New" };
     const paid = buildEventId(m, { ...base, value: "Paid" }, at);
     const booked = buildEventId(m, { ...base, value: "Booked" }, at);
-    const paidAgain = buildEventId(m, { ...base, value: "Paid" }, at);
+    const paidAgain = buildEventId(m, { ...base, value: "Paid" }, new Date());
     expect(paid).not.toBe(booked);
     expect(paid).toBe(paidAgain);
+  });
+
+  it("keys identical concurrent transitions to the same id regardless of clock", () => {
+    const m = mapping({ source_action: "workspace_field_changed" });
+    const transition = {
+      accountId: "acct-1",
+      action: "workspace_field_changed" as const,
+      flowRunId: "run-1",
+      fieldName: "Stage",
+      previousValue: "New",
+      value: "Qualified",
+    };
+    const first = buildEventId(m, transition, new Date("2026-01-02T03:04:05.000Z"));
+    const second = buildEventId(m, transition, new Date("2026-01-02T03:04:05.250Z"));
+    expect(first).toBe(second);
   });
 });
 

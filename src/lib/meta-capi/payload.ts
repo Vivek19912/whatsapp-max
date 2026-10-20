@@ -22,6 +22,13 @@ export interface CapiActionEvent {
   fieldName?: string | null;
   /** New cell value (workspace_field_changed only). */
   value?: string | null;
+  /**
+   * Stored value before this change (workspace_field_changed only).
+   * Part of the stable event id so each distinct from → to transition
+   * fires at most once per mapping + lead, while concurrent duplicates
+   * of the SAME transition collapse to one delivery.
+   */
+  previousValue?: string | null;
   occurredAt?: Date;
   matchData?: UserDataInput | null;
 }
@@ -66,21 +73,28 @@ export function valueCriteriaMet(mapping: MetaCapiMappingRow): boolean {
 
 /**
  * Stable event id. Retries reuse it (they re-send the stored payload),
- * so Meta de-duplicates. A workspace_field_changed transition is
- * timestamped so two genuine transitions are distinct events while a
- * concurrent double-fire of the SAME transition collapses.
+ * so Meta de-duplicates. A workspace_field_changed transition is keyed
+ * by its from → to values (never by wall-clock time), so concurrent
+ * double-fires of the SAME transition collapse to one delivery.
+ *
+ * Trade-off: repeating an identical transition later (e.g. Qualified →
+ * Lost → Qualified) resolves to the same id and does NOT send again.
+ * To report a re-qualification, configure a distinct value (for example
+ * a "Re-Qualified" stage) or a separate mapping.
  */
 export function buildEventId(
   mapping: MetaCapiMappingRow,
   event: CapiActionEvent,
-  occurredAt: Date,
+  _occurredAt: Date,
 ): string {
+  void _occurredAt;
   const basis = event.flowRunId ?? event.contactId ?? "unknown";
   if (event.action === "meta_lead_received") return `${mapping.id}:${basis}:meta_lead`;
   if (event.action === "flow_completed") return `${mapping.id}:${basis}:completed`;
   const field = event.fieldName ?? "";
-  const value = event.value ?? "";
-  return `${mapping.id}:${basis}:${field}:${value}:${occurredAt.getTime()}`;
+  const from = event.previousValue ?? "";
+  const to = event.value ?? "";
+  return `${mapping.id}:${basis}:${field}:${from}:${to}`;
 }
 
 export function buildCustomData(mapping: MetaCapiMappingRow): Record<string, unknown> {

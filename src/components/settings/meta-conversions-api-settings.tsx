@@ -266,6 +266,40 @@ export function MetaConversionsApiSettings({
     });
   }
 
+  const [presetInfo, setPresetInfo] = useState<{
+    created: Array<{ name: string }>;
+    skippedExisting: string[];
+    missing: Array<{ status: string; availableStageValues: string[] }>;
+    warnings: string[];
+  } | null>(null);
+
+  function createPresets() {
+    void act("presets", async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-capi/presets", { method: "POST" }),
+      )) as {
+        created: Array<{ name: string }>;
+        skippedExisting: string[];
+        missing: Array<{ status: string; availableStageValues: string[] }>;
+        warnings: string[];
+      };
+      setPresetInfo({
+        created: json.created ?? [],
+        skippedExisting: json.skippedExisting ?? [],
+        missing: json.missing ?? [],
+        warnings: json.warnings ?? [],
+      });
+      if ((json.created ?? []).length > 0) {
+        toast.success(
+          `Added ${(json.created ?? []).length} disabled status preset${(json.created ?? []).length === 1 ? "" : "s"}. Enable one only after checking the exact Stage value.`,
+        );
+      } else {
+        toast("No new presets were needed. Check the details below.");
+      }
+      await load();
+    });
+  }
+
   const needsField = form.sourceAction === "workspace_field_changed";
   const needsValue =
     form.requiresValue || form.metaEventName === "Purchase";
@@ -551,6 +585,65 @@ export function MetaConversionsApiSettings({
                   ))}
                 </div>
               )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={createPresets}
+                  disabled={disabled || busy === "presets"}
+                >
+                  {busy === "presets" ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : null}
+                  Add recommended status events
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  Creates disabled presets for Qualified, Contacted and Converted
+                  from your actual Stage values. Nothing is sent until you enable
+                  a preset.
+                </span>
+              </div>
+              {form.sourceAction === "workspace_field_changed" &&
+              form.metaEventName === "Lead" ? (
+                <p className="text-xs text-destructive">
+                  Caution: if lead ingestion already sends the standard Lead
+                  event, enabling another mapping that sends Lead will count two
+                  Leads for the same person. Prefer the custom QualifiedLead
+                  preset.
+                </p>
+              ) : null}
+              {presetInfo ? (
+                <div className="space-y-1 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
+                  {presetInfo.created.length > 0 ? (
+                    <p>
+                      Added (disabled):{" "}
+                      {presetInfo.created.map((c) => c.name).join("; ")}
+                    </p>
+                  ) : null}
+                  {presetInfo.skippedExisting.length > 0 ? (
+                    <p>
+                      Already existed:{" "}
+                      {presetInfo.skippedExisting.join("; ")}
+                    </p>
+                  ) : null}
+                  {presetInfo.missing.map((m) => (
+                    <p key={m.status}>
+                      No exact Stage value “{m.status}”
+                      {m.availableStageValues.length > 0
+                        ? ` (workspace has: ${m.availableStageValues.join(", ")})`
+                        : " (no Stage column found)"}
+                      . Create that exact value first, or map your own value
+                      explicitly.
+                    </p>
+                  ))}
+                  {presetInfo.warnings.map((w) => (
+                    <p key={w} className="text-destructive">
+                      {w}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="space-y-3 rounded-md border border-dashed border-border p-3">
                 <p className="text-sm font-medium text-foreground">Add an event</p>

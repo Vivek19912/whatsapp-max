@@ -52,6 +52,8 @@ import {
   type LookupOption,
 } from "@/lib/integrations/travel-crm/client";
 import { normalizePhone } from "@/lib/whatsapp/phone-utils";
+import { supabaseAdmin } from "@/lib/flows/admin-client";
+import { recordWorkspaceStatusChanged } from "@/lib/meta-capi/triggers";
 
 export const dynamic = "force-dynamic";
 
@@ -1286,6 +1288,7 @@ export async function POST(request: Request) {
       const fieldId = rowFieldIds[f];
       if (fieldId === null) continue;
       const label = labelForFunnelEnum(f, dialogEnum);
+      const previousValue = rowStored[f];
       try {
         const { error } = await supabase
           .from("workspace_values")
@@ -1303,6 +1306,24 @@ export async function POST(request: Request) {
         // Custom-field cells render from customValues — carry the
         // field id + label so the table and drawer repaint instantly.
         workspaceSync.rowPatch.customValues[fieldId] = label;
+        // ADDITIVE Meta Conversions API hook — same shared helper as
+        // inline Workspace edits. Best-effort: a trigger failure never
+        // fails the Travel CRM sync (failSync records the write error
+        // path only; trigger errors are swallowed by the helper).
+        try {
+          const fieldName =
+            loaded.custom.find((c) => c.id === fieldId)?.name ?? f;
+          await recordWorkspaceStatusChanged(supabaseAdmin(), {
+            accountId,
+            flowRunId: runId,
+            contactId: loaded.contactId,
+            fieldName,
+            previousValue,
+            newValue: label,
+          });
+        } catch (err) {
+          console.error("[meta-capi] travel-crm trigger failed:", err);
+        }
       } catch (err) {
         failSync(f, err);
       }

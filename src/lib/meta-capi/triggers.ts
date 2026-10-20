@@ -34,12 +34,14 @@ export function metaCapiPlatform(): CapiPlatform | null {
 
 async function loadMatchData(
   db: SupabaseClient,
+  accountId: string,
   contactId: string | null | undefined,
 ): Promise<UserDataInput | null> {
   if (!contactId) return null;
   const { data } = await db
     .from("contacts")
     .select("phone, name, email, ctwa_clid")
+    .eq("account_id", accountId)
     .eq("id", contactId)
     .maybeSingle();
   const contact = data as
@@ -86,7 +88,8 @@ export async function onMetaLeadReceived(
   const platform = metaCapiPlatform();
   if (!platform) return;
   await runSafely("meta-lead", async () => {
-    const matchData = args.matchData ?? (await loadMatchData(db, args.contactId));
+    const matchData =
+      args.matchData ?? (await loadMatchData(db, args.accountId, args.contactId));
     return fireCapiForAction(db, platform, {
       accountId: args.accountId,
       action: "meta_lead_received",
@@ -109,16 +112,16 @@ export async function onFlowCompleted(
   const platform = metaCapiPlatform();
   if (!platform) return;
   await runSafely("flow-completed", async () => {
-    const { data } = await db
-      .from("flow_runs")
-      .select("account_id, contact_id, ended_at")
-      .eq("id", runId)
-      .maybeSingle();
-    const run = data as
-      | { account_id: string; contact_id: string | null; ended_at: string | null }
-      | null;
-    if (!run) return null;
-    const matchData = await loadMatchData(db, run.contact_id);
+  const { data } = await db
+    .from("flow_runs")
+    .select("account_id, contact_id, ended_at")
+    .eq("id", runId)
+    .maybeSingle();
+  const run = data as
+    | { account_id: string; contact_id: string | null; ended_at: string | null }
+    | null;
+  if (!run) return null;
+  const matchData = await loadMatchData(db, run.account_id, run.contact_id);
     return fireCapiForAction(db, platform, {
       accountId: run.account_id,
       action: "flow_completed",
@@ -133,7 +136,9 @@ export async function onFlowCompleted(
 /**
  * A Workspace column was set to a value. Callers MUST only invoke this
  * when the stored value actually changed (not on a re-save of the same
- * value) — the route enforces that before calling.
+ * value) — the callers enforce that before calling. Prefer
+ * `recordWorkspaceStatusChanged`, which centralizes the unchanged /
+ * cleared guards.
  */
 export async function onWorkspaceValueChanged(
   db: SupabaseClient,
@@ -143,13 +148,14 @@ export async function onWorkspaceValueChanged(
     contactId?: string | null;
     fieldName: string;
     value: string;
+    previousValue?: string | null;
     occurredAt?: Date;
   },
 ): Promise<void> {
   const platform = metaCapiPlatform();
   if (!platform) return;
   await runSafely("workspace-field", async () => {
-    const matchData = await loadMatchData(db, args.contactId);
+    const matchData = await loadMatchData(db, args.accountId, args.contactId);
     return fireCapiForAction(db, platform, {
       accountId: args.accountId,
       action: "workspace_field_changed",
@@ -157,8 +163,50 @@ export async function onWorkspaceValueChanged(
       contactId: args.contactId ?? null,
       fieldName: args.fieldName,
       value: args.value,
+      previousValue: args.previousValue ?? null,
       occurredAt: args.occurredAt ?? new Date(),
       matchData,
     });
   });
+}
+
+export interface WorkspaceStatusChange {
+  accountId: string;
+  flowRunId: string;
+  contactId?: string | null;
+  fieldName: string;
+  /** Stored value before the write (null when previously empty). */
+  previousValue: string | null;
+  /** Stored value after the write (null/empty when cleared). */
+  newValue: string | null;
+  occurredAt?: Date;
+}
+
+/**
+ * Shared server-side status-change hook. Call after a successful
+ * Workspace value write from ANY route (inline Workspace edits, Travel
+ * CRM sync, future writers). Guards:
+ *   * unchanged values never trigger;
+ *   * cleared/deleted values never trigger;
+ *   * CAPI failures never throw (delivery is best-effort).
+ *
+ * Returns true when a trigger was evaluated.
+ */
+export async function recordWorkspaceStatusChanged(
+  db: SupabaseClient,
+  change: WorkspaceStatusChange,
+): Promise<boolean> {
+  const previous = change.previousValue ?? "";
+  const next = change.newValue ?? "";
+  if (next === "" || next === previous) return false;
+  await onWorkspaceValueChanged(db, {
+    accountId: change.accountId,
+    flowRunId: change.flowRunId,
+    contactId: change.contactId,
+    fieldName: change.fieldName,
+    value: next,
+    previousValue: previous === "" ? null : previous,
+    occurredAt: change.occurredAt,
+  });
+  return true;
 }
