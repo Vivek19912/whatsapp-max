@@ -59,6 +59,14 @@ describe("workspace page — Meta-only header menu", () => {
   it("the Columns menu still receives the full payload columns (restorable)", () => {
     expect(page()).toContain("flowColumns={payload?.columns ?? []}");
   });
+
+  it("passes the raw ingested answer to Meta cells only", () => {
+    const src = page();
+    const idx = src.indexOf("rawOriginal={");
+    expect(idx).toBeGreaterThan(-1);
+    expect(src.slice(idx, idx + 200)).toContain("meta_lead_ads");
+    expect(src.slice(idx, idx + 200)).toContain("row.rawAnswers?.[c.key]");
+  });
 });
 
 describe("table route — Meta-only option labels", () => {

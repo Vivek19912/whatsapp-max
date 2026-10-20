@@ -1774,6 +1774,11 @@ export default function WorkspacePage() {
                                   label={formatColumnLabel(c.label)}
                                   options={c.options ?? null}
                                   original={row.answers[c.key] ?? null}
+                    rawOriginal={
+                      payload?.meta?.kind === 'meta_lead_ads'
+                        ? (row.rawAnswers?.[c.key] ?? null)
+                        : undefined
+                    }
                                   override={overrideFor}
                                   fileUrl={cellFileUrl}
                                   canEdit={canSendMessages}

@@ -99,6 +99,12 @@ export interface FlowTableRow {
   /** Vars projected onto the flow's answer columns (missing → null). */
   answers: Record<string, string | null>;
   /**
+   * Meta Lead Ads only: the exact ingested per-question values,
+   * BEFORE any display mapping. Absent on every other flow kind.
+   * Consumed by Restore Original Answer; never mutated downstream.
+   */
+  rawAnswers?: Record<string, string | null>;
+  /**
    * First-touch CTWA ad URL for the Ad Source column. NOT part of
    * the RPC projection — attached per page by the table route from
    * contacts.source_url (batched, never N+1).

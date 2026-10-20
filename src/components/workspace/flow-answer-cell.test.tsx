@@ -221,4 +221,31 @@ describe("attachment cells open the file in a new tab", () => {
     expect(html).toContain('aria-label="Edited"');
     expect(html).toContain("New.pdf");
   });
+
+  it("compares the edited dot against the raw original for Meta tables", () => {
+    // Display shows the mapped label; the dot keys off the raw answer.
+    const edited = renderCell({
+      original: "Adobe Premiere Pro",
+      override: "Video Editing",
+      rawOriginal: "adobe_premiere_pro",
+    });
+    expect(edited).toContain('aria-label="Edited"');
+    expect(edited).toContain("Edited — original: adobe_premiere_pro");
+    // Override identical to the raw original → not edited, no restore cue.
+    const unedited = renderCell({
+      original: "Adobe Premiere Pro",
+      override: "adobe_premiere_pro",
+      rawOriginal: "adobe_premiere_pro",
+    });
+    expect(unedited).not.toContain('aria-label="Edited"');
+  });
+
+  it("keeps legacy behavior without a raw original (Flow Tables)", () => {
+    // No rawOriginal: edited state derives from the displayed value,
+    // exactly as before this change.
+    const edited = renderCell({ original: "Old.pdf", override: "New.pdf" });
+    expect(edited).toContain('aria-label="Edited"');
+    const same = renderCell({ original: "Same", override: "Same" });
+    expect(same).not.toContain('aria-label="Edited"');
+  });
 });

@@ -84,6 +84,8 @@ const h = vi.hoisted(() => ({
   adminFields: [] as Array<Record<string, unknown>>,
   adminInserts: [] as Array<Record<string, unknown>[]>,
   adminScopes: [] as Array<{ accountId: unknown; flowId: unknown }>,
+  // Meta form row (questions with option metadata) for Meta tables.
+  metaForm: null as Record<string, unknown> | null,
 }));
 
 function tableBuilder(rows: unknown) {
@@ -162,6 +164,13 @@ vi.mock("@/lib/supabase/server", () => {
             }),
           }),
         };
+      }
+      if (table === "meta_lead_forms") {
+        const chain: Record<string, unknown> = {};
+        chain.select = () => chain;
+        chain.eq = () => chain;
+        chain.maybeSingle = async () => ({ data: h.metaForm, error: null });
+        return chain;
       }
       if (table === "contacts") {
         return {
@@ -253,6 +262,7 @@ beforeEach(() => {
   h.adminFields = [];
   h.adminInserts = [];
   h.adminScopes = [];
+  h.metaForm = null;
 });
 
 describe("GET /api/flows/[id]/table", () => {
@@ -983,6 +993,126 @@ describe("GET table � Meta Instant Form identity mapping", () => {
       expect(json.rows[0].phone).toBeNull();
     } finally {
       h.rpc = previousRpc;
+    }
+  });
+});
+
+describe("GET table – Meta option labels with raw-answer preservation", () => {
+  const optionNodes = [
+    {
+      node_key: "meta_source_node",
+      node_type: "collect_input",
+      config: { var_key: "meta_lead_source", prompt_text: "Source" },
+      created_at: "2026-01-01T00:00:00Z",
+    },
+    {
+      node_key: "meta_q_0_service",
+      node_type: "collect_input",
+      config: { var_key: "service", prompt_text: "Which service?" },
+      created_at: "2026-01-01T00:00:01Z",
+    },
+  ];
+  const metaFormWithOptions = {
+    id: "form-1",
+    questions: [
+      {
+        key: "service",
+        label: "Which service?",
+        type: "CUSTOM",
+        options: [
+          { key: "adobe_premiere_pro", value: "Adobe Premiere Pro" },
+          { key: "after_effects", value: "After Effects" },
+        ],
+      },
+    ],
+  };
+  const optionRows = () => [
+    {
+      run_id: "run-opt",
+      contact_id: null,
+      contact_name: null,
+      contact_phone: null,
+      conversation_id: null,
+      status: "completed",
+      started_at: "2026-10-19T20:10:33.000Z",
+      last_advanced_at: null,
+      ended_at: "2026-10-19T20:10:33.000Z",
+      reached_at: null,
+      is_completed: true,
+      vars: {
+        service: "adobe_premiere_pro",
+        note: "Call me",
+        meta_lead_source: "Facebook",
+      },
+    },
+  ];
+
+  async function getMetaRows() {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    const previousMetaForm = h.metaForm;
+    try {
+      h.nodes = optionNodes;
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads · Opt Form",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+        meta_form_id: "form-1",
+      };
+      h.metaForm = metaFormWithOptions as unknown as Record<string, unknown>;
+      h.rpc = { total: 1, rows: optionRows() };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{
+          runId: string;
+          answers: Record<string, string | null>;
+          rawAnswers?: Record<string, string | null>;
+        }>;
+      };
+      return json.rows;
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+      h.metaForm = previousMetaForm;
+    }
+  }
+
+  it("renders human-readable labels while keeping the raw answers intact", async () => {
+    const rows = await getMetaRows();
+    const row = rows.find((r) => r.runId === "run-opt");
+    // Display layer shows the human-readable label …
+    expect(row?.answers.service).toBe("Adobe Premiere Pro");
+    // … while the raw ingested value is preserved separately.
+    expect(row?.rawAnswers?.service).toBe("adobe_premiere_pro");
+    // Columns without options pass through verbatim in both shapes.
+    expect(row?.answers.meta_lead_source).toBe("Facebook");
+    expect(row?.rawAnswers?.meta_lead_source).toBe("Facebook");
+  });
+
+  it("falls back to the raw value when no option matches", async () => {
+    const rows = await getMetaRows();
+    // 'note' is not a form column at all: absent from answers entirely.
+    expect(rows[0].answers.note).toBeUndefined();
+    expect(rows[0].rawAnswers?.note).toBeUndefined();
+  });
+
+  it("does not attach raw answers on non-Meta tables", async () => {
+    const res = await GET(new Request("https://app.test/api/flows/flow-1/table"), {
+      params: Promise.resolve({ id: "flow-1" }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { rows: Array<Record<string, unknown>> };
+    for (const row of json.rows) {
+      expect("rawAnswers" in row).toBe(false);
     }
   });
 });

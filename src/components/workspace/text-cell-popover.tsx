@@ -55,6 +55,20 @@ export function isCancelKey(e: TextCellKeyEvent): boolean {
   return e.key === "Escape";
 }
 
+/**
+ * Whether a stored override differs from the authoritative original
+ * answer, i.e. whether offering "Restore original" makes sense.
+ * `undefined` override = no override written (nothing to restore);
+ * `null` and `""` compare as the same empty value.
+ */
+export function isRestorableChange(
+  override: string | null | undefined,
+  original: string | null | undefined,
+): boolean {
+  if (override === undefined) return false;
+  return (override ?? "") !== (original ?? "");
+}
+
 /** True when the draft differs from the opened value. */
 export function isDirtyDraft(draft: string, value: string): boolean {
   return draft !== value;
@@ -97,6 +111,14 @@ export interface TextCellPopoverProps {
    * resets to the original and closes; the caller refreshes.
    */
   onRestore?: () => Promise<boolean>;
+  /**
+   * Explicit restore-UI override. When undefined (default), the
+   * panel derives visibility from `value` vs `originalValue`
+   * exactly as before — existing callers are untouched. Meta Lead
+   * Ads tables pass an explicit value computed against the raw
+   * ingested answer (never the display-mapped one).
+   */
+  showRestore?: boolean;
   /** Test/SSR escape hatch: render initially open. */
   defaultOpen?: boolean;
   /** Test/SSR escape hatch: render initially expanded. */
@@ -292,6 +314,7 @@ export function TextCellPopover({
   onSave,
   originalValue,
   onRestore,
+  showRestore: showRestoreOverride,
   defaultOpen = false,
   defaultExpanded = false,
   twoLineClamp = false,
@@ -307,9 +330,12 @@ export function TextCellPopover({
 
   // Edited (Workspace value differs from the original flow value):
   // subtle dot on the trigger + restore UI in the panel. Absent
-  // original (or equal values) → no restore affordance at all.
+  // original (or equal values) → no restore affordance at all. An
+  // explicit `showRestore` override (Meta Lead Ads: computed against
+  // the raw ingested answer) wins when provided.
   const edited =
-    originalValue !== undefined && originalValue !== value;
+    showRestoreOverride ??
+    (originalValue !== undefined && originalValue !== value);
 
   function focusTrigger() {
     triggerRef.current?.focus();

@@ -8,6 +8,7 @@ import {
   formatCharCount,
   isCancelKey,
   isDirtyDraft,
+  isRestorableChange,
   isSaveShortcut,
   textEditorClassName,
 } from "./text-cell-popover";
@@ -467,5 +468,32 @@ describe("26. two-line clamp for Customer Response / Next Action", () => {
     expect(html).toContain("this is the game");
     expect(html).toContain("Please share the best itinerary");
     expect(html).not.toContain("line-clamp-2");
+  });
+});
+
+describe("isRestorableChange — when restore is offered", () => {
+  it("is false without an override (nothing to restore)", () => {
+    expect(isRestorableChange(undefined, "Original")).toBe(false);
+    expect(isRestorableChange(undefined, null)).toBe(false);
+  });
+
+  it("is true when the committed value differs from the original", () => {
+    expect(isRestorableChange("Edited", "Original")).toBe(true);
+    expect(isRestorableChange("x", null)).toBe(true);
+    expect(isRestorableChange("", "Original")).toBe(true);
+  });
+
+  it("is false when the committed value matches the original", () => {
+    expect(isRestorableChange("Same", "Same")).toBe(false);
+    expect(isRestorableChange(null, null)).toBe(false);
+    // Null and empty both mean "no value": clearing an empty answer
+    // is not a change worth restoring.
+    expect(isRestorableChange(null, "")).toBe(false);
+    expect(isRestorableChange("", null)).toBe(false);
+  });
+
+  it("compares exact text — no normalization, no guessing", () => {
+    expect(isRestorableChange("Adobe Premiere Pro", "adobe_premiere_pro")).toBe(true);
+    expect(isRestorableChange("  spaced  ", "spaced")).toBe(true);
   });
 });

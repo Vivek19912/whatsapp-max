@@ -9,7 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { TextCellPopover } from "./text-cell-popover";
+import { TextCellPopover, isRestorableChange } from "./text-cell-popover";
 import { AttachmentCellLink } from "./attachment-cell-link";
 
 /**
@@ -40,6 +40,14 @@ export interface FlowAnswerCellProps {
   /** Original flow answer (null when unanswered). Never mutated. */
   original: string | null;
   /**
+   * Raw ingested answer for Meta Lead Ads tables (the stored value
+   * before any display mapping). When provided, restore compares
+   * and displays against it instead of `original`, so the exact
+   * Meta-supplied text is what gets restored. Absent on every
+   * other table → legacy behavior, untouched.
+   */
+  rawOriginal?: string | null;
+  /**
    * Agent override (undefined = none → show original; null =
    * explicitly cleared → show blank + edited).
    */
@@ -65,6 +73,7 @@ export function FlowAnswerCell({
   label,
   options,
   original,
+  rawOriginal,
   override,
   fileUrl,
   canEdit,
@@ -73,6 +82,13 @@ export function FlowAnswerCell({
   const [saving, setSaving] = useState(false);
   const display = override !== undefined ? override : original;
   const edited = override !== undefined;
+  // Meta Lead Ads tables compare (and restore) against the raw
+  // ingested answer rather than the display-mapped original, so a
+  // mapped label can never mask a changed override. `undefined`
+  // everywhere else → legacy behavior, untouched.
+  const showRestore =
+    rawOriginal === undefined ? undefined : isRestorableChange(override, rawOriginal);
+  const originalForRestore = rawOriginal !== undefined ? rawOriginal : original;
 
   // Attachment value (resolved file URL + non-empty display): the
   // filename renders as a clickable link that opens the actual file in
@@ -189,7 +205,8 @@ export function FlowAnswerCell({
       value={display ?? ""}
       editable
       onSave={(v) => request("PUT", v)}
-      originalValue={original}
+      originalValue={originalForRestore}
+      showRestore={showRestore}
       onRestore={() => request("DELETE")}
     />
   );

@@ -403,9 +403,14 @@ export async function GET(
       identityFallback,
     )
     // Meta-only, dynamic answers only: system Name/Phone columns
-    // keep their contact/fallback values untouched.
-    if (isMetaLeadFlow && metaOptionLabels && metaOptionLabels.size > 0) {
-      row.answers = applyOptionLabelsToAnswers(row.answers, metaOptionLabels)
+    // keep their contact/fallback values untouched. `rawAnswers`
+    // preserves the exact ingested values (needed for Restore
+    // Original Answer); `answers` carries the display mapping.
+    if (isMetaLeadFlow) {
+      row.rawAnswers = { ...row.answers }
+      if (metaOptionLabels && metaOptionLabels.size > 0) {
+        row.answers = applyOptionLabelsToAnswers(row.answers, metaOptionLabels)
+      }
     }
     return row
   });
