@@ -18,6 +18,7 @@ import {
   metaDefaultHiddenColumnIds,
   metaHeaderLabelKey,
   normalizeHeaderLabel,
+  resolveMetaHeaderDisplayLabel,
   resolveMetaHeaderLabel,
 } from "./header-labels";
 
@@ -129,6 +130,158 @@ describe("resolveMetaHeaderLabel", () => {
           labels: { "flow:experience": "Experience" },
         }),
       ).toBe("How much experience?");
+    }
+  });
+});
+
+describe("resolveMetaHeaderDisplayLabel", () => {
+  // Stand-in for the workspace display formatting: proves which
+  // path the resolver took without importing UI modules here.
+  const formatOriginal = (label: string) => `formatted:${label}`;
+
+  it("shows the custom header verbatim in the details sidebar", () => {
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: {
+          key: "software",
+          system: false,
+          label: "Which software do you use for video editing?",
+        },
+        labels: { "flow:software": "Software" },
+        formatOriginal,
+      }),
+    ).toBe("Software");
+  });
+
+  it("never formats a custom header (verbatim, like the table header)", () => {
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: { key: "city", system: false, label: "City" },
+        labels: { "flow:city": "city lowercase" },
+        formatOriginal,
+      }),
+    ).toBe("city lowercase");
+  });
+
+  it("shows the original question when no override exists", () => {
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: {
+          key: "software",
+          system: false,
+          label: "Which software do you use for video editing?",
+        },
+        labels: {},
+        formatOriginal,
+      }),
+    ).toBe("formatted:Which software do you use for video editing?");
+  });
+
+  it("restoring the header restores the formatted original label", () => {
+    const column = {
+      key: "software",
+      system: false,
+      label: "Which software do you use for video editing?",
+    };
+    // Before restore: custom wins.
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column,
+        labels: { "flow:software": "Software" },
+        formatOriginal,
+      }),
+    ).toBe("Software");
+    // After restore the override row is gone (null/{}): original again.
+    for (const labels of [{}, null, undefined]) {
+      expect(
+        resolveMetaHeaderDisplayLabel({
+          flowKind: "meta_lead_ads",
+          column,
+          labels,
+          formatOriginal,
+        }),
+      ).toBe("formatted:Which software do you use for video editing?");
+    }
+  });
+
+  it("resolves by stable key, so siblings and same-text columns are untouched", () => {
+    const labels = { "flow:software": "Software" };
+    // Same visible text, different stable key: no override applies.
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: {
+          key: "software_2",
+          system: false,
+          label: "Which software do you use for video editing?",
+        },
+        labels,
+        formatOriginal,
+      }),
+    ).toBe("formatted:Which software do you use for video editing?");
+    // Sibling question: untouched.
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: { key: "budget", system: false, label: "What is your budget?" },
+        labels,
+        formatOriginal,
+      }),
+    ).toBe("formatted:What is your budget?");
+  });
+
+  it("ignores overrides on system and Source columns", () => {
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: { key: "name", system: true, label: "Name" },
+        labels: { "flow:name": "Custom" },
+        formatOriginal,
+      }),
+    ).toBe("formatted:Name");
+    expect(
+      resolveMetaHeaderDisplayLabel({
+        flowKind: "meta_lead_ads",
+        column: { key: "meta_lead_source", system: false, label: "Source" },
+        labels: { "flow:meta_lead_source": "Custom" },
+        formatOriginal,
+      }),
+    ).toBe("formatted:Source");
+  });
+
+  it("leaves Flow Tables on the formatting path even with overrides stored", () => {
+    for (const flowKind of ["whatsapp_flow", null, undefined]) {
+      expect(
+        resolveMetaHeaderDisplayLabel({
+          flowKind,
+          column: { key: "software", system: false, label: "experience?" },
+          labels: { "flow:software": "Software" },
+          formatOriginal,
+        }),
+      ).toBe("formatted:experience?");
+    }
+  });
+
+  it("falls back safely on blank overrides or a missing map", () => {
+    const column = { key: "software", system: false, label: "Original?" };
+    for (const labels of [
+      { "flow:software": "" },
+      { "flow:software": "   " },
+      null,
+      undefined,
+    ]) {
+      expect(
+        resolveMetaHeaderDisplayLabel({
+          flowKind: "meta_lead_ads",
+          column,
+          labels,
+          formatOriginal,
+        }),
+      ).toBe("formatted:Original?");
     }
   });
 });

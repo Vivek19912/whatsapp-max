@@ -69,6 +69,78 @@ describe("workspace page — Meta-only header menu", () => {
   });
 });
 
+describe("workspace page — Meta lead-details sidebar labels", () => {
+  it("resolves sidebar answer labels through the shared header override map", () => {
+    const src = page();
+    const sheetIdx = src.indexOf('<SheetContent side="right"');
+    expect(sheetIdx).toBeGreaterThan(-1);
+    const resolverIdx = src.indexOf("resolveMetaHeaderDisplayLabel({");
+    // The single resolver usage lives inside the lead drawer, wired
+    // to the same override map as the table header.
+    expect(resolverIdx).toBeGreaterThan(sheetIdx);
+    const call = src.slice(resolverIdx, resolverIdx + 1400);
+    expect(call).toContain("flowKind: payload.meta.kind");
+    expect(call).toContain("labels: headerLabels");
+    expect(call).toContain("formatOriginal: formatColumnLabel");
+  });
+
+  it("keeps sidebar answer values on the override-aware display map", () => {
+    // Values still come from resolveFlowAnswers (agent overrides
+    // win); only the <dt> labels changed — mappings untouched.
+    expect(page()).toContain("display[c.key] ?? '—'");
+  });
+
+  it("the drawer never renders a bare original label anymore", () => {
+    const src = page();
+    const sheetIdx = src.indexOf('<SheetContent side="right"');
+    expect(sheetIdx).toBeGreaterThan(-1);
+    const sheet = src.slice(sheetIdx);
+    // The Answers <dt> goes through the override resolver; a Flow
+    // Table drawer (flowKind !== 'meta_lead_ads') falls through to
+    // the same formatting as before, so its labels are unchanged.
+    expect(sheet).toContain("resolveMetaHeaderDisplayLabel({");
+    expect(sheet).not.toContain("{formatColumnLabel(c.label)}");
+  });
+});
+
+describe("workspace page — Meta Lead Source removal", () => {
+  it("drops the Lead Received column from the Meta table and menu only", () => {
+    const src = page();
+    // Scoped list: Meta tables filter out Lead Received (shown as
+    // "Lead Source"); every other table keeps the field untouched.
+    expect(src).toContain("customFieldsScoped");
+    expect(src).toContain(
+      "customFields.filter((f) => !isLeadReceivedField({ name: f.name }))",
+    );
+    // Visibility, widths, and the Columns menu all read the scoped
+    // list — the field can no longer render or be re-enabled there.
+    expect(src).toContain("customFieldsScoped,");
+    expect(src).toContain("customFields={customFieldsScoped}");
+  });
+
+  it("keeps stored data, filters, and Flow Tables on the full field list", () => {
+    const src = page();
+    // The Filters panel metadata and the cell-save path still use
+    // the complete list: nothing deleted, nothing unwritable.
+    expect(src).toContain("customFields.map((f) => [f.name.trim().toLowerCase(), f]");
+    expect(src).toContain("customFields.find((f) => f.id === fieldId)");
+  });
+});
+
+describe("table route — Meta Source column position", () => {
+  it("reorders Source after the last question column for Meta tables only", () => {
+    const src = tableRoute();
+    const gateIdx = src.indexOf("if (isMetaLeadFlow) {");
+    expect(gateIdx).toBeGreaterThan(-1);
+    const block = src.slice(gateIdx, gateIdx + 900);
+    expect(block).toContain("META_SOURCE_COLUMN_KEY");
+    expect(block).toContain("latest_recording");
+    // Display order only: no stored-row, key, or Sheets writes.
+    expect(block).not.toContain("vars.answers");
+    expect(block).not.toContain("update({ answers");
+  });
+});
+
 describe("table route — Meta-only option labels", () => {
   it("applies option labels only inside the Meta branch", () => {
     const src = tableRoute();

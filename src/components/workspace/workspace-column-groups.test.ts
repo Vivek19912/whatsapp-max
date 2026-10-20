@@ -65,6 +65,11 @@ describe("Group 3 pinned order (Assigned To, Received, Type, Stage)", () => {
     // share a background after the pinned business reorder;
     // visibility/widths/menu still use stable stored identities.
     expect(pageSrc).toContain("...customFieldsOrdered.map((f) => ({");
-    expect(pageSrc).toContain("customFields={customFields}");
+    // The Columns menu reads the Meta-scoped list: Meta tables drop
+    // Lead Received (it duplicates the Source answer column) while
+    // Flow Tables pass the identical full-list reference through,
+    // so their menu is unchanged.
+    expect(pageSrc).toContain("customFields={customFieldsScoped}");
+    expect(pageSrc).toContain(": customFields,");
   });
 });

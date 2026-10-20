@@ -1105,6 +1105,103 @@ describe("GET table – Meta option labels with raw-answer preservation", () => 
     expect(rows[0].rawAnswers?.note).toBeUndefined();
   });
 
+  it("prettifies unmatched underscore values for display, keeps raw intact", async () => {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    const previousMetaForm = h.metaForm;
+    try {
+      h.nodes = optionNodes;
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads · Opt Form",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+        meta_form_id: "form-1",
+      };
+      h.metaForm = metaFormWithOptions as unknown as Record<string, unknown>;
+      h.rpc = {
+        total: 1,
+        rows: [
+          {
+            run_id: "run-pretty",
+            contact_id: null,
+            contact_name: null,
+            contact_phone: null,
+            conversation_id: null,
+            status: "completed",
+            started_at: "2026-10-19T20:10:33.000Z",
+            last_advanced_at: null,
+            ended_at: "2026-10-19T20:10:33.000Z",
+            reached_at: null,
+            is_completed: true,
+            vars: {
+              service: "davinci_resolve",
+              meta_lead_source: "Facebook",
+            },
+          },
+        ],
+      };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{
+          answers: Record<string, string | null>;
+          rawAnswers?: Record<string, string | null>;
+        }>;
+      };
+      // Display shows spaces; the stored raw keeps underscores.
+      expect(json.rows[0].answers.service).toBe("davinci resolve");
+      expect(json.rows[0].rawAnswers?.service).toBe("davinci_resolve");
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+      h.metaForm = previousMetaForm;
+    }
+  });
+
+  it("leaves underscore values verbatim on non-Meta tables", async () => {
+    const previousRpc = h.rpc;
+    try {
+      h.rpc = {
+        total: 1,
+        rows: [
+          {
+            run_id: "run-plain",
+            contact_id: "c-1",
+            contact_name: "Rahul",
+            contact_phone: "+91111",
+            conversation_id: null,
+            status: "completed",
+            started_at: "2026-09-18T10:00:00.000Z",
+            last_advanced_at: null,
+            ended_at: "2026-09-18T10:05:00.000Z",
+            reached_at: null,
+            is_completed: true,
+            vars: { Name: "Rahul", TravelDate: "2–3_years" },
+          },
+        ],
+      };
+      const res = await GET(new Request("https://app.test/api/flows/flow-1/table"), {
+        params: Promise.resolve({ id: "flow-1" }),
+      });
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        rows: Array<{ answers: Record<string, string | null> }>;
+      };
+      // Flow Tables never pass through option labels: byte-identical.
+      expect(json.rows[0].answers.TravelDate).toBe("2–3_years");
+    } finally {
+      h.rpc = previousRpc;
+    }
+  });
+
   it("does not attach raw answers on non-Meta tables", async () => {
     const res = await GET(new Request("https://app.test/api/flows/flow-1/table"), {
       params: Promise.resolve({ id: "flow-1" }),
@@ -1114,5 +1211,172 @@ describe("GET table – Meta option labels with raw-answer preservation", () => 
     for (const row of json.rows) {
       expect("rawAnswers" in row).toBe(false);
     }
+  });
+});
+
+describe("GET table – Meta Source column position", () => {
+  const sourceNodes = [
+    {
+      node_key: "meta_source_node",
+      node_type: "collect_input",
+      config: {
+        var_key: "meta_lead_source",
+        prompt_text: "Source",
+        next_node_key: "meta_q_0_city",
+      },
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      node_key: "meta_q_0_city",
+      node_type: "collect_input",
+      config: {
+        var_key: "city",
+        prompt_text: "Which city?",
+        next_node_key: "meta_q_1_budget",
+      },
+      created_at: "2026-01-01T00:00:01.000Z",
+    },
+    {
+      node_key: "meta_q_1_budget",
+      node_type: "collect_input",
+      config: {
+        var_key: "budget",
+        prompt_text: "What is your budget?",
+        next_node_key: "meta_q_2_service",
+      },
+      created_at: "2026-01-01T00:00:02.000Z",
+    },
+    {
+      node_key: "meta_q_2_service",
+      node_type: "collect_input",
+      config: { var_key: "service", prompt_text: "Which service?" },
+      created_at: "2026-01-01T00:00:03.000Z",
+    },
+  ];
+  const sourceRows = () => [
+    {
+      run_id: "run-fb",
+      contact_id: null,
+      contact_name: null,
+      contact_phone: null,
+      conversation_id: null,
+      status: "completed",
+      started_at: "2026-10-19T20:10:33.000Z",
+      last_advanced_at: null,
+      ended_at: "2026-10-19T20:10:33.000Z",
+      reached_at: null,
+      is_completed: true,
+      vars: {
+        city: "Mumbai",
+        budget: "High",
+        service: "Editing",
+        meta_lead_source: "Facebook",
+      },
+    },
+    {
+      run_id: "run-ig",
+      contact_id: null,
+      contact_name: null,
+      contact_phone: null,
+      conversation_id: null,
+      status: "completed",
+      started_at: "2026-10-19T21:00:00.000Z",
+      last_advanced_at: null,
+      ended_at: "2026-10-19T21:00:00.000Z",
+      reached_at: null,
+      is_completed: true,
+      vars: {
+        city: "Delhi",
+        budget: "Low",
+        service: "Shooting",
+        meta_lead_source: "Instagram",
+      },
+    },
+  ];
+
+  async function getMetaColumns() {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    try {
+      h.nodes = sourceNodes;
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads · Source Order",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+      };
+      h.rpc = { total: 2, rows: sourceRows() };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as {
+        columns: Array<{ key: string; label: string; system: boolean }>;
+        rows: Array<{ runId: string; answers: Record<string, string | null> }>;
+      };
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+    }
+  }
+
+  it("renders Source exactly once, after every dynamic question column", async () => {
+    const json = await getMetaColumns();
+    const keys = json.columns.map((c) => c.key);
+    // Exactly once.
+    expect(keys.filter((k) => k === "meta_lead_source")).toHaveLength(1);
+    expect(
+      json.columns.find((c) => c.key === "meta_lead_source")?.label,
+    ).toBe("Source");
+    // After all three question columns, just before Latest Recording.
+    expect(keys.indexOf("city")).toBeLessThan(keys.indexOf("budget"));
+    expect(keys.indexOf("budget")).toBeLessThan(keys.indexOf("service"));
+    expect(keys.indexOf("service")).toBeLessThan(
+      keys.indexOf("meta_lead_source"),
+    );
+    expect(keys.indexOf("meta_lead_source")).toBe(
+      keys.indexOf("latest_recording") - 1,
+    );
+    // System/operational columns keep their positions.
+    expect(keys.slice(0, 3)).toEqual([
+      "submission_time",
+      "name",
+      "phone",
+    ]);
+    expect(keys[keys.length - 1]).toBe("status");
+  });
+
+  it("keeps Source values correct for Facebook and Instagram leads", async () => {
+    const json = await getMetaColumns();
+    const fb = json.rows.find((r) => r.runId === "run-fb");
+    const ig = json.rows.find((r) => r.runId === "run-ig");
+    expect(fb?.answers.meta_lead_source).toBe("Facebook");
+    expect(ig?.answers.meta_lead_source).toBe("Instagram");
+    // Question answers keep their own mappings — nothing shifted.
+    expect(fb?.answers.city).toBe("Mumbai");
+    expect(fb?.answers.budget).toBe("High");
+    expect(fb?.answers.service).toBe("Editing");
+  });
+
+  it("leaves non-Meta column order untouched (no Source column)", async () => {
+    const res = await GET(new Request("https://app.test/api/flows/flow-1/table"), {
+      params: Promise.resolve({ id: "flow-1" }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      columns: Array<{ key: string; label: string; system: boolean }>;
+    };
+    const keys = json.columns.map((c) => c.key);
+    expect(keys).not.toContain("meta_lead_source");
+    // Builder order preserved: systems first, Latest Recording
+    // second-to-last, Status last — the Meta reorder never runs here.
+    expect(keys.slice(0, 3)).toEqual(["submission_time", "name", "phone"]);
+    expect(keys[keys.length - 2]).toBe("latest_recording");
+    expect(keys[keys.length - 1]).toBe("status");
   });
 });

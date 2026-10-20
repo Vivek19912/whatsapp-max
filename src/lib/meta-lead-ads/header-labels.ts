@@ -97,7 +97,44 @@ export function resolveMetaHeaderLabel(args: {
   const { flowKind, column, labels } = args;
   if (flowKind !== "meta_lead_ads") return column.label;
   if (!isRenamableMetaColumn(column)) return column.label;
-  const custom = labels?.[metaHeaderLabelKey(column.key)];
+  return storedMetaHeaderLabel(column.key, labels) ?? column.label;
+}
+
+/**
+ * A stored custom header, or null when none applies. Single lookup
+ * behind both resolvers below, so the table header, the table cell
+ * tooltip, and the lead-details sidebar can never disagree about
+ * which override belongs to which column.
+ */
+function storedMetaHeaderLabel(
+  columnKey: string,
+  labels: Readonly<Record<string, string>> | null | undefined,
+): string | null {
+  const custom = labels?.[metaHeaderLabelKey(columnKey)];
   if (typeof custom === "string" && custom.trim() !== "") return custom;
-  return column.label;
+  return null;
+}
+
+/**
+ * Final display label for one column in Meta Lead Ads surfaces
+ * (table header and lead-details sidebar). A stored custom header
+ * renders verbatim; otherwise the original question goes through
+ * the caller's display formatting (the workspace
+ * `formatColumnLabel`). Flow Tables, system columns, and the fixed
+ * Source column always take the formatting path, so their labels
+ * render exactly as before.
+ *
+ * `formatOriginal` is injected (rather than imported) so this
+ * module stays server-safe for API routes.
+ */
+export function resolveMetaHeaderDisplayLabel(args: {
+  flowKind: string | null | undefined;
+  column: Pick<MetaHeaderColumnRef, "key" | "system" | "label">;
+  labels: Readonly<Record<string, string>> | null | undefined;
+  formatOriginal: (label: string) => string;
+}): string {
+  const { flowKind, column, labels, formatOriginal } = args;
+  if (flowKind !== "meta_lead_ads") return formatOriginal(column.label);
+  if (!isRenamableMetaColumn(column)) return formatOriginal(column.label);
+  return storedMetaHeaderLabel(column.key, labels) ?? formatOriginal(column.label);
 }

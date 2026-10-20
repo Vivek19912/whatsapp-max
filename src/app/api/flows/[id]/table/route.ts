@@ -32,7 +32,10 @@ import {
   buildOptionLabelMap,
   type StoredFormQuestion,
 } from '@/lib/meta-lead-ads/option-labels'
-import { questionVarKeys } from '@/lib/meta-lead-ads/virtual-flow'
+import {
+  META_SOURCE_COLUMN_KEY,
+  questionVarKeys,
+} from '@/lib/meta-lead-ads/virtual-flow'
 
 /**
  * GET /api/flows/[id]/table?view=all|completed|incomplete&search=&page=&pageSize=&dateFrom=&dateTo=&assignee=
@@ -341,6 +344,22 @@ export async function GET(
   // wins whenever it exists, and nothing is invented for absent
   // fields. Other flow kinds are untouched.
   const isMetaLeadFlow = (flow as { kind?: string | null }).kind === 'meta_lead_ads'
+
+  // Meta-only column order: the Source answer column moves to the
+  // end of the dynamic Instant Form question columns (just before
+  // Latest Recording), instead of leading them. Display order only
+  // — keys, values, visibility ids, Sheets (node-derived), filters,
+  // and Travel CRM are untouched, and every other flow kind keeps
+  // builder order. Applies uniformly regardless of how many
+  // questions the form has; a missing Source column is a no-op.
+  if (isMetaLeadFlow) {
+    const sourceIdx = columns.findIndex((c) => c.key === META_SOURCE_COLUMN_KEY)
+    if (sourceIdx > -1) {
+      const [sourceCol] = columns.splice(sourceIdx, 1)
+      const recordIdx = columns.findIndex((c) => c.key === 'latest_recording')
+      columns.splice(recordIdx === -1 ? columns.length : recordIdx, 0, sourceCol)
+    }
+  }
 
   // Meta-only display mapping: human-readable Instant Form option
   // labels resolved from the form's stored question metadata.

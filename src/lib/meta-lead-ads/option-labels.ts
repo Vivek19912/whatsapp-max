@@ -4,12 +4,19 @@
 // Display-only: stored answers, field identifiers, and mappings are
 // NEVER modified here. Meta defines a multiple-choice option as
 // `{ value: "<text shown to the user>", key: "<short identifier>" }`,
-// so a stored raw answer that exactly equals an option `key` may be
-// rendered as that option's `value`. Anything else — free text,
-// unknown values, missing or empty labels — renders verbatim, never
-// guessed and never underscore-munged.
+// so a stored raw answer that exactly equals an option `key` renders
+// as that option's `value` (preferred — the same reliable label the
+// lead saw). When a choice question has option metadata but the
+// stored value matches no key (unsynced options, retired choices),
+// underscore-separated values render with spaces instead of
+// underscores (`davinci_resolve` → `davinci resolve`) — still
+// display-only, never title-cased, never re-keyed.
 //
-// Pure and dependency-free — unit tested directly.
+// Free text, answers without underscores, and questions with no
+// option metadata at all render verbatim, never guessed.
+//
+// Pure and dependency-free — unit tested directly. Flow Tables never
+// import this module; the fallback cannot reach them.
 // ============================================================
 
 export interface StoredFormOption {
@@ -55,10 +62,17 @@ export function buildOptionLabelMap(
 }
 
 /**
- * Resolve one stored answer value to its display text using an exact
- * option-key match only. Multi-select answers (stored joined with
- * ", ") are split and resolved per item; any item without an exact
- * match — including all free text — is returned verbatim.
+ * Resolve one stored answer value to its display text. An exact
+ * option-key match wins first (whole value, then per item for
+ * multi-select answers stored joined with ", "). Any remaining item
+ * with underscores renders with spaces — but only for questions
+ * that actually have option metadata (a known choice question); a
+ * missing/empty label map means free text or an unknown question,
+ * which renders verbatim, never guessed.
+ *
+ * Separators are preserved byte-for-byte: a value with nothing to
+ * resolve returns the identical string (e.g. "a,b" never becomes
+ * "a, b").
  */
 export function mapAnswerValue(
   labels: ReadonlyMap<string, string> | undefined,
@@ -70,16 +84,21 @@ export function mapAnswerValue(
   const whole = labels.get(value.trim());
   if (whole !== undefined) return whole;
   let changed = false;
-  const mapped = value.split(/\s*,\s*/).map((part) => {
-    if (part === "") return part;
-    const label = labels.get(part);
-    if (label === undefined) return part;
-    changed = true;
-    return label;
+  const mapped = value.split(/(\s*,\s*)/).map((token, index) => {
+    // Odd tokens are the original separators — never touched.
+    if (index % 2 === 1 || token === "") return token;
+    const label = labels.get(token);
+    if (label !== undefined) {
+      changed = true;
+      return label;
+    }
+    if (token.includes("_")) {
+      changed = true;
+      return token.replace(/_/g, " ");
+    }
+    return token;
   });
-  // Joining must never alter an unmatched value (e.g. "a,b" must not
-  // become "a, b"): only rebuild when at least one item resolved.
-  return changed ? mapped.join(", ") : value;
+  return changed ? mapped.join("") : value;
 }
 
 /**

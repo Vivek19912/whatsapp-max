@@ -78,6 +78,7 @@ import {
   isRenamableMetaColumn,
   metaDefaultHiddenColumnIds,
   metaHeaderLabelKey,
+  resolveMetaHeaderDisplayLabel,
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 
@@ -847,6 +848,20 @@ export default function WorkspacePage() {
   }, [deepLinkContactId, payload, pageSize, selected]);  const activeFlowName = flows?.find((f) => f.id === flowId)?.name ?? null;
 
   const customFields = useMemo(() => payload?.customFields ?? [], [payload]);
+  // Meta Lead Ads only: drop the "Lead Received" business column
+  // (displayed as "Lead Source") from the visible table AND the
+  // Columns menu — Meta leads carry the real Source answer column
+  // instead, so the derived duplicate is redundant. Stored values,
+  // field definitions, filter metadata, and Flow Tables are
+  // untouched; the field stays manageable from any Flow Table.
+  const isMetaTable = payload?.meta?.kind === 'meta_lead_ads';
+  const customFieldsScoped = useMemo(
+    () =>
+      isMetaTable
+        ? customFields.filter((f) => !isLeadReceivedField({ name: f.name }))
+        : customFields,
+    [isMetaTable, customFields]
+  );
   // Live business-column metadata for the Filters panel: each
   // column's own options (never hardcoded) + presence flags for
   // the date sections. Resolved by case-insensitive stored name —
@@ -993,10 +1008,10 @@ export default function WorkspacePage() {
     () =>
       applyVisibility(
         payload?.columns ?? [],
-        customFields,
+        customFieldsScoped,
         visibility.hiddenIds
       ),
-    [payload, customFields, visibility.hiddenIds]
+    [payload, customFieldsScoped, visibility.hiddenIds]
   );
 
   // "Lead Received" auto-detection: when the cell has no stored
@@ -1480,7 +1495,7 @@ export default function WorkspacePage() {
               <ColumnsMenu
                 flowId={flowId}
                 flowColumns={payload?.columns ?? []}
-                customFields={customFields}
+                customFields={customFieldsScoped}
                 hiddenIds={visibility.hiddenIds}
                 onToggleVisibility={visibility.toggle}
                 onShowAll={visibility.showAll}
@@ -1947,7 +1962,19 @@ export default function WorkspacePage() {
                               className="flex justify-between gap-4"
                             >
                               <dt className="text-muted-foreground shrink-0">
-                                {formatColumnLabel(c.label)}
+                                {resolveMetaHeaderDisplayLabel({
+                                  // Meta Lead Ads tables only: show the
+                                  // current custom header (same override
+                                  // map as the table header, so sidebar
+                                  // and header can never disagree).
+                                  // Every Flow Table takes the
+                                  // formatting path — labels render
+                                  // exactly as before.
+                                  flowKind: payload.meta.kind,
+                                  column: c,
+                                  labels: headerLabels,
+                                  formatOriginal: formatColumnLabel,
+                                })}
                               </dt>
                               <dd className="text-foreground text-right break-words">
                                 {display[c.key] ?? '—'}

@@ -1,11 +1,15 @@
 // Meta Lead Ads — human-readable option labels (display-only).
 //
-// Pins the exact-match contract:
-//   * a stored raw answer renders as its option `value` only on an
-//     exact `key` match;
-//   * free text, unknown values, missing or empty labels render
-//     verbatim — never guessed, never underscore-munged;
-//   * multi-select answers resolve per item; unmatched items survive;
+// Pins the display contract:
+//   * a stored raw answer renders as its option `value` on an exact
+//     `key` match (preferred — the label the lead saw);
+//   * for a question WITH option metadata, an unmatched
+//     underscore-separated value renders with spaces instead of
+//     underscores (`davinci_resolve` → `davinci resolve`);
+//   * free text, answers without underscores, and questions with no
+//     option metadata render verbatim — never guessed;
+//   * multi-select answers resolve per item; separators survive
+//     byte-for-byte, unmatched items survive;
 //   * stored answers and field identifiers are never modified.
 
 import { describe, expect, it } from "vitest";
@@ -64,23 +68,43 @@ describe("mapAnswerValue", () => {
     expect(mapAnswerValue(labels, "adobe_premiere_pro")).toBe("Adobe Premiere Pro");
   });
 
-  it("leaves free text and unknown values verbatim", () => {
+  it("leaves free text and underscore-free values verbatim", () => {
     expect(mapAnswerValue(labels, "Need help with editing")).toBe(
       "Need help with editing",
     );
-    expect(mapAnswerValue(labels, "some_unknown_value")).toBe("some_unknown_value");
+    expect(mapAnswerValue(labels, "Custom Text")).toBe("Custom Text");
+    expect(mapAnswerValue(labels, null)).toBe(null);
+  });
+
+  it("never guesses without option metadata (free text stays intact)", () => {
     expect(mapAnswerValue(new Map(), "adobe_premiere_pro")).toBe("adobe_premiere_pro");
+    expect(mapAnswerValue(new Map(), "rahul_kumar@gmail.com")).toBe(
+      "rahul_kumar@gmail.com",
+    );
+    expect(mapAnswerValue(undefined, "some_value")).toBe("some_value");
+  });
+
+  it("renders unmatched underscore values with spaces on choice questions", () => {
+    expect(mapAnswerValue(labels, "davinci_resolve")).toBe("davinci resolve");
+    expect(mapAnswerValue(labels, "2–3_years")).toBe("2–3 years");
+    // Exact labels still win over the fallback.
+    expect(mapAnswerValue(labels, "adobe_premiere_pro")).toBe("Adobe Premiere Pro");
   });
 
   it("resolves multi-select answers per item, keeping unmatched parts", () => {
     expect(mapAnswerValue(labels, "adobe_premiere_pro, custom text")).toBe(
       "Adobe Premiere Pro, custom text",
     );
+    expect(mapAnswerValue(labels, "adobe_premiere_pro, davinci_resolve")).toBe(
+      "Adobe Premiere Pro, davinci resolve",
+    );
   });
 
-  it("never alters unmatched values (no space-padding changes)", () => {
+  it("never alters separators or unmatched values (no space-padding changes)", () => {
     expect(mapAnswerValue(new Map(), "a,b")).toBe("a,b");
-    expect(mapAnswerValue(labels, null)).toBe(null);
+    expect(mapAnswerValue(labels, "a,b")).toBe("a,b");
+    expect(mapAnswerValue(labels, "a_b,c")).toBe("a b,c");
+    expect(mapAnswerValue(labels, "")).toBe("");
   });
 });
 
@@ -91,6 +115,21 @@ describe("applyOptionLabelsToAnswers", () => {
     const out = applyOptionLabelsToAnswers(answers, map);
     expect(out).toEqual({ service: "Adobe Premiere Pro", note: "Call me" });
     expect(answers).toEqual({ service: "adobe_premiere_pro", note: "Call me" });
+  });
+
+  it("prefers labels, falls back to spaces, leaves free text alone", () => {
+    const map = buildOptionLabelMap(QUESTIONS, KEYS);
+    const out = applyOptionLabelsToAnswers(
+      {
+        service: "davinci_resolve",
+        full_name: "rahul_kumar",
+      },
+      map,
+    );
+    // `service` is a choice question: unmatched key prettified.
+    expect(out.service).toBe("davinci resolve");
+    // `full_name` has no options: free text verbatim, even with underscores.
+    expect(out.full_name).toBe("rahul_kumar");
   });
 });
 
