@@ -10,8 +10,10 @@ import {
   filterVisibilityMenu,
   flattenVisibilityMenu,
   flowColumnVisId,
+  hasStoredVisibility,
   loadHiddenIds,
   saveHiddenIds,
+  selectInitialHiddenIds,
   toggleHiddenId,
   visibilityStorageKey,
 } from './workspace-visibility';
@@ -446,5 +448,30 @@ describe('visibility persistence (localStorage, per account + flow)', () => {
     ).not.toThrow();
     vi.unstubAllGlobals();
     expect(loadHiddenIds('acct-1', 'flow-1')).toEqual([]);
+  });
+
+  it('distinguishes never-customized scopes from stored sets', () => {
+    expect(hasStoredVisibility('acct-1', 'flow-1')).toBe(false);
+    saveHiddenIds('acct-1', 'flow-1', ['flow:phone']);
+    expect(hasStoredVisibility('acct-1', 'flow-1')).toBe(true);
+    // Empty sets remove the key (legacy storage contract), so a
+    // reset returns the scope to "no stored preference".
+    saveHiddenIds('acct-1', 'flow-1', []);
+    expect(hasStoredVisibility('acct-1', 'flow-1')).toBe(false);
+  });
+
+  it('selectInitialHiddenIds prefers stored sets and falls back to defaults', () => {
+    // No stored preference → caller-supplied defaults apply.
+    expect(selectInitialHiddenIds(null, ['flow:full_name'])).toEqual([
+      'flow:full_name',
+    ]);
+    // An explicit stored set always wins — even an empty one, so a
+    // deliberate "show all" is never overridden by defaults.
+    expect(selectInitialHiddenIds([], ['flow:full_name'])).toEqual([]);
+    expect(selectInitialHiddenIds(['flow:phone'], ['flow:full_name'])).toEqual([
+      'flow:phone',
+    ]);
+    // No defaults → legacy behaviour (all visible) everywhere.
+    expect(selectInitialHiddenIds(null)).toEqual([]);
   });
 });

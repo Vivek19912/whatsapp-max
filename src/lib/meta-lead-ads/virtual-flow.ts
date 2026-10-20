@@ -58,6 +58,25 @@ export function parseFormQuestions(raw: unknown): MetaQuestionInput[] {
 }
 
 /**
+ * Deterministic per-question storage keys, in form order. This is the
+ * single derivation shared by node materialization (below) and by
+ * display-only consumers (e.g. option-label lookup) so a stored
+ * answer always resolves to the same question — and re-running it
+ * never re-keys existing data.
+ */
+export function questionVarKeys(
+  questions: ReadonlyArray<{ key?: string | null; label?: string | null }>,
+): string[] {
+  const used = new Set<string>([META_SOURCE_COLUMN_KEY]);
+  return questions.map((q, index) => {
+    let key = sanitizeQuestionKey(q.key ?? q.label, index);
+    while (used.has(key)) key = `${key}_${index}`;
+    used.add(key);
+    return key;
+  });
+}
+
+/**
  * Build the virtual flow's node list: a leading "Source" column
  * followed by one `collect_input` node per question, chained via
  * `next_node_key` so column derivation walks them in form order.
@@ -69,13 +88,11 @@ export function buildVirtualFlowNodes(questions: MetaQuestionInput[]): {
   entryNodeKey: string;
   questionKeys: string[];
 } {
-  const used = new Set<string>([META_SOURCE_COLUMN_KEY]);
+  const keys = questionVarKeys(questions);
   const nodes: VirtualFlowNode[] = [];
 
   questions.forEach((q, index) => {
-    let key = sanitizeQuestionKey(q.key ?? q.label, index);
-    while (used.has(key)) key = `${key}_${index}`;
-    used.add(key);
+    const key = keys[index];
     const label = (q.label ?? q.key ?? key).trim() || key;
     nodes.push({
       node_key: `meta_q_${index}_${key}`,

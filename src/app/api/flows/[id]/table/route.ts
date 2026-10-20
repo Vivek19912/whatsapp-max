@@ -27,6 +27,12 @@ import {
 import { latestByContact } from '@/lib/recordings/recordings'
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders'
 import { standardContactFromAnswers } from '@/lib/meta-lead-ads/normalize'
+import {
+  applyOptionLabelsToAnswers,
+  buildOptionLabelMap,
+  type StoredFormQuestion,
+} from '@/lib/meta-lead-ads/option-labels'
+import { questionVarKeys } from '@/lib/meta-lead-ads/virtual-flow'
 
 /**
  * GET /api/flows/[id]/table?view=all|completed|incomplete&search=&page=&pageSize=&dateFrom=&dateTo=&assignee=
@@ -263,7 +269,7 @@ export async function GET(
 
   const { data: flow, error: flowErr } = await supabase
     .from('flows')
-    .select('id, name, account_id, completion_node_id, entry_node_id, kind')
+    .select('id, name, account_id, completion_node_id, entry_node_id, kind, meta_form_id')
     .eq('id', id)
     .maybeSingle()
   if (flowErr) {
@@ -335,19 +341,73 @@ export async function GET(
   // wins whenever it exists, and nothing is invented for absent
   // fields. Other flow kinds are untouched.
   const isMetaLeadFlow = (flow as { kind?: string | null }).kind === 'meta_lead_ads'
+
+  // Meta-only display mapping: human-readable Instant Form option
+  // labels resolved from the form's stored question metadata.
+  // Display-only: stored answers, keys, filtering, Sheets exports,
+  // and Travel CRM reads are untouched — only the rendered cell
+  // text changes, and only on exact option-key matches.
+  let metaOptionLabels: Map<string, Map<string, string>> | null = null
+  if (isMetaLeadFlow) {
+    const formId = (flow as { meta_form_id?: string | null }).meta_form_id ?? null
+    if (formId) {
+      const { data: formRow } = await supabase
+        .from('meta_lead_forms')
+        .select('questions')
+        .eq('id', formId)
+        .eq('account_id', (flow as { account_id: string }).account_id)
+        .maybeSingle()
+      // Options live in the raw stored JSON (parseFormQuestions
+      // drops them). Keys must match node var_keys exactly: reuse
+      // the same deterministic derivation the virtual flow was
+      // built with.
+      const rawQuestions = (formRow as { questions?: unknown } | null)?.questions
+      const rawList = Array.isArray(rawQuestions) ? rawQuestions : []
+      const stored: StoredFormQuestion[] = rawList.map((entry) => {
+        const e =
+          entry && typeof entry === "object"
+            ? (entry as Record<string, unknown>)
+            : {};
+        const rawOptions = Array.isArray(e.options) ? e.options : []
+        return {
+          key: typeof e.key === "string" ? e.key : null,
+          label: typeof e.label === "string" ? e.label : null,
+          type: typeof e.type === "string" ? e.type : null,
+          options: rawOptions.map((o) => {
+            const oo =
+              o && typeof o === "object" ? (o as Record<string, unknown>) : {}
+            return {
+              key: typeof oo.key === "string" ? oo.key : null,
+              value: typeof oo.value === "string" ? oo.value : null,
+            }
+          }),
+        }
+      })
+      if (stored.some((q) => q.options && q.options.length > 0)) {
+        metaOptionLabels = buildOptionLabelMap(stored, questionVarKeys(stored))
+      }
+    }
+  }
+
   const rows = rpcRows.map((r) => {
     const identityFallback = isMetaLeadFlow
       ? standardContactFromAnswers(
           (r.vars ?? {}) as Record<string, string | null | undefined>,
         )
       : null
-    return toFlowTableRow(
+    const row = toFlowTableRow(
       r,
       completionNodeId,
       nameKey,
       answerKeys,
       identityFallback,
     )
+    // Meta-only, dynamic answers only: system Name/Phone columns
+    // keep their contact/fallback values untouched.
+    if (isMetaLeadFlow && metaOptionLabels && metaOptionLabels.size > 0) {
+      row.answers = applyOptionLabelsToAnswers(row.answers, metaOptionLabels)
+    }
+    return row
   });
 
   // Contact source URLs for this page: one batched contacts lookup

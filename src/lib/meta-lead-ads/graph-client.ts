@@ -301,6 +301,14 @@ export async function probeFormLeadAccess(
   return Array.isArray(data.data);
 }
 
+/**
+ * A multiple-choice option on a Meta Instant Form question. Per
+ * Meta's leadgen_forms reference, `value` is the text shown to the
+ * person filling the form and `key` is the short unique identifier
+ * (also what lands in the lead's `field_data` values) — so display
+ * resolution matches submitted values against `key`, never the
+ * other way round.
+ */
 export interface MetaFormQuestionOption {
   key?: string;
   value?: string;

@@ -40,6 +40,18 @@ const FULL_NAME_KEYS = ["full_name", "name", "fullname"];
 const FIRST_NAME_KEYS = ["first_name", "firstname"];
 const LAST_NAME_KEYS = ["last_name", "lastname"];
 
+/**
+ * Sanitized answer keys that resolve into the system identity columns
+ * (standardContactFromAnswers reads exactly these sets). Used to
+ * recognize a dynamic Instant Form question column as a duplicate of
+ * the system Name / Phone Number columns — identity, never the
+ * displayed label.
+ */
+export const META_IDENTITY_ANSWER_KEYS: ReadonlySet<string> = new Set([
+  ...FULL_NAME_KEYS,
+  ...PHONE_KEYS,
+]);
+
 function coerceValue(values: string[] | undefined): string | null {
   if (!Array.isArray(values)) return null;
   const parts = values

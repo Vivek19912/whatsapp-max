@@ -49,15 +49,26 @@ interface FormRow {
 const FORM_COLUMNS =
   "id, page_id, form_id, form_name, status, locale, questions, enabled, import_status, import_cursor, imported_count, last_synced_at, last_polled_at, last_lead_at, last_error";
 
-function questionList(raw: MetaFormQuestion[] | undefined): Array<{
+/** Persisted per-question shape (options kept verbatim for display mapping). Exported for unit tests. */
+export function questionList(raw: MetaFormQuestion[] | undefined): Array<{
   key: string | null;
   label: string | null;
   type: string | null;
+  options: Array<{ key: string | null; value: string | null }>;
 }> {
+  // Options are persisted verbatim (no guessing): the table renders a
+  // human-readable label only on an exact option-key match, and falls
+  // back to the stored raw value otherwise.
   return (raw ?? []).map((q) => ({
     key: q.key ?? null,
     label: q.label ?? null,
     type: q.type ?? null,
+    options: Array.isArray(q.options)
+      ? q.options.map((o) => ({
+          key: typeof o?.key === "string" ? o.key : null,
+          value: typeof o?.value === "string" ? o.value : null,
+        }))
+      : [],
   }));
 }
 
@@ -172,6 +183,26 @@ export async function POST(request: Request) {
         });
         // Concurrent sync — another request already inserted this form.
         if (insertErr && !isUniqueViolation(insertErr)) throw insertErr;
+      }
+
+      // Refresh stored questions (including option metadata) so the
+      // table can render human-readable option labels — including
+      // for forms connected before options were persisted.
+      // Best-effort per form: one form's failure never blocks the
+      // rest of the list, and previously stored questions stay.
+      try {
+        const detail = await getForm(config, pageToken, mf.id);
+        const { error: questionsErr } = await admin
+          .from("meta_lead_forms")
+          .update({
+            questions: questionList(detail.questions),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("account_id", ctx.accountId)
+          .eq("form_id", mf.id);
+        if (questionsErr) throw questionsErr;
+      } catch {
+        // Keep previously stored questions; the list still syncs.
       }
     }
 

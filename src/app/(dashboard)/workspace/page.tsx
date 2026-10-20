@@ -76,6 +76,7 @@ import {
 import { formatColumnLabel } from '@/lib/flows/column-label';
 import {
   isRenamableMetaColumn,
+  metaDefaultHiddenColumnIds,
   metaHeaderLabelKey,
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
@@ -145,7 +146,7 @@ import { Skeleton } from '@/components/dashboard/skeleton';
 
 interface FlowOption {
   id: string;
-  name: string | null;
+  name?: string | null;
 }
 
 const VIEWS: Array<{ id: Exclude<FlowTableView, 'all'>; label: string }> = [
@@ -970,7 +971,21 @@ export default function WorkspacePage() {
   // arrays, never the payload — data, definitions, values, and
   // order are preserved, so a restored column returns to its
   // original position.
-  const visibility = useWorkspaceVisibility(accountId, flowId);
+  // Meta Lead Ads only: hide redundant dynamic identity columns
+  // (e.g. a "Full name" question column duplicating the system Name
+  // column) by default. The columns stay in the payload and in the
+  // Columns menu, so they can be restored at any time; unhiding
+  // persists because stored preferences always win over these
+  // defaults. Flow Tables pass nothing and behave exactly as before.
+  const metaDefaultHiddenIds = useMemo(
+    () =>
+      metaDefaultHiddenColumnIds(
+        payload?.columns ?? [],
+        payload?.meta?.kind === 'meta_lead_ads',
+      ),
+    [payload?.meta?.kind, payload?.columns],
+  );
+  const visibility = useWorkspaceVisibility(accountId, flowId, metaDefaultHiddenIds);
   const {
     flowColumns: flowColumnsVisible,
     customFields: customFieldsVisible,

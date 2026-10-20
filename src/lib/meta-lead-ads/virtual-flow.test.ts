@@ -4,6 +4,7 @@ import {
   META_SOURCE_COLUMN_KEY,
   buildVirtualFlowNodes,
   parseFormQuestions,
+  questionVarKeys,
   virtualFlowName,
 } from "./virtual-flow";
 
@@ -69,6 +70,22 @@ describe("buildVirtualFlowNodes", () => {
     const { nodes, questionKeys } = buildVirtualFlowNodes([]);
     expect(nodes).toHaveLength(1);
     expect(questionKeys).toEqual([]);
+  });
+});
+
+describe("questionVarKeys", () => {
+  it("matches the var_keys the virtual flow materializes", () => {
+    const questions = [
+      { key: "Full name", label: "Full name" },
+      { key: "Phone", label: "Phone number" },
+      { key: "phone" },
+      {},
+    ];
+    const { questionKeys } = buildVirtualFlowNodes(questions);
+    // Same deterministic derivation, so display lookups resolve to
+    // the exact stored answer keys — re-running never re-keys data.
+    expect(questionVarKeys(questions)).toEqual(questionKeys);
+    expect(new Set(questionKeys).size).toBe(questionKeys.length);
   });
 });
 

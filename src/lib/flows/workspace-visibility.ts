@@ -187,6 +187,34 @@ function storage(): Storage | null {
   }
 }
 
+/**
+ * True when this scope has a stored preference (even an explicitly
+ * empty one). Lets callers distinguish "never customized" from
+ * "user chose show-all" when applying per-table default hides.
+ */
+export function hasStoredVisibility(accountId: string, flowId: string): boolean {
+  try {
+    const store = storage();
+    if (!store) return false;
+    return store.getItem(visibilityStorageKey(accountId, flowId)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure default resolution (no storage access): an explicit stored set
+ * — including an explicitly empty one — always wins; defaults apply
+ * only when there is no stored preference (null).
+ */
+export function selectInitialHiddenIds(
+  stored: readonly string[] | null,
+  defaults: readonly string[] = [],
+): string[] {
+  if (stored !== null) return [...stored];
+  return [...defaults].sort();
+}
+
 /** Hidden ids for this scope. Corrupt/foreign values → default (all visible). */
 export function loadHiddenIds(accountId: string, flowId: string): string[] {
   try {
@@ -237,21 +265,29 @@ export interface WorkspaceVisibility {
  * flows, views, pages, or searches never needs a synchronizing
  * effect — each scope simply reads its own stored set, with
  * in-session overrides layered on top.
+ *
+ * `defaultHiddenIds` is an opt-in per-table default applied ONLY
+ * when the scope has no stored preference yet (first visit, or
+ * after a reset cleared storage). Once the user customizes
+ * visibility (or explicitly shows everything), the stored set
+ * wins and defaults never re-apply. Defaults to [] so existing
+ * callers (all Flow Tables) behave exactly as before.
  */
 export function useWorkspaceVisibility(
   accountId: string | null,
-  flowId: string | null
+  flowId: string | null,
+  defaultHiddenIds: readonly string[] = []
 ): WorkspaceVisibility {
   const [overrides, setOverrides] = useState<Record<string, string[]>>({});
   const scoped = accountId !== null && flowId !== null;
   const scopeKey = scoped ? visibilityStorageKey(accountId, flowId) : null;
-  const hiddenIds = useMemo(
-    () =>
-      scopeKey !== null && accountId !== null && flowId !== null
-        ? (overrides[scopeKey] ?? loadHiddenIds(accountId, flowId))
-        : [],
-    [scopeKey, accountId, flowId, overrides]
-  );
+  const hiddenIds = useMemo(() => {
+    if (scopeKey === null || accountId === null || flowId === null) return [];
+    const stored = overrides[scopeKey] ?? (hasStoredVisibility(accountId, flowId)
+      ? loadHiddenIds(accountId, flowId)
+      : null);
+    return selectInitialHiddenIds(stored, defaultHiddenIds);
+  }, [scopeKey, accountId, flowId, overrides, defaultHiddenIds]);
 
   const commit = useCallback(
     (next: string[]) => {

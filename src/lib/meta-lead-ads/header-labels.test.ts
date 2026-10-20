@@ -10,12 +10,15 @@
 
 import { describe, expect, it } from "vitest";
 
+import { flowColumnVisId } from "@/lib/flows/workspace-visibility";
+
 import {
+  META_HEADER_LABEL_MAX,
   isRenamableMetaColumn,
+  metaDefaultHiddenColumnIds,
   metaHeaderLabelKey,
   normalizeHeaderLabel,
   resolveMetaHeaderLabel,
-  META_HEADER_LABEL_MAX,
 } from "./header-labels";
 
 describe("isRenamableMetaColumn", () => {
@@ -38,6 +41,10 @@ describe("isRenamableMetaColumn", () => {
 describe("metaHeaderLabelKey", () => {
   it("uses the shared visibility-id identity (never the label)", () => {
     expect(metaHeaderLabelKey("experience")).toBe("flow:experience");
+    // Parity with the workspace visibility system (kept in sync by
+    // hand: header-labels must stay server-safe, so it cannot import
+    // the React module where flowColumnVisId lives).
+    expect(metaHeaderLabelKey("phone_number")).toBe(flowColumnVisId("phone_number"));
   });
 });
 
@@ -123,5 +130,37 @@ describe("resolveMetaHeaderLabel", () => {
         }),
       ).toBe("How much experience?");
     }
+  });
+});
+
+describe("metaDefaultHiddenColumnIds", () => {
+  const COLUMNS = [
+    { key: "submission_time", system: true },
+    { key: "name", system: true },
+    { key: "phone", system: true },
+    { key: "full_name", system: false },
+    { key: "phone_number", system: false },
+    { key: "mobile", system: false },
+    { key: "service", system: false },
+  ];
+
+  it("hides only dynamic identity columns on Meta tables", () => {
+    expect(metaDefaultHiddenColumnIds(COLUMNS, true).sort()).toEqual([
+      "flow:full_name",
+      "flow:mobile",
+      "flow:phone_number",
+    ]);
+  });
+
+  it("returns nothing for Flow Tables, even with identity keys present", () => {
+    expect(metaDefaultHiddenColumnIds(COLUMNS, false)).toEqual([]);
+  });
+
+  it("leaves non-identity dynamic columns visible", () => {
+    const ids = metaDefaultHiddenColumnIds(
+      [{ key: "service", system: false }],
+      true,
+    );
+    expect(ids).toEqual([]);
   });
 });

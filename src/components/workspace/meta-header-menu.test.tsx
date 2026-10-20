@@ -64,6 +64,26 @@ describe("MetaColumnHeaderMenu", () => {
     expect(src).toContain("setDialogOpen(true)");
   });
 
+  it("Cancel closes the dialog without saving", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/meta-header-menu.tsx`,
+      "utf8",
+    );
+    // Cancel only closes the dialog — onRename is never invoked.
+    expect(src).toContain("Cancel");
+    expect(src).toContain("onClick={() => setDialogOpen(false)}");
+  });
+
+  it("Save is blocked for empty input with an inline error", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/meta-header-menu.tsx`,
+      "utf8",
+    );
+    expect(src).toContain('if (next === "")');
+    expect(src).toContain('role="alert"');
+    expect(src).toContain("disabled={busy || draft.trim() === ");
+  });
+
   it("disables Restore Original Name without a stored override", () => {
     const src = readFileSync(
       `${process.cwd()}/src/components/workspace/meta-header-menu.tsx`,

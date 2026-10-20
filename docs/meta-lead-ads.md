@@ -291,6 +291,22 @@ success.
    Diagnostics do **not** prove a live lead was received — only a real
    submission can.
 
+## Workspace display: headers, duplicates, and option labels
+
+- **Duplicate identity columns are hidden by default** on Meta tables only.
+  When an Instant Form asks for a standard field (e.g. `Full name`,
+  `Phone number`), that question still renders as its own column, but the
+  matching system column (`Name`, `Phone Number`) already shows the same
+  value. The dynamic duplicate is hidden on first view; use the Columns
+  menu to bring it back. Flow Tables are unaffected.
+- **Custom header names** (Rename Header / Restore Original Name) are
+  stored per workspace + form + column key, never touch stored answers,
+  and survive refreshes and new imports.
+- **Multiple-choice answers** render the option's human-readable label
+  when the stored raw value exactly matches the option's key from the
+  form's stored metadata. Anything else — free text, unknown values —
+  renders verbatim. Stored answers and API values are never rewritten.
+
 ## Testing with a real lead
 
 1. Enable a form (it appears in the Workspace selector).

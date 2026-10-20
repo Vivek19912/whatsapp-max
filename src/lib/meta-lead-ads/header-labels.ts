@@ -13,6 +13,7 @@
 // The original question text always stays in flow_nodes config.
 // ============================================================
 
+import { META_IDENTITY_ANSWER_KEYS } from "./normalize";
 import { META_SOURCE_COLUMN_KEY } from "./virtual-flow";
 
 /** Maximum stored/displayed custom header length. */
@@ -36,9 +37,32 @@ export function isRenamableMetaColumn(
   return !column.system && column.key !== META_SOURCE_COLUMN_KEY;
 }
 
-/** Storage/render lookup key for one flow column. */
+/**
+ * Storage/render lookup key for one flow column. Deliberately defined
+ * here (rather than importing flowColumnVisId) so this module stays
+ * server-safe for API routes: it must always equal `flow:<key>`,
+ * enforced by the parity test below.
+ */
 export function metaHeaderLabelKey(columnKey: string): string {
   return `flow:${columnKey}`;
+}
+
+/**
+ * Visibility ids hidden by default on a Meta Lead Ads table:
+ * dynamic question columns whose stable key is a standard identity
+ * key (full_name, phone_number, …), i.e. duplicates of the system
+ * Name / Phone Number columns. The columns stay in the payload and
+ * in the Columns menu — this only seeds the default hidden set
+ * until the user customizes visibility. Flow Tables always get [].
+ */
+export function metaDefaultHiddenColumnIds(
+  columns: ReadonlyArray<Pick<MetaHeaderColumnRef, "key" | "system">>,
+  isMetaTable: boolean,
+): string[] {
+  if (!isMetaTable) return [];
+  return columns
+    .filter((c) => !c.system && META_IDENTITY_ANSWER_KEYS.has(c.key))
+    .map((c) => metaHeaderLabelKey(c.key));
 }
 
 /**
