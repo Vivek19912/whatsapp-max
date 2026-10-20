@@ -52,6 +52,18 @@ describe("MetaColumnHeaderMenu", () => {
     expect(src).toContain("Cancel");
   });
 
+  it("wires menu items with onClick (Base UI menus have no onSelect)", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/meta-header-menu.tsx`,
+      "utf8",
+    );
+    // Regression guard for the dead-Rename-Header bug: this repo's
+    // DropdownMenu is Base UI, whose items fire onClick — a Radix
+    // onSelect handler would silently never run.
+    expect(src).not.toContain("onSelect");
+    expect(src).toContain("setDialogOpen(true)");
+  });
+
   it("disables Restore Original Name without a stored override", () => {
     const src = readFileSync(
       `${process.cwd()}/src/components/workspace/meta-header-menu.tsx`,

@@ -119,7 +119,7 @@ export function MetaColumnHeaderMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
           <DropdownMenuItem
-            onSelect={() => {
+            onClick={() => {
               setMenuOpen(false);
               setDialogOpen(true);
             }}
@@ -128,7 +128,7 @@ export function MetaColumnHeaderMenu({
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={!customLabel || busy}
-            onSelect={() => {
+            onClick={() => {
               void restore();
             }}
           >
