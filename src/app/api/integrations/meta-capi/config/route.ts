@@ -12,7 +12,13 @@ import { NextResponse } from "next/server";
 
 import { requireRole } from "@/lib/auth/account";
 import { isValidActionSource } from "@/lib/meta-capi/catalog";
-import { describeCapiVerificationError, validateDataset } from "@/lib/meta-capi/client";
+import {
+  describeCapiVerificationError,
+  describeDatasetAccessError,
+  graphDiagnosticRef,
+  validateDataset,
+  validateToken,
+} from "@/lib/meta-capi/client";
 import { toPublicConfig } from "@/lib/meta-capi/serialize";
 import {
   clearAppSecret,
@@ -173,6 +179,24 @@ export async function PUT(request: Request) {
           { status: 501 },
         );
       }
+      // Stage 1: token authentication only. A success here proves
+      // nothing about dataset access or event delivery.
+      const fail = async (
+        stage: "token" | "dataset",
+        message: string,
+        err: unknown,
+      ) => {
+        await markConfigStatus(ctx.supabase, ctx.accountId, "error", message);
+        return NextResponse.json(
+          {
+            error: message,
+            code: "verification_failed",
+            stage,
+            details: graphDiagnosticRef(err),
+          },
+          { status: 400 },
+        );
+      };
       try {
         const token = await getDecryptedToken(ctx.supabase, ctx.accountId);
         if (!token) {
@@ -184,16 +208,30 @@ export async function PUT(request: Request) {
           ctx.supabase,
           ctx.accountId,
         ).catch(() => null);
-        const info = await validateDataset(platform, config.dataset_id, token, {
-          appSecret,
-        });
-        await markConfigStatus(ctx.supabase, ctx.accountId, "connected", null);
-        const fresh = await getConfig(ctx.supabase, ctx.accountId);
-        return NextResponse.json({
-          ok: true,
-          datasetName: info.name ?? null,
-          config: toPublicConfig(fresh),
-        });
+        try {
+          await validateToken(platform, token, { appSecret });
+        } catch (err) {
+          return fail("token", describeCapiVerificationError(err), err);
+        }
+        try {
+          const info = await validateDataset(platform, config.dataset_id, token, {
+            appSecret,
+          });
+          await markConfigStatus(ctx.supabase, ctx.accountId, "connected", null);
+          const fresh = await getConfig(ctx.supabase, ctx.accountId);
+          return NextResponse.json({
+            ok: true,
+            datasetName: info.name ?? null,
+            config: toPublicConfig(fresh),
+            checks: { token: "authenticated", dataset: "reachable" },
+          });
+        } catch (err) {
+          return fail(
+            "dataset",
+            describeDatasetAccessError(err, config.dataset_id),
+            err,
+          );
+        }
       } catch (err) {
         const message = describeCapiVerificationError(err);
         await markConfigStatus(ctx.supabase, ctx.accountId, "error", message);

@@ -14,8 +14,11 @@ import { MetaGraphError } from "@/lib/meta-lead-ads/errors";
 import {
   capiRequest,
   describeCapiVerificationError,
+  describeDatasetAccessError,
+  graphDiagnosticRef,
   sendEvents,
   validateDataset,
+  validateToken,
 } from "./client";
 
 const platform = { graphVersion: "v26.0" };
@@ -130,6 +133,70 @@ describe("capiRequest appsecret_proof", () => {
       graphCode: 1,
       graphType: "OAuthException",
     });
+  });
+});
+
+describe("validateToken", () => {
+  it("authenticates via GET /me without touching any dataset", async () => {
+    const { fetchImpl, state } = captureFetch({ id: "u1", name: "Tester" });
+
+    const identity = await validateToken(platform, "TOKEN", { fetchImpl });
+
+    expect(identity).toEqual({ id: "u1", name: "Tester" });
+    const parsed = new URL(state.url);
+    expect(parsed.pathname).toBe("/v26.0/me");
+    expect(parsed.searchParams.get("fields")).toBe("id,name");
+    expect(state.init?.method).toBe("GET");
+    expect(state.init?.body).toBeUndefined();
+  });
+
+  it("forwards the customer App Secret for the proof like other calls", async () => {
+    const { fetchImpl, state } = captureFetch({ id: "u1" });
+
+    await validateToken(platform, "TOKEN", {
+      appSecret: "SECRET_X",
+      fetchImpl,
+    });
+
+    const expected = crypto
+      .createHmac("sha256", "SECRET_X")
+      .update("TOKEN")
+      .digest("hex");
+    expect(new URL(state.url).searchParams.get("appsecret_proof")).toBe(expected);
+  });
+});
+
+describe("describeDatasetAccessError", () => {
+  it("never reports a #100 dataset failure as an invalid token", async () => {
+    const message = describeDatasetAccessError(
+      new MetaGraphError({
+        message: "(#100) Missing perms",
+        graphType: "OAuthException",
+        graphCode: 100,
+        graphSubcode: 33,
+        graphStatus: 400,
+        status: 400,
+      }),
+      "123",
+    );
+    expect(message).toMatch(/authenticated, but dataset 123 could not be read/);
+    expect(message).not.toMatch(/invalid, expired, or revoked/i);
+    expect(message).toMatch(/Graph #100/);
+  });
+
+  it("exposes only code, subcode, and type as diagnostic details", () => {
+    expect(
+      graphDiagnosticRef(
+        new MetaGraphError({
+          message: "(#100) Missing perms",
+          graphType: "OAuthException",
+          graphCode: 100,
+          graphSubcode: 33,
+          graphStatus: 400,
+          status: 400,
+        }),
+      ),
+    ).toEqual({ graphCode: 100, graphSubcode: 33, graphType: "OAuthException" });
   });
 });
 

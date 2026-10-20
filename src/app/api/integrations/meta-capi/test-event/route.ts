@@ -102,6 +102,16 @@ export async function POST(request: Request) {
       const res = await sendEvents(platform, config.dataset_id, token, payload, {
         appSecret,
       });
+      // An event counts as accepted only when Meta confirms receipt.
+      if ((res.events_received ?? 0) < 1) {
+        const message =
+          "Meta accepted the request but reported 0 events received.";
+        if (delivery) await markDeliveryFailed(admin, delivery.id, 1, message, null);
+        return NextResponse.json(
+          { error: message, code: "test_failed" },
+          { status: 502 },
+        );
+      }
       if (delivery) {
         await markDeliverySent(admin, delivery.id, res as Record<string, unknown>, 1);
       }

@@ -22,6 +22,8 @@ import { graphBase } from "@/lib/meta-lead-ads/config";
 import {
   MetaGraphError,
   MetaLeadAdsError,
+  graphErrorDetails,
+  graphErrorDiagnostic,
   isAuthGraphCode,
   isAuthGraphError,
 } from "@/lib/meta-lead-ads/errors";
@@ -151,6 +153,28 @@ export async function validateDataset(
   });
 }
 
+export interface TokenIdentity {
+  id: string;
+  name?: string;
+}
+
+/**
+ * Confirm the token itself authenticates, independent of any dataset.
+ * A success here proves NOTHING about dataset access or event sending —
+ * callers must still run the dataset check separately.
+ */
+export async function validateToken(
+  platform: CapiPlatform,
+  token: string,
+  opts: Partial<CapiRequestOptions> = {},
+): Promise<TokenIdentity> {
+  return capiRequest<TokenIdentity>(`/me`, platform, {
+    token,
+    params: { fields: "id,name" },
+    ...opts,
+  });
+}
+
 export interface SendEventsResult {
   events_received?: number;
   fbtrace_id?: string;
@@ -214,4 +238,74 @@ export function describeCapiVerificationError(err: unknown): string {
   }
   if (err instanceof MetaLeadAdsError) return err.message;
   return "Could not verify these details with Meta.";
+}
+
+/**
+ * Safe Graph diagnostic reference (code/subcode/type only). Never
+ * contains tokens, App Secrets, proofs, or customer data.
+ */
+export function graphDiagnosticRef(err: unknown): {
+  graphCode?: number;
+  graphSubcode?: number;
+  graphType?: string;
+} {
+  const details = graphErrorDetails(err);
+  const ref: { graphCode?: number; graphSubcode?: number; graphType?: string } =
+    {};
+  if (details.graphCode !== undefined) ref.graphCode = details.graphCode;
+  if (details.graphSubcode !== undefined) ref.graphSubcode = details.graphSubcode;
+  if (details.graphType) ref.graphType = details.graphType;
+  return ref;
+}
+
+/**
+ * Describe a dataset-metadata failure AFTER the token has already
+ * authenticated. A `#100` here must never be reported as an invalid
+ * token — it means this valid token cannot see this dataset object.
+ */
+export function describeDatasetAccessError(err: unknown, datasetId: string): string {
+  if (err instanceof MetaGraphError) {
+    const text = err.message.toLowerCase();
+    if (text.includes("appsecret_proof") || text.includes("app secret proof")) {
+      return (
+        "Meta rejected appsecret_proof. This happens when the access token " +
+        "was issued by a different Meta app than the App Secret we used. " +
+        "Add the App Secret of the app that issued this token (Step 2), or " +
+        "leave it blank so no proof is sent. Do not use this platform app's " +
+        "secret for another app's token."
+      );
+    }
+    // The token authenticated moments ago; if Meta now rejects it, say so
+    // plainly instead of folding it into the dataset message.
+    if (isAuthGraphError(err)) {
+      return (
+        "Meta rejected the access token (invalid, expired, or revoked). " +
+        "Generate a new System User token with access to this dataset and " +
+        "paste it again."
+      );
+    }
+    if (
+      err.graphCode === 200 ||
+      text.includes("permission") ||
+      err.message.includes("(#200)")
+    ) {
+      return (
+        "The token is valid but lacks permission for this dataset. In " +
+        "Business Settings, give the System User access to this dataset and " +
+        "the business that owns it, then try again."
+      );
+    }
+    if (err.graphCode === 100) {
+      return (
+        `The token authenticated, but dataset ${datasetId} could not be read ` +
+        `(${graphErrorDiagnostic(err)}). Check the Dataset ID, the System ` +
+        `User's access to that dataset and its business, and that the token ` +
+        `was generated after the access was granted. This is not proof the ` +
+        `token itself is invalid.`
+      );
+    }
+    return graphErrorDiagnostic(err);
+  }
+  if (err instanceof MetaLeadAdsError) return err.message;
+  return "Could not verify dataset access with Meta.";
 }

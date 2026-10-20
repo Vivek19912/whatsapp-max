@@ -16,6 +16,9 @@ const h = vi.hoisted(() => ({
   appSecret: null as string | null,
   verifyOpts: null as Record<string, unknown> | null,
   verifyError: null as unknown,
+  tokenError: null as unknown,
+  tokenCalls: 0,
+  datasetCalls: 0,
 }));
 
 vi.mock("@/lib/auth/account", () => ({
@@ -46,12 +49,18 @@ vi.mock("@/lib/meta-capi/client", async (importOriginal) => {
     await importOriginal<typeof import("@/lib/meta-capi/client")>();
   return {
     ...actual,
+    validateToken: async () => {
+      h.tokenCalls += 1;
+      if (h.tokenError) throw h.tokenError;
+      return { id: "user-1", name: "Tester" };
+    },
     validateDataset: async (
       _p: unknown,
       datasetId: string,
       _token: string,
       opts?: Record<string, unknown>,
     ) => {
+      h.datasetCalls += 1;
       h.verifyOpts = opts ?? null;
       if (h.verifyError) throw h.verifyError;
       if (h.verifyThrows) throw new Error("bad");
@@ -116,6 +125,9 @@ beforeEach(() => {
   h.appSecret = null;
   h.verifyOpts = null;
   h.verifyError = null;
+  h.tokenError = null;
+  h.tokenCalls = 0;
+  h.datasetCalls = 0;
 });
 
 describe("PUT /meta-capi/config", () => {
@@ -229,6 +241,75 @@ describe("PUT /meta-capi/config", () => {
     expect(res.status).toBe(400);
     const json = (await res.json()) as { error: string };
     expect(json.error).toMatch(/lacks permission/i);
+  });
+
+  it("distinguishes token auth success from a failed dataset read", async () => {
+    h.verifyError = new MetaGraphError({
+      message: "(#100) Missing perms",
+      graphType: "OAuthException",
+      graphCode: 100,
+      graphSubcode: 33,
+      graphStatus: 400,
+      status: 400,
+    });
+    const res = await PUT(
+      put({ dataset_id: "1234567890", access_token: "EAAG-token-value-1234567890" }),
+    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as {
+      error: string;
+      code: string;
+      stage: string;
+      details: { graphCode?: number; graphSubcode?: number; graphType?: string };
+    };
+    expect(json.code).toBe("verification_failed");
+    expect(json.stage).toBe("dataset");
+    // A #100 is never reported as an invalid token.
+    expect(json.error).not.toMatch(/invalid, expired, or revoked/i);
+    expect(json.error).toMatch(/authenticated, but dataset/);
+    expect(json.details).toMatchObject({
+      graphCode: 100,
+      graphSubcode: 33,
+      graphType: "OAuthException",
+    });
+    expect(JSON.stringify(json)).not.toContain("EAAG-token-value");
+    expect(h.tokenCalls).toBe(1);
+    expect(h.datasetCalls).toBe(1);
+  });
+
+  it("reports an invalid token at the token stage without checking the dataset", async () => {
+    h.tokenError = new MetaGraphError({
+      message: "Invalid OAuth access token.",
+      graphType: "OAuthException",
+      graphCode: 190,
+      graphStatus: 400,
+      status: 401,
+    });
+    const res = await PUT(
+      put({ dataset_id: "1234567890", access_token: "EAAG-token-value-1234567890" }),
+    );
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as {
+      error: string;
+      stage: string;
+      details: { graphCode?: number };
+    };
+    expect(json.stage).toBe("token");
+    expect(json.error).toMatch(/invalid, expired, or revoked/i);
+    expect(json.details).toMatchObject({ graphCode: 190 });
+    expect(h.tokenCalls).toBe(1);
+    expect(h.datasetCalls).toBe(0);
+  });
+
+  it("reports both verification stages on success", async () => {
+    const res = await PUT(
+      put({ dataset_id: "1234567890", access_token: "EAAG-token-value-1234567890" }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      checks: { token: string; dataset: string };
+    };
+    expect(json.checks).toEqual({ token: "authenticated", dataset: "reachable" });
   });
 
   it("requires an admin role", async () => {

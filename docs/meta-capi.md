@@ -165,6 +165,13 @@ Rules enforced by the presets endpoint and UI:
    labelled and are not production conversions.
 4. **Step 4.** Add one or more **event mappings**.
 
+Save & verify checks two separate stages and reports which one failed:
+token authentication first (`GET /me`, proves nothing about the dataset),
+then dataset metadata access (`GET /{dataset_id}`). A dataset `#100` after
+a successful token check means the valid token cannot see that dataset — it
+is never reported as an invalid token. Failures include Meta's error code
+and subcode (never tokens or secrets).
+
 ## Environment / platform
 
 Only needs `META_GRAPH_VERSION`. It deliberately does **not** use the Lead Ads
