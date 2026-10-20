@@ -74,6 +74,11 @@ import {
   type HiddenRowInfo,
 } from '@/lib/flows/workspace-row-prefs';
 import { formatColumnLabel } from '@/lib/flows/column-label';
+import {
+  isRenamableMetaColumn,
+  metaHeaderLabelKey,
+} from '@/lib/meta-lead-ads/header-labels';
+import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 
 /**
  * Workspace-only typeface (DM Sans). Applied to the page root so
@@ -362,6 +367,11 @@ export default function WorkspacePage() {
   // Server-persisted per (account, flow); defaults resolve in
   // code, so visibility changes never disturb colors.
   const [headerColors, setHeaderColors] = useState<Record<string, string>>({});
+  // Meta Lead Ads custom header names, keyed by the same stable
+  // visibility id (`flow:<key>`). Applies ONLY to virtual Meta
+  // tables (see the fetch + render guards below) — Flow Tables
+  // never read or write this map.
+  const [headerLabels, setHeaderLabels] = useState<Record<string, string>>({});
   // Column widths by stable visibility id. Absent = natural width
   // (current visuals are the initial state). Server-persisted per
   // (account, flow), independent of visibility and filters — never
@@ -513,6 +523,38 @@ export default function WorkspacePage() {
     return () => ctrl.abort();
   }, [flowId]);
 
+  // Meta Lead Ads custom header names — fetched only for
+  // virtual Meta tables (the route 404s everything else), so
+  // Flow Tables never pay for or see this map. Best-effort: a
+  // failed fetch leaves {} so every column renders its original
+  // Instant Form question.
+  useEffect(() => {
+    setHeaderLabels({});
+    if (!flowId || payload?.meta.kind !== 'meta_lead_ads') return;
+    const ctrl = new AbortController();
+    fetch(`/api/integrations/meta-lead-ads/flows/${flowId}/header-labels`, {
+      signal: ctrl.signal,
+      cache: 'no-store',
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => null)) as {
+          labels?: Record<string, string>;
+        } | null;
+        if (ctrl.signal.aborted || !json || typeof json.labels !== 'object')
+          return;
+        const clean: Record<string, string> = {};
+        for (const [key, value] of Object.entries(json.labels ?? {})) {
+          if (typeof value === 'string' && value.trim() !== '') {
+            clean[key] = value;
+          }
+        }
+        setHeaderLabels(clean);
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [flowId, payload?.meta.kind]);
+
   // Row pin/hide prefs — same account/flow scope as the table,
   // refetched per flow (Completed/Incomplete deliberately share
   // one configuration). Best-effort like the reads above: a
@@ -635,6 +677,48 @@ export default function WorkspacePage() {
       }
     },
     [flowId, headerColors]
+  );
+
+  // Persist one Meta Lead Ads column's custom header (null restores
+  // the original question). Optimistic: paint immediately, revert +
+  // toast when the server rejects (same pattern as header colors).
+  // Meta-only callers: the menu renders solely on Meta tables, and
+  // the API itself rejects non-Meta flows.
+  const handleSaveHeaderLabel = useCallback(
+    async (columnKey: string, label: string | null) => {
+      if (!flowId) return;
+      const visKey = metaHeaderLabelKey(columnKey);
+      const previous = headerLabels;
+      setHeaderLabels((prev) => {
+        const next = { ...prev };
+        if (label === null) delete next[visKey];
+        else next[visKey] = label;
+        return next;
+      });
+      try {
+        const res = await fetch(
+          `/api/integrations/meta-lead-ads/flows/${flowId}/header-labels`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ column_key: columnKey, label }),
+          }
+        );
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(
+            (payload as { error?: string }).error ?? 'Could not save the header name.'
+          );
+        }
+      } catch (err) {
+        setHeaderLabels(previous);
+        toast.error(
+          err instanceof Error ? err.message : 'Could not save the header name.'
+        );
+        throw err;
+      }
+    },
+    [flowId, headerLabels]
   );
 
   // Header paint helpers live below the visibility memo (they
@@ -1513,13 +1597,39 @@ export default function WorkspacePage() {
                       {flowColumnsVisible.map((c, flowIdx) => {
                         const visId = flowColumnVisId(c.key);
                         const headerIdx = (rowVisible ? 1 : 0) + flowIdx;
+                        // Meta Lead Ads tables only: Instant Form
+                        // question columns get a header menu (Rename /
+                        // Restore). System columns, the Source column,
+                        // and every Flow Table header render exactly
+                        // as before.
+                        const renamable =
+                          payload?.meta.kind === 'meta_lead_ads' &&
+                          isRenamableMetaColumn({ key: c.key, system: c.system });
+                        const customLabel = renamable
+                          ? (headerLabels[visId] ?? null)
+                          : null;
                         return (
                           <TableHead
                             key={flowColumnRenderKey(c)}
                             className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
                             style={headStyleAt(headerIdx)}
                           >
-                            {formatColumnLabel(c.label)}
+                            {renamable ? (
+                              <MetaColumnHeaderMenu
+                                columnKey={c.key}
+                                originalLabel={c.label}
+                                displayLabel={
+                                  customLabel ?? formatColumnLabel(c.label)
+                                }
+                                customLabel={customLabel}
+                                onRename={(label) =>
+                                  handleSaveHeaderLabel(c.key, label)
+                                }
+                                onRestore={() => handleSaveHeaderLabel(c.key, null)}
+                              />
+                            ) : (
+                              formatColumnLabel(c.label)
+                            )}
                             {canSendMessages && (
                               <ColumnResizeHandle
                                 columnKey={visId}
