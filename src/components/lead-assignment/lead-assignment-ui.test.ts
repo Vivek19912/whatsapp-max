@@ -69,6 +69,32 @@ describe("rule dashboard + form", () => {
   });
 });
 
+describe("Lead Assignment member loading (same data as Team Members)", () => {
+  it("filters eligibility on the API's `role` field, never `account_role`", () => {
+    const p = src("components/lead-assignment/lead-assignment-panel.tsx");
+    // Regression: the members API returns `role` (the DB column is
+    // `account_role`, but it is renamed in the response). Reading
+    // `account_role` yielded undefined for every member, so the
+    // wizard showed "No eligible members found".
+    expect(p).toContain("eligibleMemberIds");
+    expect(p).not.toContain("account_role");
+  });
+
+  it("eligibility matches the backend rule and ignores presence", () => {
+    const m = src("lib/lead-assignment/members.ts");
+    expect(m).toContain('["admin", "agent"]');
+    expect(m).toContain("isAssignableRole");
+    const service = src("lib/lead-assignment/service.ts");
+    // Single source of truth: the service reuses the same constant.
+    expect(service).toContain('from "./members"');
+  });
+
+  it("the members API exposes `role` like the Team Members page uses", () => {
+    const route = src("app/api/account/members/route.ts");
+    expect(route).toContain("role: row.account_role");
+  });
+});
+
 describe("Meta-only manual assignment wiring", () => {
   it("routes Meta assignee saves through the audited endpoint", () => {
     const page = src("app/(dashboard)/workspace/page.tsx");

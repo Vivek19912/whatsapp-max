@@ -24,6 +24,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isAssigneeField } from "@/lib/flows/workspace-assignee";
 import { roundRobinNext, swrrNext } from "./algorithms";
+import { ASSIGNABLE_ROLES } from "./members";
 
 export type LeadAssignmentMode = "round_robin" | "swrr";
 
@@ -51,8 +52,8 @@ export interface AssignmentTableState {
   version: number;
 }
 
-/** Roles allowed to receive automatic lead assignments. */
-export const ASSIGNABLE_ROLES = ["admin", "agent"] as const;
+/** Roles allowed to receive automatic lead assignments (see members.ts). */
+export { ASSIGNABLE_ROLES };
 
 /** Compare-and-swap attempts before surfacing a state conflict. */
 export const STATE_CAS_MAX_ATTEMPTS = 5;

@@ -41,6 +41,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { eligibleMemberIds } from "@/lib/lead-assignment/members";
 import { validateRuleInput } from "@/lib/lead-assignment/validation";
 
 /**
@@ -90,7 +91,8 @@ interface TableView {
 interface RosterMember {
   user_id: string;
   full_name: string | null;
-  account_role: string;
+  /** Same shape as the Team Members page: /api/account/members returns `role`. */
+  role: string;
 }
 
 interface DraftMember {
@@ -157,9 +159,13 @@ export function LeadAssignmentPanel() {
     return map;
   }, [roster]);
 
+  // Same eligibility rule as the assignment backend (single
+  // source in lib/lead-assignment/members): admin/agent only,
+  // presence never filters.
+  const eligibleIds = useMemo(() => new Set(eligibleMemberIds(roster)), [roster]);
   const eligibleRoster = useMemo(
-    () => roster.filter((m) => m.account_role === "admin" || m.account_role === "agent"),
-    [roster],
+    () => roster.filter((m) => eligibleIds.has(m.user_id)),
+    [roster, eligibleIds],
   );
 
   const tableLabelById = useMemo(() => {
@@ -766,7 +772,7 @@ export function LeadAssignmentPanel() {
                       onCheckedChange={() => toggleMember(m.user_id)}
                     />
                     <span className="flex-1">{m.full_name?.trim() || m.user_id}</span>
-                    <span className="text-xs text-muted-foreground capitalize">{m.account_role}</span>
+                    <span className="text-xs text-muted-foreground capitalize">{m.role}</span>
                   </label>
                 ))}
                 {visibleMembers.length === 0 && (
