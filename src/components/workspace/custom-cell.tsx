@@ -249,6 +249,7 @@ export function CustomCell({
   stored,
   canEdit,
   onSaved,
+  saveAssignee,
   twoLineClamp = false,
   members,
 }: {
@@ -258,6 +259,15 @@ export function CustomCell({
   stored: string | null | undefined;
   canEdit: boolean;
   onSaved: (fieldId: string, runId: string, value: string | null) => void;
+  /**
+   * Optional save override for the "Assigned To" column only.
+   * When provided (Meta Lead Ads Tables route manual assignment
+   * through the audited endpoint), it receives the raw value and
+   * resolves the stored value — or throws with the error message.
+   * Absent everywhere else: the generic workspace-values save runs
+   * untouched, so Flow Tables behave exactly as before.
+   */
+  saveAssignee?: (raw: unknown) => Promise<string | null>;
   /**
    * Two-line visual clamp for the text trigger (Customer
    * Response / Next Action cells): up to 2 wrapped lines with
@@ -288,21 +298,31 @@ export function CustomCell({
   async function save(raw: unknown): Promise<boolean> {
     setSaving(true);
     try {
-      const res = await fetch(`/api/flows/${flowId}/workspace-values`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          field_id: field.id,
-          flow_run_id: runId,
-          value: raw,
-        }),
-      });
-      const json = (await res.json().catch(() => null)) as {
-        error?: string;
-        value?: string | null;
-      } | null;
-      if (!res.ok) throw new Error(json?.error ?? "Could not save the value.");
-      onSaved(field.id, runId, json?.value ?? null);
+      let stored: string | null;
+      if (isAssigneeField(field) && saveAssignee) {
+        // Meta Lead Ads Tables only: the caller persists through the
+        // audited manual-assignment endpoint (write + history in one
+        // step). Any other column — and every Flow Table — uses the
+        // generic path below.
+        stored = await saveAssignee(raw);
+      } else {
+        const res = await fetch(`/api/flows/${flowId}/workspace-values`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            field_id: field.id,
+            flow_run_id: runId,
+            value: raw,
+          }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          error?: string;
+          value?: string | null;
+        } | null;
+        if (!res.ok) throw new Error(json?.error ?? "Could not save the value.");
+        stored = json?.value ?? null;
+      }
+      onSaved(field.id, runId, stored);
       setEditing(false);
       return true;
     } catch (err) {

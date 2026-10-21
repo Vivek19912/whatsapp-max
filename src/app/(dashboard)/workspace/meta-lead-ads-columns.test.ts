@@ -212,6 +212,26 @@ describe("workspace page — Meta unified table (no Completed/Incomplete tabs)",
   });
 });
 
+describe("workspace page — Meta sidebar hides the metadata section", () => {
+  it("gates the badge + Phone/Submission/Completed/Run-ID block to Flow Tables", () => {
+    const src = page();
+    const sheetIdx = src.indexOf('<SheetContent side="right"');
+    expect(sheetIdx).toBeGreaterThan(-1);
+    const sheet = src.slice(sheetIdx);
+    // The whole metadata section renders only for non-Meta tables.
+    expect(sheet).toContain("{isMetaTable ? null : (");
+    expect(sheet).toContain("<StatusBadge status={selected.status} />");
+    // Header (lead name + form name), Answers, recordings, and the
+    // Travel CRM action stay outside the gate.
+    const gateIdx = sheet.indexOf("{isMetaTable ? null : (");
+    expect(sheet.indexOf("<SheetTitle>{selected.name ?? 'Run'}</SheetTitle>")).toBeLessThan(gateIdx);
+    const gateEnd = sheet.indexOf("</dl>", gateIdx);
+    expect(sheet.indexOf("Answers", gateEnd)).toBeGreaterThan(-1);
+    expect(sheet.indexOf("LeadRecordings", gateEnd)).toBeGreaterThan(-1);
+    expect(sheet.indexOf("TravelCrmAction", gateEnd)).toBeGreaterThan(-1);
+  });
+});
+
 describe("table route — Meta Source column position", () => {
   it("reorders Source after the last question column for Meta tables only", () => {
     const src = tableRoute();

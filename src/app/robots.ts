@@ -22,6 +22,7 @@ export default function robots(): MetadataRoute.Robots {
           "/templates",
           "/quick-replies",
           "/chat-assignment",
+          "/lead-assignment",
           "/data-export",
           "/notifications",
           "/settings",

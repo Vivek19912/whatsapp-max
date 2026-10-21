@@ -46,6 +46,7 @@ describe('Features removal — sidebar', () => {
       '/data-export',
       '/all-sheets',
       '/chat-assignment',
+      '/lead-assignment',
     ]);
   });
 
@@ -62,6 +63,16 @@ describe('Features removal — sidebar', () => {
     expect(hrefs.indexOf('/all-sheets')).toBe(
       hrefs.indexOf('/data-export') + 1
     );
+  });
+
+  it('places Lead Assignment directly after Chat Assignment', () => {
+    const hrefs = navItems.map((i) => i.href);
+    expect(hrefs.indexOf('/lead-assignment')).toBe(
+      hrefs.indexOf('/chat-assignment') + 1
+    );
+    expect(navItems[hrefs.indexOf('/lead-assignment')]).toMatchObject({
+      label: 'Lead Assignment',
+    });
   });
 });
 

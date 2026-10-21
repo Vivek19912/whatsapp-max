@@ -1000,6 +1000,29 @@ export default function WorkspacePage() {
     [flowId]
   );
 
+  // Meta Lead Ads Tables only: manual assignment through the
+  // audited endpoint (write + history in one step). The save runs
+  // for the Assigned To column via CustomCell's saveAssignee
+  // override; Flow Tables never pass that override.
+  const manualAssignMetaLead = useCallback(
+    async (runId: string, raw: unknown): Promise<string | null> => {
+      if (!flowId) throw new Error('Could not save the value.');
+      const res = await fetch(`/api/flows/${flowId}/leads/${runId}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: raw ?? null }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        assignment?: { current: string | null };
+        error?: string;
+      } | null;
+      if (!res.ok) throw new Error(json?.error ?? 'Could not save the value.');
+      toast.success('Owner updated.');
+      return json?.assignment?.current ?? null;
+    },
+    [flowId]
+  );
+
   const handleCustomSaved = useCallback(
     (fieldId: string, runId: string, value: string | null) => {
       if (!requestKey) return;
@@ -1952,6 +1975,17 @@ export default function WorkspacePage() {
                                 onSaved={handleCustomSaved}
                                 members={teamMembers}
                                 twoLineClamp={isWideTextColumnName(f.name)}
+                                // Meta Lead Ads Tables only: manual
+                                // assignment goes through the audited
+                                // endpoint (write + history). Every
+                                // other column — and every Flow Table
+                                // — keeps the generic save path.
+                                saveAssignee={
+                                  isMetaTable && isAssigneeField(f)
+                                    ? async (raw) =>
+                                        manualAssignMetaLead(row.runId, raw)
+                                    : undefined
+                                }
                               />
                             </TableCell>
                           ))}
@@ -2005,35 +2039,44 @@ export default function WorkspacePage() {
                 </SheetDescription>
               </SheetHeader>
               <div className="mt-4 space-y-4 overflow-y-auto px-5 pb-6">
-                <div className="flex items-center gap-2">
-                  <StatusBadge status={selected.status} />
-                </div>
-                <dl className="space-y-2 text-sm">
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-muted-foreground">Phone</dt>
-                    <dd className="text-foreground font-medium">
-                      {selected.phone ?? '—'}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-muted-foreground">Submission time</dt>
-                    <dd className="text-foreground tabular-nums">
-                      {formatDateTime(selected.startedAt)}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-muted-foreground">Completed at</dt>
-                    <dd className="text-foreground tabular-nums">
-                      {formatDateTime(selected.completedAt)}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between gap-4">
-                    <dt className="text-muted-foreground">Flow run ID</dt>
-                    <dd className="text-foreground max-w-48 truncate font-mono text-xs">
-                      {selected.runId}
-                    </dd>
-                  </div>
-                </dl>
+                {/* Meta Lead Ads sidebars skip this metadata section
+                    (status badge, Phone, Submission time, Completed
+                    at, Flow run ID) — the lead name, form name,
+                    Answers, and everything below stay exactly as
+                    before. Flow Tables keep the section untouched. */}
+                {isMetaTable ? null : (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={selected.status} />
+                    </div>
+                    <dl className="space-y-2 text-sm">
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-muted-foreground">Phone</dt>
+                        <dd className="text-foreground font-medium">
+                          {selected.phone ?? '—'}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-muted-foreground">Submission time</dt>
+                        <dd className="text-foreground tabular-nums">
+                          {formatDateTime(selected.startedAt)}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-muted-foreground">Completed at</dt>
+                        <dd className="text-foreground tabular-nums">
+                          {formatDateTime(selected.completedAt)}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-muted-foreground">Flow run ID</dt>
+                        <dd className="text-foreground max-w-48 truncate font-mono text-xs">
+                          {selected.runId}
+                        </dd>
+                      </div>
+                    </dl>
+                  </>
+                )}
                 <div>
                   <h3 className="text-foreground text-sm font-semibold">
                     Answers

@@ -40,6 +40,7 @@ import {
 } from "./normalize";
 import { getPageToken, markNeedsReauth } from "./store";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
+import { maybeAutoAssignLead } from "@/lib/lead-assignment/service";
 
 export const MAX_LEAD_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 5 * 60_000;
@@ -391,6 +392,19 @@ export async function processSubmissionById(
         email: normalized.standard.email ?? null,
         fullName: normalized.standard.name ?? null,
       },
+    });
+
+    // ADDITIVE Lead Assignment hook — automatically assign the new
+    // lead per the account's active rule for this Meta table (or
+    // leave it unassigned when no rule applies). Best-effort and
+    // fully isolated: assignment can never fail lead processing,
+    // and duplicates/updates never reassign (ownership is only
+    // written when the Assigned To cell is still empty).
+    await maybeAutoAssignLead(db, {
+      accountId: submission.account_id,
+      flowId,
+      runId: (run as { id: string }).id,
+      formId: formRow.id,
     });
 
     return { outcome: "processed" };

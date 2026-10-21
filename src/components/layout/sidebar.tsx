@@ -29,6 +29,7 @@ import {
   Settings,
   Sheet,
   Table2,
+  UserCheck,
   Users,
   UsersRound,
   Workflow,
@@ -71,6 +72,9 @@ export const navItems: NavItem[] = [
   { href: "/data-export", label: "Flow Sheets", icon: Sheet },
   { href: "/all-sheets", label: "All Sheets", icon: Sheet },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
+  // Lead Assignment is a separate feature from Chat Assignment
+  // (own rules, own engine, own page) — never merged.
+  { href: "/lead-assignment", label: "Lead Assignment", icon: UserCheck },
 ];
 
 const bottomNavItems = [
@@ -152,6 +156,10 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   // reverted by removing the `isOwner` checks below.
   const isOwner = accountRole === "owner";
   const visibleNavItems = navItems.filter((item) => {
+    // Lead Assignment config is admin+ work: teammates without
+    // settings access never see the entry (the page enforces the
+    // same bar server-side).
+    if (item.href === "/lead-assignment") return canEditSettings;
     if (
       !isOwner &&
       (item.href === "/flows" || item.href === "/agents" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/workspace" || item.href === "/chat-assignment")
