@@ -127,6 +127,91 @@ describe("workspace page — Meta Lead Source removal", () => {
   });
 });
 
+describe("workspace page — Meta follow-up reminder hook", () => {
+  it("opens the reminder dialog only from Meta follow-up saves", () => {
+    const src = page();
+    // The save handler gates the entire hook on Meta tables and the
+    // canonical datetime column — Flow Table saves pass through
+    // untouched.
+    expect(src).toContain(
+      "if (isMetaTable && followupFieldId !== null && fieldId === followupFieldId) {",
+    );
+    expect(src).toContain("followupFieldId");
+    expect(src).toContain("f.field_type === 'datetime'");
+    expect(src).toContain("isWorkspaceFollowupFieldName(f.name)");
+  });
+
+  it("renders the Create Follow-up Reminder dialog from that hook", () => {
+    const src = page();
+    expect(src).toContain("FollowupReminderDialog");
+    expect(src).toContain("setReminderDialog");
+    // An already-open dialog keeps its draft (no reopen storms).
+    expect(src).toContain("prev !== null");
+  });
+
+  it("cancels the linked reminder when the follow-up is cleared", () => {
+    const src = page();
+    expect(src).toContain("cancelWorkspaceFollowupReminder(runId)");
+    expect(src).toContain("/followup-reminder");
+    expect(src).toContain("method: 'DELETE'");
+  });
+
+  it("the dialog reports failures without losing the draft", () => {
+    const src = readFileSync(
+      `${root}/src/components/workspace/followup-reminder-dialog.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("Create Follow-up Reminder");
+    expect(src).toContain("Reminder Message");
+    expect(src).toContain("Save Follow-up");
+    // Failed saves keep the dialog open with the draft intact for
+    // retry; nothing is created before confirmation.
+    expect(src).toContain('role="alert"');
+    expect(src).toContain("setSaving(false)");
+    expect(src).toContain("message: trimmed === \"\" ? null : message");
+  });
+
+  it("Flow Tables never reach the reminder state or endpoint", () => {
+    const src = page();
+    // Every reminder touchpoint sits behind the Meta gate above;
+    // there is no second call site.
+    const opens = src.split("setReminderDialog").length - 1;
+    expect(opens).toBe(3);
+    const endpoints = src.split("/followup-reminder").length - 1;
+    expect(endpoints).toBe(2);
+  });
+});
+
+describe("workspace page — Meta unified table (no Completed/Incomplete tabs)", () => {
+  it("hides the completion tabs on Meta tables only", () => {
+    const src = page();
+    const gateIdx = src.indexOf("{isMetaTable ? null : (");
+    expect(gateIdx).toBeGreaterThan(-1);
+    const block = src.slice(gateIdx, gateIdx + 400);
+    expect(block).toContain('aria-label="Completion filter"');
+    expect(src).toContain("{VIEWS.map((v) => (");
+    expect(src).toContain("onClick={() => selectView(v.id)}");
+  });
+
+  it("forces view=all for the Meta table request and empty state", () => {
+    const src = page();
+    expect(src).toContain(
+      "payload?.meta?.kind === 'meta_lead_ads' ? 'all' : view",
+    );
+    expect(src).toContain("view: effectiveView,");
+    expect(src).toContain("effectiveView === 'all'");
+  });
+
+  it("Flow Tables keep their tabs and selected view", () => {
+    const src = page();
+    // The tab buttons, selection handler, and per-view request key
+    // are untouched — only Meta tables bypass them.
+    expect(src).toContain("aria-selected={view === v.id}");
+    expect(src).toContain("const selectView = useCallback(");
+    expect(src).toContain("${flowId}|${effectiveView}|");
+  });
+});
+
 describe("table route — Meta Source column position", () => {
   it("reorders Source after the last question column for Meta tables only", () => {
     const src = tableRoute();

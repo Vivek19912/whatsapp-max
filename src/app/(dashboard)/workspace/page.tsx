@@ -81,6 +81,8 @@ import {
   resolveMetaHeaderDisplayLabel,
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
+import { FollowupReminderDialog } from '@/components/workspace/followup-reminder-dialog';
+import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
 /**
  * Workspace-only typeface (DM Sans). Applied to the page root so
@@ -740,16 +742,22 @@ export default function WorkspacePage() {
   // the fetch effect never sets state synchronously — responses
   // reconcile by key, and a stale response for an older key is
   // ignored.
+  // Meta Lead Ads tables show every lead in one unified table: the
+  // Completed/Incomplete tabs are hidden below and the request
+  // always uses view=all (the API default). Flow Tables keep their
+  // selected view untouched.
+  const effectiveView: FlowTableView =
+    payload?.meta?.kind === 'meta_lead_ads' ? 'all' : view;
   const appliedDateRange = appliedDate?.range ?? null;
   const requestKey = flowId
-    ? `${flowId}|${view}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(appliedColumns)}|${page}|${pageSize}`
+    ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(appliedColumns)}|${page}|${pageSize}`
     : null;
   const loading = requestKey !== null && requestKey !== loadedKey;
   useEffect(() => {
     if (!flowId || !requestKey) return;
     const ctrl = new AbortController();
     const qs = buildWorkspaceTableQuery({
-      view,
+      view: effectiveView,
       search: debouncedSearch,
       page,
       pageSize,
@@ -785,7 +793,7 @@ export default function WorkspacePage() {
         setLoadedKey(requestKey);
       });
     return () => ctrl.abort();
-  }, [flowId, requestKey, view, debouncedSearch, appliedDateRange, appliedAssignee, appliedColumns, page, pageSize, refreshSeq]);
+  }, [flowId, requestKey, effectiveView, debouncedSearch, appliedDateRange, appliedAssignee, appliedColumns, page, pageSize, refreshSeq]);
 
   const totalPages = useMemo(() => {
     const total = payload?.meta.total ?? 0;
@@ -945,6 +953,53 @@ export default function WorkspacePage() {
     [reloadTable, requestKey],
   );
 
+  // Meta Lead Ads only: the canonical "Next Follow-up Date & Time"
+  // column. Saving it offers a linked Reminders reminder (the
+  // dialog); clearing it cancels the linked scheduled reminder.
+  // Flow Tables have no reminder hook — their saves behave exactly
+  // as before.
+  const followupFieldId = useMemo(
+    () =>
+      customFields.find(
+        (f) =>
+          f.field_type === 'datetime' && isWorkspaceFollowupFieldName(f.name)
+      )?.id ?? null,
+    [customFields]
+  );
+  const [reminderDialog, setReminderDialog] = useState<{
+    runId: string;
+    scheduledFor: string;
+    name: string | null;
+    phone: string | null;
+  } | null>(null);
+
+  // Cancel the linked scheduled reminder after its follow-up cell
+  // was cleared. Best-effort toast: the cell is already cleared —
+  // a leftover scheduled reminder stays manageable from Reminders.
+  const cancelWorkspaceFollowupReminder = useCallback(
+    async (runId: string) => {
+      if (!flowId) return;
+      try {
+        const res = await fetch(`/api/flows/${flowId}/followup-reminder`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_run_id: runId }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          cancelled?: boolean;
+          error?: string;
+        } | null;
+        if (!res.ok) throw new Error(json?.error ?? 'Could not cancel the reminder.');
+        if (json?.cancelled) toast.success('Scheduled reminder cancelled.');
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : 'Could not cancel the reminder.'
+        );
+      }
+    },
+    [flowId]
+  );
+
   const handleCustomSaved = useCallback(
     (fieldId: string, runId: string, value: string | null) => {
       if (!requestKey) return;
@@ -966,8 +1021,42 @@ export default function WorkspacePage() {
         const field = customFields.find((f) => f.id === fieldId);
         if (field && isAssigneeField(field)) reloadTable();
       }
+      // Meta-only follow-up hook (saves on other tables pass
+      // through untouched): a fresh follow-up opens the reminder
+      // dialog; a cleared one cancels its linked reminder.
+      // Event-driven (only on successful saves), so rerenders can
+      // never reopen the dialog; an already-open dialog keeps its
+      // draft instead of being replaced.
+      if (isMetaTable && followupFieldId !== null && fieldId === followupFieldId) {
+        if (value === null) {
+          void cancelWorkspaceFollowupReminder(runId);
+          return;
+        }
+        const at = new Date(value);
+        if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) return;
+        const row = payload?.rows.find((r) => r.runId === runId);
+        setReminderDialog((prev) =>
+          prev !== null
+            ? prev
+            : {
+                runId,
+                scheduledFor: value,
+                name: row?.name ?? null,
+                phone: row?.phone ?? null,
+              }
+        );
+      }
     },
-    [requestKey, appliedAssignee, customFields, reloadTable]
+    [
+      requestKey,
+      appliedAssignee,
+      customFields,
+      reloadTable,
+      isMetaTable,
+      followupFieldId,
+      cancelWorkspaceFollowupReminder,
+      payload,
+    ]
   );
   // Closed-trigger label: Base UI falls back to the raw value when
   // the selected item's text isn't resolved, which leaked the flow
@@ -1376,9 +1465,13 @@ export default function WorkspacePage() {
         <h1 className="text-foreground text-[30px] font-bold tracking-tight">
           Workspace
         </h1>
-        <p className="text-muted-foreground mt-1 text-sm">
-          One live table per flow — every run, completed or not.
-        </p>
+        {/* Meta Lead Ads tables hide this subtitle; Flow Tables
+            keep it exactly as before. */}
+        {payload?.meta.kind === 'meta_lead_ads' ? null : (
+          <p className="text-muted-foreground mt-1 text-sm">
+            One live table per flow — every run, completed or not.
+          </p>
+        )}
       </div>
 
       {flows === null ? (
@@ -1413,37 +1506,37 @@ export default function WorkspacePage() {
                 ))}
               </SelectContent>
             </Select>
-            <div
-              className="flex items-center gap-1.5"
-              role="tablist"
-              aria-label="Completion filter"
-            >
-              {VIEWS.map((v) => (
-                <Button
-                  key={v.id}
-                  role="tab"
-                  aria-selected={view === v.id}
-                  variant={view === v.id ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => selectView(v.id)}
-                  className={cn(
-                    'h-8 rounded-full px-3.5 text-sm font-medium',
-                    view !== v.id &&
-                      'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
-                  )}
-                >
-                  {v.label}
-                </Button>
-              ))}
-            </div>
+            {/* Meta Lead Ads tables show one unified table (view=all),
+                so the Completed/Incomplete tabs are hidden here.
+                Flow Tables keep the tabs exactly as before. */}
+            {isMetaTable ? null : (
+              <div
+                className="flex items-center gap-1.5"
+                role="tablist"
+                aria-label="Completion filter"
+              >
+                {VIEWS.map((v) => (
+                  <Button
+                    key={v.id}
+                    role="tab"
+                    aria-selected={view === v.id}
+                    variant={view === v.id ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => selectView(v.id)}
+                    className={cn(
+                      'h-8 rounded-full px-3.5 text-sm font-medium',
+                      view !== v.id &&
+                        'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
+                    )}
+                  >
+                    {v.label}
+                  </Button>
+                ))}
+              </div>
+            )}
           </div>
 
-          {payload?.meta.kind === 'meta_lead_ads' ? (
-            <p className="text-muted-foreground text-xs">
-              Meta Lead Ads form — leads arrive automatically. Questions and
-              enablement are managed in Settings › Integrations.
-            </p>
-          ) : payload?.meta.completionNodeId ? (
+          {payload?.meta.kind === 'meta_lead_ads' ? null : payload?.meta.completionNodeId ? (
             <p className="text-muted-foreground text-xs">
               Completion point:{' '}
               <code className="bg-muted rounded px-1 font-mono">
@@ -1562,9 +1655,9 @@ export default function WorkspacePage() {
               <EmptyState
                 icon={Table2}
                 title={
-                  view === 'all'
+                  effectiveView === 'all'
                     ? 'No runs yet'
-                    : view === 'completed'
+                    : effectiveView === 'completed'
                       ? 'No completed runs'
                       : 'No incomplete runs'
                 }
@@ -2035,6 +2128,24 @@ export default function WorkspacePage() {
           )}
         </SheetContent>
       </Sheet>
+
+      {/* Meta-only follow-up reminder dialog: opened from the
+          handleCustomSaved hook above (successful follow-up saves
+          on Meta tables). Flow Tables never set this state. */}
+      {reminderDialog !== null && flowId !== null && (
+        <FollowupReminderDialog
+          open={reminderDialog !== null}
+          onOpenChange={(v) => {
+            if (!v) setReminderDialog(null);
+          }}
+          flowId={flowId}
+          runId={reminderDialog.runId}
+          leadName={reminderDialog.name}
+          leadPhone={reminderDialog.phone}
+          scheduledFor={reminderDialog.scheduledFor}
+          onSaved={reloadTable}
+        />
+      )}
     </div>
   );
 }
