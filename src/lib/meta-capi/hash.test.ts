@@ -40,6 +40,20 @@ describe("normalizers", () => {
   });
 });
 
+describe("buildUserData lead_id (CRM lifecycle identifier)", () => {
+  it("passes the original Meta lead id through UN-hashed", () => {
+    const data = buildUserData({ email: "A@B.com", leadId: "LEAD-123" });
+    expect(data.lead_id).toBe("LEAD-123");
+    // Hashed identifiers are untouched by the addition.
+    expect(data.em).toBe(sha256Hex("a@b.com"));
+  });
+
+  it("omits lead_id when absent, like every other missing field", () => {
+    expect(buildUserData({})).not.toHaveProperty("lead_id");
+    expect(buildUserData({ leadId: "   " })).not.toHaveProperty("lead_id");
+  });
+});
+
 describe("buildUserData", () => {
   it("hashes PII and omits fields we do not hold", () => {
     const data = buildUserData({ email: "A@B.com", phone: "+1 555 123 4567" });

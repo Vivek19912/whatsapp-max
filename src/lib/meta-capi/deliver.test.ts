@@ -100,6 +100,44 @@ const { fireCapiForAction, runDueDeliveries } = await import("./deliver");
 const db = {} as SupabaseClient;
 const platform = { graphVersion: "v21.0" };
 
+/**
+ * Minimal query builder backing loadMetaLeadContext in tests:
+ * supports the exact .select().eq().eq()[.limit()].maybeSingle()
+ * chains the loader issues, scoped per table.
+ */
+function fakeDb(fixtures: {
+  flows?: Array<Record<string, unknown>>;
+  flow_runs?: Array<Record<string, unknown>>;
+  submissions?: Array<Record<string, unknown>>;
+}) {
+  const pick = (table: string) =>
+    table === "flows"
+      ? (fixtures.flows ?? [])
+      : table === "flow_runs"
+        ? (fixtures.flow_runs ?? [])
+        : (fixtures.submissions ?? []);
+  return {
+    from: (table: string) => {
+      const filters: Array<[string, unknown]> = [];
+      const chain: Record<string, unknown> = {
+        select: () => chain,
+        eq: (col: string, val: unknown) => {
+          filters.push([col, val]);
+          return chain;
+        },
+        limit: () => chain,
+        maybeSingle: async () => ({
+          data:
+            pick(table).find((r) => filters.every(([c, v]) => r[c as string] === v)) ??
+            null,
+          error: null,
+        }),
+      };
+      return chain;
+    },
+  } as unknown as SupabaseClient;
+}
+
 function mapping(overrides: Record<string, unknown> = {}) {
   return {
     id: "map-1",
@@ -393,6 +431,103 @@ describe("fireCapiForAction", () => {
       body: unknown;
     };
     expect(stored.body).toEqual({ events_received: 0, fbtrace_id: "TRACE-0" });
+  });
+});
+
+describe("CRM lifecycle override for Meta Lead Ads tables", () => {
+  const crmMapping = (overrides: Record<string, unknown> = {}) =>
+    mapping({
+      id: "map-crm",
+      source_action: "workspace_field_changed",
+      source_field: "Stage",
+      source_value: "Qualified",
+      meta_event_name: "QualifiedLead",
+      action_source: "business_messaging",
+      ...overrides,
+    });
+  const crmDb = () =>
+    fakeDb({
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-meta" }],
+      flows: [{ id: "flow-meta", account_id: "acct-1", kind: "meta_lead_ads" }],
+      submissions: [
+        { account_id: "acct-1", flow_run_id: "run-1", meta_lead_id: "LEAD-999" },
+      ],
+    });
+  const crmEvent = {
+    accountId: "acct-1",
+    action: "workspace_field_changed" as const,
+    flowRunId: "run-1",
+    fieldName: "Stage",
+    value: "Qualified",
+    matchData: { email: "a@b.co", phone: "+15551234567" },
+  };
+
+  it("sends system_generated + crm markers with the unhashed lead id", async () => {
+    h.mappings = [crmMapping()];
+
+    const result = await fireCapiForAction(crmDb(), platform, crmEvent);
+
+    expect(result).toEqual({ fired: 1, failed: 0, skipped: 0 });
+    const event = firstEvent(h.sendCalls[0]);
+    // Regression pin for Meta #100/2804063: never business_messaging
+    // without a messaging channel here.
+    expect(event.action_source).toBe("system_generated");
+    expect(event.custom_data).toMatchObject({
+      event_source: "crm",
+      lead_event_source: "WhatsApp Max",
+    });
+    expect(event.custom_data).not.toHaveProperty("messaging_channel");
+    const userData = event.user_data as Record<string, unknown>;
+    expect(userData.lead_id).toBe("LEAD-999");
+    // Hashed fallback identifiers are preserved alongside lead_id.
+    expect(typeof userData.em).toBe("string");
+    expect(userData.em).not.toContain("a@b.co");
+    expect(typeof userData.ph).toBe("string");
+    // Configured event name is preserved verbatim.
+    expect(event.event_name).toBe("QualifiedLead");
+  });
+
+  it("leaves non-Meta workspace edits exactly as before", async () => {
+    h.mappings = [crmMapping()];
+    const nonMetaDb = fakeDb({
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-wa" }],
+      flows: [{ id: "flow-wa", account_id: "acct-1", kind: "whatsapp_flow" }],
+      submissions: [{ account_id: "acct-1", flow_run_id: "run-1", meta_lead_id: "LEAD-999" }],
+    });
+
+    await fireCapiForAction(nonMetaDb, platform, crmEvent);
+
+    const event = firstEvent(h.sendCalls[0]);
+    expect(event.action_source).toBe("business_messaging");
+    expect(event.user_data as Record<string, unknown>).not.toHaveProperty("lead_id");
+    expect(event.custom_data ?? {}).not.toHaveProperty("event_source");
+  });
+
+  it("never overrides an explicitly configured action_source", async () => {
+    h.mappings = [crmMapping({ id: "map-explicit", action_source: "phone_call" })];
+
+    await fireCapiForAction(crmDb(), platform, crmEvent);
+
+    const event = firstEvent(h.sendCalls[0]);
+    expect(event.action_source).toBe("phone_call");
+    expect(event.custom_data ?? {}).not.toHaveProperty("event_source");
+    expect(event.user_data as Record<string, unknown>).not.toHaveProperty("lead_id");
+  });
+
+  it("still reroutes when the lead id is unknown (no invented id)", async () => {
+    h.mappings = [crmMapping()];
+    const noSubmissionDb = fakeDb({
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-meta" }],
+      flows: [{ id: "flow-meta", account_id: "acct-1", kind: "meta_lead_ads" }],
+      submissions: [],
+    });
+
+    await fireCapiForAction(noSubmissionDb, platform, crmEvent);
+
+    const event = firstEvent(h.sendCalls[0]);
+    expect(event.action_source).toBe("system_generated");
+    expect(event.custom_data).toMatchObject({ event_source: "crm" });
+    expect(event.user_data as Record<string, unknown>).not.toHaveProperty("lead_id");
   });
 });
 

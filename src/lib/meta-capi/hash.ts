@@ -40,6 +40,12 @@ export interface UserDataInput {
   ctwaClid?: string | null;
   fbc?: string | null;
   fbp?: string | null;
+  /**
+   * Original Meta leadgen id for CRM lifecycle events. Sent
+   * UN-hashed: Meta matches CRM events on it verbatim, exactly
+   * like click identifiers (ctwa_clid, fbc, fbp).
+   */
+  leadId?: string | null;
 }
 
 /** Split a display name into first/last for `fn`/`ln`. */
@@ -80,6 +86,11 @@ export function buildUserData(input: UserDataInput): Record<string, string> {
   if (input.ctwaClid) out.ctwa_clid = input.ctwaClid;
   if (input.fbc) out.fbc = input.fbc;
   if (input.fbp) out.fbp = input.fbp;
+
+  // The original Meta leadgen id is an opaque identifier, not PII
+  // to hash — Meta matches CRM lifecycle events on it verbatim.
+  const leadId = input.leadId?.trim();
+  if (leadId) out.lead_id = leadId;
 
   return out;
 }

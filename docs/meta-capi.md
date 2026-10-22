@@ -195,6 +195,29 @@ Config + mappings are readable by members and writable by admins; deliveries are
 read-only to members (server writes only). The access token is never exposed to
 the browser.
 
+## CRM lifecycle events (Meta Lead Ads tables)
+
+A Workspace field change on a Meta Lead Ads table (for example, setting
+**Stage** to **Qualified**) is a CRM lifecycle event, *not* a messaging
+conversion — so it is never sent as `action_source=business_messaging`
+(Meta rejects that without a `messaging_channel`, error `#100`
+`error_subcode 2804063`). When the mapping keeps the default
+`business_messaging` source, the delivery engine automatically sends
+instead:
+
+- `action_source: "system_generated"`,
+- `custom_data.event_source: "crm"`,
+- `custom_data.lead_event_source: "WhatsApp Max"`,
+- `user_data.lead_id`: the original Meta leadgen id for that Workspace
+  row, **unhashed** (Meta matches CRM events on it verbatim). Hashed
+  `em`/`ph`/`fn`/`ln` are still sent alongside as fallback identifiers.
+  When no lead id is on file, it is omitted — never invented.
+
+Explicitly configured non-default `action_source` values are left
+exactly as configured, and non-Meta tables plus the `meta_lead_received`
+and `flow_completed` triggers keep their existing payloads. Event names
+(e.g. `QualifiedLead`), idempotency, and retry behaviour are unchanged.
+
 ## Manual steps checklist (per customer)
 
 - [ ] Create a dataset/pixel in Meta Events Manager and note its id.

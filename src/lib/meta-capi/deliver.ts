@@ -22,6 +22,7 @@ import { buildFailureResponse, toStoredResponse } from "./response";
 import { buildUserData } from "./hash";
 import {
   buildCapiEvent,
+  buildCrmCustomData,
   buildCustomData,
   buildEventId,
   buildRequestPayload,
@@ -57,6 +58,65 @@ function safeError(err: unknown): string {
   if (err instanceof MetaLeadAdsError) return `${err.code}: ${err.message}`;
   const message = err instanceof Error ? err.message : String(err);
   return message.slice(0, 500);
+}
+
+/**
+ * CRM lifecycle context for a Workspace field change on a Meta Lead
+ * Ads table: the virtual flow id plus the original Meta leadgen id
+ * (unhashed) when the run came from an Instant Form submission.
+ *
+ * Returns null for anything else (other trigger types, non-Meta
+ * flows, unknown runs) so callers fall through to the untouched
+ * legacy payload path. Lookup failures also yield null — enrichment
+ * must never break deliveries that worked before.
+ */
+export interface MetaCrmLeadContext {
+  flowId: string;
+  metaLeadId: string | null;
+}
+
+export async function loadMetaLeadContext(
+  db: SupabaseClient,
+  accountId: string,
+  flowRunId: string | null | undefined,
+): Promise<MetaCrmLeadContext | null> {
+  try {
+    if (!flowRunId) return null;
+    const { data: run, error: runError } = await db
+      .from("flow_runs")
+      .select("id, flow_id")
+      .eq("id", flowRunId)
+      .eq("account_id", accountId)
+      .maybeSingle();
+    if (runError || !run) return null;
+    const flowId = (run as { flow_id?: unknown }).flow_id;
+    if (typeof flowId !== "string" || !flowId) return null;
+    const { data: flow, error: flowError } = await db
+      .from("flows")
+      .select("id, kind")
+      .eq("id", flowId)
+      .eq("account_id", accountId)
+      .maybeSingle();
+    if (flowError || !flow) return null;
+    if ((flow as { kind?: unknown }).kind !== "meta_lead_ads") return null;
+    const { data: submission, error: submissionError } = await db
+      .from("meta_lead_submissions")
+      .select("meta_lead_id")
+      .eq("account_id", accountId)
+      .eq("flow_run_id", flowRunId)
+      .limit(1)
+      .maybeSingle();
+    if (submissionError) return null;
+    const metaLeadId = (submission as { meta_lead_id?: unknown } | null)
+      ?.meta_lead_id;
+    return {
+      flowId,
+      metaLeadId:
+        typeof metaLeadId === "string" && metaLeadId !== "" ? metaLeadId : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface FireResult {
@@ -149,13 +209,37 @@ export async function fireCapiForAction(
   if (mappings.length === 0) return result;
 
   const occurredAt = event.occurredAt ?? new Date();
-  const userData = buildUserData(event.matchData ?? {});
-  const hasMatchData = Object.keys(userData).length > 0;
+  const baseUserData = buildUserData(event.matchData ?? {});
+  const hasMatchData = Object.keys(baseUserData).length > 0;
+
+  // A Workspace field change on a Meta Lead Ads table is a CRM
+  // lifecycle event, not a messaging conversion: Meta rejects
+  // business_messaging without messaging_channel (#100/2804063),
+  // which a CRM UI edit can never provide. Resolved once per call;
+  // null keeps every other path byte-for-byte identical.
+  const crmLead =
+    event.action === "workspace_field_changed"
+      ? await loadMetaLeadContext(db, event.accountId, event.flowRunId)
+      : null;
 
   for (const mapping of mappings) {
     if (!matchesMapping(mapping, event)) continue;
 
-    const actionSource = mapping.action_source || "business_messaging";
+    const rawActionSource = mapping.action_source || "business_messaging";
+    // Only the mapping default is rerouted. An explicitly chosen
+    // action_source is the admin's deliberate choice and is left
+    // exactly as configured — a fabricated messaging_channel is
+    // never invented.
+    const useCrmPayload =
+      crmLead !== null && rawActionSource === "business_messaging";
+    const actionSource = useCrmPayload ? "system_generated" : rawActionSource;
+    const customData = useCrmPayload
+      ? buildCrmCustomData(mapping)
+      : buildCustomData(mapping);
+    const rowUserData =
+      useCrmPayload && crmLead.metaLeadId
+        ? buildUserData({ ...(event.matchData ?? {}), leadId: crmLead.metaLeadId })
+        : baseUserData;
     const eventId = buildEventId(mapping, event, occurredAt);
 
     const recordSkipped = async (reason: string): Promise<void> => {
@@ -199,8 +283,8 @@ export async function fireCapiForAction(
       eventId,
       actionSource,
       eventTime: occurredAt,
-      userData,
-      customData: buildCustomData(mapping),
+      userData: rowUserData,
+      customData,
     });
 
     const delivery = await insertDelivery(db, {

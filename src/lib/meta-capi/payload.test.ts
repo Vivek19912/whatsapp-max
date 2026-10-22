@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MetaCapiMappingRow } from "./types";
 import {
   buildCapiEvent,
+  buildCrmCustomData,
   buildCustomData,
   buildEventId,
   buildRequestPayload,
@@ -163,5 +164,26 @@ describe("payload assembly", () => {
       data: [event],
       test_event_code: "TEST123",
     });
+  });
+
+  it("builds CRM custom_data with the validated crm markers (and no messaging_channel)", () => {
+    expect(buildCrmCustomData(mapping())).toEqual({
+      event_source: "crm",
+      lead_event_source: "WhatsApp Max",
+    });
+  });
+
+  it("builds CRM custom_data on top of value/currency without mutating them", () => {
+    expect(
+      buildCrmCustomData(mapping({ event_value: 150, currency: "EUR" })),
+    ).toEqual({
+      value: 150,
+      currency: "EUR",
+      event_source: "crm",
+      lead_event_source: "WhatsApp Max",
+    });
+    expect(
+      buildCrmCustomData(mapping({ event_value: 150, currency: "EUR" })),
+    ).not.toHaveProperty("messaging_channel");
   });
 });

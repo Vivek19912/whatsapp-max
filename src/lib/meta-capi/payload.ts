@@ -106,6 +106,26 @@ export function buildCustomData(mapping: MetaCapiMappingRow): Record<string, unk
   return custom;
 }
 
+/**
+ * CRM lifecycle events (e.g. a Workspace Stage change to Qualified
+ * on a Meta Lead Ads table) are NOT messaging conversions: Meta
+ * rejects them with `business_messaging` unless a messaging_channel
+ * is present, which a CRM UI edit never has. The validated shape is
+ * `action_source: "system_generated"` plus the CRM markers below.
+ * Per requirement, `lead_event_source` identifies the originating
+ * CRM ("WhatsApp Max"). Value/currency handling is unchanged.
+ */
+export const CRM_EVENT_SOURCE = "crm";
+export const CRM_LEAD_EVENT_SOURCE = "WhatsApp Max";
+
+export function buildCrmCustomData(mapping: MetaCapiMappingRow): Record<string, unknown> {
+  return {
+    ...buildCustomData(mapping),
+    event_source: CRM_EVENT_SOURCE,
+    lead_event_source: CRM_LEAD_EVENT_SOURCE,
+  };
+}
+
 export interface CapiEventObject {
   event_name: string;
   event_time: number;
