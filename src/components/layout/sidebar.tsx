@@ -154,15 +154,20 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   // only. Non-owners simply don't see these nav entries. This is purely a
   // visibility change — the backend/routes are untouched, so it can be
   // reverted by removing the `isOwner` checks below.
+  // Workspace is owner+admin+agent: agents work their own assigned
+  // Meta leads (the table APIs enforce per-lead ownership
+  // server-side), while viewers never see it.
   const isOwner = accountRole === "owner";
+  const isAgent = accountRole === "agent";
   const visibleNavItems = navItems.filter((item) => {
     // Lead Assignment config is admin+ work: teammates without
     // settings access never see the entry (the page enforces the
     // same bar server-side).
     if (item.href === "/lead-assignment") return canEditSettings;
+    if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     if (
       !isOwner &&
-      (item.href === "/flows" || item.href === "/agents" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/workspace" || item.href === "/chat-assignment")
+      (item.href === "/flows" || item.href === "/agents" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/chat-assignment")
     ) {
       return false;
     }

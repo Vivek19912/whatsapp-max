@@ -7,6 +7,8 @@ import {
   toErrorResponse,
 } from "@/lib/auth/account";
 import type { HiddenRowInfo } from "@/lib/flows/workspace-row-prefs";
+import { isAssigneeField } from "@/lib/flows/workspace-assignee";
+import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
 
 /**
  * Row pin/hide preferences for one flow's Workspace (per user).
@@ -43,14 +45,14 @@ async function loadFlowAccount(
 ) {
   const { data: flow, error } = await supabase
     .from("flows")
-    .select("id, account_id")
+    .select("id, account_id, kind")
     .eq("id", flowId)
     .maybeSingle();
   if (error) throw error;
   if (!flow || (flow as { account_id: string }).account_id !== accountId) {
     return null;
   }
-  return flow;
+  return flow as { id: string; kind?: string | null };
 }
 
 /**
@@ -85,8 +87,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const { supabase, accountId, userId } = await getCurrentAccount();
-    if (!(await loadFlowAccount(supabase, accountId, id))) {
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
+    const flow = await loadFlowAccount(supabase, accountId, id);
+    if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
     const { data: prefRows, error: prefErr } = await supabase
@@ -113,13 +116,50 @@ export async function GET(
     // the issue-#294 lesson) under the caller's RLS — a run that
     // moved away or became inaccessible simply drops out, and no
     // unauthorized information is ever exposed.
+    //
+    // Agents on Meta tables additionally see only their own
+    // assigned leads here: hidden ids resolving to someone else's
+    // (or unassigned) leads are dropped like moved-away runs.
+    let visibleHiddenIds = hiddenIds;
+    if (
+      hiddenIds.length > 0 &&
+      role === "agent" &&
+      (flow as { kind?: string | null }).kind === "meta_lead_ads"
+    ) {
+      const { data: assigneeFields } = await supabase
+        .from("workspace_fields")
+        .select("id, name")
+        .eq("account_id", accountId)
+        .eq("flow_id", id);
+      const assigneeField = ((assigneeFields ?? []) as Array<{
+        id: string;
+        name: string;
+      }>).find((f) => isAssigneeField(f));
+      if (assigneeField) {
+        const { data: ownedRows } = await supabase
+          .from("workspace_values")
+          .select("flow_run_id")
+          .eq("account_id", accountId)
+          .eq("field_id", assigneeField.id)
+          .eq("value_text", userId)
+          .in("flow_run_id", hiddenIds);
+        const owned = new Set(
+          ((ownedRows ?? []) as Array<{ flow_run_id: string }>).map(
+            (r) => r.flow_run_id,
+          ),
+        );
+        visibleHiddenIds = hiddenIds.filter((runId) => owned.has(runId));
+      } else {
+        visibleHiddenIds = [];
+      }
+    }
     const hidden: HiddenRowInfo[] = [];
-    if (hiddenIds.length > 0) {
+    if (visibleHiddenIds.length > 0) {
       const { data: runRows, error: runErr } = await supabase
         .from("flow_runs")
         .select("id, contact_id")
         .eq("flow_id", id)
-        .in("id", hiddenIds);
+        .in("id", visibleHiddenIds);
       if (runErr) throw runErr;
       const byRunId = new Map(
         ((runRows ?? []) as Array<{ id: string; contact_id: string | null }>).map(
@@ -149,7 +189,7 @@ export async function GET(
         }
       }
       // Preserve the hidden order the prefs query returned.
-      for (const runId of hiddenIds) {
+      for (const runId of visibleHiddenIds) {
         if (!byRunId.has(runId)) continue;
         const contactId = byRunId.get(runId);
         const contact = contactId ? byContactId.get(contactId) : undefined;
@@ -172,8 +212,9 @@ export async function PUT(
 ) {
   try {
     const { id } = await params;
-    const { supabase, accountId } = await requireRole("agent");
-    if (!(await loadFlowAccount(supabase, accountId, id))) {
+    const { supabase, accountId, userId, role } = await requireRole("agent");
+    const flow = await loadFlowAccount(supabase, accountId, id);
+    if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
     const body = (await request.json().catch(() => null)) as Record<
@@ -223,6 +264,22 @@ export async function PUT(
     if (runErr) throw runErr;
     if (!run) {
       return NextResponse.json({ error: "Row not found." }, { status: 404 });
+    }
+    // Agents on Meta tables may only pin/hide their own assigned
+    // leads (same not-found shape as a foreign run).
+    if (
+      role === "agent" &&
+      (flow as { kind?: string | null }).kind === "meta_lead_ads"
+    ) {
+      const owned = await isRunOwnedByUser(supabase, {
+        accountId,
+        flowId: id,
+        runId: rawRunId,
+        userId,
+      });
+      if (!owned) {
+        return NextResponse.json({ error: "Row not found." }, { status: 404 });
+      }
     }
 
     const { data, error } = await supabase.rpc("set_workspace_row_pref", {

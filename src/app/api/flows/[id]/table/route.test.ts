@@ -217,6 +217,15 @@ vi.mock("@/lib/supabase/server", () => {
         return {
           select: () => ({
             in: async () => ({ data: h.profiles, error: null }),
+            eq: (_col: string, val: unknown) => ({
+              maybeSingle: async () => ({
+                data:
+                  (h.profiles as Array<Record<string, unknown>>).find(
+                    (p) => p.user_id === val,
+                  ) ?? null,
+                error: null,
+              }),
+            }),
           }),
         };
       }
@@ -1533,5 +1542,105 @@ describe("GET table – Meta Source column position", () => {
     expect(keys.slice(0, 3)).toEqual(["submission_time", "name", "phone"]);
     expect(keys[keys.length - 2]).toBe("latest_recording");
     expect(keys[keys.length - 1]).toBe("status");
+  });
+});
+
+describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
+  const metaFlow = () => {
+    h.flow = {
+      id: "flow-meta",
+      account_id: "acct-1",
+      name: "Meta Lead Ads · Hiring",
+      kind: "meta_lead_ads",
+      completion_node_id: null,
+      entry_node_id: "meta_source_node",
+      meta_form_id: "form-1",
+    };
+    h.user = { id: "u-agent" };
+  };
+  const asAgent = () => {
+    h.profiles = [{ user_id: "u-agent", account_role: "agent" }];
+  };
+  const asRole = (role: string) => {
+    h.profiles = [{ user_id: "u-1", account_role: role }];
+  };
+
+  it("forces p_assignee to the agent's own id, ignoring the query param", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      metaFlow();
+      asAgent();
+      const res = await GET(
+        new Request(
+          "https://app.test/api/flows/flow-meta/table?assignee=u-other",
+        ),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("defaults an agent with no assignee param to their own id", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      metaFlow();
+      asAgent();
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("leaves owners, admins, and viewers untouched on Meta tables", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      for (const role of ["owner", "admin", "viewer"]) {
+        metaFlow();
+        h.user = { id: "u-1" };
+        asRole(role);
+        const res = await GET(
+          new Request(
+            "https://app.test/api/flows/flow-meta/table?assignee=u-other",
+          ),
+          { params: Promise.resolve({ id: "flow-meta" }) },
+        );
+        expect(res.status).toBe(200);
+        expect(h.rpcArgs).toMatchObject({ p_assignee: "u-other" });
+      }
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("does not touch Flow Tables for agents", async () => {
+    const previousUser = h.user;
+    try {
+      h.user = { id: "u-agent" };
+      asAgent();
+      const res = await GET(
+        new Request(
+          "https://app.test/api/flows/flow-1/table?assignee=u-other",
+        ),
+        { params: Promise.resolve({ id: "flow-1" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-other" });
+    } finally {
+      h.user = previousUser;
+    }
   });
 });

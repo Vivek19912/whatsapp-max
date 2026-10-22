@@ -5,14 +5,16 @@ import { manualAssign } from "@/lib/lead-assignment/service";
 
 /**
  * POST /api/flows/[id]/leads/[runId]/assign — manually assign (or
- * clear) one Meta lead. Agent+.
+ * clear) one Meta lead. Admin+.
  *
- * Meta-gated: the service rejects non-Meta flows outright, so Flow
- * Tables can never reach this path. Writes the same Assigned To
- * workspace cell the table displays, and records an audit event
- * (actor, previous, new). Never touches algorithm state, and later
- * Meta updates won't overwrite the manual owner (auto-assign skips
- * owned rows).
+ * Reassignment is an admin-only operation: agents work their own
+ * assigned leads but cannot move leads between members (that would
+ * bypass per-agent ownership). Meta-gated: the service rejects
+ * non-Meta flows outright, so Flow Tables can never reach this
+ * path. Writes the same Assigned To workspace cell the table
+ * displays, and records an audit event (actor, previous, new).
+ * Never touches algorithm state, and later Meta updates won't
+ * overwrite the manual owner (auto-assign skips owned rows).
  *
  * Body: { user_id: string | "Unassigned" | null }.
  */
@@ -22,7 +24,7 @@ export async function POST(
 ) {
   try {
     const { id, runId } = await params;
-    const { supabase, accountId, userId } = await requireRole("agent");
+    const { supabase, accountId, userId } = await requireRole("admin");
     const body = (await request.json().catch(() => null)) as Record<
       string,
       unknown

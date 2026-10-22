@@ -36,6 +36,8 @@ const h = vi.hoisted(() => ({
     is_pinned: boolean;
     is_hidden: boolean;
   }>,
+  fields: [] as Array<Record<string, unknown>>,
+  values: [] as Array<Record<string, unknown>>,
   rpcError: null as { code: string; message: string } | null,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
   failTable: null as string | null,
@@ -56,6 +58,10 @@ function rowsFor(table: string): Array<Record<string, unknown>> {
     return h.contacts as unknown as Array<Record<string, unknown>>;
   if (table === "workspace_row_prefs")
     return h.prefs as unknown as Array<Record<string, unknown>>;
+  if (table === "workspace_fields")
+    return h.fields as Array<Record<string, unknown>>;
+  if (table === "workspace_values")
+    return h.values as Array<Record<string, unknown>>;
   throw new Error(`unexpected table ${table}`);
 }
 
@@ -170,7 +176,9 @@ function fakeSupabase() {
     if (
       table === "flow_runs" ||
       table === "contacts" ||
-      table === "workspace_row_prefs"
+      table === "workspace_row_prefs" ||
+      table === "workspace_fields" ||
+      table === "workspace_values"
     ) {
       return { select: () => selectQuery(table) };
     }
@@ -195,6 +203,7 @@ vi.mock("@/lib/auth/account", () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
     userId: h.userId,
+    role: h.role,
   }),
   requireRole: async (min: string) => {
     if (!h.role) throw statusError(401, "Unauthorized");
@@ -207,7 +216,7 @@ vi.mock("@/lib/auth/account", () => ({
     if ((rank[h.role] ?? 0) < (rank[min] ?? 99)) {
       throw statusError(403, "Forbidden");
     }
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId, role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =
@@ -263,6 +272,8 @@ beforeEach(() => {
   ];
   h.contacts = [{ id: "c-1", name: "Asha", phone: "+91111" }];
   h.prefs = [];
+  h.fields = [];
+  h.values = [];
   h.rpcError = null;
   h.rpcCalls = [];
   h.failTable = null;
@@ -433,5 +444,52 @@ describe("DELETE row prefs — restore all hidden (5/6/7)", () => {
     h.role = "agent";
     h.flow = null;
     expect((await del("flow-1", { all_hidden: true })).status).toBe(404);
+  });
+});
+
+describe("agent ownership on Meta Lead Ads Tables", () => {
+  function seedMetaOwned() {
+    h.role = "agent";
+    h.userId = USER_1;
+    h.flow = { id: "flow-1", account_id: "acct-1", kind: "meta_lead_ads" };
+    h.fields = [
+      { id: "f-assign", account_id: "acct-1", flow_id: "flow-1", name: "Assigned To" },
+    ];
+    h.values = [
+      { account_id: "acct-1", field_id: "f-assign", flow_run_id: RUN_1, value_text: USER_1 },
+    ];
+    h.prefs = [
+      { user_id: USER_1, account_id: "acct-1", flow_id: "flow-1", flow_run_id: RUN_1, is_pinned: false, is_hidden: true },
+      { user_id: USER_1, account_id: "acct-1", flow_id: "flow-1", flow_run_id: RUN_2, is_pinned: false, is_hidden: true },
+    ];
+  }
+
+  it("GET hides other agents' and unassigned leads from the hidden list", async () => {
+    seedMetaOwned();
+    const json = (await (await get("flow-1")).json()) as {
+      hidden: Array<{ flow_run_id: string }>;
+    };
+    expect(json.hidden.map((r) => r.flow_run_id)).toEqual([RUN_1]);
+  });
+
+  it("PUT rejects pinning another agent's Meta lead", async () => {
+    seedMetaOwned();
+    const owned = await put("flow-1", { flow_run_id: RUN_1, pinned: true });
+    expect(owned.status).toBe(200);
+    const foreign = await put("flow-1", { flow_run_id: RUN_2, hidden: true });
+    expect(foreign.status).toBe(404);
+  });
+
+  it("leaves admins and Flow Tables untouched", async () => {
+    seedMetaOwned();
+    h.role = "admin";
+    h.userId = "u-admin";
+    const adminRes = await put("flow-1", { flow_run_id: RUN_2, pinned: true });
+    expect(adminRes.status).toBe(200);
+    h.role = "agent";
+    h.userId = USER_1;
+    h.flow = { id: "flow-1", account_id: "acct-1" };
+    const flowRes = await put("flow-1", { flow_run_id: RUN_2, pinned: true });
+    expect(flowRes.status).toBe(200);
   });
 });

@@ -35,6 +35,8 @@ export type TravelCrmAssignmentIssue =
 export interface TravelCrmLoadedLead {
   accountId: string;
   flowId: string;
+  /** Flow kind (e.g. 'meta_lead_ads') for caller-side scoping. */
+  flowKind: string | null;
   runId: string;
   createdBy: string | null;
   /** Stable contact identity for scoped writes (two-way dialog sync). */
@@ -126,11 +128,12 @@ export async function loadWorkspaceLead(
 
   const { data: flow, error: flowErr } = await db
     .from("flows")
-    .select("id, account_id, entry_node_id")
+    .select("id, account_id, entry_node_id, kind")
     .eq("id", flowId)
     .maybeSingle();
   if (flowErr || !flow) return null;
   if ((flow as { account_id: string }).account_id !== accountId) return null;
+  const flowKind = (flow as { kind?: string | null }).kind ?? null;
 
   const { data: run, error: runErr } = await db
     .from("flow_runs")
@@ -293,6 +296,7 @@ export async function loadWorkspaceLead(
   return {
     accountId,
     flowId,
+    flowKind,
     runId,
     createdBy: runRow.user_id,
     contactId: runRow.contact_id,

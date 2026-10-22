@@ -12,6 +12,7 @@ import {
   isWorkspaceFollowupFieldName,
   WORKSPACE_FOLLOWUP_SOURCE_KIND,
 } from "@/lib/followups/workspace-link";
+import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
 
 /**
  * POST /api/flows/[id]/followup-reminder — create or update the ONE
@@ -178,6 +179,17 @@ export async function POST(
       return bad(
         "The Next Follow-up Date & Time column is not available on this table.",
       );
+    }
+    // Agents may only manage reminders for their own assigned
+    // leads (same not-found shape as a foreign run).
+    if (role === "agent") {
+      const owned = await isRunOwnedByUser(supabase, {
+        accountId,
+        flowId: id,
+        runId,
+        userId,
+      });
+      if (!owned) return bad("Run not found.", 404);
     }
 
     // The reminder must match the persisted cell value — never a
@@ -385,6 +397,15 @@ export async function DELETE(
     const run = await loadRun(supabase, accountId, id, runId);
     if (!run) {
       return bad("Run not found.", 404);
+    }
+    if (role === "agent") {
+      const owned = await isRunOwnedByUser(supabase, {
+        accountId,
+        flowId: id,
+        runId,
+        userId,
+      });
+      if (!owned) return bad("Run not found.", 404);
     }
 
     const { data, error } = await supabase

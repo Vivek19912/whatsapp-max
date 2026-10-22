@@ -333,7 +333,10 @@ export function cellText(row: FlowTableRow, column: FlowTableColumn): string {
 }
 
 export default function WorkspacePage() {
-  const { accountId, canEditSettings, canSendMessages } = useAuth();
+  const { accountId, accountRole, canEditSettings, canSendMessages } = useAuth();
+  // Agents see Workspace with ONLY their own assigned Meta leads
+  // (the table APIs enforce the same ownership server-side).
+  const isAgent = accountRole === 'agent';
   const [flows, setFlows] = useState<FlowOption[] | null>(null);
   const [flowsError, setFlowsError] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
@@ -421,16 +424,21 @@ export default function WorkspacePage() {
   useEffect(() => {
     if (accountId === null) return;
     const ctrl = new AbortController();
-    fetch('/api/flows', { signal: ctrl.signal, cache: 'no-store' })
+    // Agents list only Meta tables containing their own assigned
+    // leads (server-scoped); everyone else lists every flow.
+    const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';
+    fetch(flowsUrl, { signal: ctrl.signal, cache: 'no-store' })
       .then(async (res) => {
         if (!res.ok) throw new Error(`Couldn't load flows (${res.status})`);
         const json = (await res.json()) as {
           flows?: Array<{ id: string; name?: string | null }>;
+          tables?: Array<{ flow_id: string; name: string | null }>;
         };
-        const list = (json.flows ?? []).map((f) => ({
-          id: f.id,
-          name: f.name ?? null,
-        }));
+        const list = (
+          isAgent
+            ? (json.tables ?? []).map((t) => ({ id: t.flow_id, name: t.name ?? null }))
+            : (json.flows ?? []).map((f) => ({ id: f.id, name: f.name ?? null }))
+        );
         if (ctrl.signal.aborted) return;
         setFlows(list);
         setFlowId(
@@ -448,7 +456,7 @@ export default function WorkspacePage() {
         setFlows([]);
       });
     return () => ctrl.abort();
-  }, [accountId]);
+  }, [accountId, isAgent]);
 
   // Assigned-To roster — same endpoint as Settings → Team Members.
   // Best-effort: a failed fetch leaves [] so Clear + Unassigned
@@ -1506,8 +1514,12 @@ export default function WorkspacePage() {
       ) : flows.length === 0 ? (
         <EmptyState
           icon={Table2}
-          title="No flows yet"
-          hint="Create a flow first — each flow gets its own table here."
+          title={isAgent ? "No leads assigned to you yet" : "No flows yet"}
+          hint={
+            isAgent
+              ? "Leads assigned to you will appear here."
+              : "Create a flow first — each flow gets its own table here."
+          }
         />
       ) : (
         <>
@@ -1971,7 +1983,15 @@ export default function WorkspacePage() {
                                     ? (receivedDefaults[row.runId] ?? null)
                                     : null)
                                 }
-                                canEdit={canSendMessages}
+                                canEdit={
+                                  // Agents work their own Meta leads but
+                                  // can never reassign them (the Assigned
+                                  // To cell stays read-only; reassignment
+                                  // is admin-only). Everything else keeps
+                                  // the existing edit permissions.
+                                  canSendMessages &&
+                                  !(isAgent && isMetaTable && isAssigneeField(f))
+                                }
                                 onSaved={handleCustomSaved}
                                 members={teamMembers}
                                 twoLineClamp={isWideTextColumnName(f.name)}

@@ -232,6 +232,31 @@ describe("workspace page — Meta sidebar hides the metadata section", () => {
   });
 });
 
+describe("workspace page — agent-scoped Meta tables", () => {
+  it("loads assigned tables from the agent endpoint, not the full list", () => {
+    const src = page();
+    expect(src).toContain("const { accountId, accountRole, canEditSettings, canSendMessages } = useAuth();");
+    expect(src).toContain("const isAgent = accountRole === 'agent';");
+    expect(src).toContain("const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';");
+    // Owner/admin/viewer behavior is untouched (same fetch + select).
+    expect(src).toContain("fetch(flowsUrl,");
+  });
+
+  it("shows an agent-specific empty state with no assigned leads", () => {
+    const src = page();
+    expect(src).toContain("No leads assigned to you yet");
+    expect(src).toContain("will appear here");
+  });
+
+  it("keeps the Assigned To cell read-only for agents on Meta tables", () => {
+    const src = page();
+    expect(src).toContain("isAgent && isMetaTable && isAssigneeField(f)");
+    expect(src).toContain("canEdit={");
+    // Admins keep the audited manual-assign path.
+    expect(src).toContain("manualAssignMetaLead");
+  });
+});
+
 describe("table route — Meta Source column position", () => {
   it("reorders Source after the last question column for Meta tables only", () => {
     const src = tableRoute();

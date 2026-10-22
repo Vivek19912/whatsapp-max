@@ -6,6 +6,7 @@ import {
   toErrorResponse,
 } from "@/lib/auth/account";
 import { isUniqueViolation } from "@/lib/contacts/dedupe";
+import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
 import {
   loadWorkspaceLead,
   type TravelCrmAssignmentIssue,
@@ -265,7 +266,7 @@ async function readLink(
 
 export async function POST(request: Request) {
   try {
-    const { supabase, accountId, userId } = await requireRole("agent");
+    const { supabase, accountId, userId, role } = await requireRole("agent");
 
     const body = (await request.json().catch(() => null)) as Record<
       string,
@@ -308,6 +309,23 @@ export async function POST(request: Request) {
         { success: false, code: "LEAD_NOT_FOUND", error: "Workspace lead not found." },
         { status: 404 },
       );
+    }
+    // Agents on Meta Lead Ads Tables may only sync their own
+    // assigned leads. Same not-found shape as a foreign run (no
+    // oracle); owners/admins and every Flow Table are untouched.
+    if (role === "agent" && loaded.flowKind === "meta_lead_ads") {
+      const owned = await isRunOwnedByUser(supabase, {
+        accountId,
+        flowId,
+        runId,
+        userId,
+      });
+      if (!owned) {
+        return NextResponse.json(
+          { success: false, code: "LEAD_NOT_FOUND", error: "Workspace lead not found." },
+          { status: 404 },
+        );
+      }
     }
 
     // Existing real link → verify it still exists, then Created

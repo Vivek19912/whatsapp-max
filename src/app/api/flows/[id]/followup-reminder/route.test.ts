@@ -212,8 +212,20 @@ function reset() {
       name: "Next Follow-up Date & Time",
       field_type: "datetime",
     },
+    {
+      id: "f-assign",
+      account_id: "acct-1",
+      flow_id: "flow-meta",
+      name: "Assigned To",
+      field_type: "single_select",
+    },
   ];
-  h.values = { "f-followup:run-1": FUTURE };
+  h.values = {
+    "f-followup:run-1": FUTURE,
+    // run-1 belongs to the calling agent by default; individual
+    // tests re-point or drop this to prove the ownership gate.
+    "f-assign:run-1": "user-1",
+  };
   h.reminders = [];
   h.agentProfile = { whatsapp_number: "+91 98765 43210" };
   h.profileError = false;
@@ -500,6 +512,9 @@ describe("POST followup-reminder", () => {
       scheduled_for: FUTURE,
       message_text: "Mate",
     });
+    // The teammate owns the lead (passes the lead-ownership gate)
+    // but not the reminder, so the creator-ownership 403 stands.
+    h.values["f-assign:run-1"] = "user-2";
     h.userId = "user-2";
     const blocked = await POST(
       post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
@@ -574,5 +589,55 @@ describe("DELETE followup-reminder", () => {
     expect((await DELETE(del({ flow_run_id: "run-1" }), PARAMS)).status).toBe(
       403,
     );
+  });
+});
+
+describe("agent ownership on Meta Lead Ads Tables", () => {
+  it("404s creating a reminder for another agent's lead", async () => {
+    h.values["f-assign:run-1"] = "u-teammate";
+    const res = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
+      PARAMS,
+    );
+    expect(res.status).toBe(404);
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  it("404s creating a reminder for an unassigned lead", async () => {
+    delete h.values["f-assign:run-1"];
+    const res = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
+      PARAMS,
+    );
+    expect(res.status).toBe(404);
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  it("404s cancelling a reminder for another agent's lead", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "x",
+    });
+    h.values["f-assign:run-1"] = "u-teammate";
+    const res = await DELETE(del({ flow_run_id: "run-1" }), PARAMS);
+    expect(res.status).toBe(404);
+    expect(h.reminders[0].status).toBe("scheduled");
+  });
+
+  it("lets admins act on any assigned Meta lead", async () => {
+    h.role = "admin";
+    h.userId = "admin-1";
+    h.values["f-assign:run-1"] = "u-teammate";
+    const res = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
   });
 });

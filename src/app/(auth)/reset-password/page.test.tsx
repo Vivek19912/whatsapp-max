@@ -54,8 +54,11 @@ describe("reset-password page", () => {
 });
 
 describe("recovery loop is closed end to end", () => {
-  it("forgot-password points at the real callback + reset page", () => {
-    expect(forgotSrc).toContain("/auth/callback?next=/reset-password");
+  it("forgot-password uses the centralized callback URL, never a raw origin", () => {
+    expect(forgotSrc).toContain("authCallbackUrl(");
+    expect(forgotSrc).toContain("authCallbackUrl(\"/reset-password\")");
+    expect(forgotSrc).not.toContain("window.location.origin");
+    expect(forgotSrc).not.toContain("/auth/callback?next=");
   });
 
   it("callback lands on the real reset page by default", () => {

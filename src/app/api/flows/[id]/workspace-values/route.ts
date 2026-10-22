@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
+import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
 import {
   validateWorkspaceValue,
   type WorkspaceField,
@@ -64,7 +65,7 @@ export async function PUT(
 ) {
   try {
     const { id } = await params;
-    const { supabase, accountId } = await requireRole("agent");
+    const { supabase, accountId, userId, role } = await requireRole("agent");
     const body = (await request.json().catch(() => null)) as Record<
       string,
       unknown
@@ -99,6 +100,36 @@ export async function PUT(
     } | null;
     if (!typed || typed.account_id !== accountId || typed.flow_id !== id) {
       return NextResponse.json({ error: "Run not found." }, { status: 404 });
+    }
+
+    // Agents on Meta Lead Ads Tables may only write their own
+    // assigned leads — and never the Assigned To cell itself
+    // (reassignment is admin-only). Owners/admins and every Flow
+    // Table keep existing behavior exactly.
+    if (role === "agent") {
+      const { data: kindRow } = await supabase
+        .from("flows")
+        .select("kind")
+        .eq("id", id)
+        .eq("account_id", accountId)
+        .maybeSingle();
+      if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
+        const owned = await isRunOwnedByUser(supabase, {
+          accountId,
+          flowId: id,
+          runId,
+          userId,
+        });
+        if (!owned) {
+          return NextResponse.json({ error: "Run not found." }, { status: 404 });
+        }
+        if (isAssigneeField(field)) {
+          return NextResponse.json(
+            { error: "Only admins can reassign leads." },
+            { status: 403 },
+          );
+        }
+      }
     }
 
     let stored: string | null;

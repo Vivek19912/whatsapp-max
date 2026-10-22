@@ -5,7 +5,36 @@ import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import {
   buildFlowTableColumns,
 } from "@/lib/flows/flow-tables";
+import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
 import type { FlowNodeLite } from "@/lib/flows/sheet-columns";
+
+/**
+ * Agents on Meta Lead Ads Tables may only touch their own assigned
+ * leads. Owners/admins/viewers and every Flow Table keep existing
+ * behavior. Missing ownership reads as not-found (same shape as a
+ * foreign run — never an existence oracle).
+ */
+async function assertAgentMayTouchRun(args: {
+  supabase: SupabaseClient;
+  accountId: string;
+  flow: { id: string; kind?: string | null };
+  runId: string;
+  userId: string;
+  role: string;
+}): Promise<NextResponse | null> {
+  const { supabase, accountId, flow, runId, userId, role } = args;
+  if (role !== "agent" || flow.kind !== "meta_lead_ads") return null;
+  const owned = await isRunOwnedByUser(supabase, {
+    accountId,
+    flowId: flow.id,
+    runId,
+    userId,
+  });
+  if (!owned) {
+    return NextResponse.json({ error: "Run not found." }, { status: 404 });
+  }
+  return null;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +67,7 @@ async function loadFlowAccount(
 ) {
   const { data: flow, error } = await supabase
     .from("flows")
-    .select("id, account_id, entry_node_id")
+    .select("id, account_id, entry_node_id, kind")
     .eq("id", flowId)
     .maybeSingle();
   if (error) throw error;
@@ -46,6 +75,7 @@ async function loadFlowAccount(
     id: string;
     account_id: string;
     entry_node_id?: string | null;
+    kind?: string | null;
   } | null;
   if (!typed || typed.account_id !== accountId) return null;
   return typed;
@@ -160,7 +190,7 @@ async function loadTarget(
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const { supabase, accountId } = await requireRole("agent");
+    const { supabase, accountId, userId, role } = await requireRole("agent");
     const flow = await loadFlowAccount(supabase, accountId, id);
     if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
@@ -178,6 +208,15 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     }
     const loaded = await loadTarget(supabase, accountId, flow, runId, fieldKey);
     if (!loaded.ok) return loaded.response;
+    const forbidden = await assertAgentMayTouchRun({
+      supabase,
+      accountId,
+      flow,
+      runId,
+      userId,
+      role,
+    });
+    if (forbidden) return forbidden;
     const { target } = loaded;
     const key = fieldKey as string;
 
@@ -247,7 +286,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const { supabase, accountId } = await requireRole("agent");
+    const { supabase, accountId, userId, role } = await requireRole("agent");
     const flow = await loadFlowAccount(supabase, accountId, id);
     if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
@@ -265,6 +304,15 @@ export async function DELETE(
     }
     const loaded = await loadTarget(supabase, accountId, flow, runId, fieldKey);
     if (!loaded.ok) return loaded.response;
+    const forbidden = await assertAgentMayTouchRun({
+      supabase,
+      accountId,
+      flow,
+      runId,
+      userId,
+      role,
+    });
+    if (forbidden) return forbidden;
     const key = fieldKey as string;
     const { error } = await supabase
       .from("workspace_flow_overrides")

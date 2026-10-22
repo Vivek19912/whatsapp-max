@@ -236,9 +236,9 @@ function assignBody(body: unknown) {
 
 beforeEach(() => {
   h.authed = true;
-  h.role = "agent";
+  h.role = "admin";
   h.accountId = "acct-1";
-  h.userId = "agent-1";
+  h.userId = "admin-1";
   h.flows = [
     { id: "flow-1", account_id: "acct-1", kind: "meta_lead_ads", meta_form_id: "form-1" },
   ];
@@ -267,8 +267,17 @@ describe("POST assign (manual)", () => {
       kind: "manual",
       assigned_user_id: "u-mohan",
       previous_user_id: null,
-      created_by: "agent-1",
+      created_by: "admin-1",
     });
+  });
+
+  it("rejects agents: reassignment is admin-only", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(403);
+    expect(h.values).toHaveLength(0);
+    expect(h.events).toHaveLength(0);
   });
 
   it("clears on null and rejects strangers, Flow Tables, and viewers", async () => {

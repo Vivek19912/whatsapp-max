@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   accountId: "acct-1",
   authed: true,
+  role: null as string | null,
   contact: { id: "c-1", account_id: "acct-1" } as Record<string, unknown> | null,
   runs: [] as Array<Record<string, unknown>>,
+  flows: [] as Array<Record<string, unknown>>,
   // RPC pages keyed `${flowId}|${view}|${page}` → rows.
   pages: {} as Record<string, Array<Record<string, unknown>>>,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
@@ -16,15 +18,26 @@ const h = vi.hoisted(() => ({
 // flow_runs(select→eq→eq→order→limit→await).
 function builder(table: string) {
   const state = {
-    filters: [] as Array<[string, unknown]>,
+    filters: [] as Array<{ col: string; op: string; val: unknown }>,
     orderCol: "",
     orderAsc: true,
     limitN: Number.POSITIVE_INFINITY,
   };
+  const rowsFor = () => (table === "flows" ? h.flows : h.runs);
+  const applyFilters = (rows: Array<Record<string, unknown>>) =>
+    rows.filter((r) =>
+      state.filters.every((f) =>
+        f.op === "eq" ? r[f.col] === f.val : (f.val as unknown[]).includes(r[f.col]),
+      ),
+    );
   const api: Record<string, unknown> = {
     select: () => api,
     eq: (col: string, val: unknown) => {
-      state.filters.push([col, val]);
+      state.filters.push({ col, op: "eq", val });
+      return api;
+    },
+    in: (col: string, vals: unknown[]) => {
+      state.filters.push({ col, op: "in", val: vals });
       return api;
     },
     order: (col: string, opts?: { ascending?: boolean }) => {
@@ -38,19 +51,23 @@ function builder(table: string) {
     },
     maybeSingle: async () => {
       if (table === "contacts") {
-        h.contactFilters.push([...state.filters]);
+        h.contactFilters.push(
+          state.filters.map((f) => [f.col, f.val] as [string, unknown]),
+        );
         const match =
           h.contact &&
-          state.filters.every(([c, v]) => h.contact?.[c] === v);
+          state.filters.every((f) =>
+            f.op === "eq"
+              ? h.contact?.[f.col] === f.val
+              : (f.val as unknown[]).includes(h.contact?.[f.col]),
+          );
         return { data: match ? h.contact : null, error: null };
       }
       return { data: null, error: null };
     },
     then: (resolve: (v: unknown) => unknown) => {
-      let rows = [...h.runs];
-      for (const [c, v] of state.filters) {
-        rows = rows.filter((r) => r[c] === v);
-      }
+      let rows = [...rowsFor()];
+      rows = applyFilters(rows);
       if (state.orderCol) {
         rows = [...rows].sort((a, b) => {
           const av = String(a[state.orderCol] ?? "");
@@ -82,7 +99,7 @@ vi.mock("@/lib/auth/account", () => ({
       const err = Object.assign(new Error("Unauthorized"), { status: 401 });
       throw err;
     }
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: "u-1" };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: "u-1", role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =
@@ -126,8 +143,10 @@ function get(url: string) {
 beforeEach(() => {
   h.accountId = "acct-1";
   h.authed = true;
+  h.role = null;
   h.contact = { id: C1, account_id: "acct-1" };
   h.runs = [];
+  h.flows = [];
   h.pages = {};
   h.rpcCalls = [];
   h.contactFilters = [];
@@ -282,5 +301,75 @@ describe("GET /api/workspace/locate-contact", () => {
     );
     expect(res.status).toBe(401);
     expect(h.rpcCalls).toEqual([]);
+  });
+});
+
+describe("agent scoping on Meta Lead Ads Tables", () => {
+  const META = "flow-meta";
+  const WA = "flow-wa";
+
+  function seedAgent() {
+    h.role = "agent";
+    h.flows = [
+      { id: META, account_id: "acct-1", kind: "meta_lead_ads" },
+      { id: WA, account_id: "acct-1", kind: "whatsapp_flow" },
+    ];
+  }
+
+  it("forces p_assignee to the agent and finds their own Meta lead", async () => {
+    seedAgent();
+    h.runs = [run("r-1", META, "2026-09-12T10:00:00.000Z")];
+    // The server-side assignee filter returns only the agent's row.
+    h.pages = { [`${META}|completed|0`]: [pageRow("r-1")] };
+    const res = await get(
+      `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+    );
+    expect(await res.json()).toMatchObject({
+      found: true,
+      flow_id: META,
+      run_id: "r-1",
+    });
+    expect(h.rpcCalls[0]?.args).toMatchObject({
+      p_flow_id: META,
+      p_assignee: "u-1",
+    });
+  });
+
+  it("does not surface another agent's lead (server returns no row)", async () => {
+    seedAgent();
+    h.runs = [run("r-9", META, "2026-09-12T10:00:00.000Z")];
+    // The forced assignee filter excludes it server-side.
+    h.pages = {};
+    const res = await get(
+      `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+    );
+    expect(await res.json()).toEqual({ found: false });
+    expect(h.rpcCalls[0]?.args).toMatchObject({ p_assignee: "u-1" });
+  });
+
+  it("skips non-Meta flows entirely for agents", async () => {
+    seedAgent();
+    h.runs = [run("r-1", WA, "2026-10-01T10:00:00.000Z")];
+    h.pages = { [`${WA}|completed|0`]: [pageRow("r-1")] };
+    const res = await get(
+      `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+    );
+    expect(await res.json()).toEqual({ found: false });
+    expect(h.rpcCalls.map((c) => c.args.p_flow_id)).not.toContain(WA);
+  });
+
+  it("leaves admins and viewers unfiltered", async () => {
+    for (const role of ["admin", "owner", null]) {
+      h.role = role;
+      h.flows = [{ id: "flow-A", account_id: "acct-1", kind: "meta_lead_ads" }];
+      h.runs = [run("r-1", "flow-A", "2026-09-12T10:00:00.000Z")];
+      h.pages = { "flow-A|completed|0": [pageRow("r-1")] };
+      h.rpcCalls = [];
+      const res = await get(
+        `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+      );
+      expect(await res.json()).toMatchObject({ found: true, flow_id: "flow-A" });
+      expect(h.rpcCalls[0]?.args.p_assignee).toBeNull();
+    }
   });
 });

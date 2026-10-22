@@ -37,7 +37,7 @@ vi.mock("@/lib/auth/account", () => ({
     if (!h.authed) throw statusError(401, "Unauthorized");
     const rank: Record<string, number> = { viewer: 1, agent: 2, admin: 3, owner: 4 };
     if ((rank[h.role] ?? 0) < (rank[min] ?? 99)) throw statusError(403, "Forbidden");
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId, role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =
@@ -1208,5 +1208,56 @@ describe("TEMPORARY: Travel CRM leads always assign the account owner", () => {
     expect(json).toMatchObject({ assignedOwnerEmail: null, assignmentIssue: "assignment-required" });
     expect(h.travelCalls.filter((c) => c.url.endsWith("/leads"))).toHaveLength(0);
     expect(h.links).toHaveLength(0);
+  });
+});
+
+describe("agent ownership on Meta Lead Ads Tables", () => {
+  function seedMetaOwned() {
+    h.role = "agent";
+    h.userId = "u-agent";
+    h.flows = [{ id: "flow-1", account_id: "acct-1", kind: "meta_lead_ads" }];
+    h.workspace_fields = [
+      { id: "f-asg", account_id: "acct-1", flow_id: "flow-1", name: "Assigned To", field_type: "select" },
+    ];
+    // run-1 stays assigned to the caller via the seeded value row.
+    h.workspace_values = [
+      { account_id: "acct-1", flow_run_id: "run-1", field_id: "f-asg", value_text: "u-agent" },
+    ];
+  }
+
+  it("lets an agent sync their own Meta lead", async () => {
+    seedMetaOwned();
+    const res = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.success).toBe(true);
+  });
+
+  it("404s an agent syncing another agent's Meta lead", async () => {
+    seedMetaOwned();
+    h.workspace_values = [
+      { account_id: "acct-1", flow_run_id: "run-1", field_id: "f-asg", value_text: "u-teammate" },
+    ];
+    const res = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }));
+    expect(res.status).toBe(404);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.code).toBe("LEAD_NOT_FOUND");
+    expect(h.travelCalls.filter((c) => c.url.endsWith("/leads"))).toHaveLength(0);
+  });
+
+  it("leaves admins and Flow Tables untouched", async () => {
+    seedMetaOwned();
+    h.role = "admin";
+    h.userId = "u-admin";
+    h.workspace_values = [
+      { flow_run_id: "run-1", field_id: "f-asg", value_text: "u-teammate" },
+    ];
+    const adminRes = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }));
+    expect(adminRes.status).toBe(200);
+    h.role = "agent";
+    h.userId = "u-agent";
+    h.flows = [{ id: "flow-1", account_id: "acct-1", kind: "whatsapp_flow" }];
+    const flowRes = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }));
+    expect(flowRes.status).toBe(200);
   });
 });

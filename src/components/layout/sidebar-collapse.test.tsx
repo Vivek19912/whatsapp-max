@@ -27,6 +27,8 @@ const shellSrc = readFileSync(
 const h = vi.hoisted(() => ({
   pathname: "/inbox",
   tab: null as string | null,
+  accountRole: "owner" as string,
+  canEditSettings: true,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -43,8 +45,8 @@ vi.mock("@/hooks/use-auth", () => ({
       default_currency: "INR",
       travel_crm_url: null,
     },
-    accountRole: "owner",
-    canEditSettings: true,
+    accountRole: h.accountRole,
+    canEditSettings: h.canEditSettings,
   }),
 }));
 
@@ -241,6 +243,29 @@ describe("12/13/14. workspace, inbox, mobile intact", () => {
   it("logo uses /logo.png in both states", () => {
     for (const collapsed of [false, true]) {
       expect(render(collapsed)).toContain("logo.png");
+    }
+  });
+});
+
+describe("agent Workspace access (no Flow Tables, no admin areas)", () => {
+  it("agents see Workspace but nothing owner/admin-only", () => {
+    h.accountRole = "agent";
+    h.canEditSettings = false;
+    try {
+      const html = render(false);
+      expect(html).toContain('href="/workspace"');
+      for (const href of [
+        'href="/flows"',
+        'href="/agents"',
+        'href="/data-export"',
+        'href="/chat-assignment"',
+        'href="/lead-assignment"',
+      ]) {
+        expect(html).not.toContain(href);
+      }
+    } finally {
+      h.accountRole = "owner";
+      h.canEditSettings = true;
     }
   });
 });

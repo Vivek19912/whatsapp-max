@@ -129,7 +129,12 @@ describe("10. page wiring (remembered flow drives the first table fetch)", () =>
     // setFlowId is set from the resolved id in the same flush as
     // the list — the table requestKey derives from flowId, so the
     // remembered flow's data is the first fetch (no wrong-flow flash).
-    const fetchIdx = pageSrc.indexOf("fetch('/api/flows'");
+    // Agents fetch the assigned-tables endpoint; everyone else the
+    // full list — both resolve through the same flush.
+    expect(pageSrc).toContain(
+      "const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';",
+    );
+    const fetchIdx = pageSrc.indexOf("fetch(flowsUrl,");
     const resolveIdx = pageSrc.indexOf("resolveInitialFlowId(");
     expect(fetchIdx).toBeGreaterThan(-1);
     expect(resolveIdx).toBeGreaterThan(fetchIdx);

@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { createClient } from "@/lib/supabase/client";
+import { authCallbackUrl } from "@/lib/auth/recovery";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,8 +29,12 @@ export default function ForgotPasswordPage() {
     setError(null);
     setLoading(true);
 
+    // Centralized, environment-aware destination: production
+    // always uses the configured NEXT_PUBLIC_SITE_URL (never the
+    // browser origin, which may be localhost); local development
+    // uses the live dev-server origin. Never hand-build this URL.
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
+      redirectTo: authCallbackUrl("/reset-password"),
     });
 
     if (error) {

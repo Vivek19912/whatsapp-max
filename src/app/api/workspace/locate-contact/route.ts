@@ -52,7 +52,7 @@ export async function GET(request: Request) {
   } catch (err) {
     return toErrorResponse(err)
   }
-  const { supabase, accountId } = ctx
+  const { supabase, accountId, userId, role } = ctx
 
   const params = new URL(request.url).searchParams
   const contactId = params.get('contact_id')?.trim() ?? ''
@@ -113,7 +113,36 @@ export async function GET(request: Request) {
     )
   }
 
+  // Agents work only their own assigned Meta leads: non-Meta
+  // flows are skipped for them, and the RPC itself is forced to
+  // their assignment so a located row is owned by construction.
+  // Owners/admins/viewers scan exactly as before.
+  const isAgent = role === "agent";
+  let metaFlowIds: Set<string> | null = null
+  if (isAgent) {
+    const { data: kindRows, error: kindErr } = await supabase
+      .from("flows")
+      .select("id, kind")
+      .eq("account_id", accountId)
+      .in("id", flowIds)
+    if (kindErr) {
+      return NextResponse.json({ error: kindErr.message }, { status: 500 })
+    }
+    metaFlowIds = new Set(
+      ((kindRows ?? []) as Array<{ id: string; kind: string | null }>)
+        .filter((f) => f.kind === "meta_lead_ads")
+        .map((f) => f.id),
+    )
+  }
+
   for (const flowId of flowIds) {
+    const forceAssignee =
+      isAgent && metaFlowIds !== null
+        ? metaFlowIds.has(flowId)
+          ? userId
+          : null
+        : null
+    if (isAgent && metaFlowIds !== null && !metaFlowIds.has(flowId)) continue
     for (const view of VIEWS) {
       for (let page = 0; page < MAX_LOCATE_PAGES; page++) {
         let rows: RpcRow[]
@@ -128,7 +157,7 @@ export async function GET(request: Request) {
               p_page_size: pageSize,
               p_started_from: null,
               p_started_to: null,
-              p_assignee: null,
+              p_assignee: forceAssignee,
             },
           )
           if (error) throw error

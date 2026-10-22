@@ -9,7 +9,10 @@ import { describe, expect, it } from "vitest";
 import {
   NEW_PASSWORD_MIN_LENGTH,
   RECOVERY_ERROR_COPY,
+  authCallbackUrl,
+  getAppBaseUrl,
   isRecoveryErrorSlug,
+  normalizeConfiguredSiteUrl,
   recoveryErrorSlugFromExchangeError,
   recoveryErrorSlugFromParams,
   resolveSafeNextPath,
@@ -98,6 +101,118 @@ describe("validateNewPassword", () => {
       `Password must be at least ${NEW_PASSWORD_MIN_LENGTH} characters`,
     );
     expect(NEW_PASSWORD_MIN_LENGTH).toBe(6);
+  });
+});
+
+describe("normalizeConfiguredSiteUrl", () => {
+  it("accepts a canonical https URL (trailing slash trimmed)", () => {
+    expect(normalizeConfiguredSiteUrl("https://whatsappmax.in")).toBe(
+      "https://whatsappmax.in",
+    );
+    expect(normalizeConfiguredSiteUrl("  https://whatsappmax.in/  ")).toBe(
+      "https://whatsappmax.in",
+    );
+  });
+
+  it("rejects localhost, loopback, non-https, and malformed values", () => {
+    expect(normalizeConfiguredSiteUrl("https://localhost:3000")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("https://127.0.0.1:3000")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("https://[::1]:3000")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("http://whatsappmax.in")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("https://user:pass@whatsappmax.in")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("not a url")).toBeNull();
+    expect(normalizeConfiguredSiteUrl("")).toBeNull();
+    expect(normalizeConfiguredSiteUrl(null)).toBeNull();
+    expect(normalizeConfiguredSiteUrl(undefined)).toBeNull();
+  });
+});
+
+describe("getAppBaseUrl", () => {
+  const PROD = "https://whatsappmax.in";
+
+  it("production always uses the configured URL, never the browser origin", () => {
+    expect(
+      getAppBaseUrl({
+        configuredSiteUrl: PROD,
+        browserOrigin: "https://localhost:3000",
+        nodeEnv: "production",
+      }),
+    ).toBe(PROD);
+  });
+
+  it("production fails safe on missing or localhost config", () => {
+    expect(() =>
+      getAppBaseUrl({ configuredSiteUrl: null, nodeEnv: "production" }),
+    ).toThrow(/not configured/);
+    expect(() =>
+      getAppBaseUrl({
+        configuredSiteUrl: "https://localhost:3000",
+        nodeEnv: "production",
+      }),
+    ).toThrow(/not configured/);
+  });
+
+  it("local development prefers the live browser origin (http allowed)", () => {
+    expect(
+      getAppBaseUrl({
+        configuredSiteUrl: PROD,
+        browserOrigin: "http://localhost:3000",
+        nodeEnv: "development",
+      }),
+    ).toBe("http://localhost:3000");
+    expect(
+      getAppBaseUrl({
+        configuredSiteUrl: PROD,
+        browserOrigin: "http://127.0.0.1:3001",
+        nodeEnv: "development",
+      }),
+    ).toBe("http://127.0.0.1:3001");
+  });
+
+  it("falls back to plain http localhost only outside production", () => {
+    expect(
+      getAppBaseUrl({ configuredSiteUrl: null, browserOrigin: null, nodeEnv: "test" }),
+    ).toBe("http://localhost:3000");
+  });
+});
+
+describe("authCallbackUrl", () => {
+  it("generates the exact production recovery URL", () => {
+    expect(
+      authCallbackUrl("/reset-password", {
+        configuredSiteUrl: "https://whatsappmax.in",
+        nodeEnv: "production",
+      }),
+    ).toBe("https://whatsappmax.in/auth/callback?next=%2Freset-password");
+  });
+
+  it("generates an http localhost URL in local development", () => {
+    expect(
+      authCallbackUrl("/reset-password", {
+        browserOrigin: "http://localhost:3000",
+        nodeEnv: "development",
+      }),
+    ).toBe("http://localhost:3000/auth/callback?next=%2Freset-password");
+  });
+
+  it("encodes the destination exactly once with no nesting", () => {
+    const url = authCallbackUrl("/reset-password", {
+      configuredSiteUrl: "https://whatsappmax.in",
+      nodeEnv: "production",
+    });
+    expect(url).not.toContain("%25");
+    expect(url.split("?")).toHaveLength(2);
+    expect(url).not.toContain("/auth/callback?next=/auth/callback");
+  });
+
+  it("never emits an https localhost URL in production", () => {
+    const url = authCallbackUrl("/reset-password", {
+      configuredSiteUrl: "https://whatsappmax.in",
+      browserOrigin: "https://localhost:3000",
+      nodeEnv: "production",
+    });
+    expect(url.startsWith("https://localhost")).toBe(false);
+    expect(url).toContain("https://whatsappmax.in/auth/callback");
   });
 });
 

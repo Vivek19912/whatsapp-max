@@ -269,7 +269,7 @@ export async function GET(
   if (!guard.ok) {
     return NextResponse.json(guard.body, { status: guard.status })
   }
-  const { supabase } = guard
+  const { supabase, userId: callerUserId } = guard
 
   const { data: flow, error: flowErr } = await supabase
     .from('flows')
@@ -281,6 +281,26 @@ export async function GET(
   }
   if (!flow) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  }
+  const flowKind = (flow as { kind?: string | null }).kind ?? null
+
+  // Agents on Meta Lead Ads Tables see only their own assigned
+  // leads. The assignee filter is forced to the caller's user id
+  // here, so search, filters, pagination, counts, and every
+  // enrichment below compose over the owned set and the client
+  // cannot override it. Owners, admins, viewers, and every Flow
+  // Table keep existing behavior exactly.
+  if (flowKind === 'meta_lead_ads') {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('account_role')
+      .eq('user_id', callerUserId)
+      .maybeSingle()
+    if (
+      (profile as { account_role?: string } | null)?.account_role === 'agent'
+    ) {
+      assignee = { type: 'member', userId: callerUserId }
+    }
   }
 
   const { data: nodes, error: nodesErr } = await supabase
@@ -344,7 +364,7 @@ export async function GET(
   // system Name/Phone columns as a read-only fallback — contact data
   // wins whenever it exists, and nothing is invented for absent
   // fields. Other flow kinds are untouched.
-  const isMetaLeadFlow = (flow as { kind?: string | null }).kind === 'meta_lead_ads'
+  const isMetaLeadFlow = flowKind === 'meta_lead_ads'
 
   // Meta-only column order: the Source answer column moves to the
   // end of the dynamic Instant Form question columns (just before

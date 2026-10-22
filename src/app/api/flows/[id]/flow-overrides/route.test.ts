@@ -11,6 +11,8 @@ const h = vi.hoisted(() => ({
   flow_runs: [] as Row[],
   flow_nodes: [] as Row[],
   overrides: [] as Row[],
+  workspace_fields: [] as Row[],
+  workspace_values: [] as Row[],
 }));
 
 function statusError(status: number, message: string) {
@@ -24,7 +26,7 @@ vi.mock("@/lib/auth/account", () => ({
     if (!h.authed) throw statusError(401, "Unauthorized");
     const rank: Record<string, number> = { viewer: 1, agent: 2, admin: 3, owner: 4 };
     if ((rank[h.role] ?? 0) < (rank[min] ?? 99)) throw statusError(403, "Forbidden");
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId, role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =
@@ -44,6 +46,8 @@ function tables(): Record<string, Row[]> {
     flow_runs: h.flow_runs,
     flow_nodes: h.flow_nodes,
     workspace_flow_overrides: h.overrides,
+    workspace_fields: h.workspace_fields,
+    workspace_values: h.workspace_values,
   };
 }
 
@@ -149,6 +153,8 @@ function seed() {
     },
   ];
   h.overrides = [];
+  h.workspace_fields = [];
+  h.workspace_values = [];
 }
 
 beforeEach(seed);
@@ -288,5 +294,90 @@ describe("select-question option validation", () => {
     expect((await put({ flow_run_id: "run-1", field_key: "q0", value: "B" })).status).toBe(200);
     expect((await put({ flow_run_id: "run-1", field_key: "q0", value: "Z" })).status).toBe(400);
     expect(h.overrides.map((r) => r.value_text)).toEqual(["B"]);
+  });
+});
+
+describe("agent ownership on Meta Lead Ads Tables", () => {
+  function seedMetaOwned() {
+    h.role = "agent";
+    h.userId = "u-agent";
+    h.flows = [
+      { id: "flow-1", account_id: "acct-1", kind: "meta_lead_ads", entry_node_id: "start" },
+    ];
+    h.flow_runs = [
+      {
+        id: "run-own",
+        account_id: "acct-1",
+        flow_id: "flow-1",
+        vars: { Hotel: "5 Star Hotel" },
+      },
+      {
+        id: "run-other",
+        account_id: "acct-1",
+        flow_id: "flow-1",
+        vars: { Hotel: "3 Star Hotel" },
+      },
+    ];
+    h.workspace_fields = [
+      { id: "f-assign", account_id: "acct-1", flow_id: "flow-1", name: "Assigned To" },
+    ];
+    h.workspace_values = [
+      {
+        account_id: "acct-1",
+        field_id: "f-assign",
+        flow_run_id: "run-own",
+        value_text: "u-agent",
+      },
+      {
+        account_id: "acct-1",
+        field_id: "f-assign",
+        flow_run_id: "run-other",
+        value_text: "u-teammate",
+      },
+    ];
+  }
+
+  it("lets an agent edit their own Meta lead", async () => {
+    seedMetaOwned();
+    const res = await put({ flow_run_id: "run-own", field_key: "Hotel", value: "4 Star Hotel" });
+    expect(res.status).toBe(200);
+    expect(h.overrides).toHaveLength(1);
+  });
+
+  it("404s an agent editing another agent's Meta lead (PUT and DELETE)", async () => {
+    seedMetaOwned();
+    const res = await put({ flow_run_id: "run-other", field_key: "Hotel", value: "x" });
+    expect(res.status).toBe(404);
+    const del = await DELETE(
+      req("DELETE", { flow_run_id: "run-other", field_key: "Hotel" }),
+      params,
+    );
+    expect(del.status).toBe(404);
+    expect(h.overrides).toHaveLength(0);
+  });
+
+  it("404s an agent on unassigned Meta leads", async () => {
+    seedMetaOwned();
+    h.workspace_values = h.workspace_values.filter(
+      (r) => r.flow_run_id !== "run-other",
+    );
+    const res = await put({ flow_run_id: "run-other", field_key: "Hotel", value: "x" });
+    expect(res.status).toBe(404);
+    expect(h.overrides).toHaveLength(0);
+  });
+
+  it("leaves admins and Flow Tables untouched", async () => {
+    seedMetaOwned();
+    h.role = "admin";
+    h.userId = "u-admin";
+    const adminRes = await put({ flow_run_id: "run-other", field_key: "Hotel", value: "x" });
+    expect(adminRes.status).toBe(200);
+    // Non-Meta flows keep existing behavior for agents.
+    h.role = "agent";
+    h.userId = "u-agent";
+    h.flows = [{ id: "flow-1", account_id: "acct-1", entry_node_id: "start" }];
+    const flowRes = await put({ flow_run_id: "run-own", field_key: "City", value: "Goa" });
+    expect(flowRes.status).toBe(200);
+    expect(h.overrides).toHaveLength(2);
   });
 });
