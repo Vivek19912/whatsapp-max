@@ -33,7 +33,36 @@ export interface ValidRuleInput {
 
 export interface MembersStepInput {
   mode: "round_robin" | "swrr";
-  members: Array<{ user_id: string; weight: number }>;
+  members: Array<{ user_id: string; weight: number | null }>;
+}
+
+/**
+ * Parse a percentage text field. Empty or non-numeric text yields
+ * null (an unfinished edit — never a valid allocation); anything
+ * else yields the finite number, range/integer checks left to the
+ * validators so bad input is flagged, never silently fixed.
+ */
+export function parseWeightInput(text: unknown): number | null {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Normalize a percentage keystroke for display. When the field
+ * shows exactly "0" and the edit produces leading zeros before
+ * another digit (typing or pasting onto the default), drop the
+ * leading run ("05" → "5", "050" → "50", "00" → "0") so the field
+ * never reads "050". Every other edit passes through untouched,
+ * preserving cursor position and mid-string edits.
+ */
+export function normalizeWeightText(prev: string, next: string): string {
+  if (prev === "0" && /^0+\d/.test(next)) {
+    return next.replace(/^0+(?=\d)/, "");
+  }
+  return next;
 }
 
 /**

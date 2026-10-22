@@ -42,7 +42,12 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { eligibleMemberIds } from "@/lib/lead-assignment/members";
-import { validateMembersStep, validateRuleInput } from "@/lib/lead-assignment/validation";
+import {
+  normalizeWeightText,
+  parseWeightInput,
+  validateMembersStep,
+  validateRuleInput,
+} from "@/lib/lead-assignment/validation";
 
 /**
  * Lead Assignment dashboard (admin only — enforced again
@@ -97,7 +102,8 @@ interface RosterMember {
 
 interface DraftMember {
   user_id: string;
-  weight: number;
+  /** Parsed share; null while the field is empty or non-numeric. */
+  weight: number | null;
 }
 
 interface RuleDraft {
@@ -205,6 +211,7 @@ export function LeadAssignmentPanel() {
 
   function openCreate() {
     setDraft({ ...EMPTY_DRAFT });
+    setWeightText({});
     setStep(1);
     setSaveError(null);
     setActivity([]);
@@ -224,6 +231,7 @@ export function LeadAssignmentPanel() {
       tableSearch: "",
       memberSearch: "",
     });
+    setWeightText({});
     setStep(1);
     setSaveError(null);
     setDrawer({ editingId: rule.id });
@@ -291,7 +299,12 @@ export function LeadAssignmentPanel() {
   }, [draft]);
 
   const swrrTotal = useMemo(
-    () => draft.members.reduce((sum, m) => sum + (Number.isFinite(m.weight) ? m.weight : 0), 0),
+    () =>
+      draft.members.reduce(
+        (sum, m) =>
+          sum + (typeof m.weight === "number" && Number.isFinite(m.weight) ? m.weight : 0),
+        0,
+      ),
     [draft.members],
   );
 
@@ -333,12 +346,22 @@ export function LeadAssignmentPanel() {
   }
 
   function toggleMember(userId: string) {
-    setDraft((prev) => {
-      if (prev.members.some((m) => m.user_id === userId)) {
-        return { ...prev, members: prev.members.filter((m) => m.user_id !== userId) };
-      }
-      return { ...prev, members: [...prev.members, { user_id: userId, weight: 0 }] };
-    });
+    if (draft.members.some((m) => m.user_id === userId)) {
+      setWeightText((text) => {
+        const next = { ...text };
+        delete next[userId];
+        return next;
+      });
+      setDraft((prev) => ({
+        ...prev,
+        members: prev.members.filter((m) => m.user_id !== userId),
+      }));
+      return;
+    }
+    setDraft((prev) => ({
+      ...prev,
+      members: [...prev.members, { user_id: userId, weight: 0 }],
+    }));
   }
 
   function moveMember(userId: string, direction: -1 | 1) {
@@ -353,13 +376,38 @@ export function LeadAssignmentPanel() {
     });
   }
 
-  function setWeight(userId: string, weight: number) {
+  // String-based editing state for the percentage inputs: the
+  // raw text is kept verbatim per keystroke (so Backspace, Delete,
+  // select-all, and paste behave natively), while the parsed
+  // number|null drives the live total, validation, and saving.
+  // Empty or non-numeric text parses to null — an unfinished edit
+  // that can never validate — instead of being coerced to 0.
+  const [weightText, setWeightText] = useState<Record<string, string>>({});
+
+  function setWeight(userId: string, weight: number | null) {
     setDraft((prev) => ({
       ...prev,
       members: prev.members.map((m) =>
         m.user_id === userId ? { ...m, weight } : m,
       ),
     }));
+  }
+
+  function handleWeightChange(userId: string, raw: string) {
+    const normalized = normalizeWeightText(weightText[userId] ?? "", raw);
+    setWeightText((prev) => ({ ...prev, [userId]: normalized }));
+    setWeight(userId, parseWeightInput(normalized));
+  }
+
+  function handleWeightBlur(userId: string) {
+    // Canonicalize finished edits ("050" → "50"); leave empty or
+    // invalid text alone so the error — not a silent 0 — shows.
+    const parsed = parseWeightInput(weightText[userId] ?? "");
+    if (parsed !== null) {
+      const canonical = String(parsed);
+      setWeightText((prev) => ({ ...prev, [userId]: canonical }));
+      setWeight(userId, parsed);
+    }
   }
 
   async function handleSave() {
@@ -860,18 +908,17 @@ export function LeadAssignmentPanel() {
                       <div key={m.user_id} className="flex items-center gap-2">
                         <span className="flex-1 text-sm">{nameByUserId.get(m.user_id) ?? m.user_id}</span>
                         <Input
-                          type="number"
-                          min={0}
-                          max={100}
-                          step={1}
-                          value={m.weight}
-                          // Stored exactly as entered (never floored
-                          // or clamped here) so validation — not
-                          // silent adjustment — rejects bad input.
-                          onChange={(e) => {
-                            const n = Number(e.target.value);
-                            setWeight(m.user_id, Number.isFinite(n) ? n : 0);
-                          }}
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          value={weightText[m.user_id] ?? String(m.weight ?? "")}
+                          // String-based editing: the raw text is kept
+                          // verbatim per keystroke (Backspace, Delete,
+                          // select-all, and paste all behave natively)
+                          // and parsed separately for the live total,
+                          // validation, and saving.
+                          onChange={(e) => handleWeightChange(m.user_id, e.target.value)}
+                          onBlur={() => handleWeightBlur(m.user_id)}
                           className="w-24"
                           aria-label={`Percentage for ${nameByUserId.get(m.user_id) ?? m.user_id}`}
                         />
@@ -917,7 +964,7 @@ export function LeadAssignmentPanel() {
                           .map(
                             (m) =>
                               `${nameByUserId.get(m.user_id) ?? m.user_id}${
-                                draft.mode === "swrr" ? ` (${m.weight}%)` : ""
+                                draft.mode === "swrr" ? ` (${m.weight ?? "—"}%)` : ""
                               }`,
                           )
                           .join(draft.mode === "round_robin" ? " → " : ", ")}

@@ -145,6 +145,40 @@ describe("Step 3 percentage gate (Continue blocked until exactly 100%)", () => {
   });
 });
 
+describe("Step 3 percentage inputs edit naturally (string state)", () => {
+  const panel = () =>
+    src("components/lead-assignment/lead-assignment-panel.tsx");
+
+  it("uses a text input with string editing state, not a bound number", () => {
+    const p = panel();
+    expect(p).toContain('type="text"');
+    expect(p).toContain('inputMode="numeric"');
+    expect(p).toContain("handleWeightChange");
+    expect(p).toContain("handleWeightBlur");
+    expect(p).toContain("weightText[m.user_id]");
+    // The old controlled-number binding made Backspace un-clearable
+    // and prefixed typed digits with the stuck zero.
+    expect(p).not.toContain("value={m.weight}");
+    expect(p).not.toContain("Math.floor(Number(e.target.value)");
+  });
+
+  it("normalizes pasted/typed leading zeros and parses separately", () => {
+    const p = panel();
+    expect(p).toContain("normalizeWeightText");
+    expect(p).toContain("parseWeightInput");
+  });
+
+  it("empty or invalid text can never validate or proceed", () => {
+    const p = panel();
+    expect(p).toContain("step3Error");
+    expect(p).toContain(
+      "disabled={step === 3 && draft.mode === \"swrr\" && step3Error !== null}",
+    );
+    const v = src("lib/lead-assignment/validation.ts");
+    expect(v).toContain("weight: number | null");
+  });
+});
+
 describe("Meta-only manual assignment wiring", () => {
   it("routes Meta assignee saves through the audited endpoint", () => {
     const page = src("app/(dashboard)/workspace/page.tsx");

@@ -2,7 +2,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { validateMembersStep, validateRuleInput } from "./validation";
+import {
+  normalizeWeightText,
+  parseWeightInput,
+  validateMembersStep,
+  validateRuleInput,
+} from "./validation";
 
 const MEMBERS = [{ user_id: "u-1" }, { user_id: "u-2" }];
 
@@ -20,6 +25,127 @@ function swrr(overrides: Record<string, unknown> = {}) {
     ...overrides,
   });
 }
+
+describe("normalizeWeightText (natural percentage editing)", () => {
+  it("replaces the default 0 instead of prefixing it", () => {
+    expect(normalizeWeightText("0", "05")).toBe("5");
+    expect(normalizeWeightText("0", "00")).toBe("0");
+    expect(normalizeWeightText("0", "050")).toBe("50");
+    expect(normalizeWeightText("0", "010")).toBe("10");
+    expect(normalizeWeightText("0", "0100")).toBe("100");
+  });
+
+  it("leaves every other edit untouched (cursor-safe)", () => {
+    expect(normalizeWeightText("", "")).toBe("");
+    expect(normalizeWeightText("0", "")).toBe("");
+    expect(normalizeWeightText("", "5")).toBe("5");
+    expect(normalizeWeightText("1", "12")).toBe("12");
+    expect(normalizeWeightText("10", "100")).toBe("100");
+    expect(normalizeWeightText("10", "05")).toBe("05");
+    expect(normalizeWeightText("5", "")).toBe("");
+  });
+});
+
+describe("parseWeightInput (empty is unfinished, never 0)", () => {
+  it("parses display text without inventing values", () => {
+    expect(parseWeightInput("0")).toBe(0);
+    expect(parseWeightInput("50")).toBe(50);
+    expect(parseWeightInput("050")).toBe(50);
+    expect(parseWeightInput(" 60 ")).toBe(60);
+    expect(parseWeightInput("100")).toBe(100);
+    expect(parseWeightInput("12.5")).toBe(12.5);
+  });
+
+  it("returns null for empty or non-numeric text", () => {
+    expect(parseWeightInput("")).toBeNull();
+    expect(parseWeightInput("   ")).toBeNull();
+    expect(parseWeightInput("abc")).toBeNull();
+    expect(parseWeightInput(null)).toBeNull();
+    expect(parseWeightInput(undefined)).toBeNull();
+  });
+});
+
+describe("validateMembersStep rejects unfinished edits", () => {
+  it("null/empty shares cannot validate, even at a 100 total", () => {
+    expect(
+      validateMembersStep({
+        mode: "swrr",
+        members: [
+          { user_id: "u-1", weight: 100 },
+          { user_id: "u-2", weight: null },
+        ],
+      }),
+    ).toBe("Percentages must be whole numbers from 0 to 100.");
+  });
+});
+
+describe("percentage editing flow (mirrors the panel handlers)", () => {
+  // Simulates the panel's string-based editing state keystroke by
+  // keystroke: display = text ?? String(weight), edits go through
+  // normalizeWeightText, validation reads parseWeightInput.
+  function simulate(initialWeight: number | null, keystrokes: Array<{ prev: string; raw: string }>) {
+    let text: string | undefined;
+    let weight: number | null = initialWeight;
+    const displays: string[] = [text ?? String(weight ?? "")];
+    for (const k of keystrokes) {
+      text = normalizeWeightText(k.prev, k.raw);
+      weight = parseWeightInput(text);
+      displays.push(text);
+    }
+    return { displays, weight };
+  }
+
+  it("starts at 0, clears fully, and types 50 naturally", () => {
+    // Initial display for a fresh member.
+    expect(simulate(0, []).displays).toEqual(["0"]);
+    // Select-all + Backspace on "0" → temporarily empty, invalid.
+    const cleared = simulate(0, [{ prev: "0", raw: "" }]);
+    expect(cleared.displays).toEqual(["0", ""]);
+    expect(cleared.weight).toBeNull();
+    expect(
+      validateMembersStep({ mode: "swrr", members: [{ user_id: "u-1", weight: cleared.weight }] }),
+    ).not.toBeNull();
+    // Typing 50 into the empty field shows exactly "50".
+    const typed = simulate(0, [
+      { prev: "0", raw: "" },
+      { prev: "", raw: "5" },
+      { prev: "5", raw: "50" },
+    ]);
+    expect(typed.displays).toEqual(["0", "", "5", "50"]);
+    expect(typed.weight).toBe(50);
+  });
+
+  it("replaces the default 0 with 10, 60, or 100", () => {
+    for (const target of ["10", "60", "100"]) {
+      const first = target[0];
+      const r = simulate(0, [
+        { prev: "0", raw: `0${first}` },
+        { prev: first, raw: target },
+      ]);
+      expect(r.displays[r.displays.length - 1]).toBe(target);
+      expect(r.weight).toBe(Number(target));
+    }
+  });
+
+  it("Backspace/Delete/select-all/paste behave natively", () => {
+    // Backspacing "60" → "6" keeps a valid share live.
+    expect(simulate(60, [{ prev: "60", raw: "6" }]).weight).toBe(6);
+    // Pasting "050" over the default 0 → "50".
+    expect(simulate(0, [{ prev: "0", raw: "0050" }]).displays).toEqual(["0", "50"]);
+    // Select-all + type into "60" replaces fully.
+    expect(simulate(60, [{ prev: "60", raw: "4" }]).weight).toBe(4);
+  });
+
+  it("only an exact 100% total with all shares set allows progression", () => {
+    const members = [
+      { user_id: "u-1", weight: 60 as number | null },
+      { user_id: "u-2", weight: null as number | null },
+    ];
+    expect(validateMembersStep({ mode: "swrr", members })).not.toBeNull();
+    members[1].weight = 40;
+    expect(validateMembersStep({ mode: "swrr", members })).toBeNull();
+  });
+});
 
 describe("validateRuleInput", () => {
   it("accepts a valid 60/40 SWRR rule and normalizes order", () => {

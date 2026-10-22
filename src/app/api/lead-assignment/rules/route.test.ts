@@ -264,6 +264,21 @@ describe("POST /api/lead-assignment/rules", () => {
     expect(h.rules).toHaveLength(0);
   });
 
+  it("rejects empty (unfinished-edit) shares instead of treating them as 0", async () => {
+    const res = await POST(
+      req("POST", {
+        ...SWRR,
+        members: [
+          { user_id: "u-mohan", weight: 100 },
+          { user_id: "u-sohan", weight: null },
+        ],
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/whole numbers/);
+    expect(h.rules).toHaveLength(0);
+  });
+
   it("accepts exactly 100% and Round Robin without allocation", async () => {
     const ok = await POST(req("POST", SWRR));
     expect(ok.status).toBe(201);
