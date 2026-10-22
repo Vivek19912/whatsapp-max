@@ -39,6 +39,7 @@ import {
   sourceLabel,
 } from "./normalize";
 import { getPageToken, markNeedsReauth } from "./store";
+import { maybeEnqueueLeadNotification } from "./notify";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
 import { maybeAutoAssignLead } from "@/lib/lead-assignment/service";
 
@@ -373,6 +374,8 @@ export async function processSubmissionById(
         answers: normalized.answers,
         field_data: lead.field_data ?? [],
         form_name: formRow.form_name ?? submission.form_name,
+        campaign_name: lead.campaign_name ?? null,
+        ad_name: lead.ad_name ?? null,
         last_error: null,
         next_retry_at: null,
         claimed_at: null,
@@ -400,12 +403,25 @@ export async function processSubmissionById(
     // fully isolated: assignment can never fail lead processing,
     // and duplicates/updates never reassign (ownership is only
     // written when the Assigned To cell is still empty).
-    await maybeAutoAssignLead(db, {
+    const assignment = await maybeAutoAssignLead(db, {
       accountId: submission.account_id,
       flowId,
       runId: (run as { id: string }).id,
       formId: formRow.id,
     });
+
+    // ADDITIVE new-lead email notification — enqueue only when the
+    // lead now has an owner. Unassigned leads stay pending: a later
+    // manual or retry assignment enqueues then. Best-effort and
+    // fully isolated: enqueue never throws into lead processing, and
+    // UNIQUE(account_id, submission_id) makes duplicates a no-op.
+    if (assignment?.outcome === "assigned" && assignment.userId) {
+      await maybeEnqueueLeadNotification(db, {
+        accountId: submission.account_id,
+        submissionId,
+        assigneeUserId: assignment.userId,
+      });
+    }
 
     return { outcome: "processed" };
   } catch (err) {

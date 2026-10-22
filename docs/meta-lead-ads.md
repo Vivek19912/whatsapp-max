@@ -324,6 +324,43 @@ success.
    `[meta-lead-ads]` entries. The cron's polling path picks it up even when
    the webhook is not subscribed.
 
+## New-lead email notifications
+
+Each account can opt in (default **off**) at Settings › Integrations ›
+Meta › Lead capture › **New-lead email notifications**. When enabled,
+each genuinely new lead row that gains an owner triggers exactly one
+email to that salesperson's registered profile address — from the
+shared `leadnotificationss@gmail.com` mailbox over Gmail SMTP.
+
+- **Trigger.** Enqueue happens when the assignment is known: automatic
+  assignment during processing, manual assignment, or assignment
+  retry. Leads inserted before assignment stay pending and notify on
+  the later assignment. Reassignment after a sent notification does
+  not send again; clearing an assignment never notifies.
+- **Dedup.** `meta_lead_notifications` is unique on
+  `(account_id, submission_id)`, so polling, imports, retries and
+  concurrent workers collapse to one row.
+- **Delivery.** A durable outbox drained by the existing 5-minute
+  meta-lead-ads cron sweep (no new scheduler): claim → render →
+  Gmail SMTP → sent, with bounded retries (3 attempts, 1m/2m/4m…
+  backoff capped at 15m). Email failure never rolls back ingestion.
+- **Content.** Subject/body templates are configurable per account
+  (`{{lead_name}}`, `{{lead_phone}}`, `{{form_name}}`,
+  `{{campaign_name}}`, `{{ad_name}}`, `{{received_at}}`,
+  `{{lead_link}}`, …); the HTML shell is branded and all values are
+  escaped. The link uses the trusted site origin (`NEXT_PUBLIC_SITE_URL`).
+  Ad-set name is unavailable from Meta's Lead node and is omitted.
+- **SMTP setup (operator).** Set on the deployed server (never in the
+  app): `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`,
+  `SMTP_SECURE=false`, `SMTP_USER=leadnotificationss@gmail.com`,
+  `SMTP_PASS=<Gmail App Password>`, `MAIL_FROM_NAME=WhatsApp Max`,
+  `MAIL_FROM_EMAIL=leadnotificationss@gmail.com`. Resend is never
+  used as a fallback. Verify with **Send test email to me** (goes
+  only to your own registered address) before relying on it.
+- **Observability.** Recent deliveries (sent/failed/pending + reasons)
+  are listed in the settings card and via
+  `GET /api/integrations/meta-lead-ads/notifications/deliveries`.
+
 ## Two-company staging verification
 
 Use two separate staging Meta test assets and two WhatsApp Max workspaces:

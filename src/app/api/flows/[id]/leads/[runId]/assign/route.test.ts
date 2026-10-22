@@ -29,6 +29,7 @@ const h = vi.hoisted(() => ({
   ruleMembers: [] as Array<Record<string, unknown>>,
   states: [] as Array<Record<string, unknown>>,
   seq: 0,
+  enqueued: [] as Array<Record<string, unknown>>,
 }));
 
 function uid(prefix: string) {
@@ -63,6 +64,17 @@ vi.mock("@/lib/auth/account", () => ({
       { error: err instanceof Error ? err.message : "Internal server error" },
       { status },
     );
+  },
+}));
+
+vi.mock("@/lib/flows/admin-client", () => ({
+  supabaseAdmin: () => fakeSupabase(),
+}));
+
+vi.mock("@/lib/meta-lead-ads/notify", () => ({
+  maybeEnqueueForRun: async (_db: unknown, args: Record<string, unknown>) => {
+    h.enqueued.push(args);
+    return { enqueued: true, reason: "enqueued" as const };
   },
 }));
 
@@ -253,6 +265,7 @@ beforeEach(() => {
   h.ruleMembers = [];
   h.states = [];
   h.seq = 0;
+  h.enqueued = [];
 });
 
 describe("POST assign (manual)", () => {
@@ -297,6 +310,17 @@ describe("POST assign (manual)", () => {
     h.role = "viewer";
     expect((await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS)).status).toBe(403);
   });
+
+  it("enqueues a notification when a lead is manually assigned, never on clear", async () => {
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.enqueued).toEqual([
+      { accountId: "acct-1", runId: "run-1", assigneeUserId: "u-mohan" },
+    ]);
+    const cleared = await assignPOST(assignBody({ user_id: null }), ASSIGN_PARAMS);
+    expect(cleared.status).toBe(200);
+    expect(h.enqueued).toHaveLength(1);
+  });
 });
 
 describe("POST retry", () => {
@@ -317,6 +341,9 @@ describe("POST retry", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as { assignment: { outcome: string; userId: string } };
     expect(json.assignment).toMatchObject({ outcome: "assigned", userId: "u-mohan" });
+    expect(h.enqueued).toEqual([
+      { accountId: "acct-1", runId: "run-1", assigneeUserId: "u-mohan" },
+    ]);
   });
 
   it("skips owned leads and rejects non-Meta tables", async () => {

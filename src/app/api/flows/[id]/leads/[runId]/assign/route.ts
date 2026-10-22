@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { manualAssign } from "@/lib/lead-assignment/service";
+import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
+import { maybeEnqueueForRun } from "@/lib/meta-lead-ads/notify";
+import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 /**
  * POST /api/flows/[id]/leads/[runId]/assign — manually assign (or
@@ -56,6 +59,16 @@ export async function POST(
         newUserId: user_id,
         actorUserId: userId,
       });
+      // A lead assigned after insertion is notified now (unless it
+      // was already notified). Clearing/Unassigning never notifies.
+      // Best-effort: never fails assignment.
+      if (result.current && result.current !== ASSIGNED_TO_UNASSIGNED) {
+        await maybeEnqueueForRun(supabaseAdmin(), {
+          accountId,
+          runId,
+          assigneeUserId: result.current,
+        });
+      }
       return NextResponse.json({ assignment: result });
     } catch (err) {
       const raw =

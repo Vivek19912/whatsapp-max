@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { retryAssignRun } from "@/lib/lead-assignment/service";
+import { maybeEnqueueForRun } from "@/lib/meta-lead-ads/notify";
+import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 /**
  * POST /api/lead-assignment/retry — retry automatic assignment for
@@ -55,6 +57,15 @@ export async function POST(request: Request) {
       runId,
       formId: typed.meta_form_id,
     });
+    // A lead assigned by the retry is notified now (unless already
+    // notified). Best-effort: never fails assignment.
+    if (result.outcome === "assigned" && result.userId) {
+      await maybeEnqueueForRun(supabaseAdmin(), {
+        accountId,
+        runId,
+        assigneeUserId: result.userId,
+      });
+    }
     return NextResponse.json({ assignment: result });
   } catch (err) {
     return toErrorResponse(err);

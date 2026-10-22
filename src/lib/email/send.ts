@@ -45,9 +45,16 @@ export function getSmtpConfig(): SmtpConfig {
   const port = Number(process.env.SMTP_PORT || "587");
   const secure = process.env.SMTP_SECURE === "true";
   const user = process.env.SMTP_USER || "";
-  const pass = process.env.SMTP_PASSWORD || "";
-  // Fallback for bare SMTP relays that only need a sender envelope.
-  const from = process.env.SMTP_FROM || user || "no-reply@localhost";
+  // SMTP_PASS is accepted as an alias for SMTP_PASSWORD (Gmail App
+  // Password setups commonly use SMTP_PASS). SMTP_PASSWORD wins.
+  const pass = process.env.SMTP_PASSWORD || process.env.SMTP_PASS || "";
+  // MAIL_FROM_EMAIL / MAIL_FROM_NAME optionally brand the envelope
+  // sender (e.g. a shared notification mailbox). When unset, the
+  // previous behavior is byte-for-byte identical.
+  const fromEmail =
+    process.env.MAIL_FROM_EMAIL || process.env.SMTP_FROM || user || "no-reply@localhost";
+  const fromName = (process.env.MAIL_FROM_NAME || "").trim();
+  const from = fromName ? `"${fromName.replace(/"/g, "")}" <${fromEmail}>` : fromEmail;
   return { host, port, secure, user, pass, from };
 }
 
@@ -60,6 +67,8 @@ export interface EmailSendInput {
   to: string;
   subject: string;
   text: string;
+  /** Optional HTML alternative. When omitted, text-only is sent. */
+  html?: string;
 }
 
 /** Result of a successful send (whatever the provider returned). */
@@ -74,12 +83,13 @@ export interface EmailSendResult {
  * scrubbed of CR/LF/NUL so user-authored text can't inject extra
  * headers; the body is passed as plain text so newlines are safe.
  */
-export function buildMailOptions(cfg: SmtpConfig, { to, subject, text }: EmailSendInput) {
+export function buildMailOptions(cfg: SmtpConfig, input: EmailSendInput) {
   return {
     from: cfg.from,
-    to,
-    subject: sanitizeHeaderLine(subject),
-    text,
+    to: input.to,
+    subject: sanitizeHeaderLine(input.subject),
+    text: input.text,
+    ...(input.html ? { html: input.html } : {}),
   };
 }
 
@@ -151,6 +161,7 @@ export async function sendEmailViaResend(
         to: [input.to],
         subject: sanitizeHeaderLine(input.subject),
         text: input.text,
+        ...(input.html ? { html: input.html } : {}),
       }),
       signal: controller.signal,
     });

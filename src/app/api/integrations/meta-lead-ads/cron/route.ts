@@ -11,6 +11,7 @@ import { NextResponse } from "next/server";
 
 import { supabaseAdmin } from "@/lib/flows/admin-client";
 import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
+import { drainMetaLeadNotifications } from "@/lib/meta-lead-ads/notify";
 import { runDueRetries } from "@/lib/meta-lead-ads/process-lead";
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from "@/lib/meta-lead-ads/sync";
 
@@ -66,9 +67,24 @@ export async function GET(request: Request) {
     }
 
     const sync = await runLeadPolls(db, config, POLL_DEFAULT_LIMIT);
+
+    // New-lead email outbox drain. Fully isolated like the retry
+    // sweep: notification failures never affect polling, and the
+    // cadence is unchanged (same 5-minute sweep, no new scheduler).
+    let notifications = { sent: 0, failed: 0, skippedDisabled: 0, finalFailures: 0 };
+    try {
+      notifications = await drainMetaLeadNotifications(db);
+    } catch (error) {
+      console.error(
+        "[meta-lead-ads-cron] notification drain failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
     return NextResponse.json({
       ...retries,
       sync,
+      notifications,
       ...(retryError ? { retryError } : {}),
     });
   } catch (error) {

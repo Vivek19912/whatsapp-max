@@ -10,6 +10,7 @@ import {
   EyeOff,
   KeyRound,
   Loader2,
+  Mail,
   RefreshCw,
   XCircle,
 } from "lucide-react";
@@ -27,6 +28,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { SettingsPanelHead } from "./settings-panel-head";
 
 interface PageInfo {
@@ -126,6 +128,30 @@ interface Check {
   detail: string;
 }
 
+interface NotifySettingsPayload {
+  enabled: boolean;
+  subject_template: string;
+  body_template: string;
+  updated_at: string | null;
+  is_default: boolean;
+}
+
+interface NotifyDelivery {
+  id: string;
+  lead_name: string | null;
+  recipient_email: string | null;
+  assignee_name: string | null;
+  status: string;
+  attempt: number;
+  max_attempts: number;
+  last_error: string | null;
+  sent_at: string | null;
+  created_at: string;
+}
+
+const NOTIFY_PLACEHOLDERS =
+  "{{lead_name}} {{lead_phone}} {{lead_email}} {{form_name}} {{campaign_name}} {{ad_name}} {{received_at}} {{lead_link}} {{assignee_name}}";
+
 interface OAuthPageResult {
   pageId: string;
   ok: boolean;
@@ -214,6 +240,11 @@ export function MetaLeadAdsSettings({
   const [pageId, setPageId] = useState("");
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
+  const [notif, setNotif] = useState<NotifySettingsPayload | null>(null);
+  const [notifDeliveries, setNotifDeliveries] = useState<NotifyDelivery[]>([]);
+  const [notifSubject, setNotifSubject] = useState("");
+  const [notifBody, setNotifBody] = useState("");
+  const notifPrefilled = useRef(false);
   const [oauthSession, setOAuthSession] = useState<OAuthSessionPayload | null>(null);
   const [selectedOAuthPages, setSelectedOAuthPages] = useState<string[]>([]);
   const prefilled = useRef(false);
@@ -530,6 +561,72 @@ export function MetaLeadAdsSettings({
     });
   }
 
+  const loadNotif = useCallback(async () => {
+    try {
+      const [s, d] = await Promise.all([
+        readJson(
+          await fetch("/api/integrations/meta-lead-ads/notifications/settings", {
+            cache: "no-store",
+          }),
+        ),
+        readJson(
+          await fetch("/api/integrations/meta-lead-ads/notifications/deliveries?limit=8", {
+            cache: "no-store",
+          }),
+        ),
+      ]);
+      const payload = s as unknown as NotifySettingsPayload;
+      setNotif(payload);
+      if (!notifPrefilled.current) {
+        notifPrefilled.current = true;
+        setNotifSubject(payload.subject_template);
+        setNotifBody(payload.body_template);
+      }
+      setNotifDeliveries((d as unknown as { deliveries: NotifyDelivery[] }).deliveries ?? []);
+    } catch {
+      // Notifications are additive: a failure here must not break settings.
+    }
+  }, []);
+
+  function saveNotif() {
+    void act("notif-save", async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/notifications/settings", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: notif?.enabled ?? false,
+            subject_template: notifSubject,
+            body_template: notifBody,
+          }),
+        }),
+      )) as { ok: boolean; enabled: boolean };
+      if (json.ok) {
+        toast.success(
+          json.enabled
+            ? "New-lead email notifications enabled."
+            : "New-lead email notifications disabled.",
+        );
+        notifPrefilled.current = false;
+        await loadNotif();
+      }
+    });
+  }
+
+  function sendNotifTest() {
+    void act("notif-test", async () => {
+      const json = (await readJson(
+        await fetch("/api/integrations/meta-lead-ads/notifications/test", {
+          method: "POST",
+        }),
+      )) as { ok: boolean; to: string };
+      if (json.ok) {
+        toast.success(`Test notification sent to ${json.to}.`);
+        await loadNotif();
+      }
+    });
+  }
+
   const disabled = !canEditSettings || profileLoading;
   const needsReauth =
     status?.status === "needs_reauth" || status?.status === "revoked";
@@ -538,6 +635,10 @@ export function MetaLeadAdsSettings({
   const canReuseToken = Boolean(
     setup?.hasToken && setup.tokenSource === "capi" && !token.trim(),
   );
+
+  useEffect(() => {
+    if (connected) void loadNotif();
+  }, [connected, loadNotif]);
 
   return (
     <section className="space-y-5">
@@ -928,6 +1029,120 @@ export function MetaLeadAdsSettings({
                   <span>
                     Page last checked: {fmt(page?.lastPolledAt ?? null)}
                   </span>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-foreground">
+                    <Mail className="size-4" /> New-lead email notifications
+                  </CardTitle>
+                  <CardDescription className="text-muted-foreground">
+                    When a new Meta lead row is created and assigned to a
+                    salesperson, one email is sent to that salesperson&apos;s
+                    registered address — from the shared WhatsApp Max mailbox.
+                    Unassigned leads wait until someone is assigned; clearing
+                    an assignment never notifies. Each lead notifies at most
+                    once.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <Label htmlFor="meta-notif-enabled" className="text-sm">
+                      Email the assigned salesperson for new leads
+                    </Label>
+                    <Switch
+                      id="meta-notif-enabled"
+                      checked={notif?.enabled ?? false}
+                      onCheckedChange={(v) =>
+                        setNotif((current) =>
+                          current ? { ...current, enabled: v } : current,
+                        )
+                      }
+                      disabled={disabled || notif === null}
+                      aria-label="Enable new-lead email notifications"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="meta-notif-subject">Subject template</Label>
+                    <Input
+                      id="meta-notif-subject"
+                      value={notifSubject}
+                      onChange={(e) => setNotifSubject(e.target.value)}
+                      disabled={disabled || notif === null}
+                      className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="meta-notif-body">Body template</Label>
+                    <Textarea
+                      id="meta-notif-body"
+                      value={notifBody}
+                      onChange={(e) => setNotifBody(e.target.value)}
+                      disabled={disabled || notif === null}
+                      rows={8}
+                      className="mt-1 font-mono text-xs"
+                    />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Placeholders: {NOTIFY_PLACEHOLDERS}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      onClick={saveNotif}
+                      disabled={disabled || busy === "notif-save" || notif === null}
+                    >
+                      {busy === "notif-save" ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : null}
+                      Save notification settings
+                    </Button>
+                    {connected ? (
+                      <Button
+                        variant="outline"
+                        onClick={sendNotifTest}
+                        disabled={disabled || busy === "notif-test"}
+                      >
+                        {busy === "notif-test" ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <Mail className="size-4" />
+                        )}
+                        Send test email to me
+                      </Button>
+                    ) : null}
+                  </div>
+                  {notifDeliveries.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Recent deliveries
+                      </p>
+                      {notifDeliveries.map((delivery) => (
+                        <div
+                          key={delivery.id}
+                          className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs"
+                        >
+                          <Badge
+                            variant={delivery.status === "sent" ? "secondary" : "outline"}
+                          >
+                            {delivery.status}
+                          </Badge>
+                          <span className="font-medium text-foreground">
+                            {delivery.lead_name ?? "Lead"}
+                          </span>
+                          <span className="text-muted-foreground">
+                            → {delivery.assignee_name ?? delivery.recipient_email ?? "—"}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {fmt(delivery.sent_at ?? delivery.created_at)}
+                          </span>
+                          {delivery.status === "failed" && delivery.last_error ? (
+                            <span className="text-destructive">{delivery.last_error}</span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
             </>
