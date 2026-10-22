@@ -164,6 +164,9 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     // settings access never see the entry (the page enforces the
     // same bar server-side).
     if (item.href === "/lead-assignment") return canEditSettings;
+    // Chat Assignment is hidden from the sidebar UI. The page,
+    // route, APIs, and configuration are untouched.
+    if (item.href === "/chat-assignment") return false;
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     if (
       !isOwner &&

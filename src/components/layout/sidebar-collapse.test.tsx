@@ -198,13 +198,15 @@ describe("10. Google Sheets navigation unchanged", () => {
     // children on a non-sheets route (existing behavior); the
     // collapsed rail forces the icons visible instead.
     const expanded = render(false);
-    expect(expanded).toContain('href="/chat-assignment"');
+    expect(expanded).not.toContain('href="/chat-assignment"');
     expect(expanded).not.toContain('href="/data-export"');
     expect(expanded).not.toContain('href="/all-sheets"');
     const collapsed = render(true);
     expect(collapsed).toContain('href="/data-export"');
     expect(collapsed).toContain('href="/all-sheets"');
-    expect(collapsed).toContain('href="/chat-assignment"');
+    expect(collapsed).not.toContain('href="/chat-assignment"');
+    // Lead Assignment stays visible while Chat Assignment is hidden.
+    expect(collapsed).toContain('href="/lead-assignment"');
     // No duplicates even with the group header inline.
     expect(collapsed.split("Flow Sheets").length - 1).toBe(1);
     expect(collapsed.split("All Sheets").length - 1).toBe(1);
