@@ -143,6 +143,69 @@ async function findOpenLink(
   return (data as LinkRow | null) ?? null;
 }
 
+/**
+ * GET /api/flows/[id]/followup-reminder?flow_run_id=… — fetch the
+ * open linked reminder for prefill (message + scheduled time), or
+ * { reminder: null } when there is none. Agent+. Same ownership
+ * rules as POST/DELETE.
+ */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id } = await params;
+    const { supabase, accountId, userId, role } = await requireRole("agent");
+    const url = new URL(request.url);
+    const runId = url.searchParams.get("flow_run_id");
+    if (!runId) {
+      return bad("flow_run_id is required.");
+    }
+    const flow = await loadFlow(supabase, accountId, id);
+    if (!flow || flow.kind !== "meta_lead_ads") {
+      return bad("Not found.", 404);
+    }
+    const run = await loadRun(supabase, accountId, id, runId);
+    if (!run) {
+      return bad("Run not found.", 404);
+    }
+    if (role === "agent") {
+      const owned = await isRunOwnedByUser(supabase, {
+        accountId,
+        flowId: id,
+        runId,
+        userId,
+      });
+      if (!owned) return bad("Run not found.", 404);
+    }
+    const linked = await findOpenLink(supabase, accountId, runId);
+    if (!linked) {
+      return NextResponse.json({ reminder: null });
+    }
+    const { data, error } = await supabase
+      .from("whatsapp_followups")
+      .select("id, scheduled_for, message_text, status")
+      .eq("id", linked.id)
+      .eq("account_id", accountId)
+      .maybeSingle();
+    if (error) throw error;
+    const row = (data as Record<string, unknown> | null) ?? null;
+    if (!row) {
+      return NextResponse.json({ reminder: null });
+    }
+    return NextResponse.json({
+      reminder: {
+        id: row.id,
+        scheduled_for: row.scheduled_for,
+        message_text: row.message_text,
+        status: row.status,
+      },
+    });
+  } catch (err) {
+    return toErrorResponse(err);
+  }
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },

@@ -174,7 +174,7 @@ function fakeSupabase() {
   };
 }
 
-const { POST, DELETE } = await import("./route");
+const { GET, POST, DELETE } = await import("./route");
 
 function post(body: unknown) {
   return new Request("https://app.test/api/flows/flow-meta/followup-reminder", {
@@ -639,5 +639,59 @@ describe("agent ownership on Meta Lead Ads Tables", () => {
       PARAMS,
     );
     expect(res.status).toBe(201);
+  });
+});
+
+describe("GET followup-reminder (prefill for the single modal)", () => {
+  function get(runId: string | null) {
+    const url =
+      runId === null
+        ? "https://app.test/api/flows/flow-meta/followup-reminder"
+        : `https://app.test/api/flows/flow-meta/followup-reminder?flow_run_id=${runId}`;
+    return GET(new Request(url), PARAMS);
+  }
+
+  it("returns the open linked reminder for prefill", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Custom note",
+    });
+    const res = await get("run-1");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      reminder: {
+        id: "fu-1",
+        scheduled_for: FUTURE,
+        message_text: "Custom note",
+        status: "scheduled",
+      },
+    });
+  });
+
+  it("returns null when no linked reminder exists", async () => {
+    const res = await get("run-1");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reminder: null });
+  });
+
+  it("404s another agent's lead and requires a run id", async () => {
+    h.values["f-assign:run-1"] = "u-teammate";
+    expect((await get("run-1")).status).toBe(404);
+    expect((await get(null)).status).toBe(400);
+  });
+
+  it("404s non-Meta tables", async () => {
+    h.flow = { id: "flow-1", account_id: "acct-1", kind: "whatsapp_flow" };
+    const res = await GET(
+      new Request("https://app.test/api/flows/flow-1/followup-reminder?flow_run_id=run-1"),
+      { params: Promise.resolve({ id: "flow-1" }) },
+    );
+    expect(res.status).toBe(404);
   });
 });

@@ -81,7 +81,7 @@ import {
   resolveMetaHeaderDisplayLabel,
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
-import { FollowupReminderDialog } from '@/components/workspace/followup-reminder-dialog';
+import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
 /**
@@ -974,39 +974,18 @@ export default function WorkspacePage() {
       )?.id ?? null,
     [customFields]
   );
-  const [reminderDialog, setReminderDialog] = useState<{
+  // Single Schedule Follow-up modal state. Clicking the Meta
+  // follow-up cell opens it directly with the row's lead details
+  // and current value; saving inside the modal writes the cell and
+  // creates/updates the linked reminder with one identical
+  // timestamp. Flow Tables never set this state.
+  const [scheduleModal, setScheduleModal] = useState<{
     runId: string;
-    scheduledFor: string;
+    fieldId: string;
     name: string | null;
     phone: string | null;
+    initialValue: string | null;
   } | null>(null);
-
-  // Cancel the linked scheduled reminder after its follow-up cell
-  // was cleared. Best-effort toast: the cell is already cleared —
-  // a leftover scheduled reminder stays manageable from Reminders.
-  const cancelWorkspaceFollowupReminder = useCallback(
-    async (runId: string) => {
-      if (!flowId) return;
-      try {
-        const res = await fetch(`/api/flows/${flowId}/followup-reminder`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ flow_run_id: runId }),
-        });
-        const json = (await res.json().catch(() => null)) as {
-          cancelled?: boolean;
-          error?: string;
-        } | null;
-        if (!res.ok) throw new Error(json?.error ?? 'Could not cancel the reminder.');
-        if (json?.cancelled) toast.success('Scheduled reminder cancelled.');
-      } catch (err) {
-        toast.error(
-          err instanceof Error ? err.message : 'Could not cancel the reminder.'
-        );
-      }
-    },
-    [flowId]
-  );
 
   // Meta Lead Ads Tables only: manual assignment through the
   // audited endpoint (write + history in one step). The save runs
@@ -1052,42 +1031,8 @@ export default function WorkspacePage() {
         const field = customFields.find((f) => f.id === fieldId);
         if (field && isAssigneeField(field)) reloadTable();
       }
-      // Meta-only follow-up hook (saves on other tables pass
-      // through untouched): a fresh follow-up opens the reminder
-      // dialog; a cleared one cancels its linked reminder.
-      // Event-driven (only on successful saves), so rerenders can
-      // never reopen the dialog; an already-open dialog keeps its
-      // draft instead of being replaced.
-      if (isMetaTable && followupFieldId !== null && fieldId === followupFieldId) {
-        if (value === null) {
-          void cancelWorkspaceFollowupReminder(runId);
-          return;
-        }
-        const at = new Date(value);
-        if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) return;
-        const row = payload?.rows.find((r) => r.runId === runId);
-        setReminderDialog((prev) =>
-          prev !== null
-            ? prev
-            : {
-                runId,
-                scheduledFor: value,
-                name: row?.name ?? null,
-                phone: row?.phone ?? null,
-              }
-        );
-      }
     },
-    [
-      requestKey,
-      appliedAssignee,
-      customFields,
-      reloadTable,
-      isMetaTable,
-      followupFieldId,
-      cancelWorkspaceFollowupReminder,
-      payload,
-    ]
+    [requestKey, appliedAssignee, customFields, reloadTable]
   );
   // Closed-trigger label: Base UI falls back to the raw value when
   // the selected item's text isn't resolved, which leaked the flow
@@ -1995,6 +1940,27 @@ export default function WorkspacePage() {
                                 onSaved={handleCustomSaved}
                                 members={teamMembers}
                                 twoLineClamp={isWideTextColumnName(f.name)}
+                                // Meta Lead Ads Tables only: clicking the
+                                // follow-up cell opens the single Schedule
+                                // Follow-up modal directly (no inline
+                                // picker, no second dialog). Every other
+                                // column — and every Flow Table — keeps
+                                // the existing inline editing.
+                                onEditIntercept={
+                                  isMetaTable && followupFieldId !== null && f.id === followupFieldId
+                                    ? () =>
+                                        setScheduleModal({
+                                          runId: row.runId,
+                                          fieldId: f.id,
+                                          name: row.name ?? null,
+                                          phone: row.phone ?? null,
+                                          initialValue:
+                                            overridesForRequest[row.runId]?.[f.id] ??
+                                            payload.customValues?.[row.runId]?.[f.id] ??
+                                            null,
+                                        })
+                                    : undefined
+                                }
                                 // Meta Lead Ads Tables only: manual
                                 // assignment goes through the audited
                                 // endpoint (write + history). Every
@@ -2192,20 +2158,22 @@ export default function WorkspacePage() {
         </SheetContent>
       </Sheet>
 
-      {/* Meta-only follow-up reminder dialog: opened from the
-          handleCustomSaved hook above (successful follow-up saves
-          on Meta tables). Flow Tables never set this state. */}
-      {reminderDialog !== null && flowId !== null && (
-        <FollowupReminderDialog
-          open={reminderDialog !== null}
+      {/* Meta-only single Schedule Follow-up modal: opened
+          directly by clicking the follow-up cell (no inline
+          picker, no second dialog). Flow Tables never set this
+          state. */}
+      {scheduleModal !== null && flowId !== null && (
+        <ScheduleFollowupDialog
+          open={scheduleModal !== null}
           onOpenChange={(v) => {
-            if (!v) setReminderDialog(null);
+            if (!v) setScheduleModal(null);
           }}
           flowId={flowId}
-          runId={reminderDialog.runId}
-          leadName={reminderDialog.name}
-          leadPhone={reminderDialog.phone}
-          scheduledFor={reminderDialog.scheduledFor}
+          runId={scheduleModal.runId}
+          fieldId={scheduleModal.fieldId}
+          leadName={scheduleModal.name}
+          leadPhone={scheduleModal.phone}
+          initialValue={scheduleModal.initialValue}
           onSaved={reloadTable}
         />
       )}

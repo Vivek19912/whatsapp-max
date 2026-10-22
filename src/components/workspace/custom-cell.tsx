@@ -249,6 +249,7 @@ export function CustomCell({
   stored,
   canEdit,
   onSaved,
+  onEditIntercept,
   saveAssignee,
   twoLineClamp = false,
   members,
@@ -259,6 +260,13 @@ export function CustomCell({
   stored: string | null | undefined;
   canEdit: boolean;
   onSaved: (fieldId: string, runId: string, value: string | null) => void;
+  /**
+   * Optional click interceptor: when provided, clicking the cell
+   * calls this instead of entering inline edit mode (used for the
+   * Meta follow-up cell, which opens the single Schedule dialog).
+   * Absent everywhere else: default editing is untouched.
+   */
+  onEditIntercept?: () => void;
   /**
    * Optional save override for the "Assigned To" column only.
    * When provided (Meta Lead Ads Tables route manual assignment
@@ -618,6 +626,10 @@ export function CustomCell({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
+          if (onEditIntercept) {
+            onEditIntercept();
+            return;
+          }
           setDraft(shown ?? "");
           setEditing(true);
         }}

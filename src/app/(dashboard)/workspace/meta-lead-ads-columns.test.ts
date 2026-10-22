@@ -127,58 +127,69 @@ describe("workspace page — Meta Lead Source removal", () => {
   });
 });
 
-describe("workspace page — Meta follow-up reminder hook", () => {
-  it("opens the reminder dialog only from Meta follow-up saves", () => {
+describe("workspace page — single Schedule Follow-up modal", () => {
+  it("opens the modal directly from the Meta follow-up cell (no inline edit)", () => {
     const src = page();
-    // The save handler gates the entire hook on Meta tables and the
-    // canonical datetime column — Flow Table saves pass through
-    // untouched.
-    expect(src).toContain(
-      "if (isMetaTable && followupFieldId !== null && fieldId === followupFieldId) {",
-    );
-    expect(src).toContain("followupFieldId");
+    // The click is intercepted only for the canonical datetime
+    // column on Meta tables — every other cell (and every Flow
+    // Table) keeps the default inline editor.
+    expect(src).toContain("onEditIntercept={");
+    expect(src).toContain("isMetaTable && followupFieldId !== null && f.id === followupFieldId");
+    expect(src).toContain("setScheduleModal({");
     expect(src).toContain("f.field_type === 'datetime'");
     expect(src).toContain("isWorkspaceFollowupFieldName(f.name)");
   });
 
-  it("renders the Create Follow-up Reminder dialog from that hook", () => {
+  it("renders one Schedule Follow-up modal and no second dialog", () => {
     const src = page();
-    expect(src).toContain("FollowupReminderDialog");
-    expect(src).toContain("setReminderDialog");
-    // An already-open dialog keeps its draft (no reopen storms).
-    expect(src).toContain("prev !== null");
+    expect(src).toContain("ScheduleFollowupDialog");
+    expect(src).toContain("setScheduleModal");
+    // The old two-step flow is gone: no post-save dialog, no
+    // detached cancel helper, no follow-up branch in the save
+    // handler.
+    expect(src).not.toContain("FollowupReminderDialog");
+    expect(src).not.toContain("setReminderDialog");
+    expect(src).not.toContain("cancelWorkspaceFollowupReminder");
   });
 
-  it("cancels the linked reminder when the follow-up is cleared", () => {
+  it("passes the row's lead details and current value into the modal", () => {
     const src = page();
-    expect(src).toContain("cancelWorkspaceFollowupReminder(runId)");
-    expect(src).toContain("/followup-reminder");
-    expect(src).toContain("method: 'DELETE'");
+    expect(src).toContain("runId: row.runId");
+    expect(src).toContain("fieldId: f.id");
+    expect(src).toContain("initialValue:");
   });
 
-  it("the dialog reports failures without losing the draft", () => {
+  it("the modal writes the cell and the reminder with one shared timestamp", () => {
     const src = readFileSync(
-      `${root}/src/components/workspace/followup-reminder-dialog.tsx`,
+      `${root}/src/components/workspace/schedule-followup-dialog.tsx`,
       "utf8",
     );
-    expect(src).toContain("Create Follow-up Reminder");
+    // One combined instant drives both writes — the stored cell and
+    // the scheduled reminder can never disagree.
+    expect(src).toContain("const iso = combineFollowupDateTime(date, time);");
+    expect(src).toContain("value: iso");
+    expect(src).toContain("scheduled_for: iso");
+    // Clearing writes an empty cell and cancels the linked reminder.
+    expect(src).toContain("value: null");
+    expect(src).toContain('method: "DELETE"');
+  });
+
+  it("the single modal holds date, time, message, preview, and clear", () => {
+    const src = readFileSync(
+      `${root}/src/components/workspace/schedule-followup-dialog.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("Schedule Follow-up");
+    expect(src).toContain("Follow-up date");
+    expect(src).toContain("Follow-up time");
     expect(src).toContain("Reminder Message");
     expect(src).toContain("Save Follow-up");
+    expect(src).toContain("Cancel");
     // Failed saves keep the dialog open with the draft intact for
     // retry; nothing is created before confirmation.
     expect(src).toContain('role="alert"');
     expect(src).toContain("setSaving(false)");
-    expect(src).toContain("message: trimmed === \"\" ? null : message");
-  });
-
-  it("Flow Tables never reach the reminder state or endpoint", () => {
-    const src = page();
-    // Every reminder touchpoint sits behind the Meta gate above;
-    // there is no second call site.
-    const opens = src.split("setReminderDialog").length - 1;
-    expect(opens).toBe(3);
-    const endpoints = src.split("/followup-reminder").length - 1;
-    expect(endpoints).toBe(2);
+    expect(src).toContain('message: trimmedMessage === "" ? null : message');
   });
 });
 
