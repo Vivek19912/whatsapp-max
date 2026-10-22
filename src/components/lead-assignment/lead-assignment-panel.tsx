@@ -42,7 +42,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { eligibleMemberIds } from "@/lib/lead-assignment/members";
-import { validateRuleInput } from "@/lib/lead-assignment/validation";
+import { validateMembersStep, validateRuleInput } from "@/lib/lead-assignment/validation";
 
 /**
  * Lead Assignment dashboard (admin only — enforced again
@@ -294,6 +294,34 @@ export function LeadAssignmentPanel() {
     () => draft.members.reduce((sum, m) => sum + (Number.isFinite(m.weight) ? m.weight : 0), 0),
     [draft.members],
   );
+
+  // Step-3 gate (SWRR only): live validation as percentages change.
+  // Round Robin needs no allocation and is never blocked here.
+  const step3Error = useMemo(
+    () =>
+      draft.mode === "swrr"
+        ? validateMembersStep({ mode: draft.mode, members: draft.members })
+        : null,
+    [draft.mode, draft.members],
+  );
+  // Surfaced when a blocked Continue is attempted; cleared on any
+  // draft/step change so stale text can never linger.
+  const [continueError, setContinueError] = useState<string | null>(null);
+  useEffect(() => {
+    setContinueError(null);
+  }, [draft, step]);
+
+  function handleContinue() {
+    if (step === 3 && draft.mode === "swrr") {
+      const err = validateMembersStep({ mode: draft.mode, members: draft.members });
+      if (err !== null) {
+        setContinueError(err);
+        return;
+      }
+    }
+    setContinueError(null);
+    setStep(step + 1);
+  }
 
   function toggleTable(formId: string) {
     setDraft((prev) => ({
@@ -816,6 +844,15 @@ export function LeadAssignmentPanel() {
                       Total: {swrrTotal}%
                     </span>
                   </div>
+                  {(continueError ?? step3Error) !== null ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {continueError ?? step3Error}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-green-600" role="status">
+                      Total is 100% — ready to continue.
+                    </p>
+                  )}
                   {draft.members.length === 0 ? (
                     <p className="text-sm text-muted-foreground">Select members above, then set each share.</p>
                   ) : (
@@ -828,7 +865,13 @@ export function LeadAssignmentPanel() {
                           max={100}
                           step={1}
                           value={m.weight}
-                          onChange={(e) => setWeight(m.user_id, Math.floor(Number(e.target.value) || 0))}
+                          // Stored exactly as entered (never floored
+                          // or clamped here) so validation — not
+                          // silent adjustment — rejects bad input.
+                          onChange={(e) => {
+                            const n = Number(e.target.value);
+                            setWeight(m.user_id, Number.isFinite(n) ? n : 0);
+                          }}
                           className="w-24"
                           aria-label={`Percentage for ${nameByUserId.get(m.user_id) ?? m.user_id}`}
                         />
@@ -936,7 +979,11 @@ export function LeadAssignmentPanel() {
               Cancel
             </Button>
             {step < 4 ? (
-              <Button type="button" onClick={() => setStep(step + 1)}>
+              <Button
+                type="button"
+                onClick={handleContinue}
+                disabled={step === 3 && draft.mode === "swrr" && step3Error !== null}
+              >
                 Continue
               </Button>
             ) : (

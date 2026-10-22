@@ -95,6 +95,56 @@ describe("Lead Assignment member loading (same data as Team Members)", () => {
   });
 });
 
+describe("Step 3 percentage gate (Continue blocked until exactly 100%)", () => {
+  const panel = () =>
+    src("components/lead-assignment/lead-assignment-panel.tsx");
+
+  it("validates live and blocks Continue on invalid totals", () => {
+    const p = panel();
+    // Pure gate shared with the unit tests.
+    expect(p).toContain("validateMembersStep");
+    expect(p).toContain("step3Error");
+    // Disabled Continue is not the only enforcement: the click
+    // handler re-validates and stays on Step 3 with an error.
+    expect(p).toContain("handleContinue");
+    expect(p).toContain(
+      "disabled={step === 3 && draft.mode === \"swrr\" && step3Error !== null}",
+    );
+    expect(p).toContain("setContinueError(err)");
+  });
+
+  it("shows live total, inline error, and a 100% success indicator", () => {
+    const p = panel();
+    expect(p).toContain("Total: {swrrTotal}%");
+    expect(p).toContain("continueError ?? step3Error");
+    expect(p).toContain("Total is 100% — ready to continue.");
+  });
+
+  it("never silently adjusts entered percentages", () => {
+    const p = panel();
+    expect(p).not.toContain("Math.floor(Number(e.target.value)");
+  });
+
+  it("Round Robin progression is unaffected by the percentage gate", () => {
+    const p = panel();
+    // The gate only applies in SWRR mode; RR Continue is ungated.
+    expect(p).toContain("draft.mode === \"swrr\"");
+    expect(p).toContain("draft.mode === \"swrr\" && step3Error !== null");
+    expect(src("lib/lead-assignment/validation.ts")).toContain(
+      'if (input.mode !== "swrr") return null;',
+    );
+  });
+
+  it("final submission still enforces validation front and back", () => {
+    const p = panel();
+    expect(p).toContain("disabled={saving || draftError !== null}");
+    const route = src("app/api/lead-assignment/rules/route.ts");
+    expect(route).toContain("validateRuleInput");
+    const detail = src("app/api/lead-assignment/rules/[id]/route.ts");
+    expect(detail).toContain("validateRuleInput");
+  });
+});
+
 describe("Meta-only manual assignment wiring", () => {
   it("routes Meta assignee saves through the audited endpoint", () => {
     const page = src("app/(dashboard)/workspace/page.tsx");

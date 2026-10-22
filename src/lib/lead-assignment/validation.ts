@@ -31,6 +31,42 @@ export interface ValidRuleInput {
   members: Array<{ user_id: string; weight: number }>;
 }
 
+export interface MembersStepInput {
+  mode: "round_robin" | "swrr";
+  members: Array<{ user_id: string; weight: number }>;
+}
+
+/**
+ * Step-3 (Members) gate for the rule wizard. Returns null when the
+ * step may proceed, otherwise the actionable error to display.
+ * Round Robin needs no allocation (weights are ignored), so only
+ * an empty member list blocks it; SWRR requires whole-number
+ * 0–100 shares totalling exactly 100. Never adjusts input.
+ */
+export function validateMembersStep(input: MembersStepInput): string | null {
+  if (!input || !Array.isArray(input.members) || input.members.length === 0) {
+    return "Select at least one team member.";
+  }
+  if (input.mode !== "swrr") return null;
+  for (const m of input.members) {
+    const w = (m as { weight?: unknown } | null)?.weight;
+    if (typeof w !== "number" || !Number.isInteger(w) || w < 0 || w > 100) {
+      return "Percentages must be whole numbers from 0 to 100.";
+    }
+  }
+  const total = input.members.reduce(
+    (sum, m) => sum + (m as { weight: number }).weight,
+    0,
+  );
+  if (total === 0) {
+    return "Set each member's share — the total must be exactly 100%.";
+  }
+  if (total !== 100) {
+    return `Total is ${total}% — must equal exactly 100%.`;
+  }
+  return null;
+}
+
 export function validateRuleInput(input: RuleInput): ValidRuleInput {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Invalid rule.");

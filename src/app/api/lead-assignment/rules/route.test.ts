@@ -250,6 +250,38 @@ describe("POST /api/lead-assignment/rules", () => {
     expect(h.rules).toHaveLength(0);
   });
 
+  it("rejects an all-zero allocation and totals above 100%", async () => {
+    const zeros = await POST(
+      req("POST", { ...SWRR, members: [{ user_id: "u-mohan", weight: 0 }, { user_id: "u-sohan", weight: 0 }] }),
+    );
+    expect(zeros.status).toBe(400);
+    expect(((await zeros.json()) as { error: string }).error).toMatch(/exactly 100/);
+    const over = await POST(
+      req("POST", { ...SWRR, members: [{ user_id: "u-mohan", weight: 60 }, { user_id: "u-sohan", weight: 50 }] }),
+    );
+    expect(over.status).toBe(400);
+    expect(((await over.json()) as { error: string }).error).toMatch(/110/);
+    expect(h.rules).toHaveLength(0);
+  });
+
+  it("accepts exactly 100% and Round Robin without allocation", async () => {
+    const ok = await POST(req("POST", SWRR));
+    expect(ok.status).toBe(201);
+    // Round Robin needs no percentage allocation at all.
+    const rr = await POST(
+      req("POST", {
+        name: "RR",
+        scope: "all",
+        mode: "round_robin",
+        tables: [],
+        members: [{ user_id: "u-mohan" }, { user_id: "u-sohan" }],
+      }),
+    );
+    expect(rr.status).toBe(201);
+    const json = (await rr.json()) as { rule: { members: Array<{ weight: number }> } };
+    expect(json.rule.members.every((m) => m.weight === 0)).toBe(true);
+  });
+
   it("409s overlapping specifics and duplicate fallbacks", async () => {
     expect((await POST(req("POST", SWRR))).status).toBe(201);
     const overlap = await POST(req("POST", { ...SWRR, name: "Overlap" }));

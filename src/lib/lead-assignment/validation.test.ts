@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { validateRuleInput } from "./validation";
+import { validateMembersStep, validateRuleInput } from "./validation";
 
 const MEMBERS = [{ user_id: "u-1" }, { user_id: "u-2" }];
 
@@ -67,6 +67,84 @@ describe("validateRuleInput", () => {
       ).toThrow(/whole numbers from 0 to 100/);
     }
   });
+
+describe("validateMembersStep (wizard Step 3 gate)", () => {
+  const swrr = (members: Array<{ user_id: string; weight: number }>) =>
+    validateMembersStep({ mode: "swrr", members });
+
+  it("blocks all members at 0%", () => {
+    expect(
+      swrr([
+        { user_id: "u-1", weight: 0 },
+        { user_id: "u-2", weight: 0 },
+      ]),
+    ).toBe("Set each member's share — the total must be exactly 100%.");
+  });
+
+  it("blocks totals below 100%", () => {
+    expect(
+      swrr([
+        { user_id: "u-1", weight: 60 },
+        { user_id: "u-2", weight: 30 },
+      ]),
+    ).toBe("Total is 90% — must equal exactly 100%.");
+  });
+
+  it("blocks totals above 100%", () => {
+    expect(
+      swrr([
+        { user_id: "u-1", weight: 60 },
+        { user_id: "u-2", weight: 50 },
+      ]),
+    ).toBe("Total is 110% — must equal exactly 100%.");
+  });
+
+  it("passes exactly 100%", () => {
+    expect(
+      swrr([
+        { user_id: "u-1", weight: 60 },
+        { user_id: "u-2", weight: 40 },
+      ]),
+    ).toBeNull();
+  });
+
+  it("becomes invalid again the moment a valid total changes", () => {
+    const members = [
+      { user_id: "u-1", weight: 60 },
+      { user_id: "u-2", weight: 40 },
+    ];
+    expect(swrr(members)).toBeNull();
+    members[1].weight = 30;
+    expect(swrr(members)).toBe("Total is 90% — must equal exactly 100%.");
+  });
+
+  it("rejects non-integer, negative, over-range, and non-numeric shares", () => {
+    for (const weight of [12.5, -1, 101, Number.NaN, "60", null, undefined]) {
+      expect(swrr([{ user_id: "u-1", weight: weight as number }])).toBe(
+        "Percentages must be whole numbers from 0 to 100.",
+      );
+    }
+  });
+
+  it("blocks an empty member list", () => {
+    expect(swrr([])).toBe("Select at least one team member.");
+  });
+
+  it("Round Robin proceeds without any percentage allocation", () => {
+    expect(
+      validateMembersStep({
+        mode: "round_robin",
+        members: [
+          { user_id: "u-1", weight: 0 },
+          { user_id: "u-2", weight: 0 },
+        ],
+      }),
+    ).toBeNull();
+    expect(
+      validateMembersStep({ mode: "round_robin", members: [] }),
+    ).toBe("Select at least one team member.");
+  });
+});
 
   it("allows (but never assigns) 0% members within a valid total", () => {
     const out = swrr({
