@@ -13,10 +13,11 @@ import { isUniqueViolation } from "@/lib/contacts/dedupe";
 import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
 
 import type { TriggerSource } from "./catalog";
+import type { StoredMetaResponse } from "./response";
 import type {
-  MetaCapiConfigRow,
   MetaCapiDeliveryRow,
   MetaCapiMappingRow,
+  MetaCapiConfigRow,
 } from "./types";
 
 // ---------------------------------------------------------------------
@@ -393,6 +394,7 @@ export async function markDeliveryFailed(
   attempts: number,
   error: string,
   nextRetryAt: string | null,
+  response?: StoredMetaResponse | null,
 ): Promise<void> {
   const { error: dbErr } = await db
     .from("meta_capi_deliveries")
@@ -400,6 +402,7 @@ export async function markDeliveryFailed(
       status: "failed",
       attempts,
       last_error: error.slice(0, 500),
+      ...(response === undefined ? {} : { response_payload: response }),
       next_retry_at: nextRetryAt,
       claimed_at: null,
       updated_at: new Date().toISOString(),

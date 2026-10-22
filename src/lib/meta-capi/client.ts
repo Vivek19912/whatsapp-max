@@ -132,6 +132,10 @@ export async function capiRequest<T = Record<string, unknown>>(
     graphType: errorBody?.type,
     graphCode: errorBody?.code,
     graphSubcode: errorBody?.error_subcode,
+    // Keep the complete parsed body (fbtrace_id, error_data,
+    // user_title, nested details, ...) for the delivery ledger.
+    // Never logged.
+    graphBody: parsed ?? (text ? { raw: text.slice(0, 4000) } : null),
   });
 }
 

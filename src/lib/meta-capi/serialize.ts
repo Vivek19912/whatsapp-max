@@ -6,6 +6,7 @@
 // stored (`hasToken`), never its value.
 // ============================================================
 
+import { normalizeStoredResponse } from "./response";
 import type { MetaCapiConfigRow, MetaCapiDeliveryRow, MetaCapiMappingRow } from "./types";
 
 export interface PublicCapiConfig {
@@ -56,6 +57,21 @@ export function toPublicMapping(row: MetaCapiMappingRow) {
   };
 }
 
+export interface PublicDeliveryResponse {
+  /** HTTP status of the Meta exchange, when captured. */
+  httpStatus: number | null;
+  /** Complete Meta response body (sanitized), or null when unavailable. */
+  body: unknown;
+}
+
+export function toPublicDeliveryResponse(
+  row: Pick<MetaCapiDeliveryRow, "response_payload">,
+): PublicDeliveryResponse | null {
+  const normalized = normalizeStoredResponse(row.response_payload);
+  if (!normalized) return null;
+  return { httpStatus: normalized.httpStatus, body: normalized.body };
+}
+
 export function toPublicDelivery(row: MetaCapiDeliveryRow) {
   return {
     id: row.id,
@@ -69,5 +85,6 @@ export function toPublicDelivery(row: MetaCapiDeliveryRow) {
     lastError: row.last_error,
     createdAt: row.created_at,
     deliveredAt: row.delivered_at,
+    response: toPublicDeliveryResponse(row),
   };
 }

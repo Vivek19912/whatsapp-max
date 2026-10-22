@@ -22,7 +22,7 @@ const h = vi.hoisted(() => ({
   mappings: [] as Array<Record<string, unknown>>,
   inserted: [] as Array<Record<string, unknown>>,
   sent: [] as Array<{ id: string; attempts: number }>,
-  failed: [] as Array<{ id: string; error: string; nextRetryAt: string | null }>,
+  failed: [] as Array<{ id: string; error: string; nextRetryAt: string | null; response?: unknown }>,
   eventIds: new Set<string>(),
   sendCalls: [] as Array<Record<string, unknown>>,
   sendOpts: [] as Array<Record<string, unknown>>,
@@ -71,8 +71,9 @@ vi.mock("./store", () => ({
     _attempts: number,
     error: string,
     nextRetryAt: string | null,
+    response?: unknown,
   ) => {
-    h.failed.push({ id, error, nextRetryAt });
+    h.failed.push({ id, error, nextRetryAt, response });
   },
   claimDelivery: async () => h.claimResult,
   getDelivery: async () => h.claimResult,
@@ -336,6 +337,62 @@ describe("fireCapiForAction", () => {
     expect(result.failed).toBe(1);
     expect(h.failed).toHaveLength(1);
     expect(h.failed[0].nextRetryAt).toBeTruthy();
+  });
+
+  it("persists the complete Meta error body with its HTTP status", async () => {
+    const graphBody = {
+      error: {
+        message: "Invalid parameter",
+        type: "OAuthException",
+        code: 100,
+        error_subcode: 2804001,
+        error_data: { blurb: "bad value" },
+        fbtrace_id: "TRACE-1",
+      },
+    };
+    const { MetaGraphError } = await import("@/lib/meta-lead-ads/errors");
+    h.sendImpl = () => {
+      throw new MetaGraphError({
+        message: "Invalid parameter",
+        graphStatus: 400,
+        graphType: "OAuthException",
+        graphCode: 100,
+        graphSubcode: 2804001,
+        graphBody,
+      });
+    };
+
+    await fireCapiForAction(db, platform, {
+      accountId: "acct-1",
+      action: "meta_lead_received",
+      flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
+    });
+
+    expect(h.failed).toHaveLength(1);
+    const stored = (h.failed[0] as { response?: unknown }).response as {
+      httpStatus: number | null;
+      body: unknown;
+    };
+    expect(stored.httpStatus).toBe(400);
+    expect(stored.body).toEqual(graphBody);
+  });
+
+  it("persists the raw response when Meta accepts the call but counts zero events", async () => {
+    h.sendImpl = () => ({ events_received: 0, fbtrace_id: "TRACE-0" });
+
+    await fireCapiForAction(db, platform, {
+      accountId: "acct-1",
+      action: "meta_lead_received",
+      flowRunId: "run-1",
+      matchData: { phone: "+15551234567" },
+    });
+
+    expect(h.failed).toHaveLength(1);
+    const stored = (h.failed[0] as { response?: unknown }).response as {
+      body: unknown;
+    };
+    expect(stored.body).toEqual({ events_received: 0, fbtrace_id: "TRACE-0" });
   });
 });
 

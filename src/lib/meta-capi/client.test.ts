@@ -166,6 +166,54 @@ describe("validateToken", () => {
   });
 });
 
+describe("capiRequest error body capture", () => {
+  it("attaches the complete Meta response body to the thrown error", async () => {
+    const fullBody = {
+      error: {
+        message: "Invalid parameter",
+        type: "OAuthException",
+        code: 100,
+        error_subcode: 2804001,
+        error_data: { blurb: "bad value" },
+        fbtrace_id: "TRACE-ABC",
+      },
+    };
+    const { fetchImpl } = captureFetch(fullBody, 400);
+
+    const failure = await sendEvents(platform, "123", "TOKEN", { data: [] }, {
+      fetchImpl,
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    expect(failure).toBeInstanceOf(MetaGraphError);
+    const graphErr = failure as MetaGraphError & { graphBody?: unknown };
+    expect(graphErr.graphStatus).toBe(400);
+    expect(graphErr.graphBody).toEqual(fullBody);
+  });
+
+  it("captures raw text when Meta returns a non-JSON error body", async () => {
+    const fetchImpl = (async () => {
+      return new Response("gateway exploded", {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      });
+    }) as typeof fetch;
+
+    const failure = await sendEvents(platform, "123", "TOKEN", { data: [] }, {
+      fetchImpl,
+    }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    const graphErr = failure as MetaGraphError & { graphBody?: unknown };
+    expect(graphErr.graphStatus).toBe(502);
+    expect(graphErr.graphBody).toEqual({ raw: "gateway exploded" });
+  });
+});
+
 describe("describeDatasetAccessError", () => {
   it("never reports a #100 dataset failure as an invalid token", async () => {
     const message = describeDatasetAccessError(

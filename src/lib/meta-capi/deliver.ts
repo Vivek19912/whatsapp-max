@@ -18,6 +18,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { MetaLeadAdsError } from "@/lib/meta-lead-ads/errors";
 
 import { sendEvents, type CapiPlatform } from "./client";
+import { buildFailureResponse, toStoredResponse } from "./response";
 import { buildUserData } from "./hash";
 import {
   buildCapiEvent,
@@ -98,11 +99,21 @@ async function attemptDelivery(
       await markDeliverySent(db, delivery.id, res as Record<string, unknown>, attempts);
       return "sent";
     }
-    throw new MetaLeadAdsError(
-      "graph_error",
-      "Meta accepted the request but reported 0 events received.",
-      502,
+    // Meta answered but counted zero events. This is still a real
+    // Meta response, so persist it verbatim alongside the summary —
+    // the ledger keeps the exact Graph answer, not just our label.
+    const willRetryZero = attempts < MAX_DELIVERY_ATTEMPTS;
+    await markDeliveryFailed(
+      db,
+      delivery.id,
+      attempts,
+      "graph_error: Meta accepted the request but reported 0 events received.",
+      willRetryZero
+        ? new Date(Date.now() + nextRetryDelayMs(attempts)).toISOString()
+        : null,
+      toStoredResponse(null, res),
     );
+    return "failed";
   } catch (err) {
     const willRetry = attempts < MAX_DELIVERY_ATTEMPTS;
     await markDeliveryFailed(
@@ -110,9 +121,8 @@ async function attemptDelivery(
       delivery.id,
       attempts,
       safeError(err),
-      willRetry
-        ? new Date(Date.now() + nextRetryDelayMs(attempts)).toISOString()
-        : null,
+      willRetry ? new Date(Date.now() + nextRetryDelayMs(attempts)).toISOString() : null,
+      buildFailureResponse(err),
     );
     return "failed";
   }

@@ -75,6 +75,92 @@ interface Delivery {
   lastError: string | null;
   createdAt: string;
   deliveredAt: string | null;
+  response: { httpStatus: number | null; body: unknown } | null;
+}
+
+/** Safely pretty-print a stored Meta response for inspection. */
+function formatResponseJson(body: unknown): string {
+  try {
+    return JSON.stringify(body ?? null, null, 2) ?? "null";
+  } catch {
+    return String(body);
+  }
+}
+
+function DeliveryResponseDetails({ delivery }: { delivery: Delivery }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const response = delivery.response;
+  const pretty = response ? formatResponseJson(response.body) : "";
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(pretty);
+    } catch {
+      // Clipboard API unavailable (permissions, insecure context):
+      // fall back to a temporary textarea + execCommand.
+      const area = document.createElement("textarea");
+      area.value = pretty;
+      document.body.appendChild(area);
+      area.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        document.body.removeChild(area);
+      }
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="text-xs font-medium text-primary underline-offset-4 hover:underline"
+      >
+        {open ? "Hide full Meta response" : "View full Meta response"}
+      </button>
+      {open && (
+        <div className="mt-2 min-w-0 rounded-md border border-border bg-muted/40 p-3">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-muted-foreground">Event</dt>
+            <dd className="break-words font-medium text-foreground">{delivery.eventName}</dd>
+            <dt className="text-muted-foreground">Status</dt>
+            <dd className="text-foreground">{delivery.status}</dd>
+            <dt className="text-muted-foreground">Time</dt>
+            <dd className="text-foreground">{fmt(delivery.createdAt)}</dd>
+            <dt className="text-muted-foreground">HTTP status</dt>
+            <dd className="text-foreground">
+              {response?.httpStatus ?? "—"}
+            </dd>
+          </dl>
+          {response ? (
+            <>
+              <pre className="mt-2 max-h-72 overflow-auto rounded bg-background p-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap text-foreground">
+                {pretty}
+              </pre>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => void handleCopy()}
+              >
+                {copied ? "Copied" : "Copy response"}
+              </Button>
+            </>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Full response not available for this delivery.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface StatusPayload {
@@ -823,7 +909,7 @@ export function MetaConversionsApiSettings({
                     ) : (
                       <AlertCircle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                     )}
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <span className="font-medium text-foreground">
                         {d.eventName}
                       </span>{" "}
@@ -835,6 +921,7 @@ export function MetaConversionsApiSettings({
                         {d.attempts > 1 ? ` · ${d.attempts} attempts` : ""}
                         {d.lastError ? ` · ${d.lastError}` : ""}
                       </span>
+                      <DeliveryResponseDetails delivery={d} />
                     </div>
                   </div>
                 ))

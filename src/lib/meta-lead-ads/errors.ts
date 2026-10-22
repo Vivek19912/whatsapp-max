@@ -41,6 +41,12 @@ export class MetaGraphError extends MetaLeadAdsError {
   readonly graphType?: string;
   readonly graphCode?: number;
   readonly graphSubcode?: number;
+  /**
+   * The complete parsed response body Meta returned (error object,
+   * fbtrace_id, nested details, ...), or the raw text when the body
+   * was not JSON. Optional and never logged — diagnostics only.
+   */
+  readonly graphBody?: unknown;
 
   constructor(args: {
     code?: MetaLeadAdsErrorCode;
@@ -50,6 +56,7 @@ export class MetaGraphError extends MetaLeadAdsError {
     graphType?: string;
     graphCode?: number;
     graphSubcode?: number;
+    graphBody?: unknown;
   }) {
     super(args.code ?? "graph_error", args.message, args.status ?? 502);
     this.name = "MetaGraphError";
@@ -57,6 +64,7 @@ export class MetaGraphError extends MetaLeadAdsError {
     this.graphType = args.graphType;
     this.graphCode = args.graphCode;
     this.graphSubcode = args.graphSubcode;
+    this.graphBody = args.graphBody;
   }
 }
 
