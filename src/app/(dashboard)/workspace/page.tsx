@@ -1471,16 +1471,53 @@ export default function WorkspacePage() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <Select value={flowId ?? ''} onValueChange={selectFlow}>
               <SelectTrigger
-                className="border-border bg-card w-full sm:w-72"
+                className={
+                  isMetaTable
+                    ? // Meta-only: long Instant Form names need room.
+                      // 24rem (~384px) on desktop, capped at the
+                      // container so nothing overflows; full width
+                      // on small screens.
+                      "border-border bg-card w-full sm:w-[min(24rem,100%)]"
+                    : "border-border bg-card w-full sm:w-72"
+                }
                 aria-label="Select flow"
               >
                 <SelectValue placeholder="Select Flow">
-                  {activeFlowLabel}
+                  {isMetaTable && activeFlowLabel ? (
+                    // Ellipsis + native tooltip when the viewport
+                    // still forces truncation. min-w-0 lets the
+                    // label actually shrink inside the flex value.
+                    <span className="block min-w-0 truncate" title={activeFlowLabel}>
+                      {activeFlowLabel}
+                    </span>
+                  ) : (
+                    activeFlowLabel
+                  )}
                 </SelectValue>
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent
+                className={
+                  isMetaTable
+                    ? "max-w-[calc(100vw-2rem)]"
+                    : undefined
+                }
+              >
                 {flows.map((f) => (
-                  <SelectItem key={f.id} value={f.id}>
+                  <SelectItem
+                    key={f.id}
+                    value={f.id}
+                    title={isMetaTable ? flowDisplayName(f.name) : undefined}
+                    className={
+                      isMetaTable
+                        // Let long option names ellipsize inside the
+                        // (trigger-width) menu instead of clipping.
+                        // shrink-0 on the item text must be overridden
+                        // or flex refuses to shrink and no ellipsis
+                        // appears; the arbitrary variant outranks it.
+                        ? "[&>span]:min-w-0 [&>span]:shrink [&>span]:truncate"
+                        : undefined
+                    }
+                  >
                     {flowDisplayName(f.name)}
                   </SelectItem>
                 ))}
