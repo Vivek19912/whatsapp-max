@@ -21,6 +21,8 @@ import { CallRecordingPanel } from '@/components/settings/call-recording-panel';
 import { BusinessProfileSettings } from '@/components/settings/business-profile';
 import { TravelCrmSettings } from '@/components/settings/travel-crm-settings';
 import { MetaIntegrationSettings } from '@/components/settings/meta-integration-settings';
+import { MetaLeadSheetsSettings } from '@/components/settings/meta-lead-sheets-settings';
+import { SettingsPanelHead } from '@/components/settings/settings-panel-head';
 import { FieldsAndTagsPanel } from '@/components/settings/fields-and-tags-panel';
 import { DealsSettings } from '@/components/settings/deals-settings';
 import { ApiKeysSettings } from '@/components/settings/api-keys-settings';
@@ -100,6 +102,15 @@ export default function SettingsPage() {
     'business-profile': <BusinessProfileSettings />,
     'travel-crm': <TravelCrmSettings />,
     'meta-lead-ads': <MetaIntegrationSettings />,
+    'google-sheets-meta': (
+      <section className="space-y-5">
+        <SettingsPanelHead
+          title="Google Sheets — Meta Lead Ads"
+          description="Google account connection for Meta Lead Ads Workspace tables. Each table's spreadsheet, worksheet tab, and columns are configured separately from the Workspace page (“Configure Sheet”), with its own spreadsheet, worksheet, and columns. Meta-only — Flow Tables are never synced here."
+        />
+        <MetaLeadSheetsSettings />
+      </section>
+    ),
     fields: <FieldsAndTagsPanel />,
     deals: <DealsSettings />,
     api: <ApiKeysSettings />,

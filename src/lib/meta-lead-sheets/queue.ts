@@ -48,6 +48,16 @@ import {
   resolveBusinessDisplays,
   sheetsSourceLabel,
 } from './mapping';
+import { resolveFlowAnswers } from '@/lib/flows/flow-tables';
+import {
+  applyOptionLabelsToAnswers,
+  buildOptionLabelMap,
+  choiceQuestionKeys,
+  type StoredFormQuestion,
+} from '@/lib/meta-lead-ads/option-labels';
+import { questionVarKeys } from '@/lib/meta-lead-ads/virtual-flow';
+import { META_SOURCE_COLUMN_KEY } from '@/lib/meta-lead-ads/virtual-flow';
+import { standardContactFromAnswers } from '@/lib/meta-lead-ads/normalize';
 import { getSheetsAccessToken, SheetsAuthError } from './oauth';
 import {
   appendSheetsRows,
@@ -405,7 +415,24 @@ async function loadTableConfig(
   };
 }
 
-/** Load everything needed to render one sheet row. */
+/**
+ * Load everything needed to render one sheet row.
+ *
+ * Reuses the existing Workspace table data and display-value mapping
+ * for the selected table (never independently reconstructs values
+ * from raw Meta form submissions):
+ *   * flow_runs.vars is the Workspace source (same as the table RPC),
+ *     with workspace_flow_overrides applied (override wins per key),
+ *   * Instant Form option labels + choice fallback map raw values to
+ *     the exact readable text users see (e.g. `3_star` → `3 Star`),
+ *   * system Name/Phone prefer the contact row with the same
+ *     identity fallback the Workspace uses,
+ *   * Source prefers the Workspace answer display, falling back to
+ *     the stored enum label,
+ *   * Submitted At prefers the Workspace run start.
+ * Headers stay aligned via projectRowValues (ID pinned to column A
+ * for stable lead-ID matching), only selected columns in order sync.
+ */
 async function buildRowValues(
   db: SupabaseClient,
   accountId: string,
@@ -415,21 +442,40 @@ async function buildRowValues(
   let fields: Array<{ id: string; name: string }> = [];
   let values: Array<{ field_id: string; value_text: string | null }> = [];
   let roster: Array<{ user_id: string; full_name: string | null }> = [];
+  // Workspace source for this lead (same as the table RPC).
+  let runVars: Record<string, unknown> = {};
+  let runStartedAt: string | null = null;
+  let runContactId: string | null = null;
+  let runFlowId: string | null = null;
+  let overrides: Record<string, string | null> = {};
   if (submission.flow_run_id) {
     const { data: run } = await db
       .from('flow_runs')
-      .select('flow_id')
+      .select('flow_id, vars, started_at, contact_id')
       .eq('id', submission.flow_run_id)
       .eq('account_id', accountId)
       .maybeSingle();
-    const flowId = (run as { flow_id: string } | null)?.flow_id;
-    if (flowId) {
+    const runRow = run as {
+      flow_id?: string | null;
+      vars?: unknown;
+      started_at?: string | null;
+      contact_id?: string | null;
+    } | null;
+    runFlowId = runRow?.flow_id ?? null;
+    if (runRow && typeof runRow.vars === 'object' && runRow.vars !== null) {
+      runVars = runRow.vars as Record<string, unknown>;
+    }
+    runStartedAt =
+      typeof runRow?.started_at === 'string' ? runRow.started_at : null;
+    runContactId =
+      typeof runRow?.contact_id === 'string' ? runRow.contact_id : null;
+    if (runFlowId) {
       const [{ data: fieldRows }, { data: valueRows }] = await Promise.all([
         db
           .from('workspace_fields')
           .select('id, name')
           .eq('account_id', accountId)
-          .eq('flow_id', flowId),
+          .eq('flow_id', runFlowId),
         db
           .from('workspace_values')
           .select('field_id, value_text')
@@ -441,6 +487,25 @@ async function buildRowValues(
         field_id: string;
         value_text: string | null;
       }>;
+      // Agent overrides for flow-derived cells (display wins per key).
+      try {
+        const { data: overrideRows } = await db
+          .from('workspace_flow_overrides')
+          .select('field_key, value_text')
+          .eq('account_id', accountId)
+          .eq('flow_id', runFlowId)
+          .eq('flow_run_id', submission.flow_run_id);
+        for (const o of (overrideRows ?? []) as Array<{
+          field_key: string;
+          value_text: string | null;
+        }>) {
+          if (typeof o.field_key === 'string' && o.field_key !== '') {
+            overrides[o.field_key] = o.value_text ?? null;
+          }
+        }
+      } catch {
+        // Best-effort: missing table/migration degrades to originals.
+      }
     }
   }
   const { data: profiles } = await db
@@ -452,21 +517,140 @@ async function buildRowValues(
     full_name: string | null;
   }>;
   const business = resolveBusinessDisplays({ fields, values, roster });
-  return projectRowValues(
-    buildLeadFieldMap({
-      metaLeadId: submission.meta_lead_id,
-      submittedAt: submission.meta_created_time ?? submission.created_at,
-      answers: submission.answers ?? {},
-      formName: submission.form_name,
-      campaignName: submission.campaign_name,
-      adName: submission.ad_name,
-      source: sheetsSourceLabel(submission.source),
-      assigneeDisplay: business.assigneeDisplay,
-      leadType: business.leadType,
-      stage: business.stage,
-    }),
-    columns
+
+  // Raw Workspace vars (flow_runs.vars, fallback to the stored
+  // submission answers for legacy rows/tests) normalized to the
+  // string|null shape the Workspace table renders.
+  const rawAnswers: Record<string, string | null> = {};
+  const varSource =
+    Object.keys(runVars).length > 0 ? runVars : ((submission.answers ?? {}) as Record<string, unknown>);
+  for (const [k, v] of Object.entries(varSource)) {
+    if (typeof v === 'string') rawAnswers[k] = v;
+    else if (typeof v === 'number' || typeof v === 'boolean')
+      rawAnswers[k] = String(v);
+    else if (v === null || v === undefined) rawAnswers[k] = null;
+  }
+  // Display = override ?? original (same rule the Workspace uses).
+  const withOverrides = resolveFlowAnswers(rawAnswers, overrides);
+
+  // Instant Form display mapping (same lookup the Workspace table
+  // route builds): exact option-key matches first, underscore
+  // fallback for known choice questions. Display-only.
+  let displayAnswers: Record<string, string | null> = { ...withOverrides };
+  try {
+    if (submission.form_id) {
+      const { data: formRow } = await db
+        .from('meta_lead_forms')
+        .select('questions')
+        .eq('account_id', accountId)
+        .eq('form_id', submission.form_id)
+        .maybeSingle();
+      const rawQuestions = (formRow as { questions?: unknown } | null)
+        ?.questions;
+      const rawList = Array.isArray(rawQuestions) ? rawQuestions : [];
+      const stored: StoredFormQuestion[] = rawList.map((entry) => {
+        const e =
+          entry && typeof entry === 'object'
+            ? (entry as Record<string, unknown>)
+            : {};
+        const rawOptions = Array.isArray(e.options) ? e.options : [];
+        return {
+          key: typeof e.key === 'string' ? e.key : null,
+          label: typeof e.label === 'string' ? e.label : null,
+          type: typeof e.type === 'string' ? e.type : null,
+          options: rawOptions.map((o) => {
+            const oo =
+              o && typeof o === 'object' ? (o as Record<string, unknown>) : {};
+            return {
+              key: typeof oo.key === 'string' ? oo.key : null,
+              value: typeof oo.value === 'string' ? oo.value : null,
+            };
+          }),
+        };
+      });
+      const keys = questionVarKeys(stored);
+      const labelMap = buildOptionLabelMap(stored, keys);
+      const choiceKeys = choiceQuestionKeys(stored, keys);
+      if (labelMap.size > 0 || choiceKeys.size > 0) {
+        displayAnswers = applyOptionLabelsToAnswers(
+          withOverrides,
+          labelMap,
+          choiceKeys
+        );
+      }
+    }
+  } catch {
+    // Best-effort: without option metadata values stay as stored.
+  }
+
+  // System Name/Phone match the Workspace: contact wins, else the
+  // standard identity fallback from the (display-mapped) answers.
+  let contactName: string | null = null;
+  let contactPhone: string | null = null;
+  if (runContactId) {
+    try {
+      const { data: contact } = await db
+        .from('contacts')
+        .select('name, phone')
+        .eq('id', runContactId)
+        .eq('account_id', accountId)
+        .maybeSingle();
+      const c = contact as { name?: unknown; phone?: unknown } | null;
+      if (typeof c?.name === 'string' && c.name.trim() !== '')
+        contactName = c.name;
+      if (typeof c?.phone === 'string' && c.phone.trim() !== '')
+        contactPhone = c.phone;
+    } catch {
+      // Best-effort: fall back to answers below.
+    }
+  }
+  const standard = standardContactFromAnswers(
+    displayAnswers as Record<string, string | null | undefined>
   );
+  const workspaceName = contactName ?? standard.name ?? null;
+  const workspacePhone = contactPhone ?? standard.phone ?? null;
+  // Email stays display-mapped (overrides + option labels already
+  // applied; email questions are never choice-mapped).
+  const workspaceEmail = standard.email ?? null;
+
+  const sourceFromWorkspace =
+    typeof displayAnswers[META_SOURCE_COLUMN_KEY] === 'string' &&
+    (displayAnswers[META_SOURCE_COLUMN_KEY] as string).trim() !== ''
+      ? (displayAnswers[META_SOURCE_COLUMN_KEY] as string)
+      : null;
+
+  // displayAnswers carries readable values for every dynamic key;
+  // standard name/phone/email are forced to the Workspace-resolved
+  // contact/fallback so they match the table even when overrides or
+  // contacts differ from the raw submission.
+  const answersForMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(displayAnswers)) {
+    if (typeof v === 'string' && v !== '') answersForMap[k] = v;
+  }
+  // Standard keys reflect Workspace identity resolution.
+  if (workspaceName !== null) answersForMap['full_name'] = workspaceName;
+  if (workspacePhone !== null) answersForMap['phone_number'] = workspacePhone;
+
+  const fieldMap = buildLeadFieldMap({
+    metaLeadId: submission.meta_lead_id,
+    submittedAt:
+      runStartedAt ?? submission.meta_created_time ?? submission.created_at,
+    answers: answersForMap,
+    formName: submission.form_name,
+    campaignName: submission.campaign_name,
+    adName: submission.ad_name,
+    source: sourceFromWorkspace ?? sheetsSourceLabel(submission.source),
+    assigneeDisplay: business.assigneeDisplay,
+    leadType: business.leadType,
+    stage: business.stage,
+  });
+  // Force the Workspace-resolved contact identity onto the standard
+  // slots (buildLeadFieldMap derives them from answers, but the
+  // contact row wins in the Workspace and must win here too).
+  if (workspaceName !== null) fieldMap['name'] = workspaceName;
+  if (workspacePhone !== null) fieldMap['phone'] = workspacePhone;
+  if (workspaceEmail !== null) fieldMap['email'] = workspaceEmail;
+  return projectRowValues(fieldMap, columns);
 }
 
 async function markRowFailed(

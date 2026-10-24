@@ -27,6 +27,10 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { formatColumnLabel } from '@/lib/flows/column-label';
+import { isAssigneeField } from '@/lib/flows/workspace-assignee';
+import { META_SOURCE_COLUMN_KEY } from '@/lib/meta-lead-ads/virtual-flow';
+import { resolveMetaHeaderDisplayLabel } from '@/lib/meta-lead-ads/header-labels';
 
 interface SheetsColumn {
   key: string;
@@ -102,6 +106,98 @@ function previewHeaders(columns: SheetsColumn[]): string[] {
   return [id ? id.label : 'Meta Lead ID', ...rest.map((c) => c.label)];
 }
 
+interface WorkspaceTableColumn {
+  key: string;
+  label: string;
+  system: boolean;
+}
+
+interface WorkspaceCustomField {
+  id: string;
+  name: string;
+}
+
+/**
+ * Build Sheets-available columns from the existing Workspace table
+ * data source (columns + custom fields + header-label overrides).
+ * Uses the exact human-readable labels displayed in Workspace
+ * (formatColumnLabel + stored custom header names), preserving
+ * Workspace capitalization, spacing, and display order.
+ * Identity is stable Sheets keys (`submitted_at`, `name`, `phone`,
+ * `source`, `answer:<key>`, `assignee`, `lead_type`, `stage`);
+ * labels are display-only, so renaming never affects mapping.
+ * Meta Lead ID stays pinned separately (stable lead-ID matching).
+ */
+function buildWorkspaceAvailableColumns(args: {
+  columns: WorkspaceTableColumn[];
+  customFields: WorkspaceCustomField[];
+  headerLabels: Record<string, string>;
+}): SheetsColumn[] {
+  const { columns, customFields, headerLabels } = args;
+  const out: SheetsColumn[] = [];
+  const seen = new Set<string>();
+  const push = (key: string, label: string) => {
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ key, label });
+  };
+  const workspaceLabelFor = (col: WorkspaceTableColumn): string =>
+    resolveMetaHeaderDisplayLabel({
+      flowKind: 'meta_lead_ads',
+      column: col,
+      labels: headerLabels,
+      formatOriginal: formatColumnLabel,
+    });
+  for (const col of columns) {
+    // Workspace system helpers never sync to Sheets.
+    if (col.system && (col.key === 'latest_recording' || col.key === 'status')) {
+      continue;
+    }
+    if (col.system && col.key === 'submission_time') {
+      push('submitted_at', workspaceLabelFor(col));
+      continue;
+    }
+    if (col.system && col.key === 'name') {
+      push('name', workspaceLabelFor(col));
+      continue;
+    }
+    if (col.system && col.key === 'phone') {
+      push('phone', workspaceLabelFor(col));
+      continue;
+    }
+    if (!col.system && col.key === META_SOURCE_COLUMN_KEY) {
+      push('source', workspaceLabelFor(col));
+      continue;
+    }
+    if (!col.system) {
+      push(`answer:${col.key}`, workspaceLabelFor(col));
+      continue;
+    }
+  }
+  // Business columns in Workspace display order: Assigned To first,
+  // then Lead Type / Stage, matching the Workspace table's business
+  // grouping. Labels use the exact Workspace display text.
+  const byName = (n: string) =>
+    customFields.find((f) => f.name.trim().toLowerCase() === n);
+  const assignee = customFields.find((f) => isAssigneeField(f));
+  if (assignee) push('assignee', formatColumnLabel(assignee.name));
+  const leadType = byName('lead type');
+  if (leadType) push('lead_type', formatColumnLabel(leadType.name));
+  const stage = byName('stage');
+  if (stage) push('stage', formatColumnLabel(stage.name));
+  // Email as a first-class standard field when the Workspace table
+  // carries it as a dynamic question: offer the `email` key with the
+  // same Workspace display label so existing configs keep working
+  // while new selections match what users see. The dynamic
+  // `answer:<key>` entry above remains the canonical mapping; this
+  // alias only affects the available list, never values.
+  const emailDynamic = out.find((c) => c.key.toLowerCase() === 'answer:email');
+  if (emailDynamic && !seen.has('email')) {
+    out.push({ key: 'email', label: emailDynamic.label });
+  }
+  return out;
+}
+
 /**
  * Per-table Google Sheets configuration (Meta Lead Ads tables only).
  * Opened from the Workspace table selector via "Configure Sheet".
@@ -128,6 +224,15 @@ export function MetaTableSheetsDialog({
   const [importExisting, setImportExisting] = useState(true);
   const [createTab, setCreateTab] = useState(false);
   const [columns, setColumns] = useState<SheetsColumn[] | null>(null);
+  // Workspace-derived available headers: exact human-readable labels
+  // displayed in the currently selected Workspace table, in Workspace
+  // display order. Built from the existing Workspace table data source
+  // (`/api/flows/[id]/table` + header-labels), never from raw form
+  // questions or normalized keys. Null until loaded; falls back to
+  // the table-config payload lists.
+  const [workspaceAvailable, setWorkspaceAvailable] = useState<
+    SheetsColumn[] | null
+  >(null);
   const prefilled = useRef(false);
   const autoTabsDone = useRef(false);
 
@@ -156,6 +261,55 @@ export function MetaTableSheetsDialog({
         )
       )) as unknown as TableConfigPayload;
       setPayload(json);
+      // Best-effort Workspace headers: exact display labels + order
+      // from the currently selected table. Never blocks the config.
+      try {
+        const [tableRes, labelsRes] = await Promise.all([
+          fetch(`/api/flows/${encodeURIComponent(flowId)}/table?view=all&page=0&pageSize=1`, {
+            cache: 'no-store',
+          }),
+          fetch(
+            `/api/integrations/meta-lead-ads/flows/${encodeURIComponent(flowId)}/header-labels`,
+            { cache: 'no-store' }
+          ),
+        ]);
+        if (tableRes.ok) {
+          const tableJson = (await tableRes.json().catch(() => null)) as {
+            columns?: WorkspaceTableColumn[];
+            customFields?: WorkspaceCustomField[];
+            meta?: { kind?: string | null };
+          } | null;
+          let headerLabels: Record<string, string> = {};
+          if (labelsRes.ok) {
+            const lj = (await labelsRes.json().catch(() => null)) as {
+              labels?: Record<string, string>;
+            } | null;
+            if (lj && typeof lj.labels === 'object' && lj.labels) {
+              headerLabels = lj.labels as Record<string, string>;
+            }
+          }
+          if (
+            tableJson &&
+            tableJson.meta?.kind === 'meta_lead_ads' &&
+            Array.isArray(tableJson.columns)
+          ) {
+            const scopedCustom = (tableJson.customFields ?? []).filter((f) => {
+              const n = (f.name ?? '').trim().toLowerCase();
+              // Mirror the Workspace table: drop the derived
+              // "Lead Received" duplicate for Meta tables.
+              return n !== 'lead received';
+            });
+            const built = buildWorkspaceAvailableColumns({
+              columns: tableJson.columns,
+              customFields: scopedCustom,
+              headerLabels,
+            });
+            if (built.length > 0) setWorkspaceAvailable(built);
+          }
+        }
+      } catch {
+        // Non-fatal: fall back to the config payload lists below.
+      }
       if (!prefilled.current) {
         prefilled.current = true;
         const status = json.status;
@@ -213,6 +367,7 @@ export function MetaTableSheetsDialog({
       autoTabsDone.current = false;
       setTabs(null);
       setTabTouched(false);
+      setWorkspaceAvailable(null);
       void load();
     }
   }, [open, load]);
@@ -439,8 +594,8 @@ export function MetaTableSheetsDialog({
           </p>
         ) : !payload.connection.connected ? (
           <p className="text-muted-foreground text-sm">
-            Connect a Google account first in Settings → Meta → Google Sheets,
-            then configure this table here.
+            Connect a Google account first in Settings → Google Sheets — Meta
+            Lead Ads, then configure this table here.
           </p>
         ) : (
           <div className="space-y-4">
@@ -619,22 +774,63 @@ export function MetaTableSheetsDialog({
                     Available columns
                   </p>
                   <div className="border-border max-h-64 space-y-3 overflow-y-auto rounded-md border p-2">
+                    {workspaceAvailable && workspaceAvailable.length > 0 ? (
+                      <div>
+                        <p className="text-muted-foreground mb-1 text-[11px] tracking-wide uppercase">
+                          This table&apos;s Workspace columns (in table order)
+                        </p>
+                        {workspaceAvailable
+                          .filter((c) => !columnKeys.has(c.key))
+                          .map((c) => (
+                            <button
+                              key={c.key}
+                              type="button"
+                              onClick={() =>
+                                addColumn({ key: c.key, label: c.label })
+                              }
+                              className="hover:bg-muted border-border mr-1.5 mb-1.5 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
+                            >
+                              <Plus className="size-3" /> {c.label}
+                            </button>
+                          ))}
+                        {workspaceAvailable.filter(
+                          (c) => !columnKeys.has(c.key)
+                        ).length === 0 ? (
+                          <p className="text-muted-foreground text-xs">
+                            All Workspace columns are selected.
+                          </p>
+                        ) : null}
+                        <p className="text-muted-foreground mt-1 text-[11px]">
+                          Labels match the Workspace table exactly. Extra
+                          table-config fields (Form Name, Campaign, Ad) remain
+                          available below.
+                        </p>
+                      </div>
+                    ) : null}
                     <div>
                       <p className="text-muted-foreground mb-1 text-[11px] tracking-wide uppercase">
                         Standard lead fields
                       </p>
                       {payload.standard
                         .filter((s) => !columnKeys.has(s.key))
-                        .map((s) => (
-                          <button
-                            key={s.key}
-                            type="button"
-                            onClick={() => addColumn(s)}
-                            className="hover:bg-muted border-border mr-1.5 mb-1.5 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
-                          >
-                            <Plus className="size-3" /> {s.label}
-                          </button>
-                        ))}
+                        .map((s) => {
+                          const wsMatch = workspaceAvailable?.find(
+                            (w) => w.key === s.key
+                          );
+                          const label = wsMatch ? wsMatch.label : s.label;
+                          return (
+                            <button
+                              key={s.key}
+                              type="button"
+                              onClick={() =>
+                                addColumn({ key: s.key, label })
+                              }
+                              className="hover:bg-muted border-border mr-1.5 mb-1.5 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
+                            >
+                              <Plus className="size-3" /> {label}
+                            </button>
+                          );
+                        })}
                     </div>
                     <div>
                       <p className="text-muted-foreground mb-1 text-[11px] tracking-wide uppercase">
@@ -647,18 +843,24 @@ export function MetaTableSheetsDialog({
                       ) : (
                         payload.dynamic
                           .filter((d) => !columnKeys.has(d.key))
-                          .map((d) => (
-                            <button
-                              key={d.key}
-                              type="button"
-                              onClick={() =>
-                                addColumn({ key: d.key, label: d.label })
-                              }
-                              className="hover:bg-muted border-border mr-1.5 mb-1.5 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
-                            >
-                              <Plus className="size-3" /> {d.label}
-                            </button>
-                          ))
+                          .map((d) => {
+                            const wsMatch = workspaceAvailable?.find(
+                              (w) => w.key === d.key
+                            );
+                            const label = wsMatch ? wsMatch.label : d.label;
+                            return (
+                              <button
+                                key={d.key}
+                                type="button"
+                                onClick={() =>
+                                  addColumn({ key: d.key, label })
+                                }
+                                className="hover:bg-muted border-border mr-1.5 mb-1.5 inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
+                              >
+                                <Plus className="size-3" /> {label}
+                              </button>
+                            );
+                          })
                       )}
                     </div>
                   </div>
