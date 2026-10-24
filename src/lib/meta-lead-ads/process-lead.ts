@@ -40,6 +40,8 @@ import {
 } from "./normalize";
 import { getPageToken, markNeedsReauth } from "./store";
 import { maybeEnqueueLeadNotification } from "./notify";
+import { maybeEnqueueSheetsSync } from "@/lib/meta-lead-sheets/queue";
+import { scheduleSheetsDrainSoon } from "@/lib/meta-lead-sheets/trigger";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
 import { maybeAutoAssignLead } from "@/lib/lead-assignment/service";
 
@@ -421,6 +423,32 @@ export async function processSubmissionById(
         submissionId,
         assigneeUserId: assignment.userId,
       });
+    }
+
+    // ADDITIVE Google Sheets sync — queue the new lead AFTER the
+    // Workspace write succeeded. Durable outbox (UNIQUE per
+    // submission), never synchronous Sheets API calls here, never
+    // throws into lead processing. Meta-only: Flow Tables never
+    // reach this path. A genuinely new queue row also schedules a
+    // prompt post-response drain (tracked after()); duplicates and
+    // already-queued rows schedule nothing, and the five-minute cron
+    // stays the fallback.
+    const { enqueued } = await maybeEnqueueSheetsSync(db, {
+      accountId: submission.account_id,
+      submissionId,
+    });
+    if (enqueued) {
+      try {
+        scheduleSheetsDrainSoon({ accountId: submission.account_id });
+      } catch (err) {
+        // Scheduling is best-effort post-commit signalling only;
+        // the committed lead and its queued row are unaffected and
+        // the cron fallback covers the drain.
+        console.error(
+          "[meta-sheets] prompt drain scheduling failed (lead processing unaffected):",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
 
     return { outcome: "processed" };

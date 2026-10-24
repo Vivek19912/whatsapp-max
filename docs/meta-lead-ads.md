@@ -445,6 +445,9 @@ Deployment / platform (do once):
 - [ ] Apply migration `122_meta_capi_app_secret.sql` (CAPI only).
 - [ ] Apply migration `123_meta_lead_manual_setup.sql`.
 - [ ] Apply migration `124_meta_lead_oauth.sql`.
+- [ ] Apply migration `129_meta_lead_google_sheets.sql` (only if you use
+      Google Sheets Sync; no new scheduler — the existing 5-minute cron
+      drains it).
 - [ ] Configure the Page webhook (`leadgen`) at app level in the App
       Dashboard. This remains a manual dashboard action.
 - [ ] Whitelist the OAuth callback in Facebook Login and verify the
@@ -470,3 +473,47 @@ Each additional customer:
 - [ ] That customer's account admin uses Connect with Facebook, selects only
       their own Pages, loads forms, and enables them (no platform/app changes
       needed).
+
+## Google Sheets Sync (Meta-only, live)
+
+An account admin can mirror Meta leads into one Google Sheet automatically.
+**Meta-only**: Flow Tables, All Sheets, CAPI, email notifications, polling
+interval, and Meta OAuth/webhook behavior are untouched.
+
+- **Where.** Settings › Integrations › Meta › Lead capture › **Google Sheets
+  Sync** (separate card; separate Google connection in
+  `meta_lead_sheets_connections`, separate config in
+  `meta_lead_sheets_configs`, durable outbox in `meta_lead_sheets_queue` —
+  migration `129_meta_lead_google_sheets.sql`).
+- **Customer steps.** 1) **Connect Google account** (their own account with
+  Editor access to the target sheet — sheets stay private). 2) Paste the
+  spreadsheet URL/ID + worksheet tab (created if missing). 3) Keep
+  **Automatic sync** on; optionally tick **Import existing leads on save**.
+  4) **Save & enable sync**. **Sync now** retries on demand; **Disconnect**
+  stops future writes without deleting sheet contents.
+- **What syncs.** One row per lead, keyed by the stable **Meta Lead ID**
+  (column A — never phone/name). Columns (A–L): Meta Lead ID, Submitted At
+  (IST), Name, Phone, Email, Form Name, Campaign, Ad, Source, Assigned To,
+  Lead Type (default Fresh), Stage (default New Lead). All enabled forms
+  share the one tab; Form Name disambiguates. Row 1 + columns A–L are
+  managed by WhatsApp Max (manual renames are overwritten); users may add
+  columns to the right of L. Updates (assignment, Stage/Type, cell edits)
+  rewrite the same row — never a duplicate.
+- **How.** Ingestion, assignment, and Workspace cell edits enqueue a durable
+  outbox row (`UNIQUE(account_id, submission_id)`) **after** the DB write —
+  no synchronous Sheets calls in the lead path, failures never roll back
+  leads. The existing 5-minute `meta-lead-ads/cron` sweep drains the outbox
+  (claim → ensure tab/header → update-by-lead-id else append → record row
+  number), with bounded exponential backoff (1m…30m, 8 attempts), 429/5xx
+  retries, quota-safe batching (20 rows/sweep), and long-backoff + actionable
+  `needs_reauth` surfacing on expired/revoked credentials. Resume is safe:
+  interrupted appends are recovered by re-scanning column A before appending.
+- **Google Cloud (operator, once).** Same OAuth client may be reused
+  (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`), but whitelist the extra
+  redirect URI `{origin}/api/integrations/meta-lead-ads/google/callback`.
+  Meta Sheets needs the sensitive `spreadsheets` (+ `userinfo.email`) scope
+  to work with existing customer sheets — complete verification for public
+  use; until then the 100-user cap / unverified-app screen applies.
+- **Limits.** Sheets API quotas (~60 writes/min/user) bound throughput;
+  eventual consistency is expected under bursts. Last success, pending, and
+  failed counts plus the last error are shown in the card.

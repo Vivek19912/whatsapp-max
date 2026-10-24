@@ -184,6 +184,33 @@ export async function PUT(
         .eq("flow_run_id", runId)
         .eq("account_id", accountId);
       if (error) throw error;
+      // ADDITIVE Meta Sheets sync — a Workspace cell was cleared on a
+      // Meta table; queue an in-place sheet row update. Flow Tables
+      // never reach this branch (kind gate). Best-effort: never fails
+      // the save; Uses the RLS client (admin-insert policy scopes it
+      // to this account).
+      try {
+        const { enqueueSheetsSyncForRun } = await import(
+          "@/lib/meta-lead-sheets/queue"
+        );
+        const { data: kindRow } = await supabase
+          .from("flows")
+          .select("kind")
+          .eq("id", id)
+          .eq("account_id", accountId)
+          .maybeSingle();
+        if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
+          await enqueueSheetsSyncForRun(supabase, { accountId, runId });
+          // Prompt post-response drain (tracked `after()`, never a
+          // detached promise); the cron remains the fallback.
+          const { scheduleSheetsDrainSoon } = await import(
+            "@/lib/meta-lead-sheets/trigger"
+          );
+          scheduleSheetsDrainSoon({ accountId });
+        }
+      } catch (err) {
+        console.error("[meta-sheets] cell-clear enqueue failed:", err);
+      }
       return NextResponse.json({ value: null });
     }
 
@@ -217,6 +244,34 @@ export async function PUT(
       });
     } catch (err) {
       console.error("[meta-capi] workspace trigger failed:", err);
+    }
+
+    // ADDITIVE Meta Sheets sync — a Workspace cell changed on a Meta
+    // table; queue an in-place sheet row update. Meta-only (kind
+    // gate); Flow Tables skip this entirely. Best-effort.
+    try {
+      const { enqueueSheetsSyncForRun } = await import(
+        "@/lib/meta-lead-sheets/queue"
+      );
+      const { data: kindRow } = await supabase
+        .from("flows")
+        .select("kind")
+        .eq("id", id)
+        .eq("account_id", accountId)
+        .maybeSingle();
+      if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
+        if (storedValue !== previous) {
+          await enqueueSheetsSyncForRun(supabase, { accountId, runId });
+          // Prompt post-response drain (tracked `after()`, never a
+          // detached promise); the cron remains the fallback.
+          const { scheduleSheetsDrainSoon } = await import(
+            "@/lib/meta-lead-sheets/trigger"
+          );
+          scheduleSheetsDrainSoon({ accountId });
+        }
+      }
+    } catch (err) {
+      console.error("[meta-sheets] cell-save enqueue failed:", err);
     }
 
     return NextResponse.json({ value: storedValue });

@@ -20,6 +20,7 @@ import {
   processSubmissionById,
   recordLeadgenNotification,
 } from "@/lib/meta-lead-ads/process-lead";
+import { drainSheetsQueue } from "@/lib/meta-lead-sheets/queue";
 import { verifyMetaWebhookSignature } from "@/lib/whatsapp/webhook-signature";
 
 export const maxDuration = 60;
@@ -83,6 +84,7 @@ export async function POST(request: Request) {
 
   const admin = supabaseAdmin();
   const toProcess: string[] = [];
+  const sheetAccounts = new Set<string>();
 
   for (const entry of body.entry ?? []) {
     const entryPageId = entry.id != null ? String(entry.id) : "";
@@ -103,6 +105,9 @@ export async function POST(request: Request) {
         if (rec.outcome === "received" && rec.submissionId) {
           toProcess.push(rec.submissionId);
         }
+        // Tenant for the prompt Sheets drain below (resolved
+        // server-side from the Page, never from the payload).
+        if (rec.accountId) sheetAccounts.add(rec.accountId);
       } catch (err) {
         // Never fail the ack on a single bad entry — Meta retries the
         // whole batch on non-2xx, which would duplicate work.
@@ -122,6 +127,21 @@ export async function POST(request: Request) {
         } catch (err) {
           console.error(
             "[meta-lead-ads] processing failed:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      // ADDITIVE prompt Meta Sheets sync — same idempotent,
+      // per-account drain the cron uses, bounded per account.
+      // Already post-response (inside after()); failures are caught
+      // and the five-minute cron covers anything left. Never affects
+      // the ack above, polling, or lead processing. Meta-only.
+      for (const accountId of sheetAccounts) {
+        try {
+          await drainSheetsQueue(admin, { limit: 20, onlyAccountId: accountId });
+        } catch (err) {
+          console.error(
+            "[meta-sheets] prompt drain failed (cron fallback covers):",
             err instanceof Error ? err.message : err,
           );
         }

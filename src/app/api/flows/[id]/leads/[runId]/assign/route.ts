@@ -4,6 +4,7 @@ import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { manualAssign } from "@/lib/lead-assignment/service";
 import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
 import { maybeEnqueueForRun } from "@/lib/meta-lead-ads/notify";
+import { scheduleSheetsDrainSoon } from "@/lib/meta-lead-sheets/trigger";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 /**
@@ -69,6 +70,11 @@ export async function POST(
           assigneeUserId: result.current,
         });
       }
+      // ADDITIVE prompt Meta Sheets sync — the service already queued
+      // the row update (best-effort, Meta-only); schedule the bounded
+      // post-response drain. Tracked `after()`, never detached; the
+      // cron remains the fallback. Never fails the assignment.
+      scheduleSheetsDrainSoon({ accountId });
       return NextResponse.json({ assignment: result });
     } catch (err) {
       const raw =

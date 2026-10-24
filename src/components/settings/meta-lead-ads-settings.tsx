@@ -30,6 +30,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { SettingsPanelHead } from "./settings-panel-head";
+import { MetaLeadSheetsSettings } from "./meta-lead-sheets-settings";
 
 interface PageInfo {
   pageId: string;
@@ -1031,6 +1032,8 @@ export function MetaLeadAdsSettings({
                   </span>
                 </CardContent>
               </Card>
+
+              <MetaLeadSheetsSettings />
 
               <Card>
                 <CardHeader>

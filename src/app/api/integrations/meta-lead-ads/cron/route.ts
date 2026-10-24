@@ -14,6 +14,7 @@ import { metaLeadAdsConfig } from "@/lib/meta-lead-ads/config";
 import { drainMetaLeadNotifications } from "@/lib/meta-lead-ads/notify";
 import { runDueRetries } from "@/lib/meta-lead-ads/process-lead";
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from "@/lib/meta-lead-ads/sync";
+import { drainSheetsQueue } from "@/lib/meta-lead-sheets/queue";
 
 export const dynamic = "force-dynamic";
 
@@ -77,7 +78,21 @@ export async function GET(request: Request) {
     } catch (error) {
       console.error(
         "[meta-lead-ads-cron] notification drain failed:",
-        error instanceof Error ? error.message : String(error),
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    // ADDITIVE Meta Sheets live-sync drain. Same 5-minute sweep, no
+    // new scheduler; per-row failures never affect polling or
+    // notifications, and Sheets failures never roll back leads.
+    // Meta-only: drains only meta_lead_sheets_queue rows.
+    let sheets = { attempted: 0, sent: 0, failed: 0, skippedDisabled: 0, needsReauth: 0 };
+    try {
+      sheets = await drainSheetsQueue(db, { limit: 20 });
+    } catch (error) {
+      console.error(
+        "[meta-lead-ads-cron] sheets drain failed:",
+        error instanceof Error ? error.message : error,
       );
     }
 
@@ -85,6 +100,7 @@ export async function GET(request: Request) {
       ...retries,
       sync,
       notifications,
+      sheets,
       ...(retryError ? { retryError } : {}),
     });
   } catch (error) {

@@ -23,6 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isAssigneeField } from "@/lib/flows/workspace-assignee";
+import { maybeEnqueueSheetsSync } from "@/lib/meta-lead-sheets/queue";
 import { roundRobinNext, swrrNext } from "./algorithms";
 import { ASSIGNABLE_ROLES } from "./members";
 
@@ -402,6 +403,24 @@ export async function assignLead(
     reason: rule.mode,
     createdBy: args.createdBy ?? null,
   });
+  // ADDITIVE Meta Sheets sync — the Assigned To cell changed, so the
+  // existing sheet row must update in place. Best-effort: enqueue
+  // never throws into assignment. Meta-only (this service never
+  // runs for Flow Tables).
+  try {
+    const { data: sub } = await db
+      .from("meta_lead_submissions")
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("flow_run_id", runId)
+      .maybeSingle();
+    const submissionId = (sub as { id: string } | null)?.id;
+    if (submissionId) {
+      await maybeEnqueueSheetsSync(db, { accountId, submissionId });
+    }
+  } catch {
+    // Enqueue is best-effort; assignment already succeeded.
+  }
   return { outcome: "assigned", userId: selected, ruleId: rule.id };
 }
 
@@ -588,5 +607,21 @@ export async function manualAssign(
     reason: null,
     createdBy: args.actorUserId,
   });
+  // ADDITIVE Meta Sheets sync — manual assignment/clear changes the
+  // sheet's Assigned To cell. Best-effort; never fails assignment.
+  try {
+    const { data: sub } = await db
+      .from("meta_lead_submissions")
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("flow_run_id", runId)
+      .maybeSingle();
+    const submissionId = (sub as { id: string } | null)?.id;
+    if (submissionId && stored !== previous) {
+      await maybeEnqueueSheetsSync(db, { accountId, submissionId });
+    }
+  } catch {
+    // Best-effort only.
+  }
   return { previous, current: stored };
 }
