@@ -165,9 +165,16 @@ export function LeadAssignmentPanel() {
     return map;
   }, [roster]);
 
+  const roleByUserId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of roster) map.set(m.user_id, m.role);
+    return map;
+  }, [roster]);
+
   // Same eligibility rule as the assignment backend (single
-  // source in lib/lead-assignment/members): admin/agent only,
-  // presence never filters.
+  // source in lib/lead-assignment/members): owner/admin/agent,
+  // presence never filters. The owner is always eligible even
+  // without an explicit Admin/Agent role.
   const eligibleIds = useMemo(() => new Set(eligibleMemberIds(roster)), [roster]);
   const eligibleRoster = useMemo(
     () => roster.filter((m) => eligibleIds.has(m.user_id)),
@@ -848,7 +855,11 @@ export function LeadAssignmentPanel() {
                       onCheckedChange={() => toggleMember(m.user_id)}
                     />
                     <span className="flex-1">{m.full_name?.trim() || m.user_id}</span>
-                    <span className="text-xs text-muted-foreground capitalize">{m.role}</span>
+                    {m.role === "owner" ? (
+                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">Owner</span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground capitalize">{m.role}</span>
+                    )}
                   </label>
                 ))}
                 {visibleMembers.length === 0 && (
@@ -856,7 +867,7 @@ export function LeadAssignmentPanel() {
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                Only admins and agents can receive leads. Removing someone here never deletes their account.
+                Only owners, admins and agents can receive leads. Removing someone here never deletes their account.
               </p>
 
               {draft.mode === "round_robin" ? (
@@ -869,7 +880,7 @@ export function LeadAssignmentPanel() {
                       {draft.members.map((m, index) => (
                         <li key={m.user_id} className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm">
                           <span className="w-6 font-medium tabular-nums">{index + 1}.</span>
-                          <span className="flex-1">{nameByUserId.get(m.user_id) ?? m.user_id}</span>
+                          <span className="flex-1">{nameByUserId.get(m.user_id) ?? m.user_id}{roleByUserId.get(m.user_id) === "owner" ? " (Owner)" : ""}</span>
                           <Button type="button" variant="ghost" size="sm" disabled={index === 0} aria-label={`Move ${m.user_id} up`} onClick={() => moveMember(m.user_id, -1)}>
                             <ArrowUp className="h-4 w-4" />
                           </Button>
@@ -906,7 +917,7 @@ export function LeadAssignmentPanel() {
                   ) : (
                     draft.members.map((m) => (
                       <div key={m.user_id} className="flex items-center gap-2">
-                        <span className="flex-1 text-sm">{nameByUserId.get(m.user_id) ?? m.user_id}</span>
+                        <span className="flex-1 text-sm">{nameByUserId.get(m.user_id) ?? m.user_id}{roleByUserId.get(m.user_id) === "owner" ? " (Owner)" : ""}</span>
                         <Input
                           type="text"
                           inputMode="numeric"

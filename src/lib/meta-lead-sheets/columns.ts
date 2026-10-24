@@ -11,12 +11,19 @@
 //     ingestion path uses (`questionVarKeys`), so a selected field
 //     always maps to the stored answer. Labels are display-only;
 //     identity is always the key.
-//   * Layout rule: the stable Meta Lead ID is pinned to column A
-//     (hidden via the API when deselected) so row matching never
+//   * Layout rule: headers and values follow the configured column
+//     order exactly; the stable Meta Lead ID sits at its configured
+//     position (last by default, first for legacy selections) and is
+//     hidden via the API when deselected, so row matching never
 //     depends on visibility, naming, or position of other columns.
-//     Visible columns follow the user's saved order.
+//     A NULL column_config reproduces the legacy ID-first layout.
 // ============================================================
 
+import {
+  EMAIL_KEYS,
+  FULL_NAME_KEYS,
+  PHONE_KEYS,
+} from "@/lib/meta-lead-ads/normalize";
 import {
   parseFormQuestions,
   questionVarKeys,
@@ -96,45 +103,181 @@ export function resolveEffectiveColumns(saved: unknown): SheetsColumnDef[] {
   return out;
 }
 
+/**
+ * Remove duplicate column keys, keeping the first occurrence in
+ * order. Used to normalize user selections before saving and
+ * rendering so one Workspace header can never appear twice.
+ * Pure.
+ */
+export function dedupeSheetsColumns<T extends SheetsColumnDef>(
+  columns: readonly T[],
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const col of columns) {
+    if (!col || typeof col.key !== 'string' || seen.has(col.key)) continue;
+    seen.add(col.key);
+    out.push(col);
+  }
+  return out;
+}
+
+/**
+ * The standard Sheets key a dynamic `answer:<key>` option
+ * duplicates, or null when it carries its own data. Identity comes
+ * from the same sanitized answer-key sets ingestion derives the
+ * standard name/phone/email from (normalize.ts) — never from
+ * labels, so a custom question that merely looks similar (a
+ * different key) is always preserved. Pure.
+ */
+export function equivalentStandardKey(
+  sheetsKey: string,
+): "name" | "phone" | "email" | null {
+  const inner = parseAnswerFieldKey(sheetsKey);
+  if (inner === null) return null;
+  if ((FULL_NAME_KEYS as readonly string[]).includes(inner)) return "name";
+  if ((PHONE_KEYS as readonly string[]).includes(inner)) return "phone";
+  if ((EMAIL_KEYS as readonly string[]).includes(inner)) return "email";
+  return null;
+}
+
+/**
+ * Drop dynamic options shadowed by an offered standard counterpart
+ * (`Full name` when `Name` is offered, `Phone number` when `Phone`
+ * is offered, …). The standard entry already syncs the same
+ * underlying Workspace data, so offering both would only produce
+ * duplicate headers with identical values. A twin whose standard
+ * counterpart is absent is kept — offering something beats
+ * offering nothing. Order-preserving. Pure.
+ */
+export function withoutShadowedDynamicColumns<T extends SheetsColumnDef>(
+  options: readonly T[],
+  offered: readonly SheetsColumnDef[],
+): T[] {
+  const offeredKeys = new Set(offered.map((c) => c.key));
+  return options.filter((c) => {
+    const std = equivalentStandardKey(c.key);
+    return std === null || !offeredKeys.has(std);
+  });
+}
+
+/**
+ * Normalize a column selection to unique underlying fields,
+ * preferring the standard key when both it and an equivalent
+ * dynamic twin are selected (`Name` over `Full name`). Exact
+ * duplicates collapse too. Order-preserving (the survivor keeps
+ * the first occurrence's position). Pure.
+ */
+export function dedupeEquivalentColumns<T extends SheetsColumnDef>(
+  columns: readonly T[],
+): T[] {
+  const winners = new Map<string, T>();
+  const order: string[] = [];
+  for (const col of columns) {
+    if (!col || typeof col.key !== "string" || col.key === "") continue;
+    const group = equivalentStandardKey(col.key) ?? col.key;
+    const existing = winners.get(group);
+    if (!existing) {
+      winners.set(group, col);
+      order.push(group);
+      continue;
+    }
+    // Prefer the standard key: it carries the canonical Workspace
+    // display label and resolves the full derivation (including
+    // first+last-name fallbacks the raw answer lacks).
+    const existingIsStandard =
+      existing.key === "name" || existing.key === "phone" || existing.key === "email";
+    const colIsStandard =
+      col.key === "name" || col.key === "phone" || col.key === "email";
+    if (!existingIsStandard && colIsStandard) {
+      winners.set(group, col);
+    }
+  }
+  return order.map((group) => winners.get(group) as T);
+}
+
+/**
+ * Default column selection for a first-time table configuration:
+ * every available Workspace table header, in Workspace table
+ * order, with the Meta Lead ID last. Each key appears exactly
+ * once. When no Workspace header list is available (offline table
+ * read), falls back to the standard + dynamic option order (ID
+ * still last). Labels prefer the Workspace display text so the
+ * selection matches the table exactly. Pure.
+ */
+export function defaultSheetsColumns(args: {
+  workspace: readonly SheetsColumnDef[];
+  standard: readonly SheetsColumnDef[];
+  dynamic: readonly SheetsColumnDef[];
+}): SheetsColumnDef[] {
+  const { workspace, standard, dynamic } = args;
+  const labelFor = (key: string, fallback: string): string => {
+    const hit =
+      workspace.find((c) => c.key === key) ?? standard.find((c) => c.key === key);
+    return hit ? hit.label : fallback;
+  };
+  const source =
+    workspace.length > 0 ? workspace : [...standard, ...dynamic];
+  const out: SheetsColumnDef[] = [];
+  for (const col of source) {
+    if (col.key === META_LEAD_ID_FIELD_KEY) continue;
+    out.push({ key: col.key, label: col.label });
+  }
+  out.push({ key: META_LEAD_ID_FIELD_KEY, label: labelFor(META_LEAD_ID_FIELD_KEY, 'Meta Lead ID') });
+  return dedupeEquivalentColumns(dedupeSheetsColumns(out));
+}
+
 export interface ManagedLayout {
-  /** Full header row cells (row 1), ID pinned at index 0. */
+  /** Full header row cells (row 1), in the configured column order. */
   headers: string[];
   /** Visible columns in user order (may include the ID key). */
   visibleKeys: string[];
   /** Whether the ID column is a selected visible column. */
   idVisible: boolean;
+  /** 0-based position of the ID cell within headers/rows. */
+  idColumnIndex: number;
 }
 
 /**
  * Compute the managed header from the visible column selection.
- * The Meta Lead ID is always pinned to column A (hidden via the
- * API when not selected) so matching never depends on visibility.
+ * Headers and values follow the configured column order exactly —
+ * the Meta Lead ID sits wherever the selection puts it (last by
+ * default for new configurations, first for legacy ID-first ones,
+ * so existing sheets are byte-identical until the user reorders).
+ * When the ID is not selected it is still written (hidden via the
+ * API) after the last visible column so row matching never depends
+ * on visibility.
  */
 export function computeManagedLayout(columns: SheetsColumnDef[]): ManagedLayout {
   const idCol = columns.find((c) => c.key === META_LEAD_ID_FIELD_KEY);
-  const rest = columns.filter((c) => c.key !== META_LEAD_ID_FIELD_KEY);
+  const headers = columns.map((c) => c.label);
+  if (!idCol) headers.push("Meta Lead ID");
   return {
-    headers: [idCol ? idCol.label : "Meta Lead ID", ...rest.map((c) => c.label)],
+    headers,
     visibleKeys: columns.map((c) => c.key),
     idVisible: !!idCol,
+    idColumnIndex: idCol ? columns.findIndex((c) => c.key === META_LEAD_ID_FIELD_KEY) : headers.length - 1,
   };
 }
 
 /**
- * Project a full field map onto a managed data row (ID pinned at
- * index 0 to match `computeManagedLayout`). Missing fields stay
- * blank — a form that does not provide a field simply leaves it
- * empty. Never throws for unknown keys.
+ * Project a full field map onto a managed data row, aligned with
+ * `computeManagedLayout` for the same selection: the ID value
+ * sits at the ID's configured position (last by default, first
+ * for legacy ID-first selections). Missing fields stay blank — a
+ * form that does not provide a field simply leaves it empty.
+ * Never throws for unknown keys.
  */
 export function projectRowValues(
   fieldMap: Record<string, string>,
   columns: SheetsColumnDef[],
 ): string[] {
+  const idValue = fieldMap[META_LEAD_ID_FIELD_KEY] ?? "";
+  const at = columns.findIndex((c) => c.key === META_LEAD_ID_FIELD_KEY);
   const rest = columns.filter((c) => c.key !== META_LEAD_ID_FIELD_KEY);
-  return [
-    fieldMap[META_LEAD_ID_FIELD_KEY] ?? "",
-    ...rest.map((c) => fieldMap[c.key] ?? ""),
-  ];
+  const restValues = rest.map((c) => fieldMap[c.key] ?? "");
+  if (at === -1) return [...restValues, idValue];
+  return [...restValues.slice(0, at), idValue, ...restValues.slice(at)];
 }
 
 export interface DynamicFieldOption {

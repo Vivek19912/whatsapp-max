@@ -1,6 +1,6 @@
 // POST /api/integrations/meta-lead-ads/sheets/tables/[flowId]/cleanup
 //
-// Admin+. EXPLICIT, confirmed removal of THIS Workspace table's
+// Owner-only. EXPLICIT, confirmed removal of THIS Workspace table's
 // managed spreadsheet rows. Only rows with a verified queue mapping
 // (account + this table's form + recorded sheet_row_number) are
 // ever deleted; sent rows without a recorded number and all user
@@ -26,7 +26,7 @@ type Ctx = { params: Promise<{ flowId: string }> };
 export async function POST(request: Request, { params }: Ctx) {
   try {
     const { flowId } = await params;
-    const ctx = await requireRole('admin');
+    const ctx = await requireRole('owner');
     const table = await resolveTableForm(ctx.supabase, ctx.accountId, flowId);
     if (!table) {
       return NextResponse.json({ error: 'Table not found.' }, { status: 404 });

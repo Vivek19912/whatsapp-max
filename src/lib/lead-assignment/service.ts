@@ -13,8 +13,10 @@
 // lead arrivals never duplicate or corrupt sequence positions.
 // Presence (member_presence) is deliberately NOT an eligibility
 // signal — leads are not realtime chats, and presence flapping
-// would corrupt SWRR weights. Ineligible = not an admin/agent
-// member of the account (removed, deactivated, or role-changed).
+// would corrupt SWRR weights. Ineligible = not an owner/admin/
+// agent member of the account (removed, deactivated, or
+// role-changed). The account owner (profiles.account_role =
+// 'owner', or accounts.owner_user_id) is always eligible.
 //
 // Strictly separate from Chat Assignment (src/lib/assignment):
 // nothing is imported from or shared with that engine.
@@ -128,11 +130,15 @@ export async function resolveAssignmentRule(
 }
 
 /**
- * Intersect rule members with the live account roster (admin/agent
- * roles only), preserving configured member order. A removed,
- * deactivated, or demoted member simply drops out — the saved
- * configuration is untouched, so the original allocation resumes
- * when they return.
+ * Intersect rule members with the live account roster (owner/
+ * admin/agent roles only), preserving configured member order. A
+ * removed, deactivated, or demoted member simply drops out — the
+ * saved configuration is untouched, so the original allocation
+ * resumes when they return. The account owner is always eligible:
+ * role `owner` is in ASSIGNABLE_ROLES, and as a backstop the
+ * accounts.owner_user_id for this account is unioned in (after
+ * confirming they hold a profile in the same account, so tenant
+ * isolation is preserved and no role is changed).
  */
 export async function listEligibleUserIds(
   db: SupabaseClient,
@@ -149,6 +155,33 @@ export async function listEligibleUserIds(
   const roster = new Set(
     ((data ?? []) as Array<{ user_id: string }>).map((p) => p.user_id),
   );
+  // Owner backstop: accounts.owner_user_id for THIS account only.
+  // Covers owners whose profile role differs from owner/admin/
+  // agent (e.g. legacy or demoted rows) without widening to any
+  // other account.
+  try {
+    const { data: acct, error: acctErr } = await db
+      .from("accounts")
+      .select("owner_user_id")
+      .eq("id", accountId)
+      .maybeSingle();
+    if (!acctErr && acct) {
+      const ownerUserId = (acct as { owner_user_id?: unknown }).owner_user_id;
+      if (typeof ownerUserId === "string" && ownerUserId !== "") {
+        const { data: ownerProfile, error: ownerErr } = await db
+          .from("profiles")
+          .select("user_id")
+          .eq("account_id", accountId)
+          .eq("user_id", ownerUserId)
+          .maybeSingle();
+        if (!ownerErr && ownerProfile) {
+          roster.add(ownerUserId);
+        }
+      }
+    }
+  } catch {
+    // Backstop is best-effort; role-based eligibility above stands.
+  }
   return members
     .filter((m) => typeof m.user_id === "string" && roster.has(m.user_id))
     .map((m) => m.user_id);

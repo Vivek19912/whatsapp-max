@@ -10,11 +10,11 @@ import {
 } from "./members";
 
 describe("isAssignableRole", () => {
-  it("allows admin and agent only", () => {
-    expect(ASSIGNABLE_ROLES).toEqual(["admin", "agent"]);
+  it("allows owner, admin and agent only", () => {
+    expect([...ASSIGNABLE_ROLES].sort()).toEqual(["admin", "agent", "owner"]);
+    expect(isAssignableRole("owner")).toBe(true);
     expect(isAssignableRole("admin")).toBe(true);
     expect(isAssignableRole("agent")).toBe(true);
-    expect(isAssignableRole("owner")).toBe(false);
     expect(isAssignableRole("viewer")).toBe(false);
     expect(isAssignableRole("superadmin")).toBe(false);
     expect(isAssignableRole(null)).toBe(false);
@@ -23,7 +23,7 @@ describe("isAssignableRole", () => {
 });
 
 describe("eligibleMemberIds", () => {
-  it("selects the owner-excluded admin/agent pool in order", () => {
+  it("includes the owner even without an Admin/Agent role, preserving order", () => {
     const roster = [
       { user_id: "u-owner", role: "owner", full_name: "Olivia" },
       { user_id: "u-mohan", role: "agent", full_name: "Mohan" },
@@ -31,7 +31,28 @@ describe("eligibleMemberIds", () => {
       { user_id: "u-rahul", role: "admin", full_name: "Rahul" },
       { user_id: "u-viewer", role: "viewer", full_name: "Vera" },
     ];
-    expect(eligibleMemberIds(roster)).toEqual(["u-mohan", "u-priya", "u-rahul"]);
+    expect(eligibleMemberIds(roster)).toEqual([
+      "u-owner",
+      "u-mohan",
+      "u-priya",
+      "u-rahul",
+    ]);
+  });
+
+  it("includes a solo owner (no Admin/Agent on the roster)", () => {
+    expect(
+      eligibleMemberIds([{ user_id: "u-owner", role: "owner" }]),
+    ).toEqual(["u-owner"]);
+  });
+
+  it("includes the owner via an explicit owner flag even with a non-assignable role", () => {
+    expect(
+      eligibleMemberIds([
+        { user_id: "u-owner", role: "viewer", is_owner: true },
+        { user_id: "u-other", role: "viewer", isOwner: true },
+        { user_id: "u-plain-viewer", role: "viewer" },
+      ]),
+    ).toEqual(["u-owner", "u-other"]);
   });
 
   it("keeps offline agents eligible (presence is never a signal)", () => {

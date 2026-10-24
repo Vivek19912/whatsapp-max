@@ -7,7 +7,13 @@ import {
   META_SHEETS_LEAD_ID_COL,
   sheetsRetryDelayMs,
 } from "./constants";
-import { buildSheetsRow, resolveBusinessDisplays, sheetsSourceLabel } from "./mapping";
+import { projectRowValues } from "./columns";
+import {
+  buildLeadFieldMap,
+  buildSheetsRow,
+  resolveBusinessDisplays,
+  sheetsSourceLabel,
+} from "./mapping";
 
 describe("meta sheets headers", () => {
   it("owns a fixed 12-column range with the stable lead id first", () => {
@@ -98,6 +104,52 @@ describe("buildSheetsRow", () => {
     });
     expect(a[0]).not.toBe(b[0]);
     expect(a[3]).toBe(b[3]);
+  });
+});
+
+describe("twin selections map to the same correct values", () => {
+  const input = {
+    metaLeadId: "lead-1",
+    submittedAt: null,
+    answers: {
+      full_name: "Asha Rao",
+      phone_number: "+919876543210",
+      budget: "5L",
+      city: "Mumbai",
+    },
+    formName: null,
+    campaignName: null,
+    adName: null,
+    source: null,
+    assigneeDisplay: null,
+    leadType: null,
+    stage: null,
+  };
+
+  it("standard Name/Phone and their dynamic twins project identical values", () => {
+    const map = buildLeadFieldMap(input);
+    expect(map.name).toBe("Asha Rao");
+    expect(map.phone).toBe("+919876543210");
+    // The twins carry the same underlying Workspace data.
+    expect(map["answer:full_name"]).toBe("Asha Rao");
+    expect(map["answer:phone_number"]).toBe("+919876543210");
+    expect(
+      projectRowValues(map, [{ key: "name", label: "Name" }]),
+    ).toEqual(
+      projectRowValues(map, [{ key: "answer:full_name", label: "Full name" }]),
+    );
+  });
+
+  it("distinct custom answers keep their own values", () => {
+    const map = buildLeadFieldMap(input);
+    // Values follow the configured column order; the deselected
+    // ID is written last so matching keeps working.
+    expect(
+      projectRowValues(map, [
+        { key: "answer:budget", label: "Budget" },
+        { key: "answer:city", label: "City" },
+      ]),
+    ).toEqual(["5L", "Mumbai", "lead-1"]);
   });
 });
 

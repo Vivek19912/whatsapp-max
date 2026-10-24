@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { Inbox, Plus, Search, Table2 } from 'lucide-react';
+import { ExternalLink, Inbox, Plus, Search, Table2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -82,6 +82,7 @@ import {
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
+import { resolveSpreadsheetOpenUrl } from '@/lib/meta-lead-sheets/sheets-client';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
@@ -334,7 +335,7 @@ export function cellText(row: FlowTableRow, column: FlowTableColumn): string {
 }
 
 export default function WorkspacePage() {
-  const { accountId, accountRole, canEditSettings, canSendMessages } = useAuth();
+  const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();
   // Agents see Workspace with ONLY their own assigned Meta leads
   // (the table APIs enforce the same ownership server-side).
   const isAgent = accountRole === 'agent';
@@ -357,6 +358,12 @@ export default function WorkspacePage() {
   // Per-table Google Sheets configuration dialog (Meta Lead Ads
   // tables only; Flow Tables never see it).
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
+  // This Meta table's saved spreadsheet URL for the Workspace
+  // open-sheet action. Null until the table-scoped config loads
+  // (or when no spreadsheet is saved) — the button only renders
+  // with a valid URL, so the configuration dialog is the path
+  // otherwise.
+  const [sheetUrl, setSheetUrl] = useState<string | null>(null);
   const [editingField, setEditingField] = useState<WorkspaceField | null>(null);
   // Workspace filters (Date over Submission Time + Assigned To over
   // the live roster). Applied state only — the panel owns its
@@ -903,6 +910,50 @@ export default function WorkspacePage() {
   }, [customFields]);
   const overridesForRequest =
     valueOverrides.key === requestKey ? valueOverrides.map : {};
+
+  // This Meta table's saved spreadsheet URL for the Workspace
+  // open-sheet action — read from the SAME table-scoped config
+  // endpoint the dialog saves (never another table's). Refetched
+  // per selected table AND whenever the configuration dialog
+  // closes, with the previous URL cleared first: saving a new
+  // spreadsheet (e.g. right after Create Spreadsheet) otherwise
+  // leaves this button pointing at the previously connected
+  // sheet until a full page refresh. The dialog's unsaved draft
+  // never touches this state, so the active sheet only changes
+  // after a successful save. Best-effort like the roster above:
+  // failures leave null (no button) and the configuration dialog
+  // remains the path. Owner-gated like the buttons themselves.
+  useEffect(() => {
+    setSheetUrl(null);
+    if (!isMetaTable || !isOwner || !flowId) return;
+    const ctrl = new AbortController();
+    fetch(
+      `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/config`,
+      { signal: ctrl.signal, cache: 'no-store' }
+    )
+      .then(async (res) => {
+        if (!res.ok || ctrl.signal.aborted) return;
+        const json = (await res.json().catch(() => null)) as {
+          status?: {
+            spreadsheetUrl?: unknown;
+            spreadsheetId?: unknown;
+          };
+        } | null;
+        if (ctrl.signal.aborted || !json || typeof json !== 'object') return;
+        const status = json.status;
+        setSheetUrl(
+          resolveSpreadsheetOpenUrl({
+            spreadsheetUrl: status?.spreadsheetUrl ?? null,
+            spreadsheetId: status?.spreadsheetId ?? null,
+          })
+        );
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+    // sheetDialogOpen: refetch on close so a just-saved spreadsheet
+    // takes effect immediately (the refetch on open is harmless —
+    // the dialog covers the header while open).
+  }, [isMetaTable, isOwner, flowId, sheetDialogOpen]);
 
   const reloadTable = useCallback(() => {
     setRefreshSeq((n) => n + 1);
@@ -1530,16 +1581,39 @@ export default function WorkspacePage() {
               {/* Meta Lead Ads tables get a per-table Google Sheets
                   action here. Flow Tables keep exactly what they had
                   (no sheet action is rendered for them). */}
-              {isMetaTable && canEditSettings && flowId ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  onClick={() => setSheetDialogOpen(true)}
-                >
-                  <Table2 className="mr-1.5 size-4" />
-                  Configure Sheet
-                </Button>
+              {/* Owner-only sheet actions, grouped compactly: one
+                  right-aligned group with a single 8px gap, so the
+                  buttons always sit together. Admins, agents, and
+                  viewers never see either button (the APIs enforce
+                  the same owner rule server-side). */}
+              {isMetaTable && isOwner && flowId ? (
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSheetDialogOpen(true)}
+                  >
+                    <Table2 className="mr-1.5 size-4" />
+                    Configure Sheet
+                  </Button>
+                  {/* This table's own saved spreadsheet only — the
+                      URL is refetched per selected table above, and
+                      the button renders solely with a valid URL.
+                      Without one, the configuration dialog is the path. */}
+                  {sheetUrl ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label="Open this table's spreadsheet in a new tab"
+                      onClick={() =>
+                        window.open(sheetUrl, '_blank', 'noopener,noreferrer')
+                      }
+                    >
+                      <ExternalLink className="mr-1.5 size-4" />
+                      Open Sheet
+                    </Button>
+                  ) : null}
+                </div>
               ) : null}
               {/* Meta Lead Ads tables show one unified table (view=all),
               so the Completed/Incomplete tabs are hidden here.

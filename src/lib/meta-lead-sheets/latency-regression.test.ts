@@ -67,8 +67,8 @@ describe('prompt drain — interactive routes (assign / cell / config)', () => {
     expect(s).toContain('remapLayoutChunk(');
     expect(s).toContain('enqueueFormsDelta(');
     expect(s).toContain('[table.formId]');
-    // Still admin-only, still validates spreadsheet access first.
-    expect(s).toContain("requireRole('admin')");
+    // Still owner-only, still validates spreadsheet access first.
+    expect(s).toContain("requireRole('owner')");
     expect(s).toContain('getSheetsAccessToken');
     expect(s).toContain('maxDuration = 60');
   });
@@ -170,7 +170,13 @@ describe('per-table sheets settings - table resolution and enforcement', () => {
     );
     expect(s).toContain('getSheetsAccessToken');
     expect(s).toContain('getSheetsSpreadsheet');
-    expect(s).not.toContain('createWorksheetTab');
+    // Tab creation exists only as an explicit, validated, owner-only
+    // POST (single requested tab, duplicate-safe) — never silent,
+    // never a fallback, and never via a generic ensure helper.
+    expect(s).toContain('validateWorksheetTabName');
+    expect(s).toContain("requireRole('owner')");
+    expect(s).toContain('export async function POST');
+    expect(s).toContain('export async function DELETE');
     expect(s).not.toContain('ensureSheetsTab');
   });
 
@@ -180,7 +186,7 @@ describe('per-table sheets settings - table resolution and enforcement', () => {
     );
     expect(s).toContain(".eq('form_id', table.formId)");
     expect(s).toContain('onlyFormId: table.formId');
-    expect(s).toContain("requireRole('admin')");
+    expect(s).toContain("requireRole('owner')");
   });
 
   it('table cleanup requires an explicit confirmation and verified mappings', () => {
@@ -189,7 +195,7 @@ describe('per-table sheets settings - table resolution and enforcement', () => {
     );
     expect(s).toContain('confirmed');
     expect(s).toContain('cleanupTableRows');
-    expect(s).toContain("requireRole('admin')");
+    expect(s).toContain("requireRole('owner')");
     expect(s).toContain('status: 400');
   });
 
@@ -197,10 +203,13 @@ describe('per-table sheets settings - table resolution and enforcement', () => {
     const s = src('src/components/workspace/meta-table-sheets-dialog.tsx');
     expect(s).toContain('/sheets/tables/');
     expect(s).toContain('Could not load this table');
-    expect(s).toContain('Meta Lead ID is always pinned to column A');
+    // The Header preview box was removed; the dialog still treats
+    // the Meta Lead ID as the stable matching key (positioned
+    // server-side via computeManagedLayout).
+    expect(s).toContain('Meta Lead ID');
     const page = src('src/app/(dashboard)/workspace/page.tsx');
     expect(page).toContain('MetaTableSheetsDialog');
-    expect(page).toContain('isMetaTable && canEditSettings');
+    expect(page).toContain('isMetaTable && isOwner');
     expect(page).toContain('Configure Sheet');
   });
 

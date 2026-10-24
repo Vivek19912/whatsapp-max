@@ -9,11 +9,16 @@ import {
   answerFieldKey,
   buildDynamicFieldOptions,
   computeManagedLayout,
+  dedupeEquivalentColumns,
+  dedupeSheetsColumns,
   DEFAULT_SHEETS_COLUMNS,
+  defaultSheetsColumns,
+  equivalentStandardKey,
   META_LEAD_ID_FIELD_KEY,
   projectRowValues,
   resolveEffectiveColumns,
   validateColumnConfig,
+  withoutShadowedDynamicColumns,
 } from "./columns";
 
 describe("legacy default layout", () => {
@@ -53,26 +58,40 @@ describe("legacy default layout", () => {
 });
 
 describe("custom column selection", () => {
-  it("produces exactly the requested visible headers in order", () => {
+  it("produces exactly the requested visible headers in order, ID last when hidden", () => {
     const columns = [
       { key: "name", label: "Lead Name" },
       { key: "answer:budget", label: "Budget" },
       { key: "stage", label: "Stage" },
     ];
     const layout = computeManagedLayout(columns);
-    // Meta Lead ID is pinned to column A even when hidden.
-    expect(layout.headers).toEqual(["Meta Lead ID", "Lead Name", "Budget", "Stage"]);
+    // A deselected Meta Lead ID is still written (hidden via the
+    // API) after the last visible column so matching keeps working.
+    expect(layout.headers).toEqual(["Lead Name", "Budget", "Stage", "Meta Lead ID"]);
     expect(layout.idVisible).toBe(false);
+    expect(layout.idColumnIndex).toBe(3);
   });
 
-  it("keeps a visible ID column in place with its custom label", () => {
+  it("keeps a legacy ID-first selection at column A", () => {
+    const columns = [
+      { key: "meta_lead_id", label: "Meta Lead ID" },
+      { key: "phone", label: "Phone" },
+    ];
+    const layout = computeManagedLayout(columns);
+    expect(layout.headers).toEqual(["Meta Lead ID", "Phone"]);
+    expect(layout.idVisible).toBe(true);
+    expect(layout.idColumnIndex).toBe(0);
+  });
+
+  it("keeps a visible ID column in its configured place with its custom label", () => {
     const columns = [
       { key: "phone", label: "Phone" },
       { key: "meta_lead_id", label: "Lead Ref" },
     ];
     const layout = computeManagedLayout(columns);
-    expect(layout.headers).toEqual(["Lead Ref", "Phone"]);
+    expect(layout.headers).toEqual(["Phone", "Lead Ref"]);
     expect(layout.idVisible).toBe(true);
+    expect(layout.idColumnIndex).toBe(1);
   });
 
   it("projects rows by key, leaving missing fields blank", () => {
@@ -89,7 +108,26 @@ describe("custom column selection", () => {
       },
       columns,
     );
-    expect(row).toEqual(["lead-1", "Asha", "5L", ""]);
+    expect(row).toEqual(["Asha", "5L", "", "lead-1"]);
+  });
+
+  it("projects the ID at its configured position", () => {
+    const fieldMap = { [META_LEAD_ID_FIELD_KEY]: "L", name: "Asha", phone: "P" };
+    expect(
+      projectRowValues(fieldMap, [
+        { key: "meta_lead_id", label: "Meta Lead ID" },
+        { key: "name", label: "Name" },
+      ]),
+    ).toEqual(["L", "Asha"]);
+    expect(
+      projectRowValues(fieldMap, [
+        { key: "name", label: "Name" },
+        { key: "meta_lead_id", label: "Meta Lead ID" },
+      ]),
+    ).toEqual(["Asha", "L"]);
+    expect(
+      projectRowValues(fieldMap, [{ key: "phone", label: "Phone" }]),
+    ).toEqual(["P", "L"]);
   });
 
   it("renaming a label never changes the mapped values", () => {
@@ -175,6 +213,181 @@ describe("validateColumnConfig", () => {
     expect(validateColumnConfig([{ key: "name", label: "x".repeat(101) }], allowed)).toHaveProperty(
       "error",
     );
+  });
+});
+
+describe("dedupeSheetsColumns", () => {
+  it("keeps the first occurrence of each key in order", () => {
+    expect(
+      dedupeSheetsColumns([
+        { key: "name", label: "Name" },
+        { key: "phone", label: "Phone" },
+        { key: "name", label: "Name Again" },
+        { key: "stage", label: "Stage" },
+        { key: "phone", label: "Phone Again" },
+      ]),
+    ).toEqual([
+      { key: "name", label: "Name" },
+      { key: "phone", label: "Phone" },
+      { key: "stage", label: "Stage" },
+    ]);
+  });
+
+  it("passes unique selections through untouched", () => {
+    const cols = [
+      { key: "meta_lead_id", label: "Meta Lead ID" },
+      { key: "name", label: "Name" },
+    ];
+    expect(dedupeSheetsColumns(cols)).toEqual(cols);
+    expect(dedupeSheetsColumns([])).toEqual([]);
+  });
+});
+
+describe("defaultSheetsColumns", () => {
+  const workspace = [
+    { key: "submitted_at", label: "Submitted At" },
+    { key: "name", label: "Lead Name" },
+    { key: "answer:budget", label: "Budget" },
+    { key: "assignee", label: "Assigned To" },
+  ];
+  const standard = [
+    { key: "meta_lead_id", label: "Meta Lead ID" },
+    { key: "form_name", label: "Form Name" },
+  ];
+  const dynamic = [{ key: "answer:budget", label: "Budget" }];
+
+  it("selects every Workspace header in table order with the ID last, exactly once", () => {
+    const out = defaultSheetsColumns({ workspace, standard, dynamic });
+    expect(out).toEqual([
+      { key: "submitted_at", label: "Submitted At" },
+      { key: "name", label: "Lead Name" },
+      { key: "answer:budget", label: "Budget" },
+      { key: "assignee", label: "Assigned To" },
+      { key: "meta_lead_id", label: "Meta Lead ID" },
+    ]);
+    // The default layout reports the ID at its trailing position so
+    // scans, visibility, and matching follow it there.
+    const layout = computeManagedLayout(out);
+    expect(layout.idColumnIndex).toBe(out.length - 1);
+    expect(layout.headers.at(-1)).toBe("Meta Lead ID");
+    expect(layout.idVisible).toBe(true);
+  });
+
+  it("never duplicates the ID when the Workspace list contains it", () => {
+    const withId = [
+      ...workspace,
+      { key: "meta_lead_id", label: "Meta Lead ID" },
+    ];
+    const out = defaultSheetsColumns({ workspace: withId, standard, dynamic });
+    expect(out.filter((c) => c.key === "meta_lead_id")).toHaveLength(1);
+    expect(out.at(-1)).toEqual({ key: "meta_lead_id", label: "Meta Lead ID" });
+  });
+
+  it("falls back to standard + dynamic order (ID last) when no Workspace headers are available", () => {
+    expect(
+      defaultSheetsColumns({ workspace: [], standard, dynamic }).map((c) => c.key),
+    ).toEqual(["form_name", "answer:budget", "meta_lead_id"]);
+  });
+
+  it("collapses Workspace twins (Name/Full name) in defaults, keeps twins without a counterpart", () => {
+    const withTwins = [
+      ...workspace,
+      { key: "answer:full_name", label: "Full name" },
+      // No `phone` in this Workspace list, so the phone twin stays:
+      // offering something beats offering nothing.
+      { key: "answer:phone_number", label: "Phone number" },
+    ];
+    expect(
+      defaultSheetsColumns({ workspace: withTwins, standard, dynamic }).map((c) => c.key),
+    ).toEqual([
+      "submitted_at",
+      "name",
+      "answer:budget",
+      "assignee",
+      "answer:phone_number",
+      "meta_lead_id",
+    ]);
+  });
+});
+
+describe("equivalentStandardKey", () => {
+  it("maps identity answer keys to their standard field by key, never label", () => {
+    expect(equivalentStandardKey("answer:full_name")).toBe("name");
+    expect(equivalentStandardKey("answer:name")).toBe("name");
+    expect(equivalentStandardKey("answer:phone_number")).toBe("phone");
+    expect(equivalentStandardKey("answer:phone")).toBe("phone");
+    expect(equivalentStandardKey("answer:mobile")).toBe("phone");
+    expect(equivalentStandardKey("answer:email")).toBe("email");
+    expect(equivalentStandardKey("answer:email_address")).toBe("email");
+  });
+
+  it("leaves distinct custom questions and standard keys alone", () => {
+    expect(equivalentStandardKey("answer:budget")).toBeNull();
+    expect(equivalentStandardKey("answer:city")).toBeNull();
+    expect(equivalentStandardKey("answer:phone_ext")).toBeNull();
+    expect(equivalentStandardKey("name")).toBeNull();
+    expect(equivalentStandardKey("phone")).toBeNull();
+    expect(equivalentStandardKey("meta_lead_id")).toBeNull();
+  });
+});
+
+describe("withoutShadowedDynamicColumns", () => {
+  const offered = [
+    { key: "name", label: "Name" },
+    { key: "phone", label: "Phone Number" },
+    { key: "email", label: "Email" },
+  ];
+
+  it("hides Full name / Phone number twins when Name / Phone are offered", () => {
+    expect(
+      withoutShadowedDynamicColumns(
+        [
+          { key: "answer:full_name", label: "Full name" },
+          { key: "answer:phone_number", label: "Phone number" },
+          { key: "answer:budget", label: "Budget" },
+        ],
+        offered,
+      ),
+    ).toEqual([{ key: "answer:budget", label: "Budget" }]);
+  });
+
+  it("keeps a twin when its standard counterpart is absent", () => {
+    expect(
+      withoutShadowedDynamicColumns(
+        [{ key: "answer:full_name", label: "Full name" }],
+        [{ key: "phone", label: "Phone" }],
+      ),
+    ).toEqual([{ key: "answer:full_name", label: "Full name" }]);
+  });
+});
+
+describe("dedupeEquivalentColumns", () => {
+  it("prefers the standard key when both it and a twin are selected", () => {
+    expect(
+      dedupeEquivalentColumns([
+        { key: "answer:full_name", label: "Full name" },
+        { key: "name", label: "Name" },
+        { key: "answer:phone_number", label: "Phone number" },
+        { key: "phone", label: "Phone Number" },
+      ]),
+    ).toEqual([
+      { key: "name", label: "Name" },
+      { key: "phone", label: "Phone Number" },
+    ]);
+  });
+
+  it("keeps distinct custom fields and exact-order otherwise", () => {
+    expect(
+      dedupeEquivalentColumns([
+        { key: "name", label: "Name" },
+        { key: "answer:budget", label: "Budget" },
+        { key: "answer:city", label: "City" },
+      ]),
+    ).toEqual([
+      { key: "name", label: "Name" },
+      { key: "answer:budget", label: "Budget" },
+      { key: "answer:city", label: "City" },
+    ]);
   });
 });
 

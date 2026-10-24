@@ -6,15 +6,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   deleteSheetRows,
+  deleteWorksheetTab,
   ensureSheetsHeader,
+  findSheetsRowsByLeadId,
   isAuthSheetsError,
   isTransientSheetsError,
   parseSheetsSpreadsheetId,
   quoteTabTitle,
+  resolveSpreadsheetOpenUrl,
   rewriteSheetRows,
   setSheetColumnHidden,
   SheetsApiError,
   updateSheetsRow,
+  validateWorksheetTabName,
 } from "./sheets-client";
 import { META_SHEETS_GOOGLE_SCOPES } from "./oauth";
 
@@ -30,6 +34,34 @@ describe("parseSheetsSpreadsheetId", () => {
     );
     expect(parseSheetsSpreadsheetId("not a sheet")).toBeNull();
     expect(parseSheetsSpreadsheetId("")).toBeNull();
+  });
+});
+
+describe("resolveSpreadsheetOpenUrl", () => {
+  it("prefers the saved URL and trims it", () => {
+    expect(
+      resolveSpreadsheetOpenUrl({
+        spreadsheetUrl: "  https://docs.google.com/spreadsheets/d/abc  ",
+        spreadsheetId: "abc",
+      }),
+    ).toBe("https://docs.google.com/spreadsheets/d/abc");
+  });
+
+  it("builds a URL from a bare spreadsheet id", () => {
+    expect(
+      resolveSpreadsheetOpenUrl({ spreadsheetUrl: null, spreadsheetId: "abc123_XYZ-9" }),
+    ).toBe("https://docs.google.com/spreadsheets/d/abc123_XYZ-9");
+  });
+
+  it("returns null without a safe URL or id", () => {
+    expect(resolveSpreadsheetOpenUrl({ spreadsheetUrl: null })).toBeNull();
+    expect(resolveSpreadsheetOpenUrl({ spreadsheetUrl: "" , spreadsheetId: "" })).toBeNull();
+    expect(
+      resolveSpreadsheetOpenUrl({ spreadsheetUrl: "javascript:alert(1)" }),
+    ).toBeNull();
+    expect(
+      resolveSpreadsheetOpenUrl({ spreadsheetUrl: "not a url", spreadsheetId: "has spaces" }),
+    ).toBeNull();
   });
 });
 
@@ -179,6 +211,104 @@ describe("dynamic layout helpers", () => {
   it("surfaces Google failures with status", async () => {
     await expect(
       rewriteSheetRows("t", "s", "Tab", [{ rowNumber: 2, values: ["a"] }], failingFetch(500)),
+    ).rejects.toMatchObject({ status: 500 });
+  });
+});
+
+describe("validateWorksheetTabName", () => {
+  it("accepts ordinary names and trims whitespace", () => {
+    expect(validateWorksheetTabName("  Leads  ")).toEqual({ tab: "Leads" });
+    expect(validateWorksheetTabName("Q1 — Mumbai")).toEqual({ tab: "Q1 — Mumbai" });
+  });
+
+  it("rejects blank, overlong, and non-string input", () => {
+    expect(validateWorksheetTabName("")).toHaveProperty("error");
+    expect(validateWorksheetTabName("   ")).toHaveProperty("error");
+    expect(validateWorksheetTabName("x".repeat(101))).toHaveProperty("error");
+    expect(validateWorksheetTabName(null)).toHaveProperty("error");
+    expect(validateWorksheetTabName(42)).toHaveProperty("error");
+  });
+
+  it("rejects characters Google forbids in sheet titles", () => {
+    for (const bad of ["a[b", "a]b", "a:b", "a*b", "a?b", "a/b", "a\\b"]) {
+      expect(validateWorksheetTabName(bad)).toHaveProperty("error");
+    }
+    expect(validateWorksheetTabName("a\u0007b")).toHaveProperty("error");
+  });
+});
+
+describe("findSheetsRowsByLeadId", () => {
+  function columnFetch(cells: unknown[]) {
+    return vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+        okJson({ values: [cells] }),
+    );
+  }
+
+  it("scans column A by default (legacy ID-first layouts)", async () => {
+    const fetchImpl = columnFetch(["lead-a", "lead-b"]);
+    const found = await findSheetsRowsByLeadId("t", "s", "Tab", ["lead-b"], fetchImpl);
+    expect(found.get("lead-b")).toBe(3);
+    const [url] = lastCall(fetchImpl);
+    expect(String(url)).toContain("!A2:A");
+  });
+
+  it("scans the configured ID column when the ID is last", async () => {
+    const fetchImpl = columnFetch(["lead-a", "lead-b"]);
+    const found = await findSheetsRowsByLeadId("t", "s", "Tab", ["lead-a"], fetchImpl, 3);
+    expect(found.get("lead-a")).toBe(2);
+    const [url] = lastCall(fetchImpl);
+    // 0-based index 3 → column D.
+    expect(String(url)).toContain("!D2:D");
+  });
+});
+
+describe("deleteWorksheetTab", () => {
+  function tabLookupFetch() {
+    return vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> =>
+        okJson({ sheets: [{ properties: { sheetId: 12, title: "Old Tab" } }] }),
+    );
+  }
+
+  it("deletes exactly the resolved sheetId and nothing else", async () => {
+    const lookup = tabLookupFetch();
+    const batch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> => okJson({}),
+    );
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (String(input).endsWith(":batchUpdate")) return batch(String(input), init);
+      return lookup(String(input), init);
+    });
+    await deleteWorksheetTab("t", "spreadsheet-1", "Old Tab", fetchImpl);
+    const [url, init] = lastCall(batch);
+    expect(url).toContain("spreadsheet-1:batchUpdate");
+    expect(JSON.parse((init?.body as string) ?? "")).toEqual({
+      requests: [{ deleteSheet: { sheetId: 12 } }],
+    });
+    // No spreadsheet-level delete: only a single deleteSheet request.
+    expect(lookup).toHaveBeenCalled();
+  });
+
+  it("throws before deleting when the tab does not exist", async () => {
+    const fetchImpl = vi.fn(async (): Promise<Response> =>
+      okJson({ sheets: [{ properties: { sheetId: 1, title: "Other" } }] }),
+    );
+    await expect(
+      deleteWorksheetTab("t", "spreadsheet-1", "Missing", fetchImpl),
+    ).rejects.toThrow(/not found/);
+    expect(fetchImpl.mock.calls.length).toBe(1);
+  });
+
+  it("surfaces Google delete failures with status", async () => {
+    const lookup = tabLookupFetch();
+    const fail = failingFetch(500);
+    const fetchImpl = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      if (String(input).endsWith(":batchUpdate")) return fail(input);
+      return lookup(input);
+    });
+    await expect(
+      deleteWorksheetTab("t", "spreadsheet-1", "Old Tab", fetchImpl),
     ).rejects.toMatchObject({ status: 500 });
   });
 });

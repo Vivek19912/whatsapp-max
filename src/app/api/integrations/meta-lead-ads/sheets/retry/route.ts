@@ -1,6 +1,6 @@
 // POST /api/integrations/meta-lead-ads/sheets/retry
 //
-// Admin+. Manual sync-now: drains this account's due Meta Sheets queue
+// Owner-only. Manual sync-now: drains this account's due Meta Sheets queue
 // rows (force includes auto_sync=false configs). Body optionally
 // narrows to one submission: { submission_id }. Google API failures
 // stay queued with backoff — never silently marked successful.
@@ -14,7 +14,7 @@ import { drainSheetsQueue } from "@/lib/meta-lead-sheets/queue";
 
 export async function POST(request: Request) {
   try {
-    const ctx = await requireRole("admin");
+    const ctx = await requireRole("owner");
     const admin = supabaseAdmin();
     const body = (await request.json().catch(() => null)) as {
       submission_id?: unknown;

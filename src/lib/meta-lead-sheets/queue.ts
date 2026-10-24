@@ -16,9 +16,10 @@
 //   * `drainSheetsQueue` (cron + manual sync-now) claims due rows,
 //     resolves each row's table config by its form, and writes to
 //     Sheets idempotently (update existing row matched by stable
-//     Meta Lead ID column A, else append), recording the sheet row
-//     number for future updates. Rows without a matching table
-//     config are parked untouched (resume on configure).
+//     Meta Lead ID at its configured column, else append),
+//     recording the sheet row number for future updates. Rows
+//     without a matching table config are parked untouched (resume
+//     on configure).
 //   * Google failures use bounded exponential backoff and never roll
 //     back the lead. Auth failures leave rows queued with a long
 //     backoff + surface `needs_reauth` via config.last_error.
@@ -343,6 +344,188 @@ export async function enqueueFormsDelta(
   return { enqueued, alreadyQueued, total: rows.length };
 }
 
+/** Inclusive YYYY-MM-DD day range (UTC) for a manual import. */
+export interface TableImportRange {
+  from: string;
+  to: string;
+}
+
+export interface TableImportResult {
+  /** In-scope candidates (after range filtering). */
+  total: number;
+  /** Newly enqueued leads (new sheet rows on drain). */
+  imported: number;
+  /** Already mapped leads (drain updates them in place, never appends). */
+  updated: number;
+  /** Skipped: no Workspace run to sync (nothing to write). */
+  skipped: number;
+  /** Enqueue errors (non-unique violations). */
+  failed: number;
+  /** True when more candidates exist than the limit allowed. */
+  truncated: boolean;
+}
+
+/** Max submissions classified per manual import call (bounded request). */
+export const TABLE_IMPORT_LIMIT = 2000;
+
+/**
+ * Effective Workspace submission time for one lead: the run's
+ * start time wins (what the Workspace Submission Time column
+ * shows), then the Meta creation time, then row creation. Pure.
+ */
+export function resolveImportSubmittedAt(args: {
+  runStartedAt: string | null;
+  metaCreatedTime: string | null;
+  createdAt: string | null;
+}): string | null {
+  for (const value of [args.runStartedAt, args.metaCreatedTime, args.createdAt]) {
+    if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value))) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Inclusive [fromDay, toDay] day-range check over UTC day
+ * boundaries: from 00:00:00.000 through 23:59:59.999. Pure.
+ */
+export function isWithinImportRange(
+  iso: string | null,
+  fromDay: string,
+  toDay: string
+): boolean {
+  if (typeof iso !== 'string') return false;
+  const at = Date.parse(iso);
+  const from = Date.parse(`${fromDay}T00:00:00.000Z`);
+  const to = Date.parse(`${toDay}T23:59:59.999Z`);
+  if (Number.isNaN(at) || Number.isNaN(from) || Number.isNaN(to)) return false;
+  return at >= from && at <= to;
+}
+
+/**
+ * Manual historical import for ONE table: classify + enqueue that
+ * form's processed submissions (all, or an inclusive submission-day
+ * range), resetting already-mapped rows to queued so the drain
+ * refreshes them in place. Matching is always by stable Meta Lead
+ * ID downstream, so re-imports update instead of duplicating;
+ * Workspace rows are only read, never written. Only callers'
+ * (account, form) scope is touched — every query below carries
+ * both. Throws on DB failures (callers surface them); per-row
+ * enqueue errors are counted, never thrown.
+ */
+export async function importTableLeads(
+  db: SupabaseClient,
+  accountId: string,
+  formId: string,
+  range: TableImportRange | null,
+  limit = TABLE_IMPORT_LIMIT
+): Promise<TableImportResult> {
+  const bounded = Math.max(1, Math.min(limit, TABLE_IMPORT_LIMIT));
+  const { data, error } = await db
+    .from('meta_lead_submissions')
+    .select('id, flow_run_id, meta_lead_id, meta_created_time, created_at')
+    .eq('account_id', accountId)
+    .eq('status', 'processed')
+    .eq('form_id', formId)
+    .order('created_at', { ascending: true })
+    .limit(bounded + 1);
+  if (error) throw error;
+  const rows = ((data ?? []) as Array<{
+    id: string;
+    flow_run_id: string | null;
+    meta_lead_id: string;
+    meta_created_time: string | null;
+    created_at: string;
+  }>);
+  const truncated = rows.length > bounded;
+  const batch = rows.slice(0, bounded);
+
+  // Workspace submission times (run start wins) for range filtering.
+  const runIds = [...new Set(batch.map((r) => r.flow_run_id).filter((v): v is string => typeof v === 'string' && v !== ''))];
+  const startedByRun = new Map<string, string | null>();
+  if (runIds.length > 0) {
+    const { data: runs, error: runErr } = await db
+      .from('flow_runs')
+      .select('id, started_at')
+      .eq('account_id', accountId)
+      .in('id', runIds);
+    if (runErr) throw runErr;
+    for (const run of (runs ?? []) as Array<{ id: string; started_at: string | null }>) {
+      startedByRun.set(run.id, run.started_at ?? null);
+    }
+  }
+
+  // Already-mapped submissions (have a sheet row): the drain will
+  // update them in place rather than append.
+  const mapped = new Set<string>();
+  const subIds = batch.map((r) => r.id);
+  if (subIds.length > 0) {
+    const { data: queued, error: queueErr } = await db
+      .from('meta_lead_sheets_queue')
+      .select('submission_id, sheet_row_number')
+      .eq('account_id', accountId)
+      .in('submission_id', subIds);
+    if (queueErr) throw queueErr;
+    for (const q of (queued ?? []) as Array<{ submission_id: string; sheet_row_number: number | null }>) {
+      if (typeof q.sheet_row_number === 'number') mapped.add(q.submission_id);
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  let total = 0;
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const row of batch) {
+    // No Workspace run: nothing syncable to write.
+    if (!row.flow_run_id) {
+      skipped += 1;
+      continue;
+    }
+    if (range) {
+      const effective = resolveImportSubmittedAt({
+        runStartedAt: startedByRun.get(row.flow_run_id) ?? null,
+        metaCreatedTime: row.meta_created_time ?? null,
+        createdAt: row.created_at ?? null,
+      });
+      if (effective === null || !isWithinImportRange(effective, range.from, range.to)) {
+        continue;
+      }
+    }
+    total += 1;
+    // Reset sent/failed rows so the drain refreshes them in place
+    // (matched by lead ID downstream — never appended twice).
+    // In-flight (queued/sending) rows are left untouched.
+    const { error: resetErr } = await db
+      .from('meta_lead_sheets_queue')
+      .update({ status: 'queued', claimed_at: null, next_retry_at: nowIso, updated_at: nowIso })
+      .eq('account_id', accountId)
+      .eq('submission_id', row.id)
+      .in('status', ['sent', 'failed']);
+    if (resetErr) {
+      failed += 1;
+      continue;
+    }
+    const { error: insertErr } = await db
+      .from('meta_lead_sheets_queue')
+      .insert({
+        account_id: accountId,
+        submission_id: row.id,
+        flow_run_id: row.flow_run_id,
+        meta_lead_id: row.meta_lead_id,
+      });
+    if (insertErr && !isUniqueViolation(insertErr)) {
+      failed += 1;
+      continue;
+    }
+    if (mapped.has(row.id)) updated += 1;
+    else imported += 1;
+  }
+  return { total, imported, updated, skipped, failed, truncated };
+}
+
 export interface DrainResult {
   attempted: number;
   sent: number;
@@ -430,8 +613,9 @@ async function loadTableConfig(
  *   * Source prefers the Workspace answer display, falling back to
  *     the stored enum label,
  *   * Submitted At prefers the Workspace run start.
- * Headers stay aligned via projectRowValues (ID pinned to column A
- * for stable lead-ID matching), only selected columns in order sync.
+ * Headers stay aligned via projectRowValues (ID at its configured
+ * position for stable lead-ID matching), only selected columns in
+ * order sync.
  */
 async function buildRowValues(
   db: SupabaseClient,
@@ -762,7 +946,8 @@ export async function remapLayoutChunk(
       config.spreadsheet_id,
       config.sheet_tab,
       layout.idVisible,
-      fetchImpl
+      fetchImpl,
+      layout.idColumnIndex
     );
     await db
       .from('meta_lead_sheets_configs')
@@ -832,23 +1017,37 @@ export async function remapLayoutChunk(
 }
 
 /**
- * Apply pinned-ID-column visibility: hidden when the ID is not a
- * selected visible column, shown otherwise. Cosmetic; failures are
- * logged and swallowed (data stays correct either way).
+ * Apply ID-column visibility at its configured position: hidden
+ * when the ID is not a selected visible column, shown otherwise.
+ * Cosmetic; failures are logged and swallowed (data stays correct
+ * either way). When the ID no longer sits at the legacy column-A
+ * position, column A is unhidden first so a stale hidden flag from
+ * a pre-reorder layout can never hide the new first data column.
  */
 export async function applyIdColumnVisibility(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
   idVisible: boolean,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  idColumnIndex: number = META_SHEETS_LEAD_ID_COL
 ): Promise<void> {
   try {
+    if (idColumnIndex !== META_SHEETS_LEAD_ID_COL) {
+      await setSheetColumnHidden(
+        accessToken,
+        spreadsheetId,
+        tab,
+        META_SHEETS_LEAD_ID_COL,
+        false,
+        fetchImpl
+      );
+    }
     await setSheetColumnHidden(
       accessToken,
       spreadsheetId,
       tab,
-      META_SHEETS_LEAD_ID_COL,
+      idColumnIndex,
       !idVisible,
       fetchImpl
     );
@@ -1028,10 +1227,11 @@ export async function cleanupTableRows(
  * Drain due queue rows to Google Sheets. Never throws for per-row
  * failures; each outcome is recorded on its row + config.
  *
- * Idempotent: a lead maps to exactly one sheet row via pinned
- * column A (Meta Lead ID). Stored `sheet_row_number` is preferred;
- * on resume (row appended but mapping not saved) we re-scan column
- * A before appending, so retries never duplicate.
+ * Idempotent: a lead maps to exactly one sheet row via the
+ * configured Meta Lead ID column. Stored `sheet_row_number` is
+ * preferred; on resume (row appended but mapping not saved) we
+ * re-scan the ID column before appending, so retries never
+ * duplicate.
  */
 export async function drainSheetsQueue(
   db: SupabaseClient,
@@ -1224,7 +1424,8 @@ export async function drainSheetsQueue(
           config.spreadsheet_id,
           config.sheet_tab,
           [submission.meta_lead_id],
-          fetchImpl
+          fetchImpl,
+          layout.idColumnIndex
         );
         targetRow = found.get(submission.meta_lead_id) ?? null;
       }
@@ -1245,15 +1446,16 @@ export async function drainSheetsQueue(
           [values],
           fetchImpl
         );
-        // Resolve the appended row number by re-scanning column A.
-        // (Sheets append has no row-number response; a second read is
-        // the documented way to learn it.)
+        // Resolve the appended row number by re-scanning the ID
+        // column. (Sheets append has no row-number response; a
+        // second read is the documented way to learn it.)
         const found = await findSheetsRowsByLeadId(
           accessToken,
           config.spreadsheet_id,
           config.sheet_tab,
           [submission.meta_lead_id],
-          fetchImpl
+          fetchImpl,
+          layout.idColumnIndex
         );
         targetRow = found.get(submission.meta_lead_id) ?? null;
       }

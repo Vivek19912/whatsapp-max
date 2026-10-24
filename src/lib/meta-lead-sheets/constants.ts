@@ -3,18 +3,21 @@
 //
 // Meta-only. Nothing here is imported by Flow Tables, All Sheets,
 // or the generic Google Sheets feature. The header below is the
-// integration's owned range (row 1, columns A–L). Policy:
-//   * Column A (Meta Lead ID) is the stable dedup key — never
-//     rename, move, or delete it.
+// legacy owned range (row 1, columns A–L), still used for fresh
+// spreadsheet creation and NULL column configs. Policy:
+//   * The Meta Lead ID is the stable dedup key — never rename or
+//     delete it. Its position follows the configured column order
+//     (last by default; first for legacy layouts); matching scans
+//     that configured position, never a hardcoded column.
 //   * Row 1 headers are managed by WhatsApp Max; manual renames
 //     are overwritten on the next sync.
-//   * Users may add their own columns to the RIGHT of column L;
-//     anything inside A–L may be overwritten by sync updates.
+//   * Users may add their own columns to the RIGHT of the managed
+//     width; anything inside it may be overwritten by sync updates.
 //   * Never write outside this spreadsheet/tab; never touch other
 //     tabs; disconnect never deletes spreadsheet contents.
 // ============================================================
 
-/** Fixed header row owned by this integration. */
+/** Legacy header row (ID first), owned by this integration. */
 export const META_SHEETS_HEADERS = [
   "Meta Lead ID",
   "Submitted At",
@@ -32,7 +35,12 @@ export const META_SHEETS_HEADERS = [
 
 export type MetaSheetsHeader = (typeof META_SHEETS_HEADERS)[number];
 
-/** 0-based index of the stable dedup column. */
+/**
+ * 0-based fallback index of the stable dedup column, matching the
+ * legacy ID-first layout. Layouts always carry their own
+ * `idColumnIndex`; this constant is only the default when no
+ * layout is available.
+ */
 export const META_SHEETS_LEAD_ID_COL = 0;
 
 /** Default worksheet tab name for a fresh config. */

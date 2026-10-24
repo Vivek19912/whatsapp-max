@@ -34,9 +34,16 @@ export function sanitizeQuestionKey(raw: string | null | undefined, index: numbe
   return clean !== "" ? clean : `question_${index}`;
 }
 
-const PHONE_KEYS = ["phone_number", "phone", "mobile", "mobile_number", "whatsapp_number"];
-const EMAIL_KEYS = ["email", "email_address"];
-const FULL_NAME_KEYS = ["full_name", "name", "fullname"];
+/**
+ * Sanitized answer keys that feed each standard contact field
+ * (standardContactFromAnswers reads exactly these sets, in order).
+ * Exported so the Sheets column picker can recognize a dynamic
+ * `answer:<key>` option as the same underlying data as its
+ * standard counterpart — stable identifiers, never labels.
+ */
+export const PHONE_KEYS = ["phone_number", "phone", "mobile", "mobile_number", "whatsapp_number"];
+export const EMAIL_KEYS = ["email", "email_address"];
+export const FULL_NAME_KEYS = ["full_name", "name", "fullname"];
 const FIRST_NAME_KEYS = ["first_name", "firstname"];
 const LAST_NAME_KEYS = ["last_name", "lastname"];
 

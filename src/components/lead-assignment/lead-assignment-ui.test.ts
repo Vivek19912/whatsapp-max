@@ -82,11 +82,22 @@ describe("Lead Assignment member loading (same data as Team Members)", () => {
 
   it("eligibility matches the backend rule and ignores presence", () => {
     const m = src("lib/lead-assignment/members.ts");
-    expect(m).toContain('["admin", "agent"]');
+    expect(m).toContain('"owner"');
+    expect(m).toContain('"admin"');
+    expect(m).toContain('"agent"');
     expect(m).toContain("isAssignableRole");
     const service = src("lib/lead-assignment/service.ts");
     // Single source of truth: the service reuses the same constant.
     expect(service).toContain('from "./members"');
+    // Backend unions the account owner even when their role differs.
+    expect(service).toContain("owner_user_id");
+  });
+
+  it("shows the owner with a clear Owner label in Step 3", () => {
+    const p = src("components/lead-assignment/lead-assignment-panel.tsx");
+    expect(p).toContain("Owner");
+    expect(p).toContain('m.role === "owner"');
+    expect(p).toContain("Only owners, admins and agents can receive leads.");
   });
 
   it("the members API exposes `role` like the Team Members page uses", () => {

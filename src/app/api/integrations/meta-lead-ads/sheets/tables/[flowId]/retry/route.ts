@@ -1,6 +1,6 @@
 // POST /api/integrations/meta-lead-ads/sheets/tables/[flowId]/retry
 //
-// Admin+. Table-scoped manual sync-now: drains this Workspace table's
+// Owner-only. Table-scoped manual sync-now: drains this Workspace table's
 // due Meta Sheets queue rows (force includes auto_sync=false).
 // Body optionally narrows to one submission: { submission_id } —
 // verified to belong to this table's form (tenant + table scoped).
@@ -19,7 +19,7 @@ type Ctx = { params: Promise<{ flowId: string }> };
 export async function POST(request: Request, { params }: Ctx) {
   try {
     const { flowId } = await params;
-    const ctx = await requireRole('admin');
+    const ctx = await requireRole('owner');
     const table = await resolveTableForm(ctx.supabase, ctx.accountId, flowId);
     if (!table) {
       return NextResponse.json({ error: 'Table not found.' }, { status: 404 });

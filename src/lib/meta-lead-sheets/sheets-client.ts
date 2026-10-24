@@ -60,6 +60,28 @@ export function isAuthSheetsError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * Resolve an openable spreadsheet URL from a table's saved
+ * configuration. Prefers the saved URL; falls back to building one
+ * from a bare spreadsheet id. Returns null when neither yields a
+ * safe https? URL — callers hide/disable their open action then.
+ * Pure.
+ */
+export function resolveSpreadsheetOpenUrl(args: {
+  spreadsheetUrl: unknown;
+  spreadsheetId?: unknown;
+}): string | null {
+  const direct =
+    typeof args.spreadsheetUrl === "string" ? args.spreadsheetUrl.trim() : "";
+  if (/^https?:\/\//i.test(direct)) return direct;
+  const id =
+    typeof args.spreadsheetId === "string" ? args.spreadsheetId.trim() : "";
+  if (id !== "" && /^[a-zA-Z0-9-_]+$/.test(id)) {
+    return `https://docs.google.com/spreadsheets/d/${id}`;
+  }
+  return null;
+}
+
 /** Extract a spreadsheet id from a full URL or accept a bare id. */
 export function parseSheetsSpreadsheetId(input: string): string | null {
   const trimmed = input.trim();
@@ -179,6 +201,34 @@ export class TabMissingError extends Error {
 }
 
 /**
+ * Validate a user-supplied worksheet tab name (shared by the
+ * create-tab API route and the configuration dialog so both
+ * reject identically). Google Sheets tab titles must be 1–100
+ * characters and must not contain `[]:*?/\\` or control
+ * characters. Returns the trimmed name or a human-readable error.
+ * Pure.
+ */
+export function validateWorksheetTabName(
+  input: unknown,
+): { tab: string } | { error: string } {
+  if (typeof input !== 'string') {
+    return { error: 'Give the new tab a name (1–100 characters).' };
+  }
+  const tab = input.trim();
+  if (tab === '' || tab.length > 100) {
+    return { error: 'Give the new tab a name (1–100 characters).' };
+  }
+  // Google rejects these characters in sheet titles (and control
+  // characters are never valid titles).
+  if (/[[\]:*?/\\]/.test(tab) || /[\u0000-\u001f\u007f]/.test(tab)) {
+    return {
+      error: 'Tab names cannot contain any of [ ] : * ? / \\.',
+    };
+  }
+  return { tab };
+}
+
+/**
  * Create exactly one worksheet tab. Only called for an explicit
  * user action (opt-in during setup, or an empty spreadsheet with no
  * usable worksheet). Never called implicitly by sync, drain, or
@@ -201,6 +251,35 @@ export async function createWorksheetTab(
     }),
   });
   if (!res.ok) await throwForResponse(res, 'Google Sheets tab create failed');
+}
+
+/**
+ * Delete exactly one worksheet tab by title. Only called for an
+ * explicit, confirmed user action in the configuration dialog.
+ * Resolves the tab to its numeric sheetId first, so only that tab
+ * is ever deleted — the spreadsheet itself and every other tab
+ * are untouched. Never called implicitly by configuration, sync,
+ * drain, or remap paths. Throws when the tab does not exist
+ * (nothing is deleted) and SheetsApiError on Google failures.
+ */
+export async function deleteWorksheetTab(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  const sheetId = await getSheetId(accessToken, spreadsheetId, tab, fetchImpl);
+  const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      requests: [{ deleteSheet: { sheetId } }],
+    }),
+  });
+  if (!res.ok) await throwForResponse(res, 'Google Sheets tab delete failed');
 }
 
 /**
@@ -407,9 +486,9 @@ async function getSheetId(
 }
 
 /**
- * Hide or unhide one 0-based sheet column (used for the pinned
- * Meta Lead ID column when it is not a selected visible column).
- * Cosmetic and idempotent; never deletes data.
+ * Hide or unhide one 0-based sheet column (used for the Meta Lead
+ * ID column at its configured position when it is not a selected
+ * visible column). Cosmetic and idempotent; never deletes data.
  */
 export async function setSheetColumnHidden(
   accessToken: string,
@@ -495,19 +574,23 @@ export async function deleteSheetRows(
 }
 
 /**
- * Find 1-based row numbers for Meta Lead IDs by scanning column A
- * (single read). Returns only IDs that were found.
+ * Find 1-based row numbers for Meta Lead IDs by scanning the
+ * configured ID column (single read). Callers pass the layout's
+ * `idColumnIndex` so matching follows the ID wherever the column
+ * order puts it; the default preserves the legacy column-A scan.
+ * Returns only IDs that were found.
  */
 export async function findSheetsRowsByLeadId(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
   leadIds: string[],
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  idColumnIndex: number = META_SHEETS_LEAD_ID_COL
 ): Promise<Map<string, number>> {
   const found = new Map<string, number>();
   if (leadIds.length === 0) return found;
-  const col = columnLetter(META_SHEETS_LEAD_ID_COL);
+  const col = columnLetter(idColumnIndex);
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!${col}2:${col}`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}?majorDimension=COLUMNS`,

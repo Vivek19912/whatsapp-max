@@ -195,11 +195,12 @@ describe('settings UI separation', () => {
     expect(card).not.toContain('form_ids');
   });
 
-  it('workspace dialog is Meta-table-only and admin-gated', () => {
+  it('workspace dialog is Meta-table-only and owner-gated', () => {
     const page = src('src/app/(dashboard)/workspace/page.tsx');
     expect(page).toContain('MetaTableSheetsDialog');
-    // Only rendered for Meta Lead Ads tables with an admin behind the wheel.
-    expect(page).toContain('isMetaTable && canEditSettings');
+    // Only rendered for Meta Lead Ads tables with the owner behind
+    // the wheel — admins, agents, and viewers see no sheet actions.
+    expect(page).toContain('isMetaTable && isOwner');
     // Flow Table rendering paths are untouched.
     expect(page).toContain('{isMetaTable ? null : (');
   });

@@ -6,10 +6,11 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
+  Download,
+  ExternalLink,
   Loader2,
   Minus,
   Plus,
-  RefreshCw,
   Table2,
   Trash2,
   XCircle,
@@ -31,10 +32,28 @@ import { formatColumnLabel } from '@/lib/flows/column-label';
 import { isAssigneeField } from '@/lib/flows/workspace-assignee';
 import { META_SOURCE_COLUMN_KEY } from '@/lib/meta-lead-ads/virtual-flow';
 import { resolveMetaHeaderDisplayLabel } from '@/lib/meta-lead-ads/header-labels';
+import {
+  dedupeEquivalentColumns,
+  dedupeSheetsColumns,
+  defaultSheetsColumns,
+  withoutShadowedDynamicColumns,
+} from '@/lib/meta-lead-sheets/columns';
+import {
+  resolveSpreadsheetOpenUrl,
+  validateWorksheetTabName,
+} from '@/lib/meta-lead-sheets/sheets-client';
 
 interface SheetsColumn {
   key: string;
   label: string;
+}
+
+interface ImportSummary {
+  imported: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  sent: number;
 }
 
 interface TableSheetsStatus {
@@ -75,35 +94,15 @@ interface TableConfigPayload {
   standard: SheetsColumn[];
   dynamic: SheetsColumn[];
   selectedColumns: SheetsColumn[] | null;
+  /** True when the table has an explicitly saved column selection. */
+  hasCustomColumns: boolean;
   status: TableSheetsStatus;
 }
-
-const DEFAULT_COLUMNS: SheetsColumn[] = [
-  { key: 'meta_lead_id', label: 'Meta Lead ID' },
-  { key: 'submitted_at', label: 'Submitted At' },
-  { key: 'name', label: 'Name' },
-  { key: 'phone', label: 'Phone' },
-  { key: 'email', label: 'Email' },
-  { key: 'form_name', label: 'Form Name' },
-  { key: 'campaign_name', label: 'Campaign' },
-  { key: 'ad_name', label: 'Ad' },
-  { key: 'source', label: 'Source' },
-  { key: 'assignee', label: 'Assigned To' },
-  { key: 'lead_type', label: 'Lead Type' },
-  { key: 'stage', label: 'Stage' },
-];
 
 function fmt(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
-}
-
-/** Desired header preview: Meta Lead ID is always pinned to column A. */
-function previewHeaders(columns: SheetsColumn[]): string[] {
-  const id = columns.find((c) => c.key === 'meta_lead_id');
-  const rest = columns.filter((c) => c.key !== 'meta_lead_id');
-  return [id ? id.label : 'Meta Lead ID', ...rest.map((c) => c.label)];
 }
 
 interface WorkspaceTableColumn {
@@ -188,14 +187,18 @@ function buildWorkspaceAvailableColumns(args: {
   // Email as a first-class standard field when the Workspace table
   // carries it as a dynamic question: offer the `email` key with the
   // same Workspace display label so existing configs keep working
-  // while new selections match what users see. The dynamic
-  // `answer:<key>` entry above remains the canonical mapping; this
-  // alias only affects the available list, never values.
+  // while new selections match what users see. This alias only
+  // affects the available list, never values.
   const emailDynamic = out.find((c) => c.key.toLowerCase() === 'answer:email');
   if (emailDynamic && !seen.has('email')) {
     out.push({ key: 'email', label: emailDynamic.label });
   }
-  return out;
+  // Drop dynamic twins shadowed by an offered standard counterpart
+  // (`Full name` when `Name` is offered, `Phone number` when `Phone`
+  // is offered): the standard entry syncs the same underlying
+  // Workspace data, so offering both would only produce duplicate
+  // headers with identical values. Twins without a counterpart stay.
+  return withoutShadowedDynamicColumns(out, out);
 }
 
 /**
@@ -221,9 +224,19 @@ export function MetaTableSheetsDialog({
   const [tab, setTab] = useState('');
   const [tabTouched, setTabTouched] = useState(false);
   const [autoSync, setAutoSync] = useState(true);
-  const [importExisting, setImportExisting] = useState(true);
-  const [createTab, setCreateTab] = useState(false);
+  // Null until the configuration load decides: a saved selection
+  // is applied verbatim (customizations preserved), otherwise every
+  // available Workspace header is selected by default, exactly once.
   const [columns, setColumns] = useState<SheetsColumn[] | null>(null);
+  const [newTabName, setNewTabName] = useState('');
+  // Manual historical import panel state (separate from automatic
+  // sync): collapsed by default, reset every time the dialog opens.
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<'all' | 'range'>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   // Workspace-derived available headers: exact human-readable labels
   // displayed in the currently selected Workspace table, in Workspace
   // display order. Built from the existing Workspace table data source
@@ -263,6 +276,9 @@ export function MetaTableSheetsDialog({
       setPayload(json);
       // Best-effort Workspace headers: exact display labels + order
       // from the currently selected table. Never blocks the config.
+      // Captured locally so the first-time default below can use
+      // the Workspace order even before state settles.
+      let workspaceHeaders: SheetsColumn[] | null = null;
       try {
         const [tableRes, labelsRes] = await Promise.all([
           fetch(`/api/flows/${encodeURIComponent(flowId)}/table?view=all&page=0&pageSize=1`, {
@@ -304,7 +320,10 @@ export function MetaTableSheetsDialog({
               customFields: scopedCustom,
               headerLabels,
             });
-            if (built.length > 0) setWorkspaceAvailable(built);
+            if (built.length > 0) {
+              setWorkspaceAvailable(built);
+              workspaceHeaders = built;
+            }
           }
         }
       } catch {
@@ -322,7 +341,26 @@ export function MetaTableSheetsDialog({
           setTabTouched(true);
         }
         setAutoSync(status.autoSync);
-        setColumns(json.selectedColumns ?? DEFAULT_COLUMNS);
+        // An explicitly saved selection is applied verbatim —
+        // existing user customizations are never silently replaced
+        // (even an ID-first order the user chose stays until they
+        // reorder it). Anything else — new configurations and
+        // legacy rows that predate column selection — defaults to
+        // every available Workspace header, in table order, with
+        // the Meta Lead ID last, exactly once.
+        const saved =
+          json.hasCustomColumns ? (json.selectedColumns ?? null) : null;
+        if (saved && saved.length > 0) {
+          setColumns(dedupeSheetsColumns(saved));
+        } else {
+          setColumns(
+            defaultSheetsColumns({
+              workspace: workspaceHeaders ?? [],
+              standard: json.standard,
+              dynamic: json.dynamic,
+            })
+          );
+        }
         // Fresh table with a spreadsheet but no saved tab yet: list
         // tabs once so the first existing (leftmost) tab becomes the
         // default without an extra click.
@@ -368,6 +406,14 @@ export function MetaTableSheetsDialog({
       setTabs(null);
       setTabTouched(false);
       setWorkspaceAvailable(null);
+      setColumns(null);
+      setNewTabName('');
+      setImportOpen(false);
+      setImportMode('all');
+      setDateFrom('');
+      setDateTo('');
+      setImportResult(null);
+      setImportError(null);
       void load();
     }
   }, [open, load]);
@@ -394,6 +440,118 @@ export function MetaTableSheetsDialog({
       if (json.tabs.length === 0) {
         toast.error('This spreadsheet has no usable worksheet tab.');
       }
+    });
+  }
+
+  /**
+   * Create one Google Spreadsheet in the connected account for this
+   * table, then populate the URL field and select its first tab.
+   * Configuration, columns, and sync controls are untouched, and no
+   * sync starts — the user still saves explicitly afterwards.
+   */
+  function createSpreadsheet() {
+    void act('createsheet', async () => {
+      const json = (await readJson(
+        await fetch('/api/integrations/meta-lead-ads/sheets/spreadsheets', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ flow_id: flowId }),
+        })
+      )) as unknown as {
+        spreadsheet_id: string;
+        url: string;
+        title: string;
+        tabs: string[];
+      };
+      // Populate the URL field from the response (fall back to the
+      // bare id when Google omits the URL).
+      setSpreadsheet(json.url || json.spreadsheet_id);
+      setTabs(json.tabs);
+      if (json.tabs.length > 0) {
+        setTab(json.tabs[0] as string);
+        setTabTouched(true);
+      } else {
+        setTab('');
+        setTabTouched(false);
+      }
+      toast.success(`Spreadsheet "${json.title}" created — review and save.`);
+    });
+  }
+
+  /** Create one worksheet tab now, refresh tabs, select it. */
+  function createNewTab() {
+    if (!spreadsheet.trim()) {
+      toast.error('Paste a spreadsheet URL or ID first.');
+      return;
+    }
+    const name = validateWorksheetTabName(newTabName);
+    if ('error' in name) {
+      toast.error(name.error);
+      return;
+    }
+    // Google treats tab titles case-insensitively — reject a
+    // duplicate without a round trip when the live list shows it.
+    if ((tabs ?? []).some((t) => t.toLowerCase() === name.tab.toLowerCase())) {
+      toast.error(`A worksheet tab named "${name.tab}" already exists.`);
+      return;
+    }
+    void act('createtab', async () => {
+      const json = (await readJson(
+        await fetch('/api/integrations/meta-lead-ads/sheets/tabs', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            flow_id: flowId,
+            spreadsheet_url: spreadsheet.trim(),
+            tab: name.tab,
+          }),
+        })
+      )) as unknown as { tab: string; tabs: string[] };
+      setTabs(json.tabs);
+      setTab(json.tab);
+      setTabTouched(true);
+      setNewTabName('');
+      toast.success(`Worksheet tab "${json.tab}" created and selected.`);
+    });
+  }
+
+  /**
+   * Delete exactly the selected worksheet tab after an explicit
+   * confirmation. Only that tab is removed — the spreadsheet,
+   * every other tab, and all table configurations are untouched.
+   * Never called automatically by configuration or sync.
+   */
+  function deleteSelectedTab() {
+    const name = tab.trim();
+    if (!spreadsheet.trim()) {
+      toast.error('Paste a spreadsheet URL or ID first.');
+      return;
+    }
+    if (!name) {
+      toast.error('Select a worksheet tab to delete.');
+      return;
+    }
+    if (
+      !window.confirm(
+        `Delete worksheet tab "${name}"? Only this tab and its contents are removed — the spreadsheet and every other tab stay untouched. This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    void act('deletetab', async () => {
+      const json = (await readJson(
+        await fetch(
+          `/api/integrations/meta-lead-ads/sheets/tabs?spreadsheet_id=${encodeURIComponent(spreadsheet.trim())}&tab=${encodeURIComponent(name)}&flow_id=${encodeURIComponent(flowId)}`,
+          { method: 'DELETE', cache: 'no-store' }
+        )
+      )) as unknown as { deleted: string; tabs: string[] };
+      setTabs(json.tabs);
+      // Clear the selection only when the deleted tab was selected.
+      if (tab.trim() === json.deleted) {
+        setTab('');
+        setTabTouched(false);
+      }
+      toast.success(`Worksheet tab "${json.deleted}" deleted.`);
     });
   }
 
@@ -454,6 +612,15 @@ export function MetaTableSheetsDialog({
       return;
     }
     void act('save', async () => {
+      // Normalize to unique underlying fields in order: one
+      // Workspace header can never be saved (or synced) twice, and
+      // a dynamic twin (`Full name`) collapses into its standard
+      // counterpart (`Name`) which syncs the same values. The
+      // server re-validates and rejects duplicates with a clear
+      // error as a backstop.
+      const uniqueColumns = dedupeEquivalentColumns(
+        dedupeSheetsColumns(columns)
+      );
       const json = (await readJson(
         await fetch(
           `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/config`,
@@ -463,10 +630,11 @@ export function MetaTableSheetsDialog({
             body: JSON.stringify({
               spreadsheet_url: spreadsheet.trim(),
               sheet_tab: tab.trim(),
-              create_tab: createTab,
+              // Tabs are never created implicitly: the tab must
+              // already exist or be created via Create tab above.
+              create_tab: false,
               auto_sync: autoSync,
-              import_existing: importExisting,
-              columns,
+              columns: uniqueColumns,
             }),
           }
         )
@@ -498,22 +666,70 @@ export function MetaTableSheetsDialog({
           ? `Configuration saved (${parts.join('; ')}).`
           : 'Configuration saved. New and updated leads will sync automatically.'
       );
-      await load();
+      // Success closes the dialog (fresh config + status load on
+      // next open). Failures and validation errors return before
+      // this point, so the dialog stays open with the error shown.
+      onOpenChange(false);
     });
   }
 
-  function syncNow() {
-    void act('retry', async () => {
-      const json = (await readJson(
-        await fetch(
-          `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/retry`,
-          { method: 'POST' }
-        )
-      )) as { sent: number; failed: number };
-      toast.success(
-        `Sync pass finished: ${json.sent} sent, ${json.failed} failed.`
-      );
-      await load();
+  /**
+   * Manual historical import for this table only (separate from
+   * automatic sync, which only handles new + updated leads). The
+   * server enqueues this table's existing leads (all, or an
+   * inclusive submission-day range) and drains them into the
+   * configured sheet, matching by stable Meta Lead ID so existing
+   * rows update instead of duplicating.
+   */
+  function startImport() {
+    if (importMode === 'range' && (!dateFrom || !dateTo)) {
+      toast.error('Select a start and end date to import.');
+      return;
+    }
+    if (importMode === 'range' && dateFrom > dateTo) {
+      toast.error('The start date must be on or before the end date.');
+      return;
+    }
+    void act('import', async () => {
+      try {
+        const json = (await readJson(
+          await fetch(
+            `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import`,
+            {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(
+                importMode === 'range'
+                  ? { mode: 'range', from: dateFrom, to: dateTo }
+                  : { mode: 'all' }
+              ),
+            }
+          )
+        )) as {
+          ok: boolean;
+          import: {
+            imported: number;
+            updated: number;
+            skipped: number;
+            failed: number;
+          };
+          drain?: { sent: number; failed: number } | null;
+        };
+        setImportError(null);
+        setImportResult({
+          imported: json.import.imported,
+          updated: json.import.updated,
+          skipped: json.import.skipped,
+          failed: json.import.failed + (json.drain?.failed ?? 0),
+          sent: json.drain?.sent ?? 0,
+        });
+        await load();
+      } catch (err) {
+        setImportError(
+          err instanceof Error ? err.message : 'Import failed.'
+        );
+        throw err;
+      }
     });
   }
 
@@ -554,8 +770,14 @@ export function MetaTableSheetsDialog({
   }
 
   const status = payload?.status ?? null;
-  const headers = previewHeaders(columns ?? DEFAULT_COLUMNS);
   const managedRows = status?.cleanupPreview.managedRows ?? 0;
+  // The SAVED spreadsheet URL for the open-spreadsheet action —
+  // never the editable text field above (unsaved input must not
+  // leak into another tab). Null until a spreadsheet is saved.
+  const savedSpreadsheetUrl = resolveSpreadsheetOpenUrl({
+    spreadsheetUrl: status?.spreadsheetUrl ?? null,
+    spreadsheetId: status?.spreadsheetId ?? null,
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -627,7 +849,7 @@ export function MetaTableSheetsDialog({
                 <Label htmlFor="meta-table-sheets-url">
                   Spreadsheet URL or ID
                 </Label>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-2">
                   <Input
                     id="meta-table-sheets-url"
                     placeholder="https://docs.google.com/spreadsheets/d/…"
@@ -637,6 +859,99 @@ export function MetaTableSheetsDialog({
                   />
                   <Button
                     variant="outline"
+                    size="icon"
+                    className="shrink-0"
+                    aria-label="Open Spreadsheet"
+                    title={
+                      savedSpreadsheetUrl
+                        ? 'Open the saved spreadsheet in a new tab'
+                        : 'Save a spreadsheet URL first'
+                    }
+                    disabled={!savedSpreadsheetUrl}
+                    onClick={() => {
+                      if (savedSpreadsheetUrl) {
+                        window.open(
+                          savedSpreadsheetUrl,
+                          '_blank',
+                          'noopener,noreferrer'
+                        );
+                      }
+                    }}
+                  >
+                    <ExternalLink className="size-4" />
+                  </Button>
+                </div>
+                <p className="text-muted-foreground mt-1 text-xs">
+                  Your Google account needs Editor access. The sheet stays
+                  private.
+                </p>
+                <div className="mt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={createSpreadsheet}
+                    disabled={busy === 'createsheet'}
+                  >
+                    {busy === 'createsheet' ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Plus className="size-3.5" />
+                    )}
+                    Create Spreadsheet
+                  </Button>
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    Creates “Meta Leads - [this table]” in your connected
+                    Google account and fills the field above. Nothing
+                    syncs until you save.
+                  </p>
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="meta-table-sheets-tab">Worksheet tab</Label>
+                <div className="flex items-center gap-2">
+                  {tabs === null ? (
+                    <Input
+                      id="meta-table-sheets-tab"
+                      placeholder="Load tabs first…"
+                      value={tab}
+                      onChange={(e) => {
+                        setTab(e.target.value);
+                        setTabTouched(true);
+                      }}
+                      className="min-w-0 flex-1"
+                    />
+                  ) : tabs.length === 0 ? (
+                    <Input
+                      id="meta-table-sheets-tab"
+                      placeholder="New tab name…"
+                      value={tab}
+                      onChange={(e) => {
+                        setTab(e.target.value);
+                        setTabTouched(true);
+                      }}
+                      className="min-w-0 flex-1"
+                    />
+                  ) : (
+                    <select
+                      id="meta-table-sheets-tab"
+                      className="border-input bg-card h-9 min-w-0 flex-1 rounded-md border px-3 text-sm"
+                      value={tabTouched || tab ? tab : (tabs[0] as string)}
+                      onChange={(e) => {
+                        setTab(e.target.value);
+                        setTabTouched(true);
+                      }}
+                    >
+                      {tabs.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <Button
+                    variant="outline"
+                    className="shrink-0"
+                    aria-label="Load worksheet tabs"
                     onClick={() => loadTabs(spreadsheet)}
                     disabled={busy === 'tabs'}
                   >
@@ -647,50 +962,6 @@ export function MetaTableSheetsDialog({
                     )}
                   </Button>
                 </div>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  Your Google account needs Editor access. The sheet stays
-                  private.
-                </p>
-              </div>
-              <div>
-                <Label htmlFor="meta-table-sheets-tab">Worksheet tab</Label>
-                {tabs === null ? (
-                  <Input
-                    id="meta-table-sheets-tab"
-                    placeholder="Load tabs first…"
-                    value={tab}
-                    onChange={(e) => {
-                      setTab(e.target.value);
-                      setTabTouched(true);
-                    }}
-                  />
-                ) : tabs.length === 0 ? (
-                  <Input
-                    id="meta-table-sheets-tab"
-                    placeholder="New tab name…"
-                    value={tab}
-                    onChange={(e) => {
-                      setTab(e.target.value);
-                      setTabTouched(true);
-                    }}
-                  />
-                ) : (
-                  <select
-                    id="meta-table-sheets-tab"
-                    className="border-input bg-card h-9 w-full rounded-md border px-3 text-sm"
-                    value={tabTouched || tab ? tab : (tabs[0] as string)}
-                    onChange={(e) => {
-                      setTab(e.target.value);
-                      setTabTouched(true);
-                    }}
-                  >
-                    {tabs.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <p className="text-muted-foreground mt-1 text-xs">
                   Defaults to the first existing tab. Missing tabs are never
                   created or substituted silently — pick an existing tab.
@@ -704,6 +975,58 @@ export function MetaTableSheetsDialog({
                     replacement — saving writes only to the tab you pick.
                   </p>
                 ) : null}
+                {tabs !== null && tabs.length > 0 && tab.trim() ? (
+                  <div className="mt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={deleteSelectedTab}
+                      disabled={busy === 'deletetab'}
+                      aria-label={`Delete worksheet tab ${tab.trim()}`}
+                    >
+                      {busy === 'deletetab' ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-3.5" />
+                      )}
+                      Delete tab
+                    </Button>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Deletes only this tab after confirmation — the
+                      spreadsheet and other tabs are never touched.
+                    </p>
+                  </div>
+                ) : null}
+                <div className="mt-2">
+                  <Label htmlFor="meta-table-sheets-new-tab">
+                    Create a new worksheet tab
+                  </Label>
+                  <div className="mt-1 flex gap-2">
+                    <Input
+                      id="meta-table-sheets-new-tab"
+                      placeholder="New tab name…"
+                      value={newTabName}
+                      onChange={(e) => setNewTabName(e.target.value)}
+                      className="min-w-0 flex-1"
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={createNewTab}
+                      disabled={busy === 'createtab' || !newTabName.trim()}
+                    >
+                      {busy === 'createtab' ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Plus className="size-4" />
+                      )}
+                      Create tab
+                    </Button>
+                  </div>
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    Created inside the spreadsheet above, then selected
+                    automatically. Existing tabs are never modified.
+                  </p>
+                </div>
               </div>
             </div>
 
@@ -728,7 +1051,7 @@ export function MetaTableSheetsDialog({
                           className="bg-muted/50 flex items-center gap-1.5 rounded px-2 py-1.5"
                         >
                           <span className="text-muted-foreground w-6 shrink-0 text-center text-xs">
-                            {col.key === 'meta_lead_id' ? 'A' : idx + 1}
+                            {idx + 1}
                           </span>
                           <Input
                             value={col.label}
@@ -836,12 +1159,24 @@ export function MetaTableSheetsDialog({
                       <p className="text-muted-foreground mb-1 text-[11px] tracking-wide uppercase">
                         This form&apos;s answers
                       </p>
+                      {withoutShadowedDynamicColumns(
+                        payload.dynamic,
+                        payload.standard
+                      ).length === 0 && payload.dynamic.length > 0 ? (
+                        <p className="text-muted-foreground text-xs">
+                          Remaining answer fields duplicate the standard
+                          fields above (same data, same values).
+                        </p>
+                      ) : null}
                       {payload.dynamic.length === 0 ? (
                         <p className="text-muted-foreground text-xs">
                           This form has no extra answer fields.
                         </p>
                       ) : (
-                        payload.dynamic
+                        withoutShadowedDynamicColumns(
+                          payload.dynamic,
+                          payload.standard
+                        )
                           .filter((d) => !columnKeys.has(d.key))
                           .map((d) => {
                             const wsMatch = workspaceAvailable?.find(
@@ -866,47 +1201,16 @@ export function MetaTableSheetsDialog({
                   </div>
                 </div>
               </div>
-              <div className="border-border bg-muted/30 text-muted-foreground mt-2 rounded-md border p-2.5 text-xs">
-                <p className="text-foreground font-medium">Header preview</p>
-                <p className="mt-0.5 break-words">{headers.join(' · ')}</p>
-                <p className="mt-1.5">
-                  Meta Lead ID stays pinned to column A (hidden unless selected)
-                  so rows stay matched. Saving new columns rewrites this
-                  table&apos;s managed rows in place; nothing else in the sheet
-                  is touched.
-                </p>
-              </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-4 text-sm">
-              <label className="flex items-center gap-2">
-                <Switch
-                  checked={autoSync}
-                  onCheckedChange={setAutoSync}
-                  aria-label="Enable automatic sync"
-                />
-                Automatic sync for new + updated leads
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={importExisting}
-                  onChange={(e) => setImportExisting(e.target.checked)}
-                />
-                Import existing leads on save
-              </label>
-              <label
-                className="flex items-center gap-2"
-                title="Only used when the tab does not exist yet"
-              >
-                <input
-                  type="checkbox"
-                  checked={createTab}
-                  onChange={(e) => setCreateTab(e.target.checked)}
-                />
-                Create the tab if missing
-              </label>
-            </div>
+            <label className="flex w-fit items-center gap-2 text-xs text-muted-foreground">
+              <Switch
+                checked={autoSync}
+                onCheckedChange={setAutoSync}
+                aria-label="Enable automatic sync"
+              />
+              Automatic sync for new + updated leads
+            </label>
 
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={save} disabled={busy === 'save'}>
@@ -917,20 +1221,141 @@ export function MetaTableSheetsDialog({
               </Button>
               <Button
                 variant="outline"
-                onClick={syncNow}
-                disabled={busy === 'retry'}
+                onClick={() => {
+                  setImportResult(null);
+                  setImportError(null);
+                  setImportOpen((v) => !v);
+                }}
               >
-                {busy === 'retry' ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-4" />
-                )}
-                Sync now
+                <Download className="size-4" />
+                Import Leads
               </Button>
-              {managedRows > 0 ? (
+            </div>
+
+            {importOpen ? (
+              <div
+                className="rounded-md border border-border p-3"
+                aria-label="Import leads options"
+              >
+                <p className="text-sm font-medium">
+                  Import existing leads into this table&apos;s sheet
+                </p>
+                <p className="text-muted-foreground mt-0.5 text-xs">
+                  Existing rows match by Meta Lead ID and update in
+                  place — nothing is duplicated, and Workspace leads
+                  are never modified.
+                </p>
+                <div className="mt-2 grid gap-2">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="sheets-import-mode"
+                      checked={importMode === 'all'}
+                      onChange={() => setImportMode('all')}
+                      disabled={busy === 'import'}
+                    />
+                    Import All Leads
+                  </label>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="sheets-import-mode"
+                      checked={importMode === 'range'}
+                      onChange={() => setImportMode('range')}
+                      disabled={busy === 'import'}
+                    />
+                    Import Leads by Date Range
+                  </label>
+                  {importMode === 'range' ? (
+                    <div className="flex flex-wrap items-end gap-2">
+                      <div className="grid gap-1">
+                        <Label htmlFor="sheets-import-from">Start date</Label>
+                        <Input
+                          id="sheets-import-from"
+                          type="date"
+                          value={dateFrom}
+                          max={dateTo || undefined}
+                          onChange={(e) => setDateFrom(e.target.value)}
+                          disabled={busy === 'import'}
+                          className="w-40"
+                        />
+                      </div>
+                      <div className="grid gap-1">
+                        <Label htmlFor="sheets-import-to">End date</Label>
+                        <Input
+                          id="sheets-import-to"
+                          type="date"
+                          value={dateTo}
+                          min={dateFrom || undefined}
+                          onChange={(e) => setDateTo(e.target.value)}
+                          disabled={busy === 'import'}
+                          className="w-40"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                {busy === 'import' ? (
+                  <p
+                    className="text-muted-foreground mt-2 flex items-center gap-2 text-sm"
+                    role="status"
+                  >
+                    <Loader2 className="size-4 animate-spin" />
+                    Importing leads…
+                  </p>
+                ) : null}
+                {importError ? (
+                  <p className="text-destructive mt-2 text-xs" role="alert">
+                    {importError}
+                  </p>
+                ) : null}
+                {importResult ? (
+                  <p className="mt-2 text-xs text-green-600" role="status">
+                    Import finished: {importResult.imported} imported,{' '}
+                    {importResult.updated} updated, {importResult.skipped}{' '}
+                    skipped, {importResult.failed} failed
+                    {importResult.sent > 0
+                      ? ` (${importResult.sent} sent to the sheet).`
+                      : '.'}
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    onClick={startImport}
+                    disabled={busy === 'import'}
+                    size="sm"
+                  >
+                    {busy === 'import' ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : null}
+                    Start Import
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setImportOpen(false)}
+                    disabled={busy === 'import'}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {managedRows > 0 ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <p className="text-xs font-medium text-destructive">
+                  Danger zone
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Delete spreadsheet rows previously synced from this
+                  table. Only rows WhatsApp Max wrote are removed —
+                  your own content is never touched.
+                </p>
                 <Button
                   variant="outline"
                   size="sm"
+                  className="mt-2"
                   onClick={cleanupTable}
                   disabled={busy === 'cleanup'}
                 >
@@ -941,8 +1366,8 @@ export function MetaTableSheetsDialog({
                   )}
                   Remove {managedRows} synced row{managedRows === 1 ? '' : 's'}
                 </Button>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
           </div>
         )}
       </DialogContent>

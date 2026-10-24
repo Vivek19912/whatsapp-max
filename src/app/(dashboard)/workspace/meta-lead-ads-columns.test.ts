@@ -246,7 +246,7 @@ describe("workspace page — Meta sidebar hides the metadata section", () => {
 describe("workspace page — agent-scoped Meta tables", () => {
   it("loads assigned tables from the agent endpoint, not the full list", () => {
     const src = page();
-    expect(src).toContain("const { accountId, accountRole, canEditSettings, canSendMessages } = useAuth();");
+    expect(src).toContain("const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();");
     expect(src).toContain("const isAgent = accountRole === 'agent';");
     expect(src).toContain("const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';");
     // Owner/admin/viewer behavior is untouched (same fetch + select).

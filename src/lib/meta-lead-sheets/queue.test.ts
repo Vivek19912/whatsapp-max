@@ -50,6 +50,12 @@ const h = vi.hoisted(() => {
       rows: number[];
     }>,
     columnValues: new Map<string, string[]>(),
+    findCalls: [] as Array<{
+      spreadsheetId: string;
+      tab: string;
+      leadIds: string[];
+      idColumnIndex?: number;
+    }>,
     failAppendWith: null as { status: number } | null,
   };
 });
@@ -166,8 +172,11 @@ vi.mock('./sheets-client', async (importOriginal) => {
       token: string,
       spreadsheetId: string,
       tab: string,
-      leadIds: string[]
+      leadIds: string[],
+      _fetchImpl?: typeof fetch,
+      idColumnIndex?: number
     ) => {
+      h.findCalls.push({ spreadsheetId, tab, leadIds, idColumnIndex });
       const key = `${spreadsheetId}::${tab}`;
       const cells = h.columnValues.get(key) ?? [];
       const found = new Map<string, number>();
@@ -185,8 +194,11 @@ import {
   cleanupTableRows,
   drainSheetsQueue,
   getTableSheetsStatus,
+  importTableLeads,
+  isWithinImportRange,
   maybeEnqueueSheetsSync,
   remapLayoutChunk,
+  resolveImportSubmittedAt,
 } from './queue';
 
 type Row = Record<string, unknown>;
@@ -386,6 +398,7 @@ beforeEach(() => {
   h.hidden = [];
   h.deleted = [];
   h.columnValues = new Map();
+  h.findCalls = [];
   h.failAppendWith = null;
 });
 
@@ -1033,19 +1046,132 @@ describe('custom columns — drain rendering', () => {
       force: true,
     });
     expect(result.sent).toBe(1);
-    // Header row is exactly the requested layout (ID pinned at A).
+    // Header row is exactly the requested layout (deselected ID
+    // written last so matching keeps working).
     expect(h.headersWritten.at(-1)).toMatchObject({
-      headers: ['Meta Lead ID', 'Lead Name', 'Budget', 'Hotel'],
+      headers: ['Lead Name', 'Budget', 'Hotel', 'Meta Lead ID'],
     });
     // Dynamic answers map by key; the unprovided Hotel stays blank.
     expect(h.appended).toHaveLength(1);
-    expect(h.appended[0].rows[0]).toEqual(['lead-c', 'Asha', '5L', '']);
+    expect(h.appended[0].rows[0]).toEqual(['Asha', '5L', '', 'lead-c']);
+  });
+
+  it('matches rows through the configured ID column (last by default, first for legacy)', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    // The sheet's ID column carries "lead-c"; the stored mapping was
+    // lost, so the drain must recover the row via a scan instead of
+    // appending a duplicate.
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-c']);
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [
+        { ...CONFIG, form_id: 'form-sg', column_config: COLS },
+      ],
+      meta_lead_sheets_connections: [
+        {
+          account_id: 'acct-1',
+          access_token: 'x',
+          refresh_token: 'y',
+          token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+        },
+      ],
+      meta_lead_submissions: [SUB_C],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-c',
+          account_id: 'acct-1',
+          submission_id: 'sub-c',
+          flow_run_id: 'run-1',
+          meta_lead_id: 'lead-c',
+          status: 'queued',
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: null,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', flow_id: 'flow-1' }],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.sent).toBe(1);
+    // Found via scan — no duplicate appended — and the scan used the
+    // trailing ID position (3 selected columns → index 3).
+    expect(h.appended).toHaveLength(0);
+    expect(h.updated).toHaveLength(1);
+    expect(h.updated[0]).toMatchObject({
+      row: 2,
+      values: ['Asha', '5L', '', 'lead-c'],
+    });
+    expect(h.findCalls).toHaveLength(1);
+    expect(h.findCalls[0]).toMatchObject({ idColumnIndex: 3 });
+  });
+
+  it('scans column A for legacy ID-first layouts', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-c']);
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [
+        {
+          ...CONFIG,
+          form_id: 'form-sg',
+          column_config: [
+            { key: 'meta_lead_id', label: 'Meta Lead ID' },
+            { key: 'name', label: 'Lead Name' },
+          ],
+        },
+      ],
+      meta_lead_sheets_connections: [
+        {
+          account_id: 'acct-1',
+          access_token: 'x',
+          refresh_token: 'y',
+          token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+        },
+      ],
+      meta_lead_submissions: [SUB_C],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-c',
+          account_id: 'acct-1',
+          submission_id: 'sub-c',
+          flow_run_id: 'run-1',
+          meta_lead_id: 'lead-c',
+          status: 'queued',
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: null,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', flow_id: 'flow-1' }],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.sent).toBe(1);
+    expect(h.appended).toHaveLength(0);
+    expect(h.updated[0]).toMatchObject({
+      row: 2,
+      values: ['lead-c', 'Asha'],
+    });
+    expect(h.findCalls).toHaveLength(1);
+    expect(h.findCalls[0]).toMatchObject({ idColumnIndex: 0 });
   });
 
   it('updates the stored row when the ID column is hidden', async () => {
     h.accessTokenFor.set('acct-1', 'token-1');
-    // Column A still carries "lead-c" on the sheet, but the ID is not
-    // a visible column — updates must still land on the stored row.
+    // The trailing ID column still carries "lead-c" on the sheet,
+    // but the ID is not a visible column — updates must still land
+    // on the stored row.
     h.columnValues.set('sheet-1::Meta Leads', ['lead-c']);
     const { db } = makeDb({
       meta_lead_sheets_configs: [
@@ -1093,11 +1219,11 @@ describe('custom columns — drain rendering', () => {
     expect(h.updated).toHaveLength(1);
     expect(h.updated[0]).toMatchObject({
       row: 5,
-      values: ['lead-c', '+911234567890'],
+      values: ['+911234567890', 'lead-c'],
     });
     expect(h.appended).toHaveLength(0);
     expect(h.headersWritten.at(-1)).toMatchObject({
-      headers: ['Meta Lead ID', 'Phone'],
+      headers: ['Phone', 'Meta Lead ID'],
     });
   });
 });
@@ -1202,11 +1328,12 @@ describe('layout remap', () => {
     );
     expect(first.done).toBe(false);
     expect(first.remapped).toBe(2);
-    // Both managed rows rewritten in place with the new values.
+    // Both managed rows rewritten in place with the new values
+    // (ID last per the new layout).
     expect(h.rewritten).toHaveLength(1);
     expect(h.rewritten[0].rows).toEqual([
-      { rowNumber: 2, values: ['lead-a', 'Asha', '5L'] },
-      { rowNumber: 3, values: ['lead-b', 'Ravi', ''] },
+      { rowNumber: 2, values: ['Asha', '5L', 'lead-a'] },
+      { rowNumber: 3, values: ['Ravi', '', 'lead-b'] },
     ]);
     expect(h.appended).toHaveLength(0);
     expect(data.meta_lead_sheets_configs[0].remap_cursor).toBe(3);
@@ -1224,11 +1351,12 @@ describe('layout remap', () => {
       3
     );
     expect(second.done).toBe(true);
-    // Header swapped last; hidden ID column stays hidden.
+    // Header swapped last; hidden ID column stays hidden at its
+    // new trailing position (legacy column A unhidden first).
     expect(h.headersWritten.at(-1)).toMatchObject({
-      headers: ['Meta Lead ID', 'Lead Name', 'Budget'],
+      headers: ['Lead Name', 'Budget', 'Meta Lead ID'],
     });
-    expect(h.hidden.at(-1)).toMatchObject({ colIndex: 0, hidden: true });
+    expect(h.hidden.at(-1)).toMatchObject({ colIndex: 2, hidden: true });
     expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(false);
   });
 
@@ -1596,5 +1724,204 @@ describe('getTableSheetsStatus - per-table counts and connection', () => {
     const status = await getTableSheetsStatus(db, 'acct-1', 'form-sg');
     expect(status.needsReauth).toBe(true);
     expect(status.lastError).toBe('revoked');
+  });
+});
+
+describe('importTableLeads — manual historical import', () => {
+  const FORM = 'form-sg';
+  function sub(
+    id: string,
+    opts: {
+      runId?: string | null;
+      metaCreated?: string | null;
+      created?: string;
+      form?: string;
+      account?: string;
+      lead?: string;
+    } = {},
+  ) {
+    return {
+      id,
+      account_id: opts.account ?? 'acct-1',
+      meta_lead_id: opts.lead ?? `lead-${id}`,
+      flow_run_id: opts.runId === undefined ? `run-${id}` : opts.runId,
+      form_id: opts.form ?? FORM,
+      form_name: 'Singapore Lead Ad',
+      campaign_name: 'Camp',
+      ad_name: 'Ad',
+      source: 'facebook',
+      answers: { full_name: 'Asha' },
+      meta_created_time: opts.metaCreated === undefined ? '2026-03-10T10:00:00.000Z' : opts.metaCreated,
+      created_at: opts.created ?? '2026-03-10T10:00:00.000Z',
+      status: 'processed',
+    };
+  }
+  function run(id: string, startedAt: string | null) {
+    return { id, account_id: 'acct-1', flow_id: 'flow-1', started_at: startedAt };
+  }
+  function queueRow(subId: string, opts: { status?: string; rowNumber?: number | null } = {}) {
+    return {
+      id: `q-${subId}`,
+      account_id: 'acct-1',
+      submission_id: subId,
+      flow_run_id: `run-${subId}`,
+      meta_lead_id: `lead-${subId}`,
+      status: opts.status ?? 'queued',
+      attempts: 0,
+      max_attempts: 8,
+      sheet_row_number: opts.rowNumber ?? null,
+      next_retry_at: new Date(0).toISOString(),
+    };
+  }
+  function importDb(extra: Record<string, Row[]>) {
+    return makeDb({
+      meta_lead_submissions: [],
+      flow_runs: [],
+      meta_lead_sheets_queue: [],
+      workspace_fields: [],
+      workspace_values: [{ field_id: 'f-1', value_text: 'keep-me' }],
+      profiles: [],
+      ...extra,
+    });
+  }
+
+  it('imports everything in all-mode, classifying mapped rows as updates', async () => {
+    const { db, data } = importDb({
+      meta_lead_submissions: [sub('a'), sub('b'), sub('c', { runId: null })],
+      flow_runs: [run('run-a', '2026-03-10T12:00:00.000Z'), run('run-b', '2026-03-11T12:00:00.000Z')],
+      meta_lead_sheets_queue: [queueRow('a', { status: 'sent', rowNumber: 7 })],
+    });
+    const res = await importTableLeads(db, 'acct-1', FORM, null);
+    expect(res).toEqual({
+      total: 2,
+      imported: 1,
+      updated: 1,
+      skipped: 1,
+      failed: 0,
+      truncated: false,
+    });
+    // Fresh lead queued; mapped lead reset to queued (not duplicated).
+    expect(data.meta_lead_sheets_queue).toHaveLength(2);
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.submission_id === 'a')?.status,
+    ).toBe('queued');
+    // Workspace data untouched.
+    expect(data.workspace_values).toEqual([{ field_id: 'f-1', value_text: 'keep-me' }]);
+  });
+
+  it('filters by inclusive Workspace submission-day range (run start wins)', async () => {
+    const { db, data } = importDb({
+      meta_lead_submissions: [
+        sub('a', { metaCreated: '2026-03-10T10:00:00.000Z' }),
+        // Meta time is outside the range but the run start is inside.
+        sub('b', { metaCreated: '2026-01-01T00:00:00.000Z' }),
+        // Exact to-boundary instant (end of day) is included.
+        sub('e'),
+        // Just before the from-boundary is excluded.
+        sub('f'),
+        sub('other', { form: 'form-other' }),
+      ],
+      flow_runs: [
+        run('run-a', '2026-03-10T12:00:00.000Z'),
+        run('run-b', '2026-03-15T00:00:00.000Z'),
+        run('run-e', '2026-03-15T23:59:59.999Z'),
+        run('run-f', '2026-02-28T23:59:59.999Z'),
+        run('run-other', '2026-03-10T12:00:00.000Z'),
+      ],
+      meta_lead_sheets_queue: [],
+    });
+    const res = await importTableLeads(db, 'acct-1', FORM, {
+      from: '2026-03-01',
+      to: '2026-03-15',
+    });
+    expect(res.total).toBe(3);
+    expect(res.imported).toBe(3);
+    expect(res.updated).toBe(0);
+    expect(res.skipped).toBe(0);
+    expect(res.failed).toBe(0);
+    // Only the in-scope submissions of THIS form were queued.
+    expect(
+      data.meta_lead_sheets_queue.map((r) => r.submission_id).sort(),
+    ).toEqual(['a', 'b', 'e']);
+  });
+
+  it('returns empty results when nothing falls in range', async () => {
+    const { db, data } = importDb({
+      meta_lead_submissions: [sub('a')],
+      flow_runs: [run('run-a', '2026-03-10T12:00:00.000Z')],
+      meta_lead_sheets_queue: [],
+    });
+    const res = await importTableLeads(db, 'acct-1', FORM, {
+      from: '2026-04-01',
+      to: '2026-04-30',
+    });
+    expect(res).toEqual({
+      total: 0,
+      imported: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      truncated: false,
+    });
+    expect(data.meta_lead_sheets_queue).toHaveLength(0);
+  });
+
+  it('never touches other forms or accounts', async () => {
+    const { db, data } = importDb({
+      meta_lead_submissions: [
+        sub('a'),
+        sub('x', { form: 'form-other' }),
+        sub('y', { account: 'acct-2' }),
+      ],
+      flow_runs: [run('run-a', '2026-03-10T12:00:00.000Z')],
+      meta_lead_sheets_queue: [],
+    });
+    const res = await importTableLeads(db, 'acct-1', FORM, null);
+    expect(res.total).toBe(1);
+    expect(
+      data.meta_lead_sheets_queue.map((r) => r.submission_id),
+    ).toEqual(['a']);
+  });
+
+  it('flags truncation past the limit', async () => {
+    const { db } = importDb({
+      meta_lead_submissions: [sub('a'), sub('b'), sub('c', { runId: null })],
+      flow_runs: [run('run-a', '2026-03-10T12:00:00.000Z'), run('run-b', '2026-03-11T12:00:00.000Z')],
+      meta_lead_sheets_queue: [],
+    });
+    const res = await importTableLeads(db, 'acct-1', FORM, null, 2);
+    expect(res.truncated).toBe(true);
+    expect(res.total).toBe(2);
+  });
+});
+
+describe('import range helpers', () => {
+  it('prefers run start, then Meta time, then row creation', () => {
+    expect(
+      resolveImportSubmittedAt({
+        runStartedAt: '2026-03-10T12:00:00.000Z',
+        metaCreatedTime: '2026-03-09T00:00:00.000Z',
+        createdAt: '2026-03-08T00:00:00.000Z',
+      }),
+    ).toBe('2026-03-10T12:00:00.000Z');
+    expect(
+      resolveImportSubmittedAt({
+        runStartedAt: null,
+        metaCreatedTime: '2026-03-09T00:00:00.000Z',
+        createdAt: '2026-03-08T00:00:00.000Z',
+      }),
+    ).toBe('2026-03-09T00:00:00.000Z');
+    expect(
+      resolveImportSubmittedAt({ runStartedAt: null, metaCreatedTime: '  ', createdAt: null }),
+    ).toBeNull();
+  });
+
+  it('treats both range ends as inclusive UTC days', () => {
+    expect(isWithinImportRange('2026-03-01T00:00:00.000Z', '2026-03-01', '2026-03-31')).toBe(true);
+    expect(isWithinImportRange('2026-03-31T23:59:59.999Z', '2026-03-01', '2026-03-31')).toBe(true);
+    expect(isWithinImportRange('2026-02-28T23:59:59.999Z', '2026-03-01', '2026-03-31')).toBe(false);
+    expect(isWithinImportRange('2026-04-01T00:00:00.000Z', '2026-03-01', '2026-03-31')).toBe(false);
+    expect(isWithinImportRange(null, '2026-03-01', '2026-03-31')).toBe(false);
+    expect(isWithinImportRange('2026-03-10T00:00:00.000Z', 'not-a-day', '2026-03-31')).toBe(false);
   });
 });

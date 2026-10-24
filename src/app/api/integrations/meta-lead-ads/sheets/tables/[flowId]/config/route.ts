@@ -8,7 +8,7 @@
 // GET (members+) — table + form identity, this table's config (or
 //   null), available standard/dynamic columns, connection status,
 //   and sync status. Tokens are never returned.
-// PUT (admin+) — set this table's spreadsheet/tab/columns/auto_sync,
+// PUT (owner-only) — set this table's spreadsheet/tab/columns/auto_sync,
 //   validate access + the target tab server-side, reconcile this
 //   table's history, roll layout changes out to this table's managed
 //   rows, and optionally backfill. Never touches other tables.
@@ -93,6 +93,22 @@ export async function GET(_request: Request, { params }: Ctx) {
       ctx.accountId,
       table.formId
     );
+    // Whether the table has an explicitly saved column selection.
+    // Legacy rows predate column selection (column_config NULL and
+    // resolve to the ID-first default for sync); they count as
+    // "no selection" so the dialog applies its ID-last default
+    // instead of freezing the ID first. Explicit selections —
+    // including ID-first ones the user chose — are preserved.
+    const { data: rawConfig } = await ctx.supabase
+      .from('meta_lead_sheets_configs')
+      .select('column_config')
+      .eq('account_id', ctx.accountId)
+      .eq('form_id', table.formId)
+      .maybeSingle();
+    const rawColumns = (rawConfig as { column_config?: unknown } | null)
+      ?.column_config;
+    const hasCustomColumns =
+      Array.isArray(rawColumns) && rawColumns.length > 0;
     return NextResponse.json({
       flow: { id: table.flowId, name: table.flowName },
       form: {
@@ -122,6 +138,13 @@ export async function GET(_request: Request, { params }: Ctx) {
           questions: questions.map((q) => ({ ...q })),
         },
       ]),
+      // The saved column selection, or null when this table was
+      // never configured. The dialog applies its all-headers
+      // (ID-last) default unless `hasCustomColumns` is true — an
+      // explicit selection is always loaded verbatim so
+      // customizations are preserved.
+      selectedColumns: status.columns ?? null,
+      hasCustomColumns,
       status,
     });
   } catch (err) {
@@ -132,7 +155,9 @@ export async function GET(_request: Request, { params }: Ctx) {
 export async function PUT(request: Request, { params }: Ctx) {
   try {
     const { flowId } = await params;
-    const ctx = await requireRole('admin');
+    // Owner-only: configuring a table's spreadsheet, tab, columns,
+    // and sync behavior is restricted to the account owner.
+    const ctx = await requireRole('owner');
     const table = await resolveTableForm(ctx.supabase, ctx.accountId, flowId);
     if (!table) {
       return NextResponse.json({ error: 'Table not found.' }, { status: 404 });
@@ -165,7 +190,6 @@ export async function PUT(request: Request, { params }: Ctx) {
     }
     const autoSync =
       body?.auto_sync === undefined ? true : body.auto_sync === true;
-    const importExisting = body?.import_existing === true;
     const createTab = body?.create_tab === true;
 
     // Validate credential + spreadsheet access BEFORE persisting.
@@ -281,6 +305,14 @@ export async function PUT(request: Request, { params }: Ctx) {
       oldLayout.headers.some((h, i) => newLayout.headers[i] !== h);
     const needsRemap = !targetChanged && !!old && headerChanged;
 
+    // Existing leads import automatically exactly once: on the
+    // first-ever configuration of this table (!old). The backfill
+    // is idempotent (unique queue key + match-by-ID updates), so a
+    // retry can never duplicate rows — and subsequent saves never
+    // trigger another full import. (A legacy `import_existing`
+    // body flag, if sent, is intentionally ignored.)
+    const importExisting = !old;
+
     const { error: upsertErr } = await admin
       .from('meta_lead_sheets_configs')
       .upsert(
@@ -350,7 +382,9 @@ export async function PUT(request: Request, { params }: Ctx) {
           accessToken,
           spreadsheetId,
           tab,
-          newLayout.idVisible
+          newLayout.idVisible,
+          fetch,
+          newLayout.idColumnIndex
         );
       } else if (needsRemap) {
         // Roll the layout out to managed rows first (header last, in
