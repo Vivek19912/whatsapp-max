@@ -81,6 +81,7 @@ import {
   resolveMetaHeaderDisplayLabel,
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
+import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
@@ -353,6 +354,9 @@ export default function WorkspacePage() {
   const [selected, setSelected] = useState<FlowTableRow | null>(null);
   const [refreshSeq, setRefreshSeq] = useState(0);
   const [addColumnOpen, setAddColumnOpen] = useState(false);
+  // Per-table Google Sheets configuration dialog (Meta Lead Ads
+  // tables only; Flow Tables never see it).
+  const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
   const [editingField, setEditingField] = useState<WorkspaceField | null>(null);
   // Workspace filters (Date over Submission Time + Assigned To over
   // the live roster). Applied state only — the panel owns its
@@ -1521,11 +1525,25 @@ export default function WorkspacePage() {
                     {flowDisplayName(f.name)}
                   </SelectItem>
                 ))}
-              </SelectContent>
-            </Select>
-            {/* Meta Lead Ads tables show one unified table (view=all),
-                so the Completed/Incomplete tabs are hidden here.
-                Flow Tables keep the tabs exactly as before. */}
+                </SelectContent>
+              </Select>
+              {/* Meta Lead Ads tables get a per-table Google Sheets
+                  action here. Flow Tables keep exactly what they had
+                  (no sheet action is rendered for them). */}
+              {isMetaTable && canEditSettings && flowId ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => setSheetDialogOpen(true)}
+                >
+                  <Table2 className="mr-1.5 size-4" />
+                  Configure Sheet
+                </Button>
+              ) : null}
+              {/* Meta Lead Ads tables show one unified table (view=all),
+              so the Completed/Incomplete tabs are hidden here.
+              Flow Tables keep the tabs exactly as before. */}
             {isMetaTable ? null : (
               <div
                 className="flex items-center gap-1.5"
@@ -2046,6 +2064,18 @@ export default function WorkspacePage() {
           reloadTable();
         }}
       />
+
+      {/* Per-table Google Sheets configuration (Meta Lead Ads tables
+          only — never rendered for Flow Tables). Keyed by flow so
+          switching tables loads that table's own settings. */}
+      {isMetaTable && flowId ? (
+        <MetaTableSheetsDialog
+          key={flowId}
+          flowId={flowId}
+          open={sheetDialogOpen}
+          onOpenChange={setSheetDialogOpen}
+        />
+      ) : null}
 
       <Sheet
         open={selected !== null}

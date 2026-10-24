@@ -7,8 +7,8 @@ becomes a normal `flow_runs` row with the form answers as its columns.
 
 > Looking to send **conversion events** back to Meta? That is a separate
 > capability — see [Meta Conversions API](./meta-capi.md). Both live under
-> Settings › Integrations › **Meta** (tabs: *Lead capture* and *Conversions
-> API*) and share the one deployment-level Meta app.
+> Settings › Integrations › **Meta** (tabs: _Lead capture_ and _Conversions
+> API_) and share the one deployment-level Meta app.
 
 ## Connect with Facebook (recommended)
 
@@ -31,11 +31,11 @@ AES-256-GCM, and never returned to the browser:
 The legacy path remains for existing connections. An account admin pastes
 three values once:
 
-| Value | Where to find it |
-| --- | --- |
-| **Dataset / Pixel ID** | Meta Events Manager → Data sources → your dataset. |
+| Value                        | Where to find it                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| **Dataset / Pixel ID**       | Meta Events Manager → Data sources → your dataset.                                          |
 | **System User access token** | Meta Business Settings → Users → System users → assign the Page + dataset → Generate token. |
-| **Facebook Page ID** | The numeric Page id (Page → About → Page transparency, or the Page URL settings). |
+| **Facebook Page ID**         | The numeric Page id (Page → About → Page transparency, or the Page URL settings).           |
 
 A legacy foreign-app token can still read/import through polling, but it
 cannot install this shared app's webhook. Saving verifies the readable stages
@@ -176,14 +176,14 @@ shared webhook (one callback URL + verify token) and a Graph version.
 Customers never create their own app; they create a System User token and
 paste it into Settings.
 
-| Concern | Scope | Where |
-| --- | --- | --- |
-| App ID / Secret / verify token / Graph version | Deployment (shared) | env vars |
-| Webhook URL + `leadgen` subscription | Deployment (shared) | App Dashboard |
-| Dataset ID + System User token | **Per customer account** | `meta_lead_connections` |
-| Facebook Pages + encrypted Page tokens | **Per customer account** | `meta_lead_pages` |
-| Instant Forms + import state | **Per customer account** | `meta_lead_forms` |
-| Leads (submissions + Workspace rows) | **Per customer account** | `meta_lead_submissions` / `flow_runs` |
+| Concern                                        | Scope                    | Where                                 |
+| ---------------------------------------------- | ------------------------ | ------------------------------------- |
+| App ID / Secret / verify token / Graph version | Deployment (shared)      | env vars                              |
+| Webhook URL + `leadgen` subscription           | Deployment (shared)      | App Dashboard                         |
+| Dataset ID + System User token                 | **Per customer account** | `meta_lead_connections`               |
+| Facebook Pages + encrypted Page tokens         | **Per customer account** | `meta_lead_pages`                     |
+| Instant Forms + import state                   | **Per customer account** | `meta_lead_forms`                     |
+| Leads (submissions + Workspace rows)           | **Per customer account** | `meta_lead_submissions` / `flow_runs` |
 
 Isolation guarantees:
 
@@ -195,7 +195,7 @@ Isolation guarantees:
   payload. An unknown Page is logged and ignored.
 - **A Facebook Page may be connected to only one account.** Connecting a
   Page that is already connected elsewhere is rejected with a generic,
-  non-identifying conflict; enforced in the route *and* by a global unique
+  non-identifying conflict; enforced in the route _and_ by a global unique
   index on `meta_lead_pages.page_id` (migration `120`). This keeps the
   Page → account lookup unambiguous so no lead is ever dropped.
 - Disconnecting one customer removes only that customer's credentials,
@@ -207,12 +207,12 @@ Isolation guarantees:
 All four are **required**; if any is missing the integration is disabled
 (routes return `501`, the settings panel shows “Not configured”).
 
-| Variable | Purpose |
-| --- | --- |
-| `META_LEAD_ADS_APP_ID` | The shared Meta App's numeric App ID. |
-| `META_LEAD_ADS_APP_SECRET` | App Secret — verifies inbound webhook HMACs. Server-only. |
+| Variable                             | Purpose                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `META_LEAD_ADS_APP_ID`               | The shared Meta App's numeric App ID.                                                                        |
+| `META_LEAD_ADS_APP_SECRET`           | App Secret — verifies inbound webhook HMACs. Server-only.                                                    |
 | `META_LEAD_ADS_WEBHOOK_VERIFY_TOKEN` | Any long random string; typed into the App Dashboard webhook config and echoed back to Meta's GET challenge. |
-| `META_GRAPH_VERSION` | e.g. `v21.0`. **Never hardcoded** — pin a currently-supported version. Validated against `^v\d+\.\d+$`. |
+| `META_GRAPH_VERSION`                 | e.g. `v21.0`. **Never hardcoded** — pin a currently-supported version. Validated against `^v\d+\.\d+$`.      |
 
 OAuth tokens are issued by the shared app and verified with `debug_token`.
 Legacy manual System User tokens may belong to another app. Graph calls
@@ -236,19 +236,19 @@ field — asking for it fails the read with
 recorded but no Workspace row is ever created. The Page is already known from
 the form/submission, so it is never re-requested from the Lead.
 
-| Call | Purpose | Token |
-| --- | --- | --- |
-| `GET /{page-id}?fields=id,name,access_token` | Verify the Page + obtain a Page token | System User |
-| `GET /{dataset-id}?fields=id,name` | Verify dataset reachability | System User |
-| `GET /{page-id}/leadgen_forms?fields=id,name,status,locale&limit=100` | Load My Forms (follows pagination) | Page |
-| `GET /{form-id}?fields=id,name,status,locale,questions` | Refresh form questions on enable | Page |
-| `GET /{form-id}/leads?fields=…&limit=50` | Historical import + polling | Page |
-| `GET /{lead-id}?fields=…` | Retrieve a full submission | Page |
-| `GET /{app-id}/subscriptions` | Check app-level `leadgen` configuration | App token |
-| `POST /{page-id}/subscribed_apps` | Install the app on the Page for `leadgen` | Page (shared app) |
-| `GET /{page-id}/subscribed_apps?fields=id,name,subscribed_fields` | Verify our app id has `leadgen` | Page |
-| `GET /oauth/access_token` + `debug_token` | OAuth code exchange, app/token/scope verification | App secret, then app token |
-| `GET /me/accounts?fields=id,name,tasks` | Discover manageable Pages without requesting Page tokens | OAuth user token |
+| Call                                                                  | Purpose                                                  | Token                      |
+| --------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------- |
+| `GET /{page-id}?fields=id,name,access_token`                          | Verify the Page + obtain a Page token                    | System User                |
+| `GET /{dataset-id}?fields=id,name`                                    | Verify dataset reachability                              | System User                |
+| `GET /{page-id}/leadgen_forms?fields=id,name,status,locale&limit=100` | Load My Forms (follows pagination)                       | Page                       |
+| `GET /{form-id}?fields=id,name,status,locale,questions`               | Refresh form questions on enable                         | Page                       |
+| `GET /{form-id}/leads?fields=…&limit=50`                              | Historical import + polling                              | Page                       |
+| `GET /{lead-id}?fields=…`                                             | Retrieve a full submission                               | Page                       |
+| `GET /{app-id}/subscriptions`                                         | Check app-level `leadgen` configuration                  | App token                  |
+| `POST /{page-id}/subscribed_apps`                                     | Install the app on the Page for `leadgen`                | Page (shared app)          |
+| `GET /{page-id}/subscribed_apps?fields=id,name,subscribed_fields`     | Verify our app id has `leadgen`                          | Page                       |
+| `GET /oauth/access_token` + `debug_token`                             | OAuth code exchange, app/token/scope verification        | App secret, then app token |
+| `GET /me/accounts?fields=id,name,tasks`                               | Discover manageable Pages without requesting Page tokens | OAuth user token           |
 
 `Save & verify`, **Run diagnostics**, and OAuth Page selection run separate
 capability checks (token app, app-level webhook, Page access, dataset access,
@@ -448,8 +448,10 @@ Deployment / platform (do once):
 - [ ] Apply migration `129_meta_lead_google_sheets.sql` (only if you use
       Google Sheets Sync; no new scheduler — the existing 5-minute cron
       drains it).
-- [ ] Apply migration `130_meta_lead_sheets_columns.sql` (form selection
-      + custom columns for Sheets Sync; additive columns only).
+- [ ] Apply migration `130_meta_lead_sheets_columns.sql` (form selection + custom columns for Sheets Sync; additive columns only).
+- [ ] Apply migration `131_meta_lead_sheets_per_table.sql` (per-table
+      Sheets configs; migrates each account's config to one row per
+      used form, preserving sheets and history).
 - [ ] Configure the Page webhook (`leadgen`) at app level in the App
       Dashboard. This remains a manual dashboard action.
 - [ ] Whitelist the OAuth callback in Facebook Login and verify the
@@ -476,62 +478,60 @@ Each additional customer:
       their own Pages, loads forms, and enables them (no platform/app changes
       needed).
 
-## Google Sheets Sync (Meta-only, live)
+## Google Sheets Sync (Meta-only, live, per Workspace table)
 
-An account admin can mirror Meta leads into one Google Sheet automatically.
-**Meta-only**: Flow Tables, All Sheets, CAPI, email notifications, polling
-interval, and Meta OAuth/webhook behavior are untouched.
+Each Meta Lead Ads Workspace table can mirror its own leads into its
+own Google Sheet automatically. **Meta-only**: Flow Tables, All
+Sheets, CAPI, email notifications, polling interval, and Meta
+OAuth/webhook behavior are untouched.
 
-- **Where.** Settings › Integrations › Meta › Lead capture › **Google Sheets
-  Sync** (separate card; separate Google connection in
-  `meta_lead_sheets_connections`, separate config in
-  `meta_lead_sheets_configs`, durable outbox in `meta_lead_sheets_queue` —
-  migration `129_meta_lead_google_sheets.sql`).
-- **Customer steps.** 1) **Connect Google account** (their own account with
-  Editor access to the target sheet — sheets stay private). 2) Paste the
-  spreadsheet URL/ID + worksheet tab (created if missing). 3) Keep
-  **Automatic sync** on; optionally tick **Import existing leads on save**.
-  4) **Save & enable sync**. **Sync now** retries on demand; **Disconnect**
+- **Connect once, configure per table.** Settings › Integrations ›
+  Meta › **Google Sheets** holds only the Google connection (connect /
+  disconnect, account, errors). Every table is then configured from
+  the Workspace page: open a Meta Lead Ads table and choose
+  **Configure Sheet**. Each table keeps its own spreadsheet, tab,
+  columns, and sync state (`meta_lead_sheets_configs` is keyed by
+  `(account_id, form_id)` — migration `131`). Flow Tables never see
+  the Configure Sheet action.
+- **Customer steps (per table).** 1) Connect Google once in Settings
+  (own account with Editor access — sheets stay private). 2) In
+  Workspace, open the table → **Configure Sheet** → paste the
+  spreadsheet URL/ID and pick the worksheet tab (defaults to the
+  first existing tab; a renamed/deleted tab is an explicit error, and
+  a missing tab is created only when you tick the box). 3) Choose
+  columns, reorder, and rename headers. 4) Keep **Automatic sync**
+  on; optionally tick **Import existing leads on save**. 5) **Save**,
+  then **Sync now** to retry on demand. **Disconnect** (Settings)
   stops future writes without deleting sheet contents.
 - **What syncs.** One row per lead, keyed by the stable **Meta Lead ID**
-  (column A — never phone/name). Columns (A–L): Meta Lead ID, Submitted At
-  (IST), Name, Phone, Email, Form Name, Campaign, Ad, Source, Assigned To,
-  Lead Type (default Fresh), Stage (default New Lead). All enabled forms
-  share the one tab; Form Name disambiguates. Row 1 + columns A–L are
-  managed by WhatsApp Max (manual renames are overwritten); users may add
-  columns to the right of L. Updates (assignment, Stage/Type, cell edits)
-  rewrite the same row — never a duplicate.
-
-  **Per-form + per-column selection** (Settings › Google Sheets Sync):
-  - **Meta Forms to Sync** — checkbox multi-select (with Select All / Clear
-    All) over the account's own Instant Forms, persisted per account
-    (`form_ids`). Only selected forms enqueue, import, and drain; an
-    explicitly empty selection syncs nothing (explained in the UI).
-    Deselecting parks already-queued rows (they resume on re-select) but
-    never writes them. Newly selected forms reconcile their history
-    without duplicates (UNIQUE queue key).
-  - **Choose Spreadsheet Columns** — standard fields plus the union of the
-    selected forms' actual question fields (server-derived with the same
-    key derivation ingestion uses, so labels are display-only). Columns
-    are reordered, renamed, added, and removed per account
-    (`column_config`); the ID stays pinned to column A (hidden via the API
-    when deselected) so matching never depends on visibility. Saving a new
-    layout rewrites existing integration-managed rows in place (data
-    first, header last, resumable across drains); user columns to the
-    right are untouched.
-  - **Cleanup** — an explicit, confirmed action deletes only verified
-    managed rows of deselected forms (bottom-to-top, with row-number
-    repair); unmapped rows and user content are never touched. Rows from
-    deselected forms otherwise remain in the sheet — the UI says so.
-- **How.** Ingestion, assignment, and Workspace cell edits enqueue a durable
-  outbox row (`UNIQUE(account_id, submission_id)`) **after** the DB write —
-  no synchronous Sheets calls in the lead path, failures never roll back
-  leads. The existing 5-minute `meta-lead-ads/cron` sweep drains the outbox
-  (claim → ensure tab/header → update-by-lead-id else append → record row
-  number), with bounded exponential backoff (1m…30m, 8 attempts), 429/5xx
-  retries, quota-safe batching (20 rows/sweep), and long-backoff + actionable
-  `needs_reauth` surfacing on expired/revoked credentials. Resume is safe:
-  interrupted appends are recovered by re-scanning column A before appending.
+  (column A — never phone/name). Columns default to: Meta Lead ID,
+  Submitted At (IST), Name, Phone, Email, Form Name, Campaign, Ad,
+  Source, Assigned To, Lead Type (default Fresh), Stage (default New
+  Lead).
+- **Per-table columns.** Standard fields plus that form's actual
+  question fields (server-derived with the same key derivation
+  ingestion uses, so labels are display-only). Columns are reordered,
+  renamed, added, and removed per table; the ID stays pinned to
+  column A (hidden via the API when deselected) so matching never
+  depends on visibility. Saving a new layout rewrites that table's
+  managed rows in place (data first, header last, resumable across
+  drains); user columns to the right are untouched. A per-table
+  **Remove synced rows** action deletes only verified managed rows
+  of that table (explicitly confirmed; unmapped rows and user content
+  are never touched).
+- **How.** Ingestion, assignment, and Workspace cell edits enqueue a
+  durable outbox row (`UNIQUE(account_id, submission_id)`) **after**
+  the DB write — no synchronous Sheets calls in the lead path,
+  failures never roll back leads. The existing 5-minute
+  `meta-lead-ads/cron` sweep drains the outbox per table (claim →
+  verify tab exists → ensure header → update-by-lead-ID else append
+  → record row number), with bounded exponential backoff (1m…30m,
+  8 attempts), 429/5xx retries, quota-safe batching (20 rows/sweep),
+  and long-backoff + actionable `needs_reauth` surfacing on
+  expired/revoked credentials. Resume is safe: interrupted appends
+  are recovered by re-scanning column A before appending. Tables
+  without a configuration never write; their rows stay parked until
+  configured.
 - **Google Cloud (operator, once).** Same OAuth client may be reused
   (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`), but whitelist the extra
   redirect URI `{origin}/api/integrations/meta-lead-ads/google/callback`.
@@ -539,5 +539,5 @@ interval, and Meta OAuth/webhook behavior are untouched.
   to work with existing customer sheets — complete verification for public
   use; until then the 100-user cap / unverified-app screen applies.
 - **Limits.** Sheets API quotas (~60 writes/min/user) bound throughput;
-  eventual consistency is expected under bursts. Last success, pending, and
-  failed counts plus the last error are shown in the card.
+  eventual consistency is expected under bursts. Last success, pending,
+  and failed counts plus the last error are shown per table.

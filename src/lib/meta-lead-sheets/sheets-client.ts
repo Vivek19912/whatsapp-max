@@ -12,12 +12,9 @@
 // server-side before enabling sync; tokens never reach the browser.
 // ============================================================
 
-import {
-  META_SHEETS_HEADERS,
-  META_SHEETS_LEAD_ID_COL,
-} from "./constants";
+import { META_SHEETS_HEADERS, META_SHEETS_LEAD_ID_COL } from './constants';
 
-const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
 export interface SheetsMeta {
   spreadsheetId: string;
@@ -30,14 +27,20 @@ export class SheetsApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
     super(message);
-    this.name = "SheetsApiError";
+    this.name = 'SheetsApiError';
     this.status = status;
   }
 }
 
-async function throwForResponse(res: Response, context: string): Promise<never> {
-  const text = await res.text().catch(() => "");
-  throw new SheetsApiError(`${context} (${res.status}): ${text.slice(0, 500)}`, res.status);
+async function throwForResponse(
+  res: Response,
+  context: string
+): Promise<never> {
+  const text = await res.text().catch(() => '');
+  throw new SheetsApiError(
+    `${context} (${res.status}): ${text.slice(0, 500)}`,
+    res.status
+  );
 }
 
 /** True for transient errors worth retrying (429 / 5xx). */
@@ -68,7 +71,7 @@ export function parseSheetsSpreadsheetId(input: string): string | null {
 
 function columnLetter(index: number): string {
   let n = index + 1;
-  let out = "";
+  let out = '';
   while (n > 0) {
     const rem = (n - 1) % 26;
     out = String.fromCharCode(65 + rem) + out;
@@ -86,13 +89,13 @@ export function quoteTabTitle(title: string): string {
 export async function getSheetsSpreadsheet(
   accessToken: string,
   spreadsheetId: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<SheetsMeta> {
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}?fields=spreadsheetId,spreadsheetUrl,properties.title,sheets.properties.title`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets read failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets read failed');
   const data = (await res.json()) as {
     spreadsheetId: string;
     spreadsheetUrl: string;
@@ -101,8 +104,8 @@ export async function getSheetsSpreadsheet(
   };
   return {
     spreadsheetId: data.spreadsheetId,
-    title: data.properties?.title ?? "Untitled",
-    tabs: (data.sheets ?? []).map((s) => s.properties?.title ?? ""),
+    title: data.properties?.title ?? 'Untitled',
+    tabs: (data.sheets ?? []).map((s) => s.properties?.title ?? ''),
     url: data.spreadsheetUrl,
   };
 }
@@ -112,13 +115,13 @@ export async function createSheetsSpreadsheet(
   accessToken: string,
   title: string,
   tab: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<SheetsMeta> {
   const res = await fetchImpl(SHEETS_API, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       properties: { title },
@@ -140,7 +143,7 @@ export async function createSheetsSpreadsheet(
       ],
     }),
   });
-  if (!res.ok) await throwForResponse(res, "Google Sheets create failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets create failed');
   const data = (await res.json()) as {
     spreadsheetId: string;
     spreadsheetUrl: string;
@@ -150,30 +153,76 @@ export async function createSheetsSpreadsheet(
   return {
     spreadsheetId: data.spreadsheetId,
     title: data.properties?.title ?? title,
-    tabs: (data.sheets ?? []).map((s) => s.properties?.title ?? ""),
+    tabs: (data.sheets ?? []).map((s) => s.properties?.title ?? ''),
     url: data.spreadsheetUrl,
   };
 }
 
-/** Create a tab if missing; returns whether it was created. */
-export async function ensureSheetsTab(
+/** Thrown when the configured worksheet tab is missing. Never
+ *  writes anywhere else: the caller must ask the user to pick a
+ *  replacement (or explicitly create the tab). */
+export class TabMissingError extends Error {
+  readonly spreadsheetId: string;
+  readonly tab: string;
+  readonly availableTabs: string[];
+  constructor(spreadsheetId: string, tab: string, availableTabs: string[]) {
+    super(
+      availableTabs.length === 0
+        ? `Worksheet "${tab}" was not found and the spreadsheet has no usable worksheet.`
+        : `Worksheet "${tab}" was not found. Available worksheets: ${availableTabs.join(', ')}.`
+    );
+    this.name = 'TabMissingError';
+    this.spreadsheetId = spreadsheetId;
+    this.tab = tab;
+    this.availableTabs = availableTabs;
+  }
+}
+
+/**
+ * Create exactly one worksheet tab. Only called for an explicit
+ * user action (opt-in during setup, or an empty spreadsheet with no
+ * usable worksheet). Never called implicitly by sync, drain, or
+ * remap paths.
+ */
+export async function createWorksheetTab(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<{ created: boolean }> {
-  const meta = await getSheetsSpreadsheet(accessToken, spreadsheetId, fetchImpl);
-  if (meta.tabs.includes(tab)) return { created: false };
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
   const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ requests: [{ addSheet: { properties: { title: tab } } }] }),
+    body: JSON.stringify({
+      requests: [{ addSheet: { properties: { title: tab } } }],
+    }),
   });
-  if (!res.ok) await throwForResponse(res, "Google Sheets tab create failed");
-  return { created: true };
+  if (!res.ok) await throwForResponse(res, 'Google Sheets tab create failed');
+}
+
+/**
+ * Verify the configured worksheet tab exists (reads the live tab
+ * list). Throws TabMissingError — never creates, never falls back
+ * to another tab, so a renamed/deleted tab surfaces as an explicit
+ * error instead of silently writing elsewhere.
+ */
+export async function assertWorksheetTabExists(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  const meta = await getSheetsSpreadsheet(
+    accessToken,
+    spreadsheetId,
+    fetchImpl
+  );
+  if (!meta.tabs.includes(tab)) {
+    throw new TabMissingError(spreadsheetId, tab, meta.tabs);
+  }
 }
 
 /** Read row 1 of the tab. Null when the tab is empty. */
@@ -181,18 +230,18 @@ export async function readSheetsHeader(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<string[] | null> {
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!1:1`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}?majorDimension=ROWS`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets header read failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets header read failed');
   const data = (await res.json()) as { values?: unknown[][] };
   const row = data.values?.[0];
   if (!row || row.length === 0) return null;
-  return row.map((c) => String(c ?? ""));
+  return row.map((c) => String(c ?? ''));
 }
 
 /**
@@ -206,9 +255,14 @@ export async function ensureSheetsHeader(
   spreadsheetId: string,
   tab: string,
   desiredHeaders: string[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<{ updated: boolean }> {
-  const existing = await readSheetsHeader(accessToken, spreadsheetId, tab, fetchImpl);
+  const existing = await readSheetsHeader(
+    accessToken,
+    spreadsheetId,
+    tab,
+    fetchImpl
+  );
   const wanted = [...desiredHeaders];
   if (
     existing &&
@@ -223,15 +277,15 @@ export async function ensureSheetsHeader(
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${headerRange}?valueInputOption=USER_ENTERED`,
     {
-      method: "PUT",
+      method: 'PUT',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({ values: [wanted] }),
-    },
+    }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets header write failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets header write failed');
   return { updated: true };
 }
 
@@ -241,22 +295,22 @@ export async function appendSheetsRows(
   spreadsheetId: string,
   tab: string,
   rows: (string | number)[][],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   if (rows.length === 0) return;
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!A1`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     {
-      method: "POST",
+      method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({ values: rows }),
-    },
+    }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets append failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets append failed');
 }
 
 /** Overwrite one full data row (1-based row number, managed width). */
@@ -266,24 +320,25 @@ export async function updateSheetsRow(
   tab: string,
   rowNumber: number,
   values: (string | number)[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
-  if (rowNumber < 2) throw new Error("Refusing to update a sheet header row");
-  if (values.length === 0) throw new Error("Refusing to write an empty sheet row");
+  if (rowNumber < 2) throw new Error('Refusing to update a sheet header row');
+  if (values.length === 0)
+    throw new Error('Refusing to write an empty sheet row');
   const lastCol = columnLetter(values.length - 1);
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!A${rowNumber}:${lastCol}${rowNumber}`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`,
     {
-      method: "PUT",
+      method: 'PUT',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({ values: [values] }),
-    },
+    }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets row update failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets row update failed');
 }
 
 /**
@@ -296,24 +351,24 @@ export async function rewriteSheetRows(
   spreadsheetId: string,
   tab: string,
   rows: Array<{ rowNumber: number; values: (string | number)[] }>,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   if (rows.length === 0) return;
   for (const row of rows) {
     if (row.rowNumber < 2 || row.values.length === 0) {
-      throw new Error("Refusing to rewrite a header row or an empty row");
+      throw new Error('Refusing to rewrite a header row or an empty row');
     }
   }
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values:batchUpdate`,
     {
-      method: "POST",
+      method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        valueInputOption: "USER_ENTERED",
+        valueInputOption: 'USER_ENTERED',
         data: rows.map((row) => {
           const lastCol = columnLetter(row.values.length - 1);
           return {
@@ -322,30 +377,30 @@ export async function rewriteSheetRows(
           };
         }),
       }),
-    },
+    }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets rows rewrite failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets rows rewrite failed');
 }
 
 async function getSheetId(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<number> {
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}?fields=sheets.properties`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   if (!res.ok) {
-    await throwForResponse(res, "Google Sheets tab lookup failed");
+    await throwForResponse(res, 'Google Sheets tab lookup failed');
   }
   const data = (await res.json()) as {
     sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
   };
   const sheetId = data.sheets?.find((sheet) => sheet.properties?.title === tab)
     ?.properties?.sheetId;
-  if (typeof sheetId !== "number") {
+  if (typeof sheetId !== 'number') {
     throw new Error(`Google Sheets tab not found: ${tab}`);
   }
   return sheetId;
@@ -362,14 +417,14 @@ export async function setSheetColumnHidden(
   tab: string,
   colIndex: number,
   hidden: boolean,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   const sheetId = await getSheetId(accessToken, spreadsheetId, tab, fetchImpl);
   const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       requests: [
@@ -377,19 +432,22 @@ export async function setSheetColumnHidden(
           updateDimensionProperties: {
             range: {
               sheetId,
-              dimension: "COLUMNS",
+              dimension: 'COLUMNS',
               startIndex: colIndex,
               endIndex: colIndex + 1,
             },
             properties: { hiddenByUser: hidden },
-            fields: "hiddenByUser",
+            fields: 'hiddenByUser',
           },
         },
       ],
     }),
   });
   if (!res.ok) {
-    await throwForResponse(res, "Google Sheets column visibility update failed");
+    await throwForResponse(
+      res,
+      'Google Sheets column visibility update failed'
+    );
   }
 }
 
@@ -404,26 +462,26 @@ export async function deleteSheetRows(
   spreadsheetId: string,
   tab: string,
   rowNumbers: number[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   if (rowNumbers.length === 0) return;
   if (rowNumbers.some((rowNumber) => rowNumber < 2)) {
-    throw new Error("Refusing to delete a sheet header row");
+    throw new Error('Refusing to delete a sheet header row');
   }
   const sheetId = await getSheetId(accessToken, spreadsheetId, tab, fetchImpl);
   const descendingRows = [...new Set(rowNumbers)].sort((a, b) => b - a);
   const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     },
     body: JSON.stringify({
       requests: descendingRows.map((rowNumber) => ({
         deleteDimension: {
           range: {
             sheetId,
-            dimension: "ROWS",
+            dimension: 'ROWS',
             startIndex: rowNumber - 1,
             endIndex: rowNumber,
           },
@@ -432,7 +490,7 @@ export async function deleteSheetRows(
     }),
   });
   if (!res.ok) {
-    await throwForResponse(res, "Google Sheets row delete failed");
+    await throwForResponse(res, 'Google Sheets row delete failed');
   }
 }
 
@@ -445,7 +503,7 @@ export async function findSheetsRowsByLeadId(
   spreadsheetId: string,
   tab: string,
   leadIds: string[],
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<Map<string, number>> {
   const found = new Map<string, number>();
   if (leadIds.length === 0) return found;
@@ -453,14 +511,14 @@ export async function findSheetsRowsByLeadId(
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!${col}2:${col}`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}?majorDimension=COLUMNS`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-  if (!res.ok) await throwForResponse(res, "Google Sheets column read failed");
+  if (!res.ok) await throwForResponse(res, 'Google Sheets column read failed');
   const data = (await res.json()) as { values?: unknown[][] };
   const cells = data.values?.[0] ?? [];
   const wanted = new Set(leadIds);
   cells.forEach((cell, index) => {
-    const value = String(cell ?? "");
+    const value = String(cell ?? '');
     if (wanted.has(value) && !found.has(value)) found.set(value, index + 2);
   });
   return found;

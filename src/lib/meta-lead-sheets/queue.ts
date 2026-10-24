@@ -2,16 +2,23 @@
 // Meta Lead Ads → Google Sheets — durable outbox.
 //
 // Flow (all Meta-only, never Flow Tables):
+//   * Configuration is per Workspace table: one
+//     `meta_lead_sheets_configs` row per (account, Meta form id).
+//     Each table syncs only its own form's leads into its own
+//     spreadsheet/tab/columns.
 //   * Ingestion (`processSubmissionById` success), assignment
 //     changes, and Workspace cell edits call `maybeEnqueue...`
 //     AFTER the underlying write succeeded. Enqueue is a single
 //     idempotent INSERT keyed UNIQUE(account_id, submission_id):
 //     polling/import/retries/concurrent workers collapse to one row.
-//     Enqueue NEVER throws into lead processing.
+//     Enqueue NEVER throws into lead processing. Rows whose form has
+//     no table config are never enqueued.
 //   * `drainSheetsQueue` (cron + manual sync-now) claims due rows,
-//     writes to Sheets idempotently (update existing row matched by
-//     stable Meta Lead ID column A, else append), and records the
-//     sheet row number for future updates.
+//     resolves each row's table config by its form, and writes to
+//     Sheets idempotently (update existing row matched by stable
+//     Meta Lead ID column A, else append), recording the sheet row
+//     number for future updates. Rows without a matching table
+//     config are parked untouched (resume on configure).
 //   * Google failures use bounded exponential backoff and never roll
 //     back the lead. Auth failures leave rows queued with a long
 //     backoff + surface `needs_reauth` via config.last_error.
@@ -19,9 +26,9 @@
 //     safe batches; resume is automatic via the queue.
 // ============================================================
 
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { isUniqueViolation } from "@/lib/contacts/dedupe";
+import { isUniqueViolation } from '@/lib/contacts/dedupe';
 
 import {
   META_SHEETS_BATCH_SIZE,
@@ -29,28 +36,33 @@ import {
   META_SHEETS_MAX_ATTEMPTS,
   META_SHEETS_SWEEP_LIMIT,
   sheetsRetryDelayMs,
-} from "./constants";
+} from './constants';
 import {
   computeManagedLayout,
   projectRowValues,
   resolveEffectiveColumns,
   type SheetsColumnDef,
-} from "./columns";
-import { buildLeadFieldMap, resolveBusinessDisplays, sheetsSourceLabel } from "./mapping";
-import { getSheetsAccessToken, SheetsAuthError } from "./oauth";
+} from './columns';
+import {
+  buildLeadFieldMap,
+  resolveBusinessDisplays,
+  sheetsSourceLabel,
+} from './mapping';
+import { getSheetsAccessToken, SheetsAuthError } from './oauth';
 import {
   appendSheetsRows,
+  assertWorksheetTabExists,
   deleteSheetRows,
   ensureSheetsHeader,
-  ensureSheetsTab,
   findSheetsRowsByLeadId,
   isAuthSheetsError,
   isTransientSheetsError,
   rewriteSheetRows,
   setSheetColumnHidden,
   SheetsApiError,
+  TabMissingError,
   updateSheetsRow,
-} from "./sheets-client";
+} from './sheets-client';
 
 const STALE_CLAIM_MS = 5 * 60_000;
 
@@ -82,61 +94,35 @@ interface SubmissionRow {
 }
 
 /**
- * Selected Meta form_ids for Sheets sync. NULL/undefined = legacy
- * (no filter, every form syncs). Empty array = sync nothing.
+ * This table's Sheets preference: auto_sync for one
+ * (account, Meta form). No row = not configured = sync nothing.
  */
-export type SheetsFormSelection = string[] | null | undefined;
-
-/** True when a submission's form passes the account's form filter. */
-export function isFormSelected(
-  selection: SheetsFormSelection,
-  formId: string | null | undefined,
-): boolean {
-  if (selection === undefined || selection === null) return true;
-  if (!formId) return false;
-  return selection.includes(formId);
-}
-
-interface SheetsPref {
-  autoSync: boolean;
-  formIds: string[] | null;
-}
-
-async function getSheetsPref(
+async function getTableAutoSync(
   db: SupabaseClient,
   accountId: string,
-): Promise<SheetsPref> {
-  const { data } = await db
-    .from("meta_lead_sheets_configs")
-    .select("auto_sync, form_ids")
-    .eq("account_id", accountId)
-    .maybeSingle();
-  const row = data as { auto_sync?: boolean; form_ids?: string[] | null } | null;
-  return {
-    autoSync: row?.auto_sync === true,
-    formIds: Array.isArray(row?.form_ids) ? (row.form_ids as string[]) : null,
-  };
-}
-
-async function getAutoSync(
-  db: SupabaseClient,
-  accountId: string,
+  formId: string
 ): Promise<boolean> {
-  return (await getSheetsPref(db, accountId)).autoSync;
+  const { data } = await db
+    .from('meta_lead_sheets_configs')
+    .select('auto_sync')
+    .eq('account_id', accountId)
+    .eq('form_id', formId)
+    .maybeSingle();
+  return (data as { auto_sync?: boolean } | null)?.auto_sync === true;
 }
 
 async function loadSubmission(
   db: SupabaseClient,
   accountId: string,
-  submissionId: string,
+  submissionId: string
 ): Promise<SubmissionRow | null> {
   const { data, error } = await db
-    .from("meta_lead_submissions")
+    .from('meta_lead_submissions')
     .select(
-      "id, account_id, meta_lead_id, flow_run_id, form_id, form_name, campaign_name, ad_name, source, answers, meta_created_time, created_at",
+      'id, account_id, meta_lead_id, flow_run_id, form_id, form_name, campaign_name, ad_name, source, answers, meta_created_time, created_at'
     )
-    .eq("id", submissionId)
-    .eq("account_id", accountId)
+    .eq('id', submissionId)
+    .eq('account_id', accountId)
     .maybeSingle();
   if (error) throw error;
   return (data as SubmissionRow | null) ?? null;
@@ -144,27 +130,31 @@ async function loadSubmission(
 
 /**
  * Idempotent enqueue after a lead was created/updated. Never throws.
- * Skips when the account has no Meta Sheets config or auto_sync is
- * off, and when the lead's form is not selected for sync.
- * (manual sync-now can still enqueue via `enqueueSheetsSyncForRun`
- * with force, or backfill explicitly).
+ * Skips when this table (account + form) has no Sheets config or
+ * auto_sync is off. (Manual sync-now drains forcefully; backfill
+ * enqueues explicitly per form.)
  */
 export async function maybeEnqueueSheetsSync(
   db: SupabaseClient,
-  args: { accountId: string; submissionId: string },
+  args: { accountId: string; submissionId: string }
 ): Promise<{ enqueued: boolean }> {
   try {
-    const pref = await getSheetsPref(db, args.accountId);
-    if (!pref.autoSync) return { enqueued: false };
-    const submission = await loadSubmission(db, args.accountId, args.submissionId);
+    const submission = await loadSubmission(
+      db,
+      args.accountId,
+      args.submissionId
+    );
     if (!submission) return { enqueued: false };
     // Only sync leads that actually became Workspace rows; failed /
     // ignored submissions have no flow_run_id yet and will be
     // enqueued when (if) they process.
-    if (!submission.flow_run_id) return { enqueued: false };
-    // Deselected (or never-selected) forms never enter the outbox.
-    if (!isFormSelected(pref.formIds, submission.form_id)) return { enqueued: false };
-    const { error } = await db.from("meta_lead_sheets_queue").insert({
+    if (!submission.flow_run_id || !submission.form_id)
+      return { enqueued: false };
+    // This table's config only — other tables' forms never enter.
+    if (!(await getTableAutoSync(db, args.accountId, submission.form_id))) {
+      return { enqueued: false };
+    }
+    const { error } = await db.from('meta_lead_sheets_queue').insert({
       account_id: args.accountId,
       submission_id: submission.id,
       flow_run_id: submission.flow_run_id,
@@ -177,8 +167,8 @@ export async function maybeEnqueueSheetsSync(
     return { enqueued: true };
   } catch (err) {
     console.error(
-      "[meta-sheets] enqueue failed (lead processing unaffected):",
-      err instanceof Error ? err.message : err,
+      '[meta-sheets] enqueue failed (lead processing unaffected):',
+      err instanceof Error ? err.message : err
     );
     return { enqueued: false };
   }
@@ -191,24 +181,27 @@ export async function maybeEnqueueSheetsSync(
  */
 export async function enqueueSheetsSyncForRun(
   db: SupabaseClient,
-  args: { accountId: string; runId: string },
+  args: { accountId: string; runId: string }
 ): Promise<{ enqueued: boolean }> {
   try {
-    if (!(await getAutoSync(db, args.accountId))) return { enqueued: false };
     const { data, error } = await db
-      .from("meta_lead_submissions")
-      .select("id")
-      .eq("account_id", args.accountId)
-      .eq("flow_run_id", args.runId)
+      .from('meta_lead_submissions')
+      .select('id')
+      .eq('account_id', args.accountId)
+      .eq('flow_run_id', args.runId)
       .maybeSingle();
     if (error) throw error;
     const row = data as { id: string } | null;
     if (!row) return { enqueued: false };
-    return maybeEnqueueSheetsSync(db, { accountId: args.accountId, submissionId: row.id });
+    // maybeEnqueueSheetsSync re-checks this table's config + form.
+    return maybeEnqueueSheetsSync(db, {
+      accountId: args.accountId,
+      submissionId: row.id,
+    });
   } catch (err) {
     console.error(
-      "[meta-sheets] enqueue-for-run failed (assignment unaffected):",
-      err instanceof Error ? err.message : err,
+      '[meta-sheets] enqueue-for-run failed (assignment unaffected):',
+      err instanceof Error ? err.message : err
     );
     return { enqueued: false };
   }
@@ -221,44 +214,39 @@ export interface BackfillResult {
 }
 
 /**
- * Historical sync: enqueue existing processed submissions in batches.
- * Idempotent (unique key) — safe to resume after interruption.
- * Only the account's SELECTED forms are enqueued; an explicit empty
- * selection enqueues nothing.
+ * Historical sync for ONE table: enqueue that form's processed
+ * submissions in batches. Idempotent (unique key) — safe to resume
+ * after interruption.
  */
-export async function backfillAccountSheets(
+export async function backfillFormSheets(
   db: SupabaseClient,
   accountId: string,
-  limit = 500,
+  formId: string,
+  limit = 500
 ): Promise<BackfillResult> {
   const bounded = Math.max(1, Math.min(limit, 2000));
-  const { formIds } = await getSheetsPref(db, accountId);
-  if (formIds !== null && formIds.length === 0) {
-    return { enqueued: 0, alreadyQueued: 0, total: 0 };
-  }
-  let query = db
-    .from("meta_lead_submissions")
-    .select("id, flow_run_id, meta_lead_id, form_id")
-    .eq("account_id", accountId)
-    .eq("status", "processed")
-    .not("flow_run_id", "is", null)
-    .order("created_at", { ascending: true })
+  const { data, error } = await db
+    .from('meta_lead_submissions')
+    .select('id, flow_run_id, meta_lead_id, form_id')
+    .eq('account_id', accountId)
+    .eq('status', 'processed')
+    .not('flow_run_id', 'is', null)
+    .eq('form_id', formId)
+    .order('created_at', { ascending: true })
     .limit(bounded);
-  if (formIds !== null) query = query.in("form_id", formIds);
-  const { data, error } = await query;
   if (error) throw error;
-  const rows = ((data ?? []) as Array<{
+  const rows = (data ?? []) as Array<{
     id: string;
     flow_run_id: string | null;
     meta_lead_id: string;
-  }>);
+  }>;
   let enqueued = 0;
   let alreadyQueued = 0;
   for (let i = 0; i < rows.length; i += META_SHEETS_BATCH_SIZE) {
     const batch = rows.slice(i, i + META_SHEETS_BATCH_SIZE);
     for (const row of batch) {
       const { error: insertErr } = await db
-        .from("meta_lead_sheets_queue")
+        .from('meta_lead_sheets_queue')
         .insert({
           account_id: accountId,
           submission_id: row.id,
@@ -276,13 +264,13 @@ export async function backfillAccountSheets(
     }
   }
   await db
-    .from("meta_lead_sheets_configs")
+    .from('meta_lead_sheets_configs')
     .update({
-      historical_import_status: "done",
+      historical_import_status: 'done',
       historical_imported_count: enqueued + alreadyQueued,
       updated_at: new Date().toISOString(),
     })
-    .eq("account_id", accountId);
+    .eq('account_id', accountId);
   return { enqueued, alreadyQueued, total: rows.length };
 }
 
@@ -303,34 +291,36 @@ export async function enqueueFormsDelta(
   db: SupabaseClient,
   accountId: string,
   formIds: string[],
-  limit = 2000,
+  limit = 2000
 ): Promise<FormsDeltaResult> {
   if (formIds.length === 0) return { enqueued: 0, alreadyQueued: 0, total: 0 };
   const bounded = Math.max(1, Math.min(limit, 2000));
   const { data, error } = await db
-    .from("meta_lead_submissions")
-    .select("id, flow_run_id, meta_lead_id")
-    .eq("account_id", accountId)
-    .eq("status", "processed")
-    .not("flow_run_id", "is", null)
-    .in("form_id", formIds)
-    .order("created_at", { ascending: true })
+    .from('meta_lead_submissions')
+    .select('id, flow_run_id, meta_lead_id')
+    .eq('account_id', accountId)
+    .eq('status', 'processed')
+    .not('flow_run_id', 'is', null)
+    .in('form_id', formIds)
+    .order('created_at', { ascending: true })
     .limit(bounded);
   if (error) throw error;
-  const rows = ((data ?? []) as Array<{
+  const rows = (data ?? []) as Array<{
     id: string;
     flow_run_id: string | null;
     meta_lead_id: string;
-  }>);
+  }>;
   let enqueued = 0;
   let alreadyQueued = 0;
   for (const row of rows) {
-    const { error: insertErr } = await db.from("meta_lead_sheets_queue").insert({
-      account_id: accountId,
-      submission_id: row.id,
-      flow_run_id: row.flow_run_id,
-      meta_lead_id: row.meta_lead_id,
-    });
+    const { error: insertErr } = await db
+      .from('meta_lead_sheets_queue')
+      .insert({
+        account_id: accountId,
+        submission_id: row.id,
+        flow_run_id: row.flow_run_id,
+        meta_lead_id: row.meta_lead_id,
+      });
     if (insertErr) {
       if (isUniqueViolation(insertErr)) {
         alreadyQueued += 1;
@@ -348,55 +338,70 @@ export interface DrainResult {
   sent: number;
   failed: number;
   skippedDisabled: number;
-  skippedForm: number;
+  /** Rows parked because their form has no table config (resume on configure). */
+  skippedNoConfig: number;
   needsReauth: number;
 }
 
 interface ConfigRow {
   account_id: string;
+  form_id: string;
   spreadsheet_id: string;
+  spreadsheet_url: string | null;
+  spreadsheet_title: string | null;
   sheet_tab: string;
   auto_sync: boolean;
-  form_ids: string[] | null;
+  last_success_at: string | null;
+  last_error: string | null;
   column_config: unknown;
   pending_remap: boolean;
   remap_cursor: number | null;
 }
 
-async function loadConfig(
+/** This table's Sheets config: one row per (account, Meta form id). */
+async function loadTableConfig(
   db: SupabaseClient,
   accountId: string,
+  formId: string
 ): Promise<ConfigRow | null> {
   const { data, error } = await db
-    .from("meta_lead_sheets_configs")
+    .from('meta_lead_sheets_configs')
     .select(
-      "account_id, spreadsheet_id, sheet_tab, auto_sync, form_ids, column_config, pending_remap, remap_cursor",
+      'account_id, form_id, spreadsheet_id, spreadsheet_url, spreadsheet_title, sheet_tab, auto_sync, last_success_at, last_error, column_config, pending_remap, remap_cursor'
     )
-    .eq("account_id", accountId)
+    .eq('account_id', accountId)
+    .eq('form_id', formId)
     .maybeSingle();
   if (error) throw error;
-  const row = data as
-    | {
-        account_id: string;
-        spreadsheet_id: string;
-        sheet_tab: string;
-        auto_sync: boolean;
-        form_ids?: string[] | null;
-        column_config?: unknown;
-        pending_remap?: boolean | null;
-        remap_cursor?: number | null;
-      }
-    | null;
+  const row = data as {
+    account_id: string;
+    form_id: string;
+    spreadsheet_id: string;
+    spreadsheet_url?: string | null;
+    spreadsheet_title?: string | null;
+    sheet_tab: string;
+    auto_sync: boolean;
+    last_success_at?: string | null;
+    last_error?: string | null;
+    column_config?: unknown;
+    pending_remap?: boolean | null;
+    remap_cursor?: number | null;
+  } | null;
   if (!row) return null;
   return {
     account_id: row.account_id,
+    form_id: row.form_id,
     spreadsheet_id: row.spreadsheet_id,
+    spreadsheet_url: row.spreadsheet_url ?? null,
+    spreadsheet_title: row.spreadsheet_title ?? null,
     sheet_tab: row.sheet_tab,
     auto_sync: row.auto_sync,
-    form_ids: Array.isArray(row.form_ids) ? (row.form_ids as string[]) : null,
+    last_success_at: row.last_success_at ?? null,
+    last_error: row.last_error ?? null,
     column_config: row.column_config ?? null,
     pending_remap: row.pending_remap === true,
-    remap_cursor: typeof row.remap_cursor === "number" ? row.remap_cursor : null,
+    remap_cursor:
+      typeof row.remap_cursor === 'number' ? row.remap_cursor : null,
   };
 }
 
@@ -405,44 +410,47 @@ async function buildRowValues(
   db: SupabaseClient,
   accountId: string,
   submission: SubmissionRow,
-  columns: SheetsColumnDef[],
+  columns: SheetsColumnDef[]
 ): Promise<string[]> {
   let fields: Array<{ id: string; name: string }> = [];
   let values: Array<{ field_id: string; value_text: string | null }> = [];
   let roster: Array<{ user_id: string; full_name: string | null }> = [];
   if (submission.flow_run_id) {
     const { data: run } = await db
-      .from("flow_runs")
-      .select("flow_id")
-      .eq("id", submission.flow_run_id)
-      .eq("account_id", accountId)
+      .from('flow_runs')
+      .select('flow_id')
+      .eq('id', submission.flow_run_id)
+      .eq('account_id', accountId)
       .maybeSingle();
     const flowId = (run as { flow_id: string } | null)?.flow_id;
     if (flowId) {
       const [{ data: fieldRows }, { data: valueRows }] = await Promise.all([
         db
-          .from("workspace_fields")
-          .select("id, name")
-          .eq("account_id", accountId)
-          .eq("flow_id", flowId),
+          .from('workspace_fields')
+          .select('id, name')
+          .eq('account_id', accountId)
+          .eq('flow_id', flowId),
         db
-          .from("workspace_values")
-          .select("field_id, value_text")
-          .eq("account_id", accountId)
-          .eq("flow_run_id", submission.flow_run_id),
+          .from('workspace_values')
+          .select('field_id, value_text')
+          .eq('account_id', accountId)
+          .eq('flow_run_id', submission.flow_run_id),
       ]);
-      fields = ((fieldRows ?? []) as Array<{ id: string; name: string }>);
-      values = ((valueRows ?? []) as Array<{
+      fields = (fieldRows ?? []) as Array<{ id: string; name: string }>;
+      values = (valueRows ?? []) as Array<{
         field_id: string;
         value_text: string | null;
-      }>);
+      }>;
     }
   }
   const { data: profiles } = await db
-    .from("profiles")
-    .select("user_id, full_name")
-    .eq("account_id", accountId);
-  roster = ((profiles ?? []) as Array<{ user_id: string; full_name: string | null }>);
+    .from('profiles')
+    .select('user_id, full_name')
+    .eq('account_id', accountId);
+  roster = (profiles ?? []) as Array<{
+    user_id: string;
+    full_name: string | null;
+  }>;
   const business = resolveBusinessDisplays({ fields, values, roster });
   return projectRowValues(
     buildLeadFieldMap({
@@ -457,7 +465,7 @@ async function buildRowValues(
       leadType: business.leadType,
       stage: business.stage,
     }),
-    columns,
+    columns
   );
 }
 
@@ -465,14 +473,14 @@ async function markRowFailed(
   db: SupabaseClient,
   row: QueueRow,
   message: string,
-  retryInMs: number | null,
+  retryInMs: number | null
 ): Promise<void> {
   const attempt = row.attempts + 1;
   const willRetry = attempt < row.max_attempts && retryInMs !== null;
   await db
-    .from("meta_lead_sheets_queue")
+    .from('meta_lead_sheets_queue')
     .update({
-      status: willRetry ? "failed" : "failed",
+      status: willRetry ? 'failed' : 'failed',
       attempts: attempt,
       last_error: message.slice(0, 500),
       next_retry_at:
@@ -482,16 +490,16 @@ async function markRowFailed(
       claimed_at: null,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", row.id);
+    .eq('id', row.id);
   // Terminal failures keep next_retry_at far out so the cron stops
   // hammering but the row stays visible for manual retry.
   if (!willRetry) {
     await db
-      .from("meta_lead_sheets_queue")
+      .from('meta_lead_sheets_queue')
       .update({
         next_retry_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
       })
-      .eq("id", row.id);
+      .eq('id', row.id);
   }
 }
 
@@ -520,36 +528,39 @@ export async function remapLayoutChunk(
   accessToken: string,
   config: {
     account_id: string;
+    form_id: string;
     spreadsheet_id: string;
     sheet_tab: string;
     column_config: unknown;
   },
   cursor: number | null,
   fetchImpl: typeof fetch = fetch,
-  chunkSize = REMAP_CHUNK_SIZE,
+  chunkSize = REMAP_CHUNK_SIZE
 ): Promise<RemapChunkResult> {
   const columns = resolveEffectiveColumns(config.column_config);
   const layout = computeManagedLayout(columns);
-  const from = typeof cursor === "number" ? cursor : 0;
+  const from = typeof cursor === 'number' ? cursor : 0;
 
   // Bound the scan: only sent, mapped rows past the cursor. Filtering
   // `> cursor` happens in memory (small bounded set) so the resume
   // point survives crashes without per-row version bookkeeping.
   const { data, error } = await db
-    .from("meta_lead_sheets_queue")
-    .select("id, sheet_row_number, submission_id")
-    .eq("account_id", config.account_id)
-    .eq("status", "sent")
-    .not("sheet_row_number", "is", null)
-    .order("sheet_row_number", { ascending: true })
+    .from('meta_lead_sheets_queue')
+    .select('id, sheet_row_number, submission_id')
+    .eq('account_id', config.account_id)
+    .eq('status', 'sent')
+    .not('sheet_row_number', 'is', null)
+    .order('sheet_row_number', { ascending: true })
     .limit(500);
   if (error) throw error;
-  const candidates = ((data ?? []) as Array<{
-    id: string;
-    sheet_row_number: number | null;
-    submission_id: string;
-  }>).filter(
-    (r) => typeof r.sheet_row_number === "number" && r.sheet_row_number > from,
+  const candidates = (
+    (data ?? []) as Array<{
+      id: string;
+      sheet_row_number: number | null;
+      submission_id: string;
+    }>
+  ).filter(
+    (r) => typeof r.sheet_row_number === 'number' && r.sheet_row_number > from
   );
   const batch = candidates.slice(0, Math.max(1, Math.min(chunkSize, 500)));
 
@@ -560,44 +571,61 @@ export async function remapLayoutChunk(
       config.spreadsheet_id,
       config.sheet_tab,
       layout.headers,
-      fetchImpl,
+      fetchImpl
     );
     await applyIdColumnVisibility(
       accessToken,
       config.spreadsheet_id,
       config.sheet_tab,
       layout.idVisible,
-      fetchImpl,
+      fetchImpl
     );
     await db
-      .from("meta_lead_sheets_configs")
+      .from('meta_lead_sheets_configs')
       .update({
         pending_remap: false,
         remap_cursor: null,
         updated_at: new Date().toISOString(),
       })
-      .eq("account_id", config.account_id);
+      .eq('account_id', config.account_id)
+      .eq('form_id', config.form_id);
     return { done: true, remapped: 0, skipped: 0 };
   }
 
-  const rewrites: Array<{ rowNumber: number; values: (string | number)[] }> = [];
+  const rewrites: Array<{ rowNumber: number; values: (string | number)[] }> =
+    [];
   let skipped = 0;
   let maxNumber = from;
   for (const item of batch) {
     const rowNumber = item.sheet_row_number as number;
     maxNumber = Math.max(maxNumber, rowNumber);
     try {
-      const submission = await loadSubmission(db, config.account_id, item.submission_id);
-      if (!submission || !submission.flow_run_id) {
+      const submission = await loadSubmission(
+        db,
+        config.account_id,
+        item.submission_id
+      );
+      // Only this table's form is remapped; other forms' rows keep
+      // their own layout rollout (each table owns its sheet range).
+      if (
+        !submission ||
+        !submission.flow_run_id ||
+        submission.form_id !== config.form_id
+      ) {
         skipped += 1;
         continue;
       }
-      const values = await buildRowValues(db, config.account_id, submission, columns);
+      const values = await buildRowValues(
+        db,
+        config.account_id,
+        submission,
+        columns
+      );
       rewrites.push({ rowNumber, values });
     } catch (err) {
       console.error(
         `[meta-sheets] remap skipped row ${rowNumber}:`,
-        err instanceof Error ? err.message : err,
+        err instanceof Error ? err.message : err
       );
       skipped += 1;
     }
@@ -608,13 +636,14 @@ export async function remapLayoutChunk(
       config.spreadsheet_id,
       config.sheet_tab,
       rewrites,
-      fetchImpl,
+      fetchImpl
     );
   }
   await db
-    .from("meta_lead_sheets_configs")
+    .from('meta_lead_sheets_configs')
     .update({ remap_cursor: maxNumber, updated_at: new Date().toISOString() })
-    .eq("account_id", config.account_id);
+    .eq('account_id', config.account_id)
+    .eq('form_id', config.form_id);
   return { done: false, remapped: rewrites.length, skipped };
 }
 
@@ -628,7 +657,7 @@ export async function applyIdColumnVisibility(
   spreadsheetId: string,
   tab: string,
   idVisible: boolean,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   try {
     await setSheetColumnHidden(
@@ -637,12 +666,12 @@ export async function applyIdColumnVisibility(
       tab,
       META_SHEETS_LEAD_ID_COL,
       !idVisible,
-      fetchImpl,
+      fetchImpl
     );
   } catch (err) {
     console.error(
-      "[meta-sheets] ID column visibility update failed (cosmetic only):",
-      err instanceof Error ? err.message : err,
+      '[meta-sheets] ID column visibility update failed (cosmetic only):',
+      err instanceof Error ? err.message : err
     );
   }
 }
@@ -654,40 +683,54 @@ export async function applyIdColumnVisibility(
  */
 async function drainPendingRemap(
   db: SupabaseClient,
-  fetchImpl: typeof fetch,
+  fetchImpl: typeof fetch
 ): Promise<boolean> {
   const { data, error } = await db
-    .from("meta_lead_sheets_configs")
-    .select("account_id, spreadsheet_id, sheet_tab, column_config, remap_cursor")
-    .eq("pending_remap", true)
+    .from('meta_lead_sheets_configs')
+    .select(
+      'account_id, form_id, spreadsheet_id, sheet_tab, column_config, remap_cursor'
+    )
+    .eq('pending_remap', true)
     .limit(3);
   if (error) {
-    console.error("[meta-sheets] remap scan failed:", error.message);
+    console.error('[meta-sheets] remap scan failed:', error.message);
     return false;
   }
-  const pending = ((data ?? []) as Array<{
+  const pending = (data ?? []) as Array<{
     account_id: string;
+    form_id: string;
     spreadsheet_id: string;
     sheet_tab: string;
     column_config: unknown;
     remap_cursor: number | null;
-  }>);
+  }>;
   if (pending.length === 0) return false;
   for (const cfg of pending) {
     try {
       const token = await getSheetsAccessToken(db, cfg.account_id, fetchImpl);
-      await remapLayoutChunk(db, token, cfg, cfg.remap_cursor ?? 0, fetchImpl, REMAP_CHUNK_SIZE);
+      await remapLayoutChunk(
+        db,
+        token,
+        cfg,
+        cfg.remap_cursor ?? 0,
+        fetchImpl,
+        REMAP_CHUNK_SIZE
+      );
     } catch (err) {
       await db
-        .from("meta_lead_sheets_configs")
+        .from('meta_lead_sheets_configs')
         .update({
-          last_error: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+          last_error: (err instanceof Error ? err.message : String(err)).slice(
+            0,
+            500
+          ),
           updated_at: new Date().toISOString(),
         })
-        .eq("account_id", cfg.account_id);
+        .eq('account_id', cfg.account_id)
+        .eq('form_id', cfg.form_id);
       console.error(
         `[meta-sheets] remap chunk failed for ${cfg.account_id}:`,
-        err instanceof Error ? err.message : err,
+        err instanceof Error ? err.message : err
       );
     }
   }
@@ -700,8 +743,9 @@ export interface CleanupResult {
 }
 
 /**
- * Explicit, confirmed cleanup of rows belonging to DESELECTED forms.
- * Only rows with a verified queue mapping (account + submission +
+ * Explicit, confirmed cleanup of ONE table's managed rows (used when
+ * a table's target changes or its sheet is retired). Only rows with
+ * a verified queue mapping (account + submission of THIS form +
  * recorded sheet_row_number) are ever deleted; sent rows without a
  * recorded number and all user content are never touched. Remaining
  * managed row numbers are fixed arithmetically after the bottom-to-
@@ -709,40 +753,49 @@ export interface CleanupResult {
  * do not re-sync. Throws on Google failures (nothing is half-applied
  * except the sheet delete itself, which is reported).
  */
-export async function cleanupDeselectedRows(
+export async function cleanupTableRows(
   db: SupabaseClient,
   accessToken: string,
   accountId: string,
-  fetchImpl: typeof fetch = fetch,
+  formId: string,
+  fetchImpl: typeof fetch = fetch
 ): Promise<CleanupResult> {
-  const config = await loadConfig(db, accountId);
-  if (!config) throw new Error("Sheets sync is not configured for this account.");
-  if (config.form_ids === null) {
-    throw new Error("Save an explicit form selection before cleaning up.");
-  }
+  const config = await loadTableConfig(db, accountId, formId);
+  if (!config) throw new Error('Sheets sync is not configured for this table.');
   const { data: queued, error: queueErr } = await db
-    .from("meta_lead_sheets_queue")
-    .select("id, submission_id, sheet_row_number")
-    .eq("account_id", accountId)
-    .eq("status", "sent");
+    .from('meta_lead_sheets_queue')
+    .select('id, submission_id, sheet_row_number')
+    .eq('account_id', accountId)
+    .eq('status', 'sent');
   if (queueErr) throw queueErr;
-  const sentRows = ((queued ?? []) as Array<{
+  const sentRows = (queued ?? []) as Array<{
     id: string;
     submission_id: string;
     sheet_row_number: number | null;
-  }>);
+  }>;
   const mapped = sentRows.filter(
-    (r) => typeof r.sheet_row_number === "number" && (r.sheet_row_number as number) >= 2,
+    (r) =>
+      typeof r.sheet_row_number === 'number' &&
+      (r.sheet_row_number as number) >= 2
   );
-  const skippedUnmapped = sentRows.length - mapped.length;
+  let skippedUnmapped = sentRows.length - mapped.length;
 
-  // Resolve each mapped row's form server-side (tenant-scoped).
+  // Keep only this table's verified rows (tenant + form scoped).
   const toDelete: Array<{ queueId: string; rowNumber: number }> = [];
   for (const row of mapped) {
     const submission = await loadSubmission(db, accountId, row.submission_id);
-    if (!submission) continue;
-    if (!isFormSelected(config.form_ids, submission.form_id)) {
-      toDelete.push({ queueId: row.id, rowNumber: row.sheet_row_number as number });
+    if (!submission) {
+      // Orphaned mapping (submission gone): drop the queue row and
+      // count it as skipped — never delete a sheet row we cannot
+      // verify (it may be user content by now).
+      skippedUnmapped += 1;
+      continue;
+    }
+    if (submission.form_id === formId) {
+      toDelete.push({
+        queueId: row.id,
+        rowNumber: row.sheet_row_number as number,
+      });
     }
   }
   if (toDelete.length === 0) {
@@ -750,13 +803,21 @@ export async function cleanupDeselectedRows(
   }
 
   const numbers = toDelete.map((d) => d.rowNumber).sort((a, b) => a - b);
-  await deleteSheetRows(accessToken, config.spreadsheet_id, config.sheet_tab, numbers, fetchImpl);
+  await deleteSheetRows(
+    accessToken,
+    config.spreadsheet_id,
+    config.sheet_tab,
+    numbers,
+    fetchImpl
+  );
 
   // Fix surviving managed row numbers arithmetically (a bottom-to-top
   // delete shifts every row below each deletion up by one).
-  const remaining = sentRows.filter((r) => !toDelete.some((d) => d.queueId === r.id));
+  const remaining = sentRows.filter(
+    (r) => !toDelete.some((d) => d.queueId === r.id)
+  );
   for (const row of remaining) {
-    if (typeof row.sheet_row_number !== "number") continue;
+    if (typeof row.sheet_row_number !== 'number') continue;
     let shift = 0;
     for (const n of numbers) {
       if (n < (row.sheet_row_number as number)) shift += 1;
@@ -764,17 +825,17 @@ export async function cleanupDeselectedRows(
     }
     if (shift > 0) {
       await db
-        .from("meta_lead_sheets_queue")
+        .from('meta_lead_sheets_queue')
         .update({ sheet_row_number: (row.sheet_row_number as number) - shift })
-        .eq("id", row.id);
+        .eq('id', row.id);
     }
   }
   await db
-    .from("meta_lead_sheets_queue")
+    .from('meta_lead_sheets_queue')
     .delete()
     .in(
-      "id",
-      toDelete.map((d) => d.queueId),
+      'id',
+      toDelete.map((d) => d.queueId)
     );
   return { removed: toDelete.length, skippedUnmapped };
 }
@@ -793,18 +854,23 @@ export async function drainSheetsQueue(
   opts: {
     limit?: number;
     onlyAccountId?: string;
+    /** Restrict this drain to one table's form (per-table sync-now). */
+    onlyFormId?: string;
     force?: boolean;
     fetchImpl?: typeof fetch;
-  } = {},
+  } = {}
 ): Promise<DrainResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const limit = Math.max(1, Math.min(opts.limit ?? META_SHEETS_SWEEP_LIMIT, 100));
+  const limit = Math.max(
+    1,
+    Math.min(opts.limit ?? META_SHEETS_SWEEP_LIMIT, 100)
+  );
   const result: DrainResult = {
     attempted: 0,
     sent: 0,
     failed: 0,
     skippedDisabled: 0,
-    skippedForm: 0,
+    skippedNoConfig: 0,
     needsReauth: 0,
   };
   const nowIso = new Date().toISOString();
@@ -812,79 +878,96 @@ export async function drainSheetsQueue(
 
   // Reclaim stale `sending` rows from crashed workers.
   await db
-    .from("meta_lead_sheets_queue")
-    .update({ status: "queued", claimed_at: null, updated_at: nowIso })
-    .eq("status", "sending")
-    .lte("updated_at", staleIso);
+    .from('meta_lead_sheets_queue')
+    .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
+    .eq('status', 'sending')
+    .lte('updated_at', staleIso);
 
   // A layout rollout in flight takes over the drain (bounded chunk);
-  // due rows wait one run so the sheet holds exactly one layout.
+  // due rows wait one run so each sheet holds exactly one layout.
   if (await drainPendingRemap(db, fetchImpl)) {
     return result;
   }
 
   let query = db
-    .from("meta_lead_sheets_queue")
+    .from('meta_lead_sheets_queue')
     .select(
-      "id, account_id, submission_id, flow_run_id, meta_lead_id, status, attempts, max_attempts, sheet_row_number",
+      'id, account_id, submission_id, flow_run_id, meta_lead_id, status, attempts, max_attempts, sheet_row_number'
     )
-    .in("status", ["queued", "failed"])
-    .lte("next_retry_at", nowIso)
-    .order("next_retry_at", { ascending: true })
+    .in('status', ['queued', 'failed'])
+    .lte('next_retry_at', nowIso)
+    .order('next_retry_at', { ascending: true })
     .limit(limit);
-  if (opts.onlyAccountId) query = query.eq("account_id", opts.onlyAccountId);
+  if (opts.onlyAccountId) query = query.eq('account_id', opts.onlyAccountId);
   const { data: due, error } = await query;
   if (error) {
-    console.error("[meta-sheets] due-jobs scan failed:", error.message);
+    console.error('[meta-sheets] due-jobs scan failed:', error.message);
     return result;
   }
-  const rows = ((due ?? []) as QueueRow[]);
+  const rows = (due ?? []) as QueueRow[];
   const ensuredHeaders = new Set<string>();
 
   for (const row of rows) {
     result.attempted += 1;
     // Claim.
     const { data: claimed } = await db
-      .from("meta_lead_sheets_queue")
-      .update({ status: "sending", claimed_at: nowIso, updated_at: nowIso })
-      .eq("id", row.id)
-      .in("status", ["queued", "failed"])
-      .select("id")
+      .from('meta_lead_sheets_queue')
+      .update({ status: 'sending', claimed_at: nowIso, updated_at: nowIso })
+      .eq('id', row.id)
+      .in('status', ['queued', 'failed'])
+      .select('id')
       .maybeSingle();
     if (!claimed) continue;
 
+    // Hoisted for the catch block: a per-row Google failure is
+    // recorded against this table's config (never a sibling table's).
+    let config: ConfigRow | null = null;
     try {
-      const config = await loadConfig(db, row.account_id);
-      if (!config) {
-        await markRowFailed(db, row, "Sheets sync is not configured for this account.", null);
+      const submission = await loadSubmission(
+        db,
+        row.account_id,
+        row.submission_id
+      );
+      if (!submission) {
+        // Submission deleted — drop the queue row (nothing to sync).
+        await db.from('meta_lead_sheets_queue').delete().eq('id', row.id);
+        continue;
+      }
+      if (opts.onlyFormId && submission.form_id !== opts.onlyFormId) {
+        await db
+          .from('meta_lead_sheets_queue')
+          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
+          .eq('id', row.id);
+        continue;
+      }
+      // One table's config per row: a form with no table config never
+      // writes. The claim is released untouched so configuring the
+      // table later resumes instantly.
+      if (!submission.form_id) {
+        await markRowFailed(
+          db,
+          row,
+          'Lead has no form reference; cannot route to a table.',
+          null
+        );
         result.failed += 1;
+        continue;
+      }
+      config = await loadTableConfig(db, row.account_id, submission.form_id);
+      if (!config) {
+        await db
+          .from('meta_lead_sheets_queue')
+          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
+          .eq('id', row.id);
+        result.skippedNoConfig += 1;
         continue;
       }
       if (!config.auto_sync && !opts.force) {
         await db
-          .from("meta_lead_sheets_queue")
-          .update({ status: "queued", claimed_at: null, updated_at: nowIso })
-          .eq("id", row.id);
+          .from('meta_lead_sheets_queue')
+          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
+          .eq('id', row.id);
         result.skippedDisabled += 1;
-        continue;
-      }
-
-      const submission = await loadSubmission(db, row.account_id, row.submission_id);
-      if (!submission) {
-        // Submission deleted — drop the queue row (nothing to sync).
-        await db.from("meta_lead_sheets_queue").delete().eq("id", row.id);
-        continue;
-      }
-
-      // Deselected forms never write: release the claim untouched so
-      // re-selecting resumes instantly and retries stay quiet. Checked
-      // before any Google call, against the CURRENT config.
-      if (!isFormSelected(config.form_ids, submission.form_id)) {
-        await db
-          .from("meta_lead_sheets_queue")
-          .update({ status: "queued", claimed_at: null, updated_at: nowIso })
-          .eq("id", row.id);
-        result.skippedForm += 1;
         continue;
       }
 
@@ -894,25 +977,26 @@ export async function drainSheetsQueue(
       } catch (authErr) {
         const message =
           authErr instanceof SheetsAuthError
-            ? "Google authorization expired or was revoked. Reconnect Google Sheets."
+            ? 'Google authorization expired or was revoked. Reconnect Google Sheets.'
             : authErr instanceof Error
               ? authErr.message
               : String(authErr);
         await db
-          .from("meta_lead_sheets_queue")
+          .from('meta_lead_sheets_queue')
           .update({
-            status: "queued",
+            status: 'queued',
             attempts: row.attempts + 1,
             last_error: message.slice(0, 500),
             next_retry_at: new Date(Date.now() + 60 * 60_000).toISOString(),
             claimed_at: null,
             updated_at: nowIso,
           })
-          .eq("id", row.id);
+          .eq('id', row.id);
         await db
-          .from("meta_lead_sheets_configs")
+          .from('meta_lead_sheets_configs')
           .update({ last_error: message.slice(0, 500), updated_at: nowIso })
-          .eq("account_id", row.account_id);
+          .eq('account_id', row.account_id)
+          .eq('form_id', config.form_id);
         result.needsReauth += 1;
         result.failed += 1;
         continue;
@@ -921,7 +1005,15 @@ export async function drainSheetsQueue(
       const columns = resolveEffectiveColumns(config.column_config);
       const layout = computeManagedLayout(columns);
 
-      await ensureSheetsTab(accessToken, config.spreadsheet_id, config.sheet_tab, fetchImpl);
+      // The tab must exist — never auto-create, never fall back to
+      // another tab. A renamed/deleted tab surfaces as an explicit,
+      // actionable error instead of a silent write elsewhere.
+      await assertWorksheetTabExists(
+        accessToken,
+        config.spreadsheet_id,
+        config.sheet_tab,
+        fetchImpl
+      );
       const headerKey = `${config.spreadsheet_id}::${config.sheet_tab}`;
       if (!ensuredHeaders.has(headerKey)) {
         await ensureSheetsHeader(
@@ -929,12 +1021,17 @@ export async function drainSheetsQueue(
           config.spreadsheet_id,
           config.sheet_tab,
           layout.headers,
-          fetchImpl,
+          fetchImpl
         );
         ensuredHeaders.add(headerKey);
       }
 
-      const values = await buildRowValues(db, row.account_id, submission, columns);
+      const values = await buildRowValues(
+        db,
+        row.account_id,
+        submission,
+        columns
+      );
 
       let targetRow = row.sheet_row_number;
       if (!targetRow) {
@@ -943,7 +1040,7 @@ export async function drainSheetsQueue(
           config.spreadsheet_id,
           config.sheet_tab,
           [submission.meta_lead_id],
-          fetchImpl,
+          fetchImpl
         );
         targetRow = found.get(submission.meta_lead_id) ?? null;
       }
@@ -954,7 +1051,7 @@ export async function drainSheetsQueue(
           config.sheet_tab,
           targetRow,
           values,
-          fetchImpl,
+          fetchImpl
         );
       } else {
         await appendSheetsRows(
@@ -962,7 +1059,7 @@ export async function drainSheetsQueue(
           config.spreadsheet_id,
           config.sheet_tab,
           [values],
-          fetchImpl,
+          fetchImpl
         );
         // Resolve the appended row number by re-scanning column A.
         // (Sheets append has no row-number response; a second read is
@@ -972,67 +1069,110 @@ export async function drainSheetsQueue(
           config.spreadsheet_id,
           config.sheet_tab,
           [submission.meta_lead_id],
-          fetchImpl,
+          fetchImpl
         );
         targetRow = found.get(submission.meta_lead_id) ?? null;
       }
 
       await db
-        .from("meta_lead_sheets_queue")
+        .from('meta_lead_sheets_queue')
         .update({
-          status: "sent",
+          status: 'sent',
           last_error: null,
           next_retry_at: nowIso,
           claimed_at: null,
           sheet_row_number: targetRow,
           updated_at: nowIso,
         })
-        .eq("id", row.id);
+        .eq('id', row.id);
       await db
-        .from("meta_lead_sheets_configs")
+        .from('meta_lead_sheets_configs')
         .update({
           last_success_at: nowIso,
           last_error: null,
           updated_at: nowIso,
         })
-        .eq("account_id", row.account_id);
+        .eq('account_id', row.account_id)
+        .eq('form_id', config.form_id);
       result.sent += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (isAuthSheetsError(err)) {
+      // Config writes below are scoped to THIS table only. config can
+      // only be null when its own load threw (DB down) — then there is
+      // no table to attribute, so skip the config write but still
+      // record the row outcome.
+      const markTableConfig = async (patch: Record<string, unknown>) => {
+        if (!config) return;
         await db
-          .from("meta_lead_sheets_queue")
+          .from('meta_lead_sheets_configs')
+          .update({ ...patch, updated_at: nowIso })
+          .eq('account_id', row.account_id)
+          .eq('form_id', config.form_id);
+      };
+      if (err instanceof TabMissingError) {
+        // The worksheet was renamed or deleted: park the row with a
+        // long backoff and an actionable error. Never write to
+        // another tab, never drop the row.
+        await db
+          .from('meta_lead_sheets_queue')
           .update({
-            status: "queued",
+            status: 'failed',
             attempts: row.attempts + 1,
             last_error:
-              "Google rejected the request (check sharing + reconnect).".slice(0, 500),
+              `Worksheet "${err.tab}" was not found. Select a replacement tab in this table's Google Sheets settings.`.slice(
+                0,
+                500
+              ),
+            next_retry_at: new Date(
+              Date.now() + 24 * 60 * 60_000
+            ).toISOString(),
+            claimed_at: null,
+            updated_at: nowIso,
+          })
+          .eq('id', row.id);
+        await markTableConfig({ last_error: message.slice(0, 500) });
+        result.failed += 1;
+      } else if (isAuthSheetsError(err)) {
+        await db
+          .from('meta_lead_sheets_queue')
+          .update({
+            status: 'queued',
+            attempts: row.attempts + 1,
+            last_error:
+              'Google rejected the request (check sharing + reconnect).'.slice(
+                0,
+                500
+              ),
             next_retry_at: new Date(Date.now() + 60 * 60_000).toISOString(),
             claimed_at: null,
             updated_at: nowIso,
           })
-          .eq("id", row.id);
-        await db
-          .from("meta_lead_sheets_configs")
-          .update({ last_error: message.slice(0, 500), updated_at: nowIso })
-          .eq("account_id", row.account_id);
+          .eq('id', row.id);
+        await markTableConfig({ last_error: message.slice(0, 500) });
         result.needsReauth += 1;
         result.failed += 1;
       } else if (isTransientSheetsError(err) || err instanceof SheetsApiError) {
         const attempt = row.attempts + 1;
         const retryIn = sheetsRetryDelayMs(attempt);
-        await markRowFailed(db, { ...row, attempts: row.attempts }, message, retryIn);
-        await db
-          .from("meta_lead_sheets_configs")
-          .update({ last_error: message.slice(0, 500), updated_at: nowIso })
-          .eq("account_id", row.account_id);
+        await markRowFailed(
+          db,
+          { ...row, attempts: row.attempts },
+          message,
+          retryIn
+        );
+        await markTableConfig({ last_error: message.slice(0, 500) });
         result.failed += 1;
       } else {
-        await markRowFailed(db, row, message, sheetsRetryDelayMs(row.attempts + 1));
+        await markRowFailed(
+          db,
+          row,
+          message,
+          sheetsRetryDelayMs(row.attempts + 1)
+        );
         result.failed += 1;
       }
       console.error(
-        `[meta-sheets] job ${row.id} failed (attempt ${row.attempts + 1}): ${message.slice(0, 200)}`,
+        `[meta-sheets] job ${row.id} failed (attempt ${row.attempts + 1}): ${message.slice(0, 200)}`
       );
     }
   }
@@ -1046,115 +1186,93 @@ export interface SheetsSyncStatus {
   email: string | null;
   spreadsheetId: string | null;
   spreadsheetUrl: string | null;
+  spreadsheetTitle: string | null;
   sheetTab: string | null;
   autoSync: boolean;
   lastSuccessAt: string | null;
   lastError: string | null;
   pending: number;
   failed: number;
-  formIds: string[] | null;
   columns: SheetsColumnDef[] | null;
   remapPending: boolean;
-  cleanupPreview: { deselectedMappedRows: number };
+  cleanupPreview: { managedRows: number };
 }
 
-/** Status for the settings UI (tokens never returned). */
-export async function getSheetsSyncStatus(
+/**
+ * Per-table status for the Workspace sheet dialog (tokens never
+ * returned). Pending/failed count only this table's submissions;
+ * cleanup preview counts this table's verified managed rows.
+ */
+export async function getTableSheetsStatus(
   db: SupabaseClient,
   accountId: string,
+  formId: string
 ): Promise<SheetsSyncStatus> {
-  const [{ data: conn }, { data: config }, { data: queued }, { data: failed }] =
-    await Promise.all([
-      db
-        .from("meta_lead_sheets_connections")
-        .select("google_email, last_error")
-        .eq("account_id", accountId)
-        .maybeSingle(),
-      db
-        .from("meta_lead_sheets_configs")
-        .select(
-          "spreadsheet_id, spreadsheet_url, sheet_tab, auto_sync, last_success_at, last_error, form_ids, column_config, pending_remap",
-        )
-        .eq("account_id", accountId)
-        .maybeSingle(),
-      db
-        .from("meta_lead_sheets_queue")
-        .select("id", { count: "exact" })
-        .eq("account_id", accountId)
-        .in("status", ["queued", "sending"]),
-      db
-        .from("meta_lead_sheets_queue")
-        .select("id", { count: "exact" })
-        .eq("account_id", accountId)
-        .eq("status", "failed"),
-    ]);
-  const connection = conn as { google_email: string | null; last_error: string | null } | null;
-  const cfg = config as {
-    spreadsheet_id: string;
-    spreadsheet_url: string | null;
-    sheet_tab: string;
-    auto_sync: boolean;
-    last_success_at: string | null;
+  const [{ data: conn }, config] = await Promise.all([
+    db
+      .from('meta_lead_sheets_connections')
+      .select('google_email, last_error')
+      .eq('account_id', accountId)
+      .maybeSingle(),
+    loadTableConfig(db, accountId, formId),
+  ]);
+  const connection = conn as {
+    google_email: string | null;
     last_error: string | null;
-    form_ids?: string[] | null;
-    column_config?: unknown;
-    pending_remap?: boolean | null;
   } | null;
-  const pendingCount = Array.isArray(queued) ? queued.length : 0;
-  const failedCount = Array.isArray(failed) ? failed.length : 0;
-  const lastError = cfg?.last_error ?? connection?.last_error ?? null;
-  const formIds = Array.isArray(cfg?.form_ids) ? (cfg.form_ids as string[]) : null;
-  const cleanupPreview = await countDeselectedMappedRows(db, accountId, formIds);
+  const lastError = config?.last_error ?? connection?.last_error ?? null;
+
+  // This table's submissions (bounded; per-table queues are small).
+  const { data: submissionRows } = await db
+    .from('meta_lead_submissions')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('form_id', formId)
+    .limit(5000);
+  const submissionIds = new Set(
+    ((submissionRows ?? []) as Array<{ id: string }>).map((s) => s.id)
+  );
+  let pending = 0;
+  let failed = 0;
+  let managed = 0;
+  if (submissionIds.size > 0) {
+    const { data: queueRows } = await db
+      .from('meta_lead_sheets_queue')
+      .select('submission_id, status, sheet_row_number')
+      .eq('account_id', accountId)
+      .limit(5000);
+    for (const qr of (queueRows ?? []) as Array<{
+      submission_id: string;
+      status: string;
+      sheet_row_number: number | null;
+    }>) {
+      if (!submissionIds.has(qr.submission_id)) continue;
+      if (qr.status === 'queued' || qr.status === 'sending') pending += 1;
+      else if (qr.status === 'failed') failed += 1;
+      else if (qr.status === 'sent' && typeof qr.sheet_row_number === 'number')
+        managed += 1;
+    }
+  }
   return {
     configured: metaSheetsOAuthConfiguredSafe(),
     connected: !!connection,
     needsReauth:
       !!connection?.last_error ||
-      (lastError ?? "").toLowerCase().includes("reconnect"),
+      (lastError ?? '').toLowerCase().includes('reconnect'),
     email: connection?.google_email ?? null,
-    spreadsheetId: cfg?.spreadsheet_id ?? null,
-    spreadsheetUrl: cfg?.spreadsheet_url ?? null,
-    sheetTab: cfg?.sheet_tab ?? null,
-    autoSync: cfg?.auto_sync ?? false,
-    lastSuccessAt: cfg?.last_success_at ?? null,
+    spreadsheetId: config?.spreadsheet_id ?? null,
+    spreadsheetUrl: config?.spreadsheet_url ?? null,
+    spreadsheetTitle: config?.spreadsheet_title ?? null,
+    sheetTab: config?.sheet_tab ?? null,
+    autoSync: config?.auto_sync ?? false,
+    lastSuccessAt: config?.last_success_at ?? null,
     lastError,
-    pending: pendingCount,
-    failed: failedCount,
-    formIds,
-    columns: cfg ? resolveEffectiveColumns(cfg.column_config) : null,
-    remapPending: cfg?.pending_remap === true,
-    cleanupPreview,
+    pending,
+    failed,
+    columns: config ? resolveEffectiveColumns(config.column_config) : null,
+    remapPending: config?.pending_remap === true,
+    cleanupPreview: { managedRows: managed },
   };
-}
-
-/**
- * Rows whose form is deselected but which still occupy verified
- * managed sheet rows (candidates for the explicit cleanup). Never
- * counts unmapped or user rows.
- */
-async function countDeselectedMappedRows(
-  db: SupabaseClient,
-  accountId: string,
-  formIds: string[] | null,
-): Promise<{ deselectedMappedRows: number }> {
-  if (formIds === null) return { deselectedMappedRows: 0 };
-  const { data } = await db
-    .from("meta_lead_sheets_queue")
-    .select("submission_id, sheet_row_number")
-    .eq("account_id", accountId)
-    .eq("status", "sent")
-    .not("sheet_row_number", "is", null)
-    .limit(2000);
-  const rows = ((data ?? []) as Array<{
-    submission_id: string;
-    sheet_row_number: number | null;
-  }>).filter((r) => typeof r.sheet_row_number === "number");
-  let count = 0;
-  for (const row of rows) {
-    const submission = await loadSubmission(db, accountId, row.submission_id);
-    if (submission && !isFormSelected(formIds, submission.form_id)) count += 1;
-  }
-  return { deselectedMappedRows: count };
 }
 
 function metaSheetsOAuthConfiguredSafe(): boolean {
