@@ -123,6 +123,44 @@ describe("prompt drain — shared processing path (poll / import / retry)", () =
   });
 });
 
+describe("form + column selection — settings and enforcement", () => {
+  it("config save validates forms and columns before touching the sheet", () => {
+    const s = src("src/app/api/integrations/meta-lead-ads/sheets/config/route.ts");
+    expect(s).toContain("Unknown form selected. Choose only forms from this account.");
+    expect(s).toContain("validateColumnConfig(body.columns, allowedKeys)");
+    expect(s).toContain("remapLayoutChunk(");
+    expect(s).toContain("enqueueFormsDelta(admin, ctx.accountId, addedForms)");
+    // Still admin-only, still validates spreadsheet access first.
+    expect(s).toContain('requireRole("admin")');
+    expect(s).toContain("getSheetsAccessToken");
+    expect(s).toContain("maxDuration = 60");
+  });
+
+  it("cleanup requires an explicit confirmation and verified mappings", () => {
+    const s = src("src/app/api/integrations/meta-lead-ads/sheets/cleanup/route.ts");
+    expect(s).toContain("confirmed");
+    expect(s).toContain("cleanupDeselectedRows");
+    expect(s).toContain('requireRole("admin")');
+    expect(s).toContain("status: 400");
+  });
+
+  it("fields endpoint is account-scoped and exposes stable keys", () => {
+    const s = src("src/app/api/integrations/meta-lead-ads/sheets/fields/route.ts");
+    expect(s).toContain(".eq(\"account_id\", ctx.accountId)");
+    expect(s).toContain("buildDynamicFieldOptions");
+    expect(s).toContain("STANDARD_SHEETS_FIELDS");
+  });
+
+  it("UI keeps form and column configuration inside the sheets card", () => {
+    const s = src("src/components/settings/meta-lead-sheets-settings.tsx");
+    expect(s).toContain("Meta Forms to Sync");
+    expect(s).toContain("Choose Spreadsheet Columns");
+    expect(s).toContain("Save Configuration");
+    expect(s).toContain("No forms selected");
+    expect(s).toContain("Meta Lead ID is always pinned to column A");
+  });
+});
+
 describe("fallback + schedules unchanged", () => {
   it("the five-minute cron still drains inline (fallback preserved)", () => {
     const s = src("src/app/api/integrations/meta-lead-ads/cron/route.ts");
@@ -162,6 +200,7 @@ describe("fallback + schedules unchanged", () => {
       "src/lib/meta-lead-sheets/sheets-client.ts",
       "src/lib/meta-lead-sheets/trigger.ts",
       "src/lib/meta-lead-sheets/mapping.ts",
+      "src/lib/meta-lead-sheets/columns.ts",
       "src/lib/meta-lead-sheets/constants.ts",
     ];
     for (const f of libFiles) {

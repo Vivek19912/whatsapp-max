@@ -16,6 +16,12 @@
 
 import { standardContactFromAnswers } from "@/lib/meta-lead-ads/normalize";
 
+import {
+  answerFieldKey,
+  DEFAULT_SHEETS_COLUMNS,
+  projectRowValues,
+} from "./columns";
+
 /**
  * Format a timestamp as India Standard Time for the "Submitted At"
  * cell, time first, e.g. "2:25 PM, 14 Jul 2026". Local duplicate of
@@ -55,23 +61,39 @@ export interface SheetsLeadInput {
   stage: string | null;
 }
 
-/** Build the 12-cell row in header order. */
+/** Build the 12-cell row in header order (legacy default layout). */
 export function buildSheetsRow(input: SheetsLeadInput): string[] {
+  return projectRowValues(buildLeadFieldMap(input), DEFAULT_SHEETS_COLUMNS);
+}
+
+/**
+ * Full field map for one lead: standard keys plus `answer:<key>`
+ * entries for every stored answer. Projection onto the visible
+ * columns happens separately, so renaming/reordering labels never
+ * affects mapping. Pure.
+ */
+export function buildLeadFieldMap(input: SheetsLeadInput): Record<string, string> {
   const standard = standardContactFromAnswers(input.answers);
-  return [
-    input.metaLeadId,
-    input.submittedAt ? formatSubmittedAtIST(input.submittedAt) : "",
-    standard.name ?? "",
-    standard.phone ?? "",
-    standard.email ?? "",
-    input.formName ?? "",
-    input.campaignName ?? "",
-    input.adName ?? "",
-    input.source ?? "",
-    input.assigneeDisplay ?? "",
-    input.leadType ?? "Fresh",
-    input.stage ?? "New Lead",
-  ];
+  const map: Record<string, string> = {
+    meta_lead_id: input.metaLeadId,
+    submitted_at: input.submittedAt ? formatSubmittedAtIST(input.submittedAt) : "",
+    name: standard.name ?? "",
+    phone: standard.phone ?? "",
+    email: standard.email ?? "",
+    form_name: input.formName ?? "",
+    campaign_name: input.campaignName ?? "",
+    ad_name: input.adName ?? "",
+    source: input.source ?? "",
+    assignee: input.assigneeDisplay ?? "",
+    lead_type: input.leadType ?? "Fresh",
+    stage: input.stage ?? "New Lead",
+  };
+  for (const [key, value] of Object.entries(input.answers)) {
+    if (typeof value === "string" && key.trim() !== "") {
+      map[answerFieldKey(key)] = value;
+    }
+  }
+  return map;
 }
 
 /** Display label for the stored source enum. */

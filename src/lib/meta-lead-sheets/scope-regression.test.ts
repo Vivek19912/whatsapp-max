@@ -96,11 +96,15 @@ describe("flow tables — no regression", () => {
     const mapping = src("src/lib/meta-lead-sheets/mapping.ts");
     const queue = src("src/lib/meta-lead-sheets/queue.ts");
     const oauth = src("src/lib/meta-lead-sheets/oauth.ts");
-    for (const [name, s] of [["mapping", mapping], ["queue", queue], ["oauth", oauth]] as const) {
+    const columns = src("src/lib/meta-lead-sheets/columns.ts");
+    const trigger = src("src/lib/meta-lead-sheets/trigger.ts");
+    for (const [name, s] of [["mapping", mapping], ["queue", queue], ["oauth", oauth], ["columns", columns], ["trigger", trigger]] as const) {
       expect(s, name).not.toContain("@/lib/google/sheets");
       expect(s, name).not.toContain("@/lib/google/tabs");
       expect(s, name).not.toContain("@/lib/flows/sheet-");
     }
+    // columns.ts maps via the Meta virtual-flow derivation only.
+    expect(columns).not.toContain("@/lib/flows/");
   });
 });
 
@@ -123,6 +127,20 @@ describe("migration scope", () => {
     expect(s).not.toContain("ALTER TABLE public.meta_lead_pages");
     expect(s).not.toContain("ALTER TABLE public.meta_lead_forms");
     expect(s).not.toContain("ALTER TABLE public.meta_lead_submissions");
+  });
+
+  it("migration 130 only extends the sheets config table", () => {
+    const s = src("supabase/migrations/130_meta_lead_sheets_columns.sql");
+    expect(s).toContain("form_ids");
+    expect(s).toContain("column_config");
+    expect(s).toContain("pending_remap");
+    // Only the meta_lead_sheets_configs table is altered.
+    const alters = s.match(/^ALTER TABLE .*$/gm) ?? [];
+    expect(alters.length).toBeGreaterThan(0);
+    for (const stmt of alters) {
+      expect(stmt).toContain("meta_lead_sheets_configs");
+    }
+    expect(s).not.toContain("CREATE TABLE");
   });
 });
 

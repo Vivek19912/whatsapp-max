@@ -15,8 +15,12 @@ const h = vi.hoisted(() => {
     authFailsFor: new Set<string>(),
     tabsEnsured: [] as Array<{ spreadsheetId: string; tab: string }>,
     headersEnsured: [] as Array<{ spreadsheetId: string; tab: string }>,
+    headersWritten: [] as Array<{ spreadsheetId: string; tab: string; headers: string[] }>,
     appended: [] as Array<{ spreadsheetId: string; tab: string; rows: string[][] }>,
     updated: [] as Array<{ spreadsheetId: string; tab: string; row: number; values: string[] }>,
+    rewritten: [] as Array<{ spreadsheetId: string; tab: string; rows: Array<{ rowNumber: number; values: string[] }> }>,
+    hidden: [] as Array<{ spreadsheetId: string; tab: string; colIndex: number; hidden: boolean }>,
+    deleted: [] as Array<{ spreadsheetId: string; tab: string; rows: number[] }>,
     columnValues: new Map<string, string[]>(),
     failAppendWith: null as { status: number } | null,
   };
@@ -42,8 +46,9 @@ vi.mock("./sheets-client", async (importOriginal) => {
     ensureSheetsTab: async (token: string, spreadsheetId: string, tab: string) => {
       h.tabsEnsured.push({ spreadsheetId, tab });
     },
-    ensureSheetsHeader: async (token: string, spreadsheetId: string, tab: string) => {
+    ensureSheetsHeader: async (token: string, spreadsheetId: string, tab: string, headers?: string[]) => {
       h.headersEnsured.push({ spreadsheetId, tab });
+      if (headers) h.headersWritten.push({ spreadsheetId, tab, headers });
       return { updated: false };
     },
     appendSheetsRows: async (
@@ -71,6 +76,38 @@ vi.mock("./sheets-client", async (importOriginal) => {
     ) => {
       h.updated.push({ spreadsheetId, tab, row: rowNumber, values });
     },
+    rewriteSheetRows: async (
+      token: string,
+      spreadsheetId: string,
+      tab: string,
+      rows: Array<{ rowNumber: number; values: string[] }>,
+    ) => {
+      h.rewritten.push({ spreadsheetId, tab, rows });
+    },
+    setSheetColumnHidden: async (
+      token: string,
+      spreadsheetId: string,
+      tab: string,
+      colIndex: number,
+      hidden: boolean,
+    ) => {
+      h.hidden.push({ spreadsheetId, tab, colIndex, hidden });
+    },
+    deleteSheetRows: async (
+      token: string,
+      spreadsheetId: string,
+      tab: string,
+      rowNumbers: number[],
+    ) => {
+      h.deleted.push({ spreadsheetId, tab, rows: [...rowNumbers].sort((a, b) => a - b) });
+      // Mirror Google's bottom-to-top delete in the tracked column.
+      const key = `${spreadsheetId}::${tab}`;
+      const cells = h.columnValues.get(key) ?? [];
+      for (const n of [...rowNumbers].sort((a, b) => b - a)) {
+        cells.splice(n - 2, 1);
+      }
+      h.columnValues.set(key, cells);
+    },
     findSheetsRowsByLeadId: async (
       token: string,
       spreadsheetId: string,
@@ -88,7 +125,7 @@ vi.mock("./sheets-client", async (importOriginal) => {
   };
 });
 
-import { drainSheetsQueue, maybeEnqueueSheetsSync } from "./queue";
+import { drainSheetsQueue, maybeEnqueueSheetsSync, remapLayoutChunk, cleanupDeselectedRows, isFormSelected } from "./queue";
 
 type Row = Record<string, unknown>;
 
@@ -268,8 +305,12 @@ beforeEach(() => {
   h.authFailsFor = new Set();
   h.tabsEnsured = [];
   h.headersEnsured = [];
+  h.headersWritten = [];
   h.appended = [];
   h.updated = [];
+  h.rewritten = [];
+  h.hidden = [];
+  h.deleted = [];
   h.columnValues = new Map();
   h.failAppendWith = null;
 });
@@ -517,5 +558,539 @@ describe("drainSheetsQueue", () => {
     expect(data.meta_lead_sheets_queue[0].status).toBe("sent");
     expect(h.appended).toHaveLength(1);
     expect(h.appended[0].rows[0][0]).toBe("lead-1");
+  });
+});
+
+describe("isFormSelected", () => {
+  it("treats a missing selection as legacy (sync everything)", () => {
+    expect(isFormSelected(null, "form-a")).toBe(true);
+    expect(isFormSelected(undefined, "form-a")).toBe(true);
+  });
+
+  it("syncs nothing when the selection is explicitly empty", () => {
+    expect(isFormSelected([], "form-a")).toBe(false);
+  });
+
+  it("matches selected forms and rejects the rest", () => {
+    expect(isFormSelected(["form-a"], "form-a")).toBe(true);
+    expect(isFormSelected(["form-a"], "form-b")).toBe(false);
+    expect(isFormSelected(["form-a"], null)).toBe(false);
+  });
+});
+
+describe("form selection — enqueue + backfill", () => {
+  const SUB_A = {
+    id: "sub-a",
+    account_id: "acct-1",
+    meta_lead_id: "lead-a",
+    flow_run_id: "run-1",
+    form_id: "form-sg",
+    form_name: "Singapore Lead Ad",
+    campaign_name: "Camp",
+    ad_name: "Ad",
+    source: "facebook",
+    answers: { full_name: "Asha", budget: "5L" },
+    meta_created_time: "2026-03-01T10:00:00.000Z",
+    created_at: "2026-03-01T10:00:00.000Z",
+    status: "processed",
+  };
+  const SUB_B = {
+    ...SUB_A,
+    id: "sub-b",
+    meta_lead_id: "lead-b",
+    flow_run_id: "run-2",
+    form_id: "form-other",
+    form_name: "Other Form",
+    answers: { full_name: "Ravi" },
+  };
+
+  it("maybeEnqueueSheetsSync skips unselected forms", async () => {
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: ["form-sg"] }],
+      meta_lead_submissions: [SUB_A, SUB_B],
+      meta_lead_sheets_queue: [],
+    });
+    expect(
+      (await maybeEnqueueSheetsSync(db, { accountId: "acct-1", submissionId: "sub-a" })).enqueued,
+    ).toBe(true);
+    expect(
+      (await maybeEnqueueSheetsSync(db, { accountId: "acct-1", submissionId: "sub-b" })).enqueued,
+    ).toBe(false);
+    expect(data.meta_lead_sheets_queue).toHaveLength(1);
+  });
+
+  it("maybeEnqueueSheetsSync syncs nothing when the selection is empty", async () => {
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: [] }],
+      meta_lead_submissions: [SUB_A],
+      meta_lead_sheets_queue: [],
+    });
+    expect(
+      (await maybeEnqueueSheetsSync(db, { accountId: "acct-1", submissionId: "sub-a" })).enqueued,
+    ).toBe(false);
+    expect(data.meta_lead_sheets_queue).toHaveLength(0);
+  });
+});
+
+describe("form selection — drain filtering", () => {
+  const FSG = "form-sg";
+  const FOTHER = "form-other";
+  const SUB_A = {
+    id: "sub-a",
+    account_id: "acct-1",
+    meta_lead_id: "lead-a",
+    flow_run_id: "run-1",
+    form_id: FSG,
+    form_name: "Singapore Lead Ad",
+    campaign_name: "Camp",
+    ad_name: "Ad",
+    source: "facebook",
+    answers: { full_name: "Asha", phone_number: "+911234567890", budget: "5L" },
+    meta_created_time: "2026-03-01T10:00:00.000Z",
+    created_at: "2026-03-01T10:00:00.000Z",
+    status: "processed",
+  };
+  const SUB_B = {
+    ...SUB_A,
+    id: "sub-b",
+    meta_lead_id: "lead-b",
+    flow_run_id: "run-2",
+    form_id: FOTHER,
+    form_name: "Other Form",
+    answers: { full_name: "Ravi" },
+  };
+  const Q = (id: string, submissionId: string, metaLeadId: string, flowRunId: string) => ({
+    id,
+    account_id: "acct-1",
+    submission_id: submissionId,
+    flow_run_id: flowRunId,
+    meta_lead_id: metaLeadId,
+    status: "queued",
+    attempts: 0,
+    max_attempts: 8,
+    sheet_row_number: null,
+    next_retry_at: new Date(0).toISOString(),
+  });
+  function selectionTables(formIds: string[] | null, queueRows: Row[], submissions: Row[]) {
+    return {
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: formIds }],
+      meta_lead_sheets_connections: [
+        { account_id: "acct-1", access_token: "x", refresh_token: "y", token_expiry: new Date(Date.now() + 3600_000).toISOString() },
+      ],
+      meta_lead_submissions: submissions,
+      meta_lead_sheets_queue: queueRows,
+      flow_runs: [
+        { id: "run-1", account_id: "acct-1", flow_id: "flow-1" },
+        { id: "run-2", account_id: "acct-1", flow_id: "flow-2" },
+      ],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    };
+  }
+
+  it("syncs only the selected form's leads (Singapore only)", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    const { db, data } = makeDb(
+      selectionTables(["form-sg"], [Q("q-a", "sub-a", "lead-a", "run-1"), Q("q-b", "sub-b", "lead-b", "run-2")], [SUB_A, SUB_B]),
+    );
+    const result = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(result).toMatchObject({ attempted: 2, sent: 1, skippedForm: 1, failed: 0 });
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0].rows[0][0]).toBe("lead-a");
+    const parked = data.meta_lead_sheets_queue.find((r) => r.id === "q-b")!;
+    expect(parked.status).toBe("queued");
+    expect(parked.attempts).toBe(0);
+    expect(parked.claimed_at).toBeNull();
+  });
+
+  it("deselect parks pending jobs and reselecting resumes them", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    const { db, data } = makeDb(
+      selectionTables(["form-sg"], [Q("q-b", "sub-b", "lead-b", "run-2")], [SUB_B]),
+    );
+    const parked = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(parked).toMatchObject({ sent: 0, skippedForm: 1 });
+    expect(h.appended).toHaveLength(0);
+
+    data.meta_lead_sheets_configs[0].form_ids = ["form-other"];
+    const resumed = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(resumed.sent).toBe(1);
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0].rows[0][0]).toBe("lead-b");
+  });
+
+  it("an explicitly empty selection syncs nothing without consuming retries", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    const { db, data } = makeDb(
+      selectionTables([], [Q("q-a", "sub-a", "lead-a", "run-1")], [SUB_A]),
+    );
+    const result = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(result).toMatchObject({ sent: 0, skippedForm: 1, failed: 0 });
+    expect(h.appended).toHaveLength(0);
+    expect(h.updated).toHaveLength(0);
+    expect(data.meta_lead_sheets_queue[0].attempts).toBe(0);
+  });
+});
+
+describe("custom columns — drain rendering", () => {
+  const COLS = [
+    { key: "name", label: "Lead Name" },
+    { key: "answer:budget", label: "Budget" },
+    { key: "answer:hotel_category", label: "Hotel" },
+  ];
+  const SUB_C = {
+    id: "sub-c",
+    account_id: "acct-1",
+    meta_lead_id: "lead-c",
+    flow_run_id: "run-1",
+    form_id: "form-sg",
+    form_name: "Singapore Lead Ad",
+    campaign_name: "Camp",
+    ad_name: "Ad",
+    source: "facebook",
+    answers: { full_name: "Asha", budget: "5L" },
+    meta_created_time: "2026-03-01T10:00:00.000Z",
+    created_at: "2026-03-01T10:00:00.000Z",
+    status: "processed",
+  };
+
+  it("writes exactly the requested headers in order with mapped values", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: ["form-sg"], column_config: COLS }],
+      meta_lead_sheets_connections: [
+        { account_id: "acct-1", access_token: "x", refresh_token: "y", token_expiry: new Date(Date.now() + 3600_000).toISOString() },
+      ],
+      meta_lead_submissions: [SUB_C],
+      meta_lead_sheets_queue: [
+        {
+          id: "q-c",
+          account_id: "acct-1",
+          submission_id: "sub-c",
+          flow_run_id: "run-1",
+          meta_lead_id: "lead-c",
+          status: "queued",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: null,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-1" }],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(result.sent).toBe(1);
+    // Header row is exactly the requested layout (ID pinned at A).
+    expect(h.headersWritten.at(-1)).toMatchObject({
+      headers: ["Meta Lead ID", "Lead Name", "Budget", "Hotel"],
+    });
+    // Dynamic answers map by key; the unprovided Hotel stays blank.
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0].rows[0]).toEqual(["lead-c", "Asha", "5L", ""]);
+  });
+
+  it("updates the stored row when the ID column is hidden", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    // Column A still carries "lead-c" on the sheet, but the ID is not
+    // a visible column — updates must still land on the stored row.
+    h.columnValues.set("sheet-1::Meta Leads", ["lead-c"]);
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [
+        { ...CONFIG, form_ids: ["form-sg"], column_config: [{ key: "phone", label: "Phone" }] },
+      ],
+      meta_lead_sheets_connections: [
+        { account_id: "acct-1", access_token: "x", refresh_token: "y", token_expiry: new Date(Date.now() + 3600_000).toISOString() },
+      ],
+      meta_lead_submissions: [{ ...SUB_C, answers: { phone_number: "+911234567890" } }],
+      meta_lead_sheets_queue: [
+        {
+          id: "q-c",
+          account_id: "acct-1",
+          submission_id: "sub-c",
+          flow_run_id: "run-1",
+          meta_lead_id: "lead-c",
+          status: "queued",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 5,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-1" }],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(result.sent).toBe(1);
+    expect(h.updated).toHaveLength(1);
+    expect(h.updated[0]).toMatchObject({ row: 5, values: ["lead-c", "+911234567890"] });
+    expect(h.appended).toHaveLength(0);
+    expect(h.headersWritten.at(-1)).toMatchObject({ headers: ["Meta Lead ID", "Phone"] });
+  });
+});
+
+describe("layout remap", () => {
+  const NEW_COLS = [
+    { key: "name", label: "Lead Name" },
+    { key: "answer:budget", label: "Budget" },
+  ];
+  const SUB_A = {
+    id: "sub-a",
+    account_id: "acct-1",
+    meta_lead_id: "lead-a",
+    flow_run_id: "run-1",
+    form_id: "form-sg",
+    form_name: "Singapore Lead Ad",
+    campaign_name: "Camp",
+    ad_name: "Ad",
+    source: "facebook",
+    answers: { full_name: "Asha", budget: "5L" },
+    meta_created_time: "2026-03-01T10:00:00.000Z",
+    created_at: "2026-03-01T10:00:00.000Z",
+    status: "processed",
+  };
+  const SUB_B = {
+    ...SUB_A,
+    id: "sub-b",
+    meta_lead_id: "lead-b",
+    flow_run_id: "run-2",
+    answers: { full_name: "Ravi" },
+  };
+  function remapTables(cursor: number | null) {
+    return {
+      meta_lead_sheets_configs: [
+        {
+          ...CONFIG,
+          form_ids: ["form-sg"],
+          column_config: NEW_COLS,
+          pending_remap: true,
+          remap_cursor: cursor,
+        },
+      ],
+      meta_lead_sheets_connections: [
+        { account_id: "acct-1", access_token: "x", refresh_token: "y", token_expiry: new Date(Date.now() + 3600_000).toISOString() },
+      ],
+      meta_lead_submissions: [SUB_A, SUB_B],
+      meta_lead_sheets_queue: [
+        {
+          id: "q-a",
+          account_id: "acct-1",
+          submission_id: "sub-a",
+          flow_run_id: "run-1",
+          meta_lead_id: "lead-a",
+          status: "sent",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 2,
+          next_retry_at: new Date(0).toISOString(),
+        },
+        {
+          id: "q-b",
+          account_id: "acct-1",
+          submission_id: "sub-b",
+          flow_run_id: "run-2",
+          meta_lead_id: "lead-b",
+          status: "sent",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 3,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [
+        { id: "run-1", account_id: "acct-1", flow_id: "flow-1" },
+        { id: "run-2", account_id: "acct-1", flow_id: "flow-2" },
+      ],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    };
+  }
+
+  it("rewrites managed rows in place without duplicating, then swaps the header", async () => {
+    h.columnValues.set("sheet-1::Meta Leads", ["lead-a", "lead-b"]);
+    const { db, data } = makeDb(remapTables(0));
+    const first = await remapLayoutChunk(
+      db,
+      "token-1",
+      {
+        account_id: "acct-1",
+        spreadsheet_id: "sheet-1",
+        sheet_tab: "Meta Leads",
+        column_config: NEW_COLS,
+      },
+      0,
+    );
+    expect(first.done).toBe(false);
+    expect(first.remapped).toBe(2);
+    // Both managed rows rewritten in place with the new values.
+    expect(h.rewritten).toHaveLength(1);
+    expect(h.rewritten[0].rows).toEqual([
+      { rowNumber: 2, values: ["lead-a", "Asha", "5L"] },
+      { rowNumber: 3, values: ["lead-b", "Ravi", ""] },
+    ]);
+    expect(h.appended).toHaveLength(0);
+    expect(data.meta_lead_sheets_configs[0].remap_cursor).toBe(3);
+
+    const second = await remapLayoutChunk(
+      db,
+      "token-1",
+      {
+        account_id: "acct-1",
+        spreadsheet_id: "sheet-1",
+        sheet_tab: "Meta Leads",
+        column_config: NEW_COLS,
+      },
+      3,
+    );
+    expect(second.done).toBe(true);
+    // Header swapped last; hidden ID column stays hidden.
+    expect(h.headersWritten.at(-1)).toMatchObject({
+      headers: ["Meta Lead ID", "Lead Name", "Budget"],
+    });
+    expect(h.hidden.at(-1)).toMatchObject({ colIndex: 0, hidden: true });
+    expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(false);
+  });
+
+  it("a drain pauses normal work while a remap is pending, then resumes", async () => {
+    h.accessTokenFor.set("acct-1", "token-1");
+    h.columnValues.set("sheet-1::Meta Leads", ["lead-a", "lead-b"]);
+    const { db, data } = makeDb(remapTables(0));
+    // A due row waits while the rollout runs.
+    data.meta_lead_sheets_queue.push({
+      id: "q-new",
+      account_id: "acct-1",
+      submission_id: "sub-a",
+      flow_run_id: "run-1",
+      meta_lead_id: "lead-a",
+      status: "queued",
+      attempts: 0,
+      max_attempts: 8,
+      sheet_row_number: null,
+      next_retry_at: new Date(0).toISOString(),
+    });
+    const first = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(first).toMatchObject({ attempted: 0, sent: 0 });
+    expect(h.rewritten).toHaveLength(1);
+
+    const second = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(second).toMatchObject({ attempted: 0, sent: 0 });
+    expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(false);
+
+    const third = await drainSheetsQueue(db, { onlyAccountId: "acct-1", force: true });
+    expect(third.sent).toBe(1);
+  });
+});
+
+describe("cleanup of deselected rows", () => {
+  const SUB_A = {
+    id: "sub-a",
+    account_id: "acct-1",
+    meta_lead_id: "lead-a",
+    flow_run_id: "run-1",
+    form_id: "form-sg",
+    form_name: "Singapore Lead Ad",
+    campaign_name: "Camp",
+    ad_name: "Ad",
+    source: "facebook",
+    answers: { full_name: "Asha" },
+    meta_created_time: "2026-03-01T10:00:00.000Z",
+    created_at: "2026-03-01T10:00:00.000Z",
+    status: "processed",
+  };
+  const SUB_B = { ...SUB_A, id: "sub-b", meta_lead_id: "lead-b", form_id: "form-other" };
+  function cleanupTables() {
+    return {
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: ["form-sg"] }],
+      meta_lead_sheets_connections: [
+        { account_id: "acct-1", access_token: "x", refresh_token: "y", token_expiry: new Date(Date.now() + 3600_000).toISOString() },
+      ],
+      meta_lead_submissions: [SUB_A, SUB_B],
+      meta_lead_sheets_queue: [
+        {
+          id: "q-a",
+          account_id: "acct-1",
+          submission_id: "sub-a",
+          status: "sent",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 2,
+          next_retry_at: new Date(0).toISOString(),
+        },
+        {
+          id: "q-b",
+          account_id: "acct-1",
+          submission_id: "sub-b",
+          status: "sent",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 3,
+          next_retry_at: new Date(0).toISOString(),
+        },
+        {
+          id: "q-orphan",
+          account_id: "acct-1",
+          submission_id: "sub-b",
+          status: "sent",
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: null,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    };
+  }
+
+  it("deletes only verified deselected rows, fixes numbers, never touches the rest", async () => {
+    h.columnValues.set("sheet-1::Meta Leads", ["lead-a", "lead-b"]);
+    const { db, data } = makeDb(cleanupTables());
+    const result = await cleanupDeselectedRows(db, "token-1", "acct-1");
+    expect(result).toEqual({ removed: 1, skippedUnmapped: 1 });
+    // Exactly the deselected mapped row, bottom-to-top.
+    expect(h.deleted).toEqual([{ spreadsheetId: "sheet-1", tab: "Meta Leads", rows: [3] }]);
+    // Selected row keeps its number; removed queue row is gone.
+    expect(data.meta_lead_sheets_queue.find((r) => r.id === "q-b")).toBeUndefined();
+    expect(data.meta_lead_sheets_queue.find((r) => r.id === "q-a")!.sheet_row_number).toBe(2);
+    // The unmapped row is never touched.
+    expect(data.meta_lead_sheets_queue.find((r) => r.id === "q-orphan")).toBeDefined();
+  });
+
+  it("is a no-op when every mapped row belongs to selected forms", async () => {
+    h.columnValues.set("sheet-1::Meta Leads", ["lead-a"]);
+    const tables = cleanupTables();
+    tables.meta_lead_sheets_configs = [{ ...CONFIG, form_ids: ["form-sg", "form-other"] }];
+    const { db, data } = makeDb(tables);
+    const result = await cleanupDeselectedRows(db, "token-1", "acct-1");
+    expect(result).toEqual({ removed: 0, skippedUnmapped: 1 });
+    expect(h.deleted).toHaveLength(0);
+    expect(data.meta_lead_sheets_queue).toHaveLength(3);
+  });
+
+  it("refuses without an explicit form selection or config", async () => {
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [{ ...CONFIG, form_ids: null }],
+      meta_lead_submissions: [],
+      meta_lead_sheets_queue: [],
+    });
+    await expect(cleanupDeselectedRows(db, "token-1", "acct-1")).rejects.toThrow(
+      /explicit form selection/,
+    );
+    const empty = makeDb({
+      meta_lead_sheets_configs: [],
+      meta_lead_submissions: [],
+      meta_lead_sheets_queue: [],
+    });
+    await expect(
+      cleanupDeselectedRows(empty.db, "token-1", "acct-1"),
+    ).rejects.toThrow(/not configured/);
   });
 });

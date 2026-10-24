@@ -196,18 +196,20 @@ export async function readSheetsHeader(
 }
 
 /**
- * Ensure row 1 matches META_SHEETS_HEADERS exactly. Writes the full
- * header when the tab is empty or mismatched. This is the integration's
- * owned range — user columns to the right of L are untouched.
+ * Ensure row 1 matches the desired managed header exactly. Writes
+ * the full header when the tab is empty or mismatched. This is the
+ * integration's owned range — user columns to the right of the
+ * managed width are untouched.
  */
 export async function ensureSheetsHeader(
   accessToken: string,
   spreadsheetId: string,
   tab: string,
+  desiredHeaders: string[],
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ updated: boolean }> {
   const existing = await readSheetsHeader(accessToken, spreadsheetId, tab, fetchImpl);
-  const wanted = [...META_SHEETS_HEADERS];
+  const wanted = [...desiredHeaders];
   if (
     existing &&
     existing.length >= wanted.length &&
@@ -257,7 +259,7 @@ export async function appendSheetsRows(
   if (!res.ok) await throwForResponse(res, "Google Sheets append failed");
 }
 
-/** Overwrite one full data row (1-based row number, columns A–L). */
+/** Overwrite one full data row (1-based row number, managed width). */
 export async function updateSheetsRow(
   accessToken: string,
   spreadsheetId: string,
@@ -267,7 +269,8 @@ export async function updateSheetsRow(
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   if (rowNumber < 2) throw new Error("Refusing to update a sheet header row");
-  const lastCol = columnLetter(META_SHEETS_HEADERS.length - 1);
+  if (values.length === 0) throw new Error("Refusing to write an empty sheet row");
+  const lastCol = columnLetter(values.length - 1);
   const range = `${encodeURIComponent(quoteTabTitle(tab))}!A${rowNumber}:${lastCol}${rowNumber}`;
   const res = await fetchImpl(
     `${SHEETS_API}/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`,
@@ -281,6 +284,156 @@ export async function updateSheetsRow(
     },
   );
   if (!res.ok) await throwForResponse(res, "Google Sheets row update failed");
+}
+
+/**
+ * Rewrite many full data rows in ONE request (used when rolling a
+ * column-layout change out to already-written managed rows).
+ * Each entry is `{rowNumber (1-based, >= 2), values}`.
+ */
+export async function rewriteSheetRows(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  rows: Array<{ rowNumber: number; values: (string | number)[] }>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (rows.length === 0) return;
+  for (const row of rows) {
+    if (row.rowNumber < 2 || row.values.length === 0) {
+      throw new Error("Refusing to rewrite a header row or an empty row");
+    }
+  }
+  const res = await fetchImpl(
+    `${SHEETS_API}/${spreadsheetId}/values:batchUpdate`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        valueInputOption: "USER_ENTERED",
+        data: rows.map((row) => {
+          const lastCol = columnLetter(row.values.length - 1);
+          return {
+            range: `${quoteTabTitle(tab)}!A${row.rowNumber}:${lastCol}${row.rowNumber}`,
+            values: [row.values],
+          };
+        }),
+      }),
+    },
+  );
+  if (!res.ok) await throwForResponse(res, "Google Sheets rows rewrite failed");
+}
+
+async function getSheetId(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<number> {
+  const res = await fetchImpl(
+    `${SHEETS_API}/${spreadsheetId}?fields=sheets.properties`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!res.ok) {
+    await throwForResponse(res, "Google Sheets tab lookup failed");
+  }
+  const data = (await res.json()) as {
+    sheets?: Array<{ properties?: { sheetId?: number; title?: string } }>;
+  };
+  const sheetId = data.sheets?.find((sheet) => sheet.properties?.title === tab)
+    ?.properties?.sheetId;
+  if (typeof sheetId !== "number") {
+    throw new Error(`Google Sheets tab not found: ${tab}`);
+  }
+  return sheetId;
+}
+
+/**
+ * Hide or unhide one 0-based sheet column (used for the pinned
+ * Meta Lead ID column when it is not a selected visible column).
+ * Cosmetic and idempotent; never deletes data.
+ */
+export async function setSheetColumnHidden(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  colIndex: number,
+  hidden: boolean,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const sheetId = await getSheetId(accessToken, spreadsheetId, tab, fetchImpl);
+  const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: [
+        {
+          updateDimensionProperties: {
+            range: {
+              sheetId,
+              dimension: "COLUMNS",
+              startIndex: colIndex,
+              endIndex: colIndex + 1,
+            },
+            properties: { hiddenByUser: hidden },
+            fields: "hiddenByUser",
+          },
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    await throwForResponse(res, "Google Sheets column visibility update failed");
+  }
+}
+
+/**
+ * Delete multiple 1-based data rows in one request, bottom-to-top
+ * (so earlier deletions never shift later row numbers). Never
+ * deletes the header row. Used ONLY for the explicit, confirmed
+ * cleanup of integration-managed rows — never for user data.
+ */
+export async function deleteSheetRows(
+  accessToken: string,
+  spreadsheetId: string,
+  tab: string,
+  rowNumbers: number[],
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (rowNumbers.length === 0) return;
+  if (rowNumbers.some((rowNumber) => rowNumber < 2)) {
+    throw new Error("Refusing to delete a sheet header row");
+  }
+  const sheetId = await getSheetId(accessToken, spreadsheetId, tab, fetchImpl);
+  const descendingRows = [...new Set(rowNumbers)].sort((a, b) => b - a);
+  const res = await fetchImpl(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: descendingRows.map((rowNumber) => ({
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: "ROWS",
+            startIndex: rowNumber - 1,
+            endIndex: rowNumber,
+          },
+        },
+      })),
+    }),
+  });
+  if (!res.ok) {
+    await throwForResponse(res, "Google Sheets row delete failed");
+  }
 }
 
 /**

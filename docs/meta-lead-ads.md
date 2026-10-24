@@ -448,6 +448,8 @@ Deployment / platform (do once):
 - [ ] Apply migration `129_meta_lead_google_sheets.sql` (only if you use
       Google Sheets Sync; no new scheduler — the existing 5-minute cron
       drains it).
+- [ ] Apply migration `130_meta_lead_sheets_columns.sql` (form selection
+      + custom columns for Sheets Sync; additive columns only).
 - [ ] Configure the Page webhook (`leadgen`) at app level in the App
       Dashboard. This remains a manual dashboard action.
 - [ ] Whitelist the OAuth callback in Facebook Login and verify the
@@ -499,6 +501,28 @@ interval, and Meta OAuth/webhook behavior are untouched.
   managed by WhatsApp Max (manual renames are overwritten); users may add
   columns to the right of L. Updates (assignment, Stage/Type, cell edits)
   rewrite the same row — never a duplicate.
+
+  **Per-form + per-column selection** (Settings › Google Sheets Sync):
+  - **Meta Forms to Sync** — checkbox multi-select (with Select All / Clear
+    All) over the account's own Instant Forms, persisted per account
+    (`form_ids`). Only selected forms enqueue, import, and drain; an
+    explicitly empty selection syncs nothing (explained in the UI).
+    Deselecting parks already-queued rows (they resume on re-select) but
+    never writes them. Newly selected forms reconcile their history
+    without duplicates (UNIQUE queue key).
+  - **Choose Spreadsheet Columns** — standard fields plus the union of the
+    selected forms' actual question fields (server-derived with the same
+    key derivation ingestion uses, so labels are display-only). Columns
+    are reordered, renamed, added, and removed per account
+    (`column_config`); the ID stays pinned to column A (hidden via the API
+    when deselected) so matching never depends on visibility. Saving a new
+    layout rewrites existing integration-managed rows in place (data
+    first, header last, resumable across drains); user columns to the
+    right are untouched.
+  - **Cleanup** — an explicit, confirmed action deletes only verified
+    managed rows of deselected forms (bottom-to-top, with row-number
+    repair); unmapped rows and user content are never touched. Rows from
+    deselected forms otherwise remain in the sheet — the UI says so.
 - **How.** Ingestion, assignment, and Workspace cell edits enqueue a durable
   outbox row (`UNIQUE(account_id, submission_id)`) **after** the DB write —
   no synchronous Sheets calls in the lead path, failures never roll back
