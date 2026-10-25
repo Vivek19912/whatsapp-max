@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 // import bcrypt from "bcryptjs";
+import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 // Admin client using the service-role key — this bypasses Row Level
 // Security, which is exactly why this must only ever run server-side
@@ -8,10 +8,10 @@ import { createClient } from "@supabase/supabase-js";
 // NEXT_PUBLIC_SUPABASE_URL is safe to expose (it already is, client-side).
 // SUPABASE_SERVICE_ROLE_KEY must NOT have a NEXT_PUBLIC_ prefix, or it
 // would get bundled into client JS and leak to anyone viewing the page source.
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-);
+//
+// Lazily constructed per request (via the shared factory) rather than
+// at module scope: a top-level createClient throws during `next build`
+// page-data collection when the key is absent, failing the whole build.
 
 export async function POST(request: NextRequest) {
   try {
@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
 
     // const passwordHash = await bcrypt.hash(password, 10);
 
-    const { error } = await supabaseAdmin
+    const { error } = await supabaseAdmin()
       .from("profiles")
       .update({ password })
       .eq("user_id", userId);
