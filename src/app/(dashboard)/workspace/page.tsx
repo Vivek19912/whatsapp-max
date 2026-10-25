@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { ExternalLink, Inbox, Plus, Search, Table2 } from 'lucide-react';
+import { ExternalLink, Inbox, MessageCircle, Plus, Search, Table2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -84,6 +84,7 @@ import {
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
+import { MetaTableWhatsappDialog } from '@/components/workspace/meta-table-whatsapp-dialog';
 import { resolveSpreadsheetOpenUrl } from '@/lib/meta-lead-sheets/sheets-client';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
@@ -360,6 +361,9 @@ export default function WorkspacePage() {
   // Per-table Google Sheets configuration dialog (Meta Lead Ads
   // tables only; Flow Tables never see it).
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
+  // Per-table WhatsApp auto-send dialog (Meta Lead Ads tables
+  // only; Flow Tables never see it).
+  const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
   // This Meta table's saved spreadsheet URL for the Workspace
   // open-sheet action. Null until the table-scoped config loads
   // (or when no spreadsheet is saved) — the button only renders
@@ -1608,6 +1612,14 @@ export default function WorkspacePage() {
                     <Table2 className="mr-1.5 size-4" />
                     Configure Sheet
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setWhatsappDialogOpen(true)}
+                  >
+                    <MessageCircle className="mr-1.5 size-4" />
+                    Auto-send WhatsApp
+                  </Button>
                   {/* This table's own saved spreadsheet only — the
                       URL is refetched per selected table above, and
                       the button renders solely with a valid URL.
@@ -2202,6 +2214,18 @@ export default function WorkspacePage() {
           flowId={flowId}
           open={sheetDialogOpen}
           onOpenChange={setSheetDialogOpen}
+        />
+      ) : null}
+
+      {/* Per-table WhatsApp auto-send configuration (Meta Lead Ads
+          tables only — never rendered for Flow Tables). Keyed by
+          flow so switching tables loads that table's own settings. */}
+      {isMetaTable && flowId ? (
+        <MetaTableWhatsappDialog
+          key={`wa-${flowId}`}
+          flowId={flowId}
+          open={whatsappDialogOpen}
+          onOpenChange={setWhatsappDialogOpen}
         />
       ) : null}
 

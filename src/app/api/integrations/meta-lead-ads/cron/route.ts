@@ -15,6 +15,7 @@ import { drainMetaLeadNotifications } from '@/lib/meta-lead-ads/notify';
 import { runDueRetries } from '@/lib/meta-lead-ads/process-lead';
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from '@/lib/meta-lead-ads/sync';
 import { drainSheetsQueue } from '@/lib/meta-lead-sheets/queue';
+import { drainWhatsappQueue } from '@/lib/meta-lead-whatsapp/queue';
 
 export const dynamic = 'force-dynamic';
 
@@ -108,11 +109,35 @@ export async function GET(request: Request) {
       );
     }
 
+    // ADDITIVE WhatsApp auto-send drain. Same 5-minute sweep, no
+    // new scheduler; per-row failures never affect polling,
+    // notifications, or Sheets, and WhatsApp failures never roll
+    // back leads. Meta-only: drains only meta_lead_whatsapp_queue
+    // rows.
+    let whatsapp = {
+      attempted: 0,
+      sent: 0,
+      failed: 0,
+      skippedPaused: 0,
+      skippedNoConfig: 0,
+      skippedNoPhone: 0,
+      skippedOutOfOrder: 0,
+    };
+    try {
+      whatsapp = await drainWhatsappQueue(db, { limit: 20 });
+    } catch (error) {
+      console.error(
+        '[meta-lead-ads-cron] whatsapp drain failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+
     return NextResponse.json({
       ...retries,
       sync,
       notifications,
       sheets,
+      whatsapp,
       ...(retryError ? { retryError } : {}),
     });
   } catch (error) {
