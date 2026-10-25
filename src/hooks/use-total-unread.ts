@@ -22,6 +22,9 @@ export function useTotalUnread(): number {
   // events can adjust the total in O(1) without refetching.
   const countsRef = useRef<Map<string, number>>(new Map());
 
+  // Reset-on-logout plus realtime subscription setup in one effect
+  // is intentional here; splitting it risks double-subscribing.
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional, see above */
   useEffect(() => {
     if (!userId) {
       setTotal(0);
@@ -76,6 +79,7 @@ export function useTotalUnread(): number {
       supabase.removeChannel(channel);
     };
   }, [userId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return total;
 }

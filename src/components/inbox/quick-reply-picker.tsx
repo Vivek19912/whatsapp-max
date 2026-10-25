@@ -214,6 +214,10 @@ export const QuickReplyPicker = forwardRef<
     setLoading(false);
   }, [accountId]);
 
+  // Reset-on-open is intentional UI state choreography (open the
+  // picker fresh each time). Kept as-is; restructuring risks
+  // changing visible picker behaviour.
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional reset, see above */
   useEffect(() => {
     if (open) {
       fetchReplies();
@@ -222,6 +226,7 @@ export const QuickReplyPicker = forwardRef<
       setActiveIdx(0);
     }
   }, [open, fetchReplies]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Focus search input when modal opens
   useEffect(() => {
@@ -311,9 +316,11 @@ export const QuickReplyPicker = forwardRef<
   }, [filtered, recentItems]);
 
   // Reset active index on filter change
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional reset, see above */
   useEffect(() => {
     setActiveIdx(0);
   }, [search, slashQuery, activeCategory]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Handle selection — supports both media and text
   const handleSelect = useCallback(

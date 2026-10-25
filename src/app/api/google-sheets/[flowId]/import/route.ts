@@ -19,6 +19,15 @@ import {
 import { setSheetColumnHidden } from "@/lib/google/sheets";
 import { NextResponse } from "next/server";
 
+/** Minimal shape of the flow_runs rows this route reads. */
+type FlowRunRow = {
+  id: string;
+  contact_id?: string | null;
+  vars?: unknown;
+  started_at?: string | null;
+  ended_at?: string | null;
+};
+
 function parseIsoDate(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
   const ms = Date.parse(value);
@@ -106,7 +115,7 @@ export async function POST(
 
     const resolvedNameHeader = nameKey ? (nameHeader ?? "Name") : null;
 
-    const rows: (string | number)[][] = runs.map((run: any) => {
+    const rows: (string | number)[][] = runs.map((run: FlowRunRow) => {
       const contact = run.contact_id ? contactMap.get(run.contact_id) : null;
       const vars = (run.vars ?? {}) as Record<string, unknown>;
       const varsWithAssign: Record<string, unknown> = { ...vars };

@@ -41,7 +41,11 @@ export interface AssignmentPickRow {
 }
 
 interface DbLike {
+  // Chainable PostgREST builder — structurally deep; typed as any
+  // like the sibling call sites below (lines ~448/~458).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   from(table: string): any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   rpc?(fn: string, args?: Record<string, unknown>): any
 }
 

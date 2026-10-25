@@ -74,8 +74,16 @@ export function dispatchNodeWebhook(
       clearTimeout(timeout);
       statusCode = res.status;
       responseBody = (await res.text()).slice(0, 1000);
-    } catch (err: any) {
-      error = err?.name === "AbortError" ? "timeout after 5s" : String(err?.message ?? err);
+    } catch (err: unknown) {
+      // Duck-typed (not instanceof): fetch aborts with a DOMException,
+      // which does not inherit from Error in every runtime.
+      const candidate = err as { name?: unknown; message?: unknown } | undefined;
+      error =
+        candidate?.name === "AbortError"
+          ? "timeout after 5s"
+          : typeof candidate?.message === "string"
+            ? candidate.message
+            : String(err);
     }
 
     await db.from("flow_node_webhook_logs").insert({

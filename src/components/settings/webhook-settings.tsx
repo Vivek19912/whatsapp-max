@@ -60,7 +60,7 @@ function SecretBanner({ secret, onDismiss }: { secret: string; onDismiss: () => 
         <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-500" />
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-yellow-700 dark:text-yellow-400">
-            Save your signing secret — it won't be shown again
+            Save your signing secret — it won&apos;t be shown again
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             Use this to verify the <code className="font-mono">X-Wacrm-Signature</code> header on incoming deliveries.
@@ -72,7 +72,7 @@ function SecretBanner({ secret, onDismiss }: { secret: string; onDismiss: () => 
             <CopyButton text={secret} />
           </div>
           <Button variant="ghost" size="sm" className="mt-2 h-7 text-xs text-muted-foreground" onClick={onDismiss}>
-            I've saved it, dismiss
+            I&apos;ve saved it, dismiss
           </Button>
         </div>
       </div>

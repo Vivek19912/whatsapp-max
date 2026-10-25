@@ -119,6 +119,10 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   // All account tags, for the assign/unassign picker. Same source table
   // and scoping as Settings > Tags (`TagManager`) so both surfaces stay
   // in sync — creating a tag here shows up there and vice versa.
+  // Intentional manual memoization (narrow dep); the compiler's
+  // inferred dep would refire this fetch more often. Not refactored
+  // to avoid changing fetch timing on a live surface.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const fetchAllTags = useCallback(async () => {
     if (!user?.id) return;
     const supabase = createClient();
@@ -222,7 +226,9 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   );
 
   // Remove a tag from the current contact (does not delete the tag
-  // itself — just the contact_tags join row).
+  // itself — just the contact_tags join row). Manual memoization is
+  // intentional here; see the note on fetchAllTags above.
+  /* eslint-disable react-hooks/preserve-manual-memoization -- see note above */
   const handleRemoveTag = useCallback(
     async (contactTagId: string, tagId: string) => {
       setTogglingTagId(tagId);
@@ -245,6 +251,7 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
     },
     [],
   );
+  /* eslint-enable react-hooks/preserve-manual-memoization */
 
   const handleToggleTag = useCallback(
     (tag: Tag) => {
@@ -259,7 +266,9 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   );
 
   // Create a brand-new tag (same insert shape as Settings > Tags) and
-  // immediately assign it to the current contact.
+  // immediately assign it to the current contact. Manual memoization
+  // is intentional here; see the note on fetchAllTags above.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const handleCreateTag = useCallback(async () => {
     if (!newTagName.trim() || !user?.id || !accountId || !contact) return;
     setCreatingTag(true);

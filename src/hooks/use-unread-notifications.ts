@@ -14,6 +14,9 @@ export function useUnreadNotifications(): number {
   const { user } = useAuth();
   const userId = user?.id;
 
+  // Reset-on-logout plus realtime subscription setup in one effect
+  // is intentional here; splitting it risks double-subscribing.
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional, see above */
   useEffect(() => {
     if (!userId) {
       setCount(0);
@@ -62,6 +65,7 @@ export function useUnreadNotifications(): number {
       supabase.removeChannel(channel);
     };
   }, [userId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return count;
 }

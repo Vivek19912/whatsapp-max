@@ -631,7 +631,7 @@ async function buildRowValues(
   let runStartedAt: string | null = null;
   let runContactId: string | null = null;
   let runFlowId: string | null = null;
-  let overrides: Record<string, string | null> = {};
+  const overrides: Record<string, string | null> = {};
   if (submission.flow_run_id) {
     const { data: run } = await db
       .from('flow_runs')

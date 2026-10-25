@@ -15,6 +15,15 @@ import {
 } from "@/lib/flows/sheet-columns";
 import { NextResponse } from "next/server";
 
+/** Minimal shape of the flow_runs rows this route reads. */
+type FlowRunRow = {
+  id?: string;
+  contact_id?: string | null;
+  vars?: unknown;
+  started_at?: string | null;
+  ended_at?: string | null;
+};
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ id: string }> },
@@ -59,7 +68,7 @@ export async function POST(
     const contactIds = [
       ...new Set(
         droppedRuns
-          .map((r: any) => r.contact_id)
+          .map((r: FlowRunRow) => r.contact_id)
           .filter(Boolean),
       ),
     ];
@@ -106,7 +115,7 @@ export async function POST(
     );
     const headerFor = (k: string): string => headerMap.get(k) ?? k;
     const unorderedKeys = new Set<string>();
-    droppedRuns.forEach((run: any) => {
+    droppedRuns.forEach((run: FlowRunRow) => {
       Object.keys(run.vars ?? {}).forEach((k) => {
         if (!disabledKeys.has(k)) unorderedKeys.add(k);
       });
@@ -123,7 +132,7 @@ export async function POST(
     const answerHeaders = Array.from(allVarKeys, headerFor);
     const headers = [...nameHeaderCell, ...STANDARD_COLUMNS_V3, ...answerHeaders];
 
-    const rows = droppedRuns.map((run: any) => {
+    const rows = droppedRuns.map((run: FlowRunRow) => {
       const contact = run.contact_id
         ? contactMap.get(run.contact_id)
         : null;
