@@ -15,27 +15,17 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   resolveDisplayServiceLabel,
   TRAVEL_CRM_SERVICE_LABELS,
 } from "@/lib/integrations/travel-crm/services";
 import {
-  citiesForDestination,
-  cityLabelForValue,
   resolveSelectValue,
   validateNightsInput,
 } from "@/lib/integrations/travel-crm/itineraries";
-import { ItineraryDestinationSelect, ITINERARY_DROPDOWN_ABOVE } from "./travel-crm-action";
+import { ItineraryDestinationSelect } from "./travel-crm-action";
 
 export interface ItineraryEditRow {
   destination: string;
-  city: string;
   nights: string;
 }
 
@@ -47,7 +37,7 @@ interface LookupOption {
 
 /** Blank editing row (nights kept as text for typing). */
 export function createEmptyItineraryRow(): ItineraryEditRow {
-  return { destination: "", city: "", nights: "" };
+  return { destination: "", nights: "" };
 }
 
 /** Pure: append a blank row (Add More). */
@@ -64,32 +54,20 @@ export function removeItineraryRow(
 }
 
 /**
- * Pure: set a row's destination and clear an incompatible city
- * rather than keeping an invalid pairing.
+ * Pure: set a row's destination. Rows carry Destination + Nights
+ * only (no per-row city — mirrors native Travel CRM).
  */
 export function updateItineraryDestination(
   rows: ItineraryEditRow[],
   index: number,
   destination: string,
-  cities: ReadonlyArray<{ value: string; destinationValue?: string | null }>,
 ): ItineraryEditRow[] {
-  return rows.map((row, i) => {
-    if (i !== index) return row;
-    const next = { ...row, destination };
-    if (!next.city) return next;
-    const linked = cities.filter((c) => (c.destinationValue ?? null) !== null);
-    // No linkage in lookup data → free pairing, keep the city.
-    if (linked.length === 0) return next;
-    const compatible = linked.some(
-      (c) => c.value === next.city && (c.destinationValue ?? null) === destination,
-    );
-    return compatible ? next : { ...next, city: "" };
-  });
+  return rows.map((row, i) => (i === index ? { ...row, destination } : row));
 }
 
 /** True when an editing row is completely empty (dropped on save). */
 export function isEmptyItineraryRow(row: ItineraryEditRow): boolean {
-  return !row.destination && !row.city && !row.nights.trim();
+  return !row.destination && !row.nights.trim();
 }
 
 /**
@@ -114,7 +92,6 @@ export function TravelCrmSettings({
   const [selected, setSelected] = useState<string[]>([]);
   const [rows, setRows] = useState<ItineraryEditRow[]>([]);
   const [destinations, setDestinations] = useState<LookupOption[]>([]);
-  const [cities, setCities] = useState<LookupOption[]>([]);
   const [lookupsLoading, setLookupsLoading] = useState(false);
   const [lookupsError, setLookupsError] = useState<string | null>(null);
 
@@ -131,13 +108,15 @@ export function TravelCrmSettings({
         setSelected(Array.isArray(list) ? list.filter((s): s is string => typeof s === "string") : []);
         const itin = (json as { itinerary?: unknown } | null)?.itinerary;
         if (Array.isArray(itin)) {
+          // Legacy saved rows may still carry a `city` property —
+          // it is ignored (the editor collects Destination + Nights
+          // only), so old defaults load safely.
           setRows(
             itin
               .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
               .map((r) => ({
                 destination:
                   typeof r.destination === "string" ? r.destination : "",
-                city: typeof r.city === "string" ? r.city : "",
                 nights:
                   typeof r.nights === "number" && Number.isFinite(r.nights)
                     ? String(r.nights)
@@ -145,7 +124,7 @@ export function TravelCrmSettings({
                       ? r.nights
                       : "",
               }))
-              .filter((r) => r.destination || r.city || r.nights.trim()),
+              .filter((r) => r.destination || r.nights.trim()),
           );
         } else {
           setRows([]);
@@ -156,15 +135,16 @@ export function TravelCrmSettings({
     fetch("/api/integrations/travel-crm/lookups", { cache: "no-store" })
       .then((r) => r.json().catch(() => null))
       .then((json) => {
+        // City options are intentionally not loaded: itinerary rows
+        // carry Destination + Nights only (city-less rows stay
+        // valid end to end, mirroring native Travel CRM).
         const j = json as {
           success?: boolean;
           destinations?: unknown;
-          cities?: unknown;
         } | null;
         if (!j || j.success === false) {
           setLookupsError("Could not load Travel CRM destinations.");
           setDestinations([]);
-          setCities([]);
           return;
         }
         const dests = Array.isArray(j.destinations)
@@ -181,38 +161,11 @@ export function TravelCrmSettings({
                     : (o.value as string).trim(),
               }))
           : [];
-        const cityList = Array.isArray(j.cities)
-          ? (
-              j.cities as Array<{
-                value?: unknown;
-                label?: unknown;
-                destinationValue?: unknown;
-              }>
-            )
-              .filter(
-                (o) =>
-                  o && typeof o.value === "string" && o.value.trim(),
-              )
-              .map((o) => ({
-                value: (o.value as string).trim(),
-                label:
-                  typeof o.label === "string" && o.label.trim()
-                    ? o.label.trim()
-                    : (o.value as string).trim(),
-                destinationValue:
-                  typeof o.destinationValue === "string" &&
-                  o.destinationValue.trim()
-                    ? o.destinationValue.trim()
-                    : null,
-              }))
-          : [];
         setDestinations(dests);
-        setCities(cityList);
       })
       .catch(() => {
         setLookupsError("Could not load Travel CRM destinations.");
         setDestinations([]);
-        setCities([]);
       })
       .finally(() => setLookupsLoading(false));
   }, [open, flowId]);
@@ -232,11 +185,7 @@ export function TravelCrmSettings({
   }
 
   function setDestination(index: number, value: string) {
-    setRows((prev) => updateItineraryDestination(prev, index, value, cities));
-  }
-
-  function setCity(index: number, value: string) {
-    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, city: value } : r)));
+    setRows((prev) => updateItineraryDestination(prev, index, value));
   }
 
   function setNights(index: number, value: string) {
@@ -245,11 +194,11 @@ export function TravelCrmSettings({
 
   async function save() {
     if (!flowId) return;
-    // Validate nights for non-empty rows before sending.
+    // Validate destination + nights for non-empty rows before sending.
     for (const row of rows) {
       if (isEmptyItineraryRow(row)) continue;
-      if (!row.destination || !row.city) {
-        setError("Each itinerary row needs a destination, city, and nights.");
+      if (!row.destination || !row.nights.trim()) {
+        setError("Each itinerary row needs a destination and nights.");
         return;
       }
       const nightsError = validateNightsInput(row.nights);
@@ -260,10 +209,10 @@ export function TravelCrmSettings({
     }
     const itinerary = rows
       .filter((r) => !isEmptyItineraryRow(r))
-      .filter((r) => r.destination && r.city && r.nights.trim())
+      .filter((r) => r.destination && r.nights.trim())
       .map((r) => ({
         destination: r.destination,
-        city: r.city,
+        city: "",
         nights: Number(r.nights.trim()),
       }));
     // The departure key is deliberately omitted: the API
@@ -388,22 +337,12 @@ export function TravelCrmSettings({
               ) : (
                 <div className="space-y-2">
                   {rows.map((row, i) => {
-                    const cityOptions = row.destination
-                      ? citiesForDestination(cities, row.destination)
-                      : [];
                     // Stored values are stable Travel CRM IDs. When a
                     // stored ID has no matching lookup option (stale or
                     // archived master), show the "Select" placeholder
                     // instead of a raw UUID — the stored value stays
                     // intact in state and on save.
                     const destinationValue = resolveSelectValue(destinations, row.destination);
-                    const cityValue = resolveSelectValue(cityOptions, row.city);
-                    // Explicit label resolution (ID → name) for the
-                    // city display: the stored UUID is passed to the
-                    // Select only as the value; the human-readable
-                    // name renders directly so the trigger never
-                    // shows a raw UUID.
-                    const cityLabel = cityLabelForValue(cityOptions, row.city);
                     // Destination uses the shared country-grouped
                     // selector (same component as the creation
                     // dialog): groups appear when the lookup feed
@@ -412,7 +351,7 @@ export function TravelCrmSettings({
                     return (
                       <div
                         key={i}
-                        className="grid grid-cols-[1fr_1fr_72px_auto] items-end gap-2"
+                        className="grid grid-cols-[1fr_72px_auto] items-end gap-2"
                       >
                         <div className="grid gap-1">
                           <label
@@ -427,40 +366,6 @@ export function TravelCrmSettings({
                             inputId={`itin-dest-${i}`}
                             onChange={(v) => setDestination(i, v ?? "")}
                           />
-                        </div>
-                        <div className="grid gap-1">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor={`itin-city-${i}`}
-                          >
-                            City
-                          </label>
-                          <Select
-                            value={cityValue}
-                            onValueChange={(v) => setCity(i, v ?? "")}
-                            disabled={!row.destination}
-                          >
-                          <SelectTrigger id={`itin-city-${i}`} aria-label="City" className="min-h-8 w-full *:[data-slot=select-value]:line-clamp-none *:[data-slot=select-value]:whitespace-normal">
-                            <SelectValue
-                              placeholder={
-                                row.destination ? "Select" : "Pick destination first"
-                              }
-                            >
-                              {cityLabel !== null ? cityLabel : undefined}
-                            </SelectValue>
-                          </SelectTrigger>
-                          <SelectContent {...ITINERARY_DROPDOWN_ABOVE}>
-                            {cityOptions.map((o) => (
-                              <SelectItem
-                                key={`${o.destinationValue ?? ""}:${o.value}`}
-                                value={o.value}
-                                className="[&>div]:whitespace-normal [&>div]:break-words"
-                              >
-                                {o.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                          </Select>
                         </div>
                         <div className="grid gap-1">
                           <label

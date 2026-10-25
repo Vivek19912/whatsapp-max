@@ -616,14 +616,16 @@ describe("itinerary dropdowns always open above their fields", () => {
     expect(settings).toContain("<ItineraryDestinationSelect");
   });
 
-  it("settings keeps the pinned city dropdown; the dialog has none", () => {
-    const action = SRC();
-    expect(action).not.toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
-    const settings = readFileSync(
-      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
-      "utf8",
-    );
-    expect(settings).toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
+  it("neither dialog nor settings renders a city dropdown", () => {
+    for (const rel of [
+      "src/components/workspace/travel-crm-action.tsx",
+      "src/components/workspace/travel-crm-settings.tsx",
+    ]) {
+      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
+      expect(src).not.toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
+      expect(src).not.toContain("lead-itin-city-");
+      expect(src).not.toContain('aria-label="City"');
+    }
   });
 
   it("wrappers forward collisionAvoidance to the positioner", () => {
@@ -706,24 +708,17 @@ describe("destination names render complete, never truncated", () => {
     expect(html).not.toContain("truncate");
   });
 
-  it("settings city triggers wrap instead of clamping to one line", () => {
-    const src = readFileSync(
-      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
-      "utf8",
-    );
-    expect(src).toContain("min-h-8 w-full *:[data-slot=select-value]:line-clamp-none");
-    expect(src).toContain("*:[data-slot=select-value]:whitespace-normal");
-    // The dialog no longer renders a city trigger at all.
-    expect(SRC()).not.toContain('aria-label="City"');
-  });
-
-  it("settings city options wrap instead of truncating", () => {
-    const src = readFileSync(
-      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
-      "utf8",
-    );
-    expect(src).toContain("[&>div]:whitespace-normal [&>div]:break-words");
-    // The dialog no longer renders city options at all.
-    expect(SRC()).not.toContain("lead-itin-city-");
+  it("no city trigger wraps or truncates anywhere (city removed)", () => {
+    // The city Select (with its wrap/no-truncate styling) is gone
+    // from both the dialog and Settings; destination rendering
+    // keeps its own wrapping, covered above.
+    for (const rel of [
+      "src/components/workspace/travel-crm-action.tsx",
+      "src/components/workspace/travel-crm-settings.tsx",
+    ]) {
+      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
+      expect(src).not.toContain("min-h-8 w-full *:[data-slot=select-value]:line-clamp-none");
+      expect(src).not.toContain("[&>div]:whitespace-normal [&>div]:break-words");
+    }
   });
 });

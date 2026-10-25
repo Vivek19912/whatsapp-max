@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 
 import {
   addItineraryRow,
@@ -19,16 +20,16 @@ import { validateNightsInput } from "@/lib/integrations/travel-crm/itineraries";
 
 // ---------------------------------------------------------------------------
 // Focused UI tests: Add More / Remove / nights validation / stable
-// IDs / dialog prefill without mutating. Dialog rows carry
-// Destination + Nights only (no per-row city — mirrors native
-// Travel CRM); the Settings editor keeps its own city handling.
+// IDs / dialog prefill without mutating. Dialog AND Settings rows
+// carry Destination + Nights only (no per-row city — mirrors
+// native Travel CRM); legacy saved `city` values load safely.
 // ---------------------------------------------------------------------------
 
 describe("6. Add More works (settings + dialog)", () => {
-  it("settings appends a blank row", () => {
-    expect(addItineraryRow([])).toEqual([{ destination: "", city: "", nights: "" }]);
+  it("settings appends a blank row (Destination + Nights, no City)", () => {
+    expect(addItineraryRow([])).toEqual([{ destination: "", nights: "" }]);
     expect(
-      addItineraryRow([{ destination: "d", city: "c", nights: "2" }]),
+      addItineraryRow([{ destination: "d", nights: "2" }]),
     ).toHaveLength(2);
   });
 
@@ -41,11 +42,11 @@ describe("6. Add More works (settings + dialog)", () => {
 describe("7. Remove works (zero rows allowed)", () => {
   it("settings removes the indexed row, allowing empty", () => {
     const rows = [
-      { destination: "d1", city: "c1", nights: "2" },
-      { destination: "d2", city: "c2", nights: "3" },
+      { destination: "d1", nights: "2" },
+      { destination: "d2", nights: "3" },
     ];
     expect(removeItineraryRow(rows, 0)).toEqual([
-      { destination: "d2", city: "c2", nights: "3" },
+      { destination: "d2", nights: "3" },
     ]);
     expect(removeItineraryRow(rows, 1)).toHaveLength(1);
     expect(removeItineraryRow([rows[0]], 0)).toEqual([]);
@@ -59,24 +60,31 @@ describe("7. Remove works (zero rows allowed)", () => {
 
   it("empty rows are droppable on save", () => {
     expect(isEmptyItineraryRow(createEmptyItineraryRow())).toBe(true);
-    expect(isEmptyItineraryRow({ destination: "d", city: "", nights: "" })).toBe(false);
+    expect(isEmptyItineraryRow({ destination: "", nights: "  " })).toBe(true);
+    expect(isEmptyItineraryRow({ destination: "d", nights: "" })).toBe(false);
+    expect(isEmptyItineraryRow({ destination: "", nights: "3" })).toBe(false);
+  });
+
+  it("legacy saved rows load safely with city stripped (Destination + Nights only)", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    // Load maps stored rows to {destination, nights} — a legacy
+    // `city` property is ignored, never rendered, never sent.
+    expect(src).not.toContain("typeof r.city");
+    expect(src).not.toContain("setCity(");
   });
 });
 
 describe("9+10. destination change keeps the row (no city to clear)", () => {
-  it("settings clears an incompatible city on destination change", () => {
-    const CITIES = [
-      { value: "city-marina", destinationValue: "dest-sg" },
-      { value: "city-sentosa", destinationValue: "dest-sg" },
-      { value: "city-kuta", destinationValue: "dest-bali" },
-    ];
-    const rows = [{ destination: "dest-sg", city: "city-marina", nights: "4" }];
-    const kept = updateItineraryDestination(rows, 0, "dest-sg", CITIES);
-    expect(kept[0].city).toBe("city-marina");
-    const cleared = updateItineraryDestination(rows, 0, "dest-bali", CITIES);
-    expect(cleared).toEqual([{ destination: "dest-bali", city: "", nights: "4" }]);
+  it("settings sets the destination and preserves nights (no city field)", () => {
+    const rows = [{ destination: "dest-sg", nights: "4" }];
+    expect(updateItineraryDestination(rows, 0, "dest-bali")).toEqual([
+      { destination: "dest-bali", nights: "4" },
+    ]);
     // Input never mutated.
-    expect(rows).toEqual([{ destination: "dest-sg", city: "city-marina", nights: "4" }]);
+    expect(rows).toEqual([{ destination: "dest-sg", nights: "4" }]);
   });
 
   it("dialog sets the destination and preserves nights (no city field)", () => {

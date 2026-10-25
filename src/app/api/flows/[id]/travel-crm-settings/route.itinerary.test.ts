@@ -180,6 +180,46 @@ describe("1. itinerary defaults save per account + flow", () => {
     expect(h.settings).toHaveLength(0);
   });
 
+  it("accepts city-less rows (Destination + Nights only)", async () => {
+    h.role = "agent";
+    const res = await PUT(
+      req("PUT", {
+        services: [],
+        itinerary: [
+          { destination: "dest-sg", nights: 4 },
+          { destination: "dest-bali", nights: "3" },
+        ],
+      }),
+      params,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      services: [],
+      itinerary: [
+        { destination: "dest-sg", city: "", nights: 4 },
+        { destination: "dest-bali", city: "", nights: 3 },
+      ],
+      departure: null,
+    });
+  });
+
+  it("reads back legacy city-carrying rows verbatim (load stays safe)", async () => {
+    h.role = "agent";
+    await PUT(
+      req("PUT", {
+        services: [],
+        itinerary: [{ destination: "dest-sg", city: "city-marina", nights: 4 }],
+      }),
+      params,
+    );
+    const reread = await GET(req("GET"), params);
+    expect(await reread.json()).toEqual({
+      services: [],
+      itinerary: [{ destination: "dest-sg", city: "city-marina", nights: 4 }],
+      departure: null,
+    });
+  });
+
   it("services-only PUT preserves existing itinerary (backward compatible)", async () => {
     h.role = "agent";
     await PUT(

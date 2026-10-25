@@ -73,10 +73,29 @@ describe("Itinerary Defaults display names — never raw UUIDs", () => {
     // groups appear when the feed carries country metadata.
     expect(src).toContain("<ItineraryDestinationSelect");
     expect(src).toContain("resolveSelectValue(destinations, row.destination)");
-    // City keeps its explicit ID → name resolution.
-    expect(src).toContain("cityLabelForValue(cityOptions, row.city)");
-    expect(src).toContain("cityLabel !== null ? cityLabel : undefined");
+    // No city control: rows carry Destination + Nights only.
+    expect(src).not.toContain("cityLabelForValue(");
+    expect(src).not.toContain('aria-label="City"');
     // The stored UUID still travels as the option value (never the name).
     expect(src).toContain("onChange={(v) => setDestination(i, v ?? \"\")}");
+  });
+
+  it("loads legacy city-carrying defaults safely (city ignored)", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    // Saved rows with a legacy `city` property load without crashing:
+    // the loader maps to {destination, nights} and drops the city.
+    expect(src).toContain("Legacy saved rows may still carry a `city` property");
+  });
+
+  it("requires only destination and nights per row", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("Each itinerary row needs a destination and nights.");
+    expect(src).not.toContain("needs a destination, city, and nights");
   });
 });
