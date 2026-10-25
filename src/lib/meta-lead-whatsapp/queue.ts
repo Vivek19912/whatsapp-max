@@ -21,11 +21,16 @@
 //   * Sends for one lead run sequentially in the configured
 //     order: item N is scheduled at lead-time + N * delay, and
 //     the drain never sends an item while an earlier item of the
-//     same lead is still pending/sending/retryable.
+//     same lead is still in flight.
+//   * Template variables resolve against the lead's OWN Workspace
+//     row on every attempt (including retries) using the table's
+//     stored per-template mappings. Missing/empty values fail the
+//     row (retryable, with the field named) so a corrected row or
+//     mapping heals the send; placeholders are never transmitted.
 //   * Failures use bounded exponential backoff and never roll
-//     back the lead. Terminal problems (no phone, unapproved
-//     template, params required) fail fast with an actionable
-//     message and unblock later items.
+//     back the lead. Terminal problems (no phone, unapproved or
+//     deleted template, unmappable media) fail fast with an
+//     actionable message and unblock later items.
 // ============================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -39,7 +44,6 @@ import {
   sanitizePhoneForMeta,
 } from "@/lib/whatsapp/phone-utils";
 import { isMessageTemplate } from "@/lib/whatsapp/template-row-guard";
-import { extractVariableIndices } from "@/lib/whatsapp/template-validators";
 import type { MessageTemplate } from "@/types";
 
 import {
@@ -47,6 +51,18 @@ import {
   whatsappRetryDelayMs,
   type ValidatedAutoSendTemplate,
 } from "./config";
+import {
+  buildAvailableVariableFields,
+  buildVariableSendParams,
+  getTemplateVariableSlots,
+  renderVariablePreview,
+  resolveLeadVariableFieldMap,
+  resolveVariableValues,
+  templateMediaBlockers,
+  validateVariableMappings,
+  type VariableFieldDef,
+} from "./variables";
+import type { SendTimeParams } from "@/lib/whatsapp/template-send-builder";
 
 export const WHATSAPP_SWEEP_LIMIT = 20;
 export const WHATSAPP_MAX_ATTEMPTS = 8;
@@ -87,6 +103,12 @@ interface SubmissionRow {
   meta_lead_id: string;
   flow_run_id: string | null;
   form_id: string | null;
+  form_name: string | null;
+  campaign_name: string | null;
+  ad_name: string | null;
+  source: string | null;
+  meta_created_time: string | null;
+  created_at: string;
   contact_id: string | null;
 }
 
@@ -103,9 +125,30 @@ export function isTerminalSendError(err: unknown): boolean {
 }
 
 /**
- * Which send-time values a template requires that auto-send cannot
- * supply (no per-lead mapping exists). Returns human-readable
- * reasons; empty = safely auto-sendable. Pure.
+ * Normalize a stored `variable_mappings` JSON value into a slot →
+ * field record. Corrupt values degrade to {} (the drain then
+ * reports the missing mapping on the row instead of crashing).
+ * Pure.
+ */
+export function normalizeStoredMappings(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [slotKey, fieldKey] of Object.entries(
+    raw as Record<string, unknown>,
+  )) {
+    if (typeof fieldKey === "string" && fieldKey.trim() !== "") {
+      out[slotKey] = fieldKey.trim();
+    }
+  }
+  return out;
+}
+
+/**
+ * Structural problems mappings can never fix (media header with
+ * no stored file). Template variables are NOT blockers — they
+ * are satisfied by per-table mappings. Kept for the send path
+ * and pre-existing callers; new code should prefer
+ * `templateMediaBlockers` + `getTemplateVariableSlots`.
  */
 export function templateSendBlockers(
   template: Pick<
@@ -113,35 +156,7 @@ export function templateSendBlockers(
     "header_type" | "header_content" | "body_text" | "buttons"
   >,
 ): string[] {
-  const blockers: string[] = [];
-  if (
-    template.header_type === "text" &&
-    extractVariableIndices(template.header_content ?? "").length > 0
-  ) {
-    blockers.push("text header contains a {{variable}}");
-  }
-  if (extractVariableIndices(template.body_text ?? "").length > 0) {
-    blockers.push("body contains {{variables}}");
-  }
-  for (const btn of template.buttons ?? []) {
-    if (
-      btn.type === "URL" &&
-      typeof btn.url === "string" &&
-      extractVariableIndices(btn.url).length > 0
-    ) {
-      blockers.push(`button "${btn.text ?? "URL"}" contains a {{variable}}`);
-    }
-  }
-  // Media headers without any stored media can never send.
-  if (
-    (template.header_type === "image" ||
-      template.header_type === "video" ||
-      template.header_type === "document") &&
-    !(template as { header_media_url?: string | null }).header_media_url
-  ) {
-    blockers.push(`${template.header_type} header has no media file`);
-  }
-  return blockers;
+  return templateMediaBlockers(template);
 }
 
 /** This table's auto-send config + ordered items. Null = never configured. */
@@ -162,7 +177,9 @@ export async function loadTableWhatsappConfig(
 
   const { data: rows, error: rowsErr } = await db
     .from("meta_lead_whatsapp_templates")
-    .select("id, template_name, template_language, position")
+    .select(
+      "id, template_name, template_language, position, variable_mappings",
+    )
     .eq("account_id", accountId)
     .eq("form_id", formId)
     .order("position", { ascending: true });
@@ -172,11 +189,13 @@ export async function loadTableWhatsappConfig(
     template_name: string;
     template_language: string;
     position: number;
+    variable_mappings?: unknown;
   }>).map((r) => ({
     id: r.id,
     template_name: r.template_name,
     template_language: r.template_language,
     position: r.position,
+    variable_mappings: normalizeStoredMappings(r.variable_mappings),
   }));
   return { config, items };
 }
@@ -188,7 +207,9 @@ async function loadSubmission(
 ): Promise<SubmissionRow | null> {
   const { data, error } = await db
     .from("meta_lead_submissions")
-    .select("id, account_id, meta_lead_id, flow_run_id, form_id, contact_id")
+    .select(
+      "id, account_id, meta_lead_id, flow_run_id, form_id, form_name, campaign_name, ad_name, source, meta_created_time, created_at, contact_id",
+    )
     .eq("id", submissionId)
     .eq("account_id", accountId)
     .maybeSingle();
@@ -274,6 +295,10 @@ export interface SendFnArgs {
   auditUserId: string;
   templateName: string;
   templateLanguage: string;
+  /** Resolved Meta send-time params (body/header/button values). */
+  params: SendTimeParams;
+  /** Slot → resolved value (for rendering + audit). */
+  variableValues: Record<string, string>;
 }
 
 export interface SendFnResult {
@@ -350,10 +375,10 @@ export async function sendTemplateToLeadContact(
       `Template "${args.templateName}" (${args.templateLanguage}) is ${template.status ?? "not approved"}; only APPROVED templates can be auto-sent.`,
     );
   }
-  const blockers = templateSendBlockers(template);
-  if (blockers.length > 0) {
+  const mediaBlockers = templateMediaBlockers(template);
+  if (mediaBlockers.length > 0) {
     throw new TerminalSendError(
-      `Template "${args.templateName}" needs values auto-send cannot provide: ${blockers.join("; ")}.`,
+      `Template "${args.templateName}" cannot be sent: ${mediaBlockers.join("; ")}.`,
     );
   }
 
@@ -367,6 +392,7 @@ export async function sendTemplateToLeadContact(
       language: args.templateLanguage,
       template,
       params: [],
+      messageParams: args.params,
     });
     providerMessageId = result.messageId;
   } catch (err) {
@@ -407,13 +433,18 @@ export async function sendTemplateToLeadContact(
     };
   }
 
+  // Rendered body for the Inbox: resolved values substituted,
+  // so agents see exactly what the lead received.
+  const renderedText =
+    renderVariablePreview(template.body_text ?? "", args.variableValues) ||
+    `[${args.templateName}]`;
   const { data: inserted, error: insertErr } = await db
     .from("messages")
     .insert({
       conversation_id: conversationId,
       sender_type: "agent",
       content_type: "template",
-      content_text: template.body_text || `[${args.templateName}]`,
+      content_text: renderedText,
       template_name: args.templateName,
       message_id: providerMessageId,
       status: "sent",
@@ -430,7 +461,7 @@ export async function sendTemplateToLeadContact(
   await db
     .from("conversations")
     .update({
-      last_message_text: template.body_text || `[${args.templateName}]`,
+      last_message_text: renderedText,
       last_message_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
@@ -510,6 +541,172 @@ async function hasBlockingEarlierRow(
     // failed: retryable rows block; exhausted rows don't.
     return r.attempts < r.max_attempts;
   });
+}
+
+/**
+ * Load one table's variable field catalog: standard fields plus
+ * one `answer:<key>` per Instant Form question. Never throws —
+ * falls back to the standard fields when the form row is
+ * unreadable (validation then reports unknown dynamic fields).
+ */
+export async function loadTableVariableFields(
+  db: SupabaseClient,
+  accountId: string,
+  formId: string,
+): Promise<{ fields: VariableFieldDef[]; keys: Set<string> }> {
+  let questions: Array<{ key?: string | null; label?: string | null }> = [];
+  try {
+    const { data } = await db
+      .from("meta_lead_forms")
+      .select("questions")
+      .eq("account_id", accountId)
+      .eq("form_id", formId)
+      .maybeSingle();
+    const raw = (data as { questions?: unknown } | null)?.questions;
+    if (Array.isArray(raw)) {
+      questions = raw.map((entry) => {
+        const e =
+          entry && typeof entry === "object"
+            ? (entry as Record<string, unknown>)
+            : {};
+        return {
+          key: typeof e.key === "string" ? e.key : null,
+          label: typeof e.label === "string" ? e.label : null,
+        };
+      });
+    }
+  } catch {
+    // Fall through to standard fields only.
+  }
+  const fields = buildAvailableVariableFields(questions);
+  return { fields, keys: new Set(fields.map((f) => f.key)) };
+}
+
+type PreparedVariables =
+  | { ok: true; params: SendTimeParams; values: Record<string, string> }
+  | { ok: false; terminal: boolean; message: string };
+
+/**
+ * Resolve one queue row's template variables: live template
+ * structure → slot coverage by the table's stored mapping →
+ * values from the lead's Workspace row → Meta send params.
+ * Never throws; every outcome is an explicit verdict.
+ */
+async function prepareRowVariables(
+  db: SupabaseClient,
+  row: QueueRow,
+  item: TableWhatsappItem,
+  submission: SubmissionRow,
+): Promise<PreparedVariables> {
+  const label = `"${row.template_name}" (${row.template_language})`;
+
+  const { data: templateRow } = await db
+    .from("message_templates")
+    .select("header_type, header_content, header_media_url, body_text, buttons, status")
+    .eq("account_id", row.account_id)
+    .eq("name", row.template_name)
+    .eq("language", row.template_language)
+    .maybeSingle();
+  if (!templateRow) {
+    return {
+      ok: false,
+      terminal: true,
+      message: `Template ${label} no longer exists; remove it from this table's auto-send list.`,
+    };
+  }
+  const template = templateRow as Pick<
+    MessageTemplate,
+    "header_type" | "header_content" | "body_text" | "buttons"
+  > & { header_media_url?: string | null; status?: string };
+  if (template.status !== "APPROVED") {
+    return {
+      ok: false,
+      terminal: true,
+      message: `Template ${label} is ${template.status ?? "not approved"}; only APPROVED templates can be auto-sent.`,
+    };
+  }
+  const mediaBlockers = templateMediaBlockers(template);
+  if (mediaBlockers.length > 0) {
+    return {
+      ok: false,
+      terminal: true,
+      message: `Template ${label} cannot be sent: ${mediaBlockers.join("; ")}.`,
+    };
+  }
+
+  const slots = getTemplateVariableSlots(template);
+  const { keys } = await loadTableVariableFields(
+    db,
+    row.account_id,
+    row.form_id,
+  );
+  const mappingProblem = validateVariableMappings(
+    slots,
+    item.variable_mappings,
+    keys,
+  );
+  if (mappingProblem) {
+    return {
+      ok: false,
+      terminal: false,
+      message: `Template ${label} is missing a variable mapping: ${mappingProblem} Update this table's auto-send settings, then retry.`,
+    };
+  }
+
+  if (slots.length === 0) {
+    return { ok: true, params: {}, values: {} };
+  }
+
+  const fieldMap = await resolveLeadVariableFieldMap(db, row.account_id, {
+    id: submission.id,
+    meta_lead_id: submission.meta_lead_id,
+    flow_run_id: submission.flow_run_id,
+    form_id: submission.form_id,
+    form_name: submission.form_name,
+    campaign_name: submission.campaign_name,
+    ad_name: submission.ad_name,
+    source: submission.source,
+    meta_created_time: submission.meta_created_time,
+    created_at: submission.created_at,
+    contact_id: submission.contact_id,
+  });
+  if (!fieldMap) {
+    return {
+      ok: false,
+      terminal: true,
+      message: `Template ${label} needs Workspace values but the lead's Workspace row is gone; nothing to resolve variables from.`,
+    };
+  }
+
+  const { values, missing } = resolveVariableValues(
+    slots,
+    item.variable_mappings,
+    fieldMap,
+  );
+  if (missing.length > 0) {
+    const first = missing[0];
+    const slot = slots.find((s) => s.key === first.slotKey);
+    const fieldLabel = first.fieldKey === "" ? "no field" : `"${first.fieldKey}"`;
+    return {
+      ok: false,
+      terminal: false,
+      message:
+        `Template ${label} needs a value for {{${slot?.position ?? "?"}}} ` +
+        `(field ${fieldLabel}) but this lead has none; fill the Workspace row or update the mapping, then retry. ` +
+        `Nothing was sent and no placeholder was substituted.`,
+    };
+  }
+
+  try {
+    const params = buildVariableSendParams(template, slots, values);
+    return { ok: true, params, values };
+  } catch (err) {
+    return {
+      ok: false,
+      terminal: false,
+      message: `Template ${label} could not be prepared: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 export interface DrainResult {
@@ -652,17 +849,33 @@ export async function drainWhatsappQueue(
       }
       // The template may have been removed from the table after
       // enqueue — park rather than fail so re-adding resumes it.
-      const stillConfigured = table.items.some(
+      const item = table.items.find(
         (t) =>
           t.template_name === row.template_name &&
           t.template_language === row.template_language,
       );
-      if (!stillConfigured) {
+      if (!item) {
         await db
           .from("meta_lead_whatsapp_queue")
           .update({ status: "pending", claimed_at: null, updated_at: nowIso })
           .eq("id", row.id);
         result.skippedNoConfig += 1;
+        continue;
+      }
+
+      // Resolve the template's live structure + this table's
+      // available fields, then this lead's values. Every failure
+      // below is retryable (data or mapping corrections heal it
+      // via the normal backoff or the manual retry endpoint);
+      // placeholders are never transmitted.
+      const prepared = await prepareRowVariables(db, row, item, submission);
+      if (!prepared.ok) {
+        if (prepared.terminal) {
+          await markRowTerminal(db, row, prepared.message);
+        } else {
+          await markRowFailed(db, row, prepared.message);
+        }
+        result.failed += 1;
         continue;
       }
 
@@ -675,6 +888,8 @@ export async function drainWhatsappQueue(
         auditUserId,
         templateName: row.template_name,
         templateLanguage: row.template_language,
+        params: prepared.params,
+        variableValues: prepared.values,
       });
 
       await db
@@ -772,6 +987,7 @@ export interface TableWhatsappStatus {
     template_name: string;
     template_language: string;
     position: number;
+    variable_mappings: Record<string, string>;
   }>;
   counts: {
     pending: number;
@@ -814,6 +1030,7 @@ export async function getTableWhatsappStatus(
       template_name: t.template_name,
       template_language: t.template_language,
       position: t.position,
+      variable_mappings: { ...t.variable_mappings },
     })),
     counts: tally,
   };

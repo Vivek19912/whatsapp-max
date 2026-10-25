@@ -245,6 +245,35 @@ function templateItem(name: string, position: number, over: Partial<Row> = {}): 
     template_name: name,
     template_language: 'en_US',
     position,
+    variable_mappings: {},
+    ...over,
+  };
+}
+
+/** Approved template catalog row (only the columns the drain reads). */
+function approvedTemplate(name: string, over: Partial<Row> = {}): Row {
+  return {
+    id: `mt-${name}`,
+    account_id: 'acct-1',
+    name,
+    language: 'en_US',
+    status: 'APPROVED',
+    header_type: null,
+    header_content: null,
+    header_media_url: null,
+    body_text: 'Thanks for reaching out!',
+    buttons: [],
+    ...over,
+  };
+}
+
+function metaForm(over: Partial<Row> = {}): Row {
+  return {
+    id: 'form-db-1',
+    account_id: 'acct-1',
+    form_id: 'form-1',
+    form_name: 'Form A',
+    questions: [],
     ...over,
   };
 }
@@ -347,6 +376,8 @@ describe('drainWhatsappQueue', () => {
       meta_lead_whatsapp_configs: [tableConfig()],
       meta_lead_whatsapp_templates: [templateItem('welcome', 0)],
       meta_lead_whatsapp_queue: rows,
+      message_templates: [approvedTemplate('welcome')],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
       ...over,
@@ -355,13 +386,15 @@ describe('drainWhatsappQueue', () => {
 
   it('sends due rows in order and records provider + inbox ids', async () => {
     const sent: string[] = [];
+    const seen: Array<{ params: unknown; variableValues: unknown }> = [];
     const { db, data } = baseDb([queueRow()]);
     const out = await drainWhatsappQueue(db, {
       sendImpl: (async (
         _d: unknown,
-        a: { templateName: string }
+        a: { templateName: string; params: unknown; variableValues: unknown }
       ) => {
         sent.push(a.templateName);
+        seen.push({ params: a.params, variableValues: a.variableValues });
         return {
           providerMessageId: `wamid-${a.templateName}`,
           conversationId: 'conv-1',
@@ -371,6 +404,8 @@ describe('drainWhatsappQueue', () => {
     });
     expect(out).toMatchObject({ attempted: 1, sent: 1, failed: 0 });
     expect(sent).toEqual(['welcome']);
+    // Static template: no params, no resolved values.
+    expect(seen).toEqual([{ params: {}, variableValues: {} }]);
     const row = data.meta_lead_whatsapp_queue[0];
     expect(row.status).toBe('sent');
     expect(row.provider_message_id).toBe('wamid-welcome');
@@ -390,6 +425,8 @@ describe('drainWhatsappQueue', () => {
         queueRow({ id: 'q1', template_name: 't1', position: 0 }),
         queueRow({ id: 'q2', template_name: 't2', position: 1 }),
       ],
+      message_templates: [approvedTemplate('t1'), approvedTemplate('t2')],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
     });
@@ -430,6 +467,8 @@ describe('drainWhatsappQueue', () => {
           next_retry_at: future,
         }),
       ],
+      message_templates: [approvedTemplate('t1'), approvedTemplate('t2')],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
     });
@@ -496,6 +535,8 @@ describe('drainWhatsappQueue', () => {
       meta_lead_whatsapp_configs: [tableConfig({ paused: true })],
       meta_lead_whatsapp_templates: [templateItem('welcome', 0)],
       meta_lead_whatsapp_queue: [queueRow()],
+      message_templates: [approvedTemplate('welcome')],
+      meta_lead_forms: [metaForm()],
     });
     const out = await drainWhatsappQueue(db, { sendImpl: sendImpl as never });
     expect(sendImpl).not.toHaveBeenCalled();
@@ -538,6 +579,8 @@ describe('drainWhatsappQueue', () => {
       meta_lead_whatsapp_configs: [tableConfig()],
       meta_lead_whatsapp_templates: [templateItem('welcome', 0)],
       meta_lead_whatsapp_queue: [queueRow()],
+      message_templates: [approvedTemplate('welcome')],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
     });
@@ -577,6 +620,8 @@ describe('drainWhatsappQueue', () => {
         queueRow({ id: 'q1', template_name: 't1', position: 0 }),
         queueRow({ id: 'q2', template_name: 't2', position: 1 }),
       ],
+      message_templates: [approvedTemplate('t1'), approvedTemplate('t2')],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
     });
@@ -626,6 +671,11 @@ describe('drainWhatsappQueue', () => {
           submission_id: 'sub-2',
         }),
       ],
+      message_templates: [
+        approvedTemplate('welcome'),
+        approvedTemplate('welcome', { id: 'mt-b', account_id: 'acct-2' }),
+      ],
+      meta_lead_forms: [metaForm()],
       flow_runs: [{ id: 'run-1', user_id: 'user-1' }],
       profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
     });
@@ -684,8 +734,345 @@ describe('drainWhatsappQueue', () => {
   });
 });
 
+describe('drainWhatsappQueue with template variables', () => {
+  const FORM_QUESTIONS = [
+    { key: 'full_name', label: 'Full name', type: 'text' },
+    { key: 'city', label: 'City', type: 'text' },
+  ];
+
+  function varTemplate(name: string, body: string, over: Partial<Row> = {}): Row {
+    return approvedTemplate(name, { body_text: body, ...over });
+  }
+
+  function leadDb(over: Record<string, Row[]> = {}) {
+    return makeDb({
+      meta_lead_submissions: [
+        submission({
+          form_name: 'Form A',
+          campaign_name: 'Camp',
+          ad_name: 'Ad',
+          source: 'facebook',
+          created_at: PAST,
+        }),
+      ],
+      meta_lead_whatsapp_configs: [tableConfig()],
+      meta_lead_whatsapp_templates: [
+        templateItem('hello_lead', 0, {
+          variable_mappings: { 'body:1': 'name' },
+        }),
+      ],
+      meta_lead_whatsapp_queue: [
+        queueRow({ template_name: 'hello_lead' }),
+      ],
+      message_templates: [
+        varTemplate('hello_lead', 'Hello {{1}}, thanks for your enquiry!'),
+      ],
+      meta_lead_forms: [metaForm({ questions: FORM_QUESTIONS })],
+      flow_runs: [
+        {
+          id: 'run-1',
+          account_id: 'acct-1',
+          user_id: 'user-1',
+          flow_id: 'flow-1',
+          vars: { full_name: 'Asha', city: 'Goa' },
+          started_at: PAST,
+          contact_id: 'contact-1',
+        },
+      ],
+      contacts: [
+        {
+          id: 'contact-1',
+          account_id: 'acct-1',
+          name: 'Asha Sharma',
+          phone: '+911234567890',
+        },
+      ],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+      ...over,
+    });
+  }
+
+  function capture() {
+    const calls: Array<{
+      templateName: string;
+      params: { body?: string[]; headerText?: string; buttonParams?: Record<number, string> };
+      variableValues: Record<string, string>;
+    }> = [];
+    const sendImpl = (async (
+      _d: unknown,
+      a: {
+        templateName: string;
+        params: { body?: string[]; headerText?: string; buttonParams?: Record<number, string> };
+        variableValues: Record<string, string>;
+      }
+    ) => {
+      calls.push({
+        templateName: a.templateName,
+        params: a.params,
+        variableValues: { ...a.variableValues },
+      });
+      return {
+        providerMessageId: `wamid-${calls.length}`,
+        conversationId: 'conv-1',
+        inboxMessageId: `msg-${calls.length}`,
+      };
+    }) as never;
+    return { calls, sendImpl };
+  }
+
+  it('maps {{1}} to Name only, preferring the contact row', async () => {
+    const { db, data } = leadDb();
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out).toMatchObject({ sent: 1, failed: 0 });
+    expect(calls).toHaveLength(1);
+    // Contact row wins over the raw answer for Name.
+    expect(calls[0].params.body).toEqual(['Asha Sharma']);
+    expect(calls[0].variableValues).toEqual({ 'body:1': 'Asha Sharma' });
+    expect(data.meta_lead_whatsapp_queue[0].status).toBe('sent');
+  });
+
+  it('maps multiple variables to different Workspace fields in order', async () => {
+    const { db } = leadDb({
+      message_templates: [
+        varTemplate('hello_lead', 'Hi {{1}} from {{2}}, welcome!'),
+      ],
+      meta_lead_whatsapp_templates: [
+        templateItem('hello_lead', 0, {
+          variable_mappings: { 'body:1': 'name', 'body:2': 'answer:city' },
+        }),
+      ],
+    });
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out.sent).toBe(1);
+    expect(calls[0].params.body).toEqual(['Asha Sharma', 'Goa']);
+  });
+
+  it('sends URL-button variables through the button component', async () => {
+    const { db } = leadDb({
+      message_templates: [
+        varTemplate('track_lead', 'Track your request:', {
+          body_text: 'Track your request:',
+          buttons: [
+            { type: 'URL', text: 'Track', url: 'https://x.test/t/{{1}}' },
+          ],
+        }),
+      ],
+      meta_lead_whatsapp_templates: [
+        templateItem('track_lead', 0, {
+          variable_mappings: { 'button:0:1': 'meta_lead_id' },
+        }),
+      ],
+      meta_lead_whatsapp_queue: [queueRow({ template_name: 'track_lead' })],
+    });
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out.sent).toBe(1);
+    expect(calls[0].params.body).toBeUndefined();
+    expect(calls[0].params.buttonParams).toEqual({ 0: 'lead-1' });
+  });
+
+  it('fails retryably with a clear reason when a value is missing — no send, no placeholder', async () => {
+    const { db, data } = leadDb({
+      flow_runs: [
+        {
+          id: 'run-1',
+          account_id: 'acct-1',
+          user_id: 'user-1',
+          flow_id: 'flow-1',
+          // City answer missing for this lead.
+          vars: { full_name: 'Asha' },
+          started_at: PAST,
+          contact_id: 'contact-1',
+        },
+      ],
+      meta_lead_whatsapp_templates: [
+        templateItem('hello_lead', 0, {
+          variable_mappings: { 'body:1': 'name', 'body:2': 'answer:city' },
+        }),
+      ],
+      message_templates: [
+        varTemplate('hello_lead', 'Hi {{1}} from {{2}}!'),
+      ],
+    });
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(calls).toHaveLength(0);
+    expect(out).toMatchObject({ sent: 0, failed: 1 });
+    const row = data.meta_lead_whatsapp_queue[0];
+    expect(row.status).toBe('failed');
+    expect(Number(row.attempts)).toBe(1);
+    expect(String(row.last_error)).toMatch(/answer:city/);
+
+    // The agent fills the missing answer; the retry then sends.
+    ((data.flow_runs as Row[])[0] as Row).vars = {
+      full_name: 'Asha',
+      city: 'Goa',
+    };
+    (row as Row).next_retry_at = PAST;
+    const retry = await drainWhatsappQueue(db, { sendImpl });
+    expect(retry.sent).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params.body).toEqual(['Asha Sharma', 'Goa']);
+    for (const v of Object.values(calls[0].variableValues)) {
+      expect(v).not.toContain('{{');
+    }
+  });
+
+  it('keeps mappings independent across tables for the same template', async () => {
+    const { db } = leadDb({
+      meta_lead_submissions: [
+        submission({
+          id: 'sub-1',
+          form_id: 'form-1',
+          flow_run_id: 'run-1',
+          contact_id: 'contact-1',
+          created_at: PAST,
+        }),
+        submission({
+          id: 'sub-2',
+          form_id: 'form-2',
+          flow_run_id: 'run-2',
+          contact_id: 'contact-2',
+          created_at: PAST,
+        }),
+      ],
+      meta_lead_whatsapp_configs: [
+        tableConfig(),
+        tableConfig({ form_id: 'form-2' }),
+      ],
+      meta_lead_whatsapp_templates: [
+        templateItem('hello_lead', 0, {
+          variable_mappings: { 'body:1': 'name' },
+        }),
+        templateItem('hello_lead', 0, {
+          id: 'tpl-form-2',
+          form_id: 'form-2',
+          variable_mappings: { 'body:1': 'answer:city' },
+        }),
+      ],
+      meta_lead_whatsapp_queue: [
+        queueRow({ id: 'qa', template_name: 'hello_lead' }),
+        queueRow({
+          id: 'qb',
+          submission_id: 'sub-2',
+          flow_run_id: 'run-2',
+          form_id: 'form-2',
+          template_name: 'hello_lead',
+        }),
+      ],
+      message_templates: [
+        varTemplate('hello_lead', 'Hello {{1}}!'),
+      ],
+      meta_lead_forms: [
+        metaForm({ questions: FORM_QUESTIONS }),
+        metaForm({ id: 'form-db-2', form_id: 'form-2', questions: FORM_QUESTIONS }),
+      ],
+      flow_runs: [
+        {
+          id: 'run-1',
+          account_id: 'acct-1',
+          user_id: 'user-1',
+          flow_id: 'flow-1',
+          vars: { full_name: 'Asha', city: 'Goa' },
+          started_at: PAST,
+          contact_id: 'contact-1',
+        },
+        {
+          id: 'run-2',
+          account_id: 'acct-1',
+          user_id: 'user-1',
+          flow_id: 'flow-2',
+          vars: { full_name: 'Ravi', city: 'Jaipur' },
+          started_at: PAST,
+          contact_id: 'contact-2',
+        },
+      ],
+      contacts: [
+        { id: 'contact-1', account_id: 'acct-1', name: 'Asha Sharma', phone: '+911234567890' },
+        { id: 'contact-2', account_id: 'acct-1', name: 'Ravi Kumar', phone: '+911234567891' },
+      ],
+    });
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out).toMatchObject({ sent: 2, failed: 0 });
+    const bodies = calls.map((c) => c.params.body?.[0]);
+    // Form 1 maps Name, form 2 maps City — never shared.
+    expect(bodies).toEqual(['Asha Sharma', 'Jaipur']);
+  });
+
+  it('fails retryably when the mapping is incomplete, and recovers after mapping fix', async () => {
+    const { db, data } = leadDb({
+      meta_lead_whatsapp_templates: [templateItem('hello_lead', 0)],
+    });
+    const { calls, sendImpl } = capture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(calls).toHaveLength(0);
+    expect(out.failed).toBe(1);
+    expect(String(data.meta_lead_whatsapp_queue[0].last_error)).toMatch(
+      /missing a variable mapping/i
+    );
+    expect(Number(data.meta_lead_whatsapp_queue[0].attempts)).toBe(1);
+
+    // Admin fixes the mapping; the retry sends without re-enqueue.
+    (data.meta_lead_whatsapp_templates as Row[])[0].variable_mappings = {
+      'body:1': 'name',
+    };
+    (data.meta_lead_whatsapp_queue[0] as Row).next_retry_at = PAST;
+    const retry = await drainWhatsappQueue(db, { sendImpl });
+    expect(retry.sent).toBe(1);
+    expect(calls[0].params.body).toEqual(['Asha Sharma']);
+  });
+
+  it('fails terminally for a deleted template and unblocks later items', async () => {
+    const { db, data } = leadDb({
+      meta_lead_whatsapp_templates: [
+        templateItem('gone', 0),
+        templateItem('hello_lead', 1, {
+          variable_mappings: { 'body:1': 'name' },
+        }),
+      ],
+      meta_lead_whatsapp_queue: [
+        queueRow({ id: 'q1', template_name: 'gone', position: 0 }),
+        queueRow({ id: 'q2', template_name: 'hello_lead', position: 1 }),
+      ],
+    });
+    const { calls, sendImpl } = capture();
+    await drainWhatsappQueue(db, { sendImpl });
+    await drainWhatsappQueue(db, { sendImpl });
+    const byId = Object.fromEntries(
+      (data.meta_lead_whatsapp_queue as Row[]).map((r) => [r.id, r])
+    );
+    expect(byId.q1.status).toBe('failed');
+    expect(byId.q1.attempts).toBe(byId.q1.max_attempts);
+    expect(String(byId.q1.last_error)).toMatch(/no longer exists/);
+    expect(byId.q2.status).toBe('sent');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('reprocessing a variable template lead is a no-op (no duplicate send)', async () => {
+    const ctx = leadDb({ meta_lead_whatsapp_queue: [] });
+    const { calls, sendImpl } = capture();
+    const first = await maybeEnqueueWhatsappAutoreplies(ctx.db, {
+      accountId: 'acct-1',
+      submissionId: 'sub-1',
+    });
+    // A second ingestion pass for the same lead collapses.
+    const second = await maybeEnqueueWhatsappAutoreplies(ctx.db, {
+      accountId: 'acct-1',
+      submissionId: 'sub-1',
+    });
+    expect(first.enqueued).toBe(1);
+    expect(second.alreadyQueued).toBe(1);
+    await drainWhatsappQueue(ctx.db, { sendImpl });
+    await drainWhatsappQueue(ctx.db, { sendImpl });
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('templateSendBlockers', () => {
-  it('allows fully static templates', () => {
+  it('allows static templates and templates with variables (mapped per table)', () => {
     expect(
       templateSendBlockers({
         header_type: undefined,
@@ -694,17 +1081,19 @@ describe('templateSendBlockers', () => {
         buttons: [],
       })
     ).toEqual([]);
-  });
-
-  it('blocks body/header/button variables and header media without a file', () => {
+    // Variables are no longer structural blockers — mappings
+    // stored per table/template satisfy them at send time.
     expect(
       templateSendBlockers({
         header_type: 'text',
         header_content: 'Hi {{1}}',
         body_text: 'Hello {{1}}, code {{2}}',
         buttons: [{ type: 'URL', text: 'Track', url: 'https://x.test/{{1}}' }],
-      }).length
-    ).toBeGreaterThan(0);
+      })
+    ).toEqual([]);
+  });
+
+  it('still blocks media headers with no stored file', () => {
     expect(
       templateSendBlockers({
         header_type: 'image',

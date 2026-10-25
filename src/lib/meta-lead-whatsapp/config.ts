@@ -11,15 +11,22 @@
 //     nothing. Duplicates within one table are rejected (the
 //     queue's UNIQUE key would collapse them anyway, but the UI
 //     should never produce them).
+//   * Templates with variables carry a `variable_mappings` object
+//     (slot → Workspace field), stored per table AND per
+//     template. Shape validation lives here; coverage against the
+//     template's actual slots and the table's available fields
+//     needs I/O and lives in the route.
 //   * delay_seconds spaces CONSECUTIVE sends for one lead:
 //     item N is due at lead-time + N * delay_seconds. 0 =
-//     immediate (all items due at once, still sent in order).
+//     immediate (all items due at once, still in order).
 //     Bounded to [0, 86400] (one day); the DB CHECK enforces the
 //     same range server-side.
 //   * Only APPROVED templates may be saved. The check itself needs
 //     I/O (message_templates lookup) and lives in queue.ts; the
 //     shape validation lives here.
 // ============================================================
+
+import { isSlotKey } from "./variables";
 
 export const MAX_AUTO_SEND_TEMPLATES = 10;
 export const MAX_AUTO_SEND_DELAY_SECONDS = 86400;
@@ -31,6 +38,8 @@ const LANGUAGE_PATTERN = /^[a-z]{2,3}([-_][A-Za-z]{2,8})?$/;
 export interface AutoSendTemplateInput {
   template_name: string;
   template_language?: string | null;
+  /** Variable slot → Workspace field map (may be absent/empty). */
+  variable_mappings?: unknown;
 }
 
 export interface ValidatedAutoSendTemplate {
@@ -38,6 +47,8 @@ export interface ValidatedAutoSendTemplate {
   template_language: string;
   /** 0-based send order within the table. */
   position: number;
+  /** Normalized slot → field map ({} for static templates). */
+  variable_mappings: Record<string, string>;
 }
 
 export interface AutoSendConfigInput {
@@ -125,10 +136,55 @@ export function validateAutoSendConfig(input: AutoSendConfigInput): {
       template_name: name,
       template_language: rawLang,
       position: index,
+      variable_mappings: normalizeVariableMappings(
+        row.variable_mappings,
+        index,
+      ),
     });
   });
 
   return { delay_seconds, paused, templates };
+}
+
+/**
+ * Normalize a template's variable_mappings payload into a slot →
+ * field record. Unknown slots, empty/non-string fields, and
+ * non-object payloads are rejected; coverage against the
+ * template's actual slots and the table's fields is validated
+ * server-side where the template and form are known. Pure.
+ */
+export function normalizeVariableMappings(
+  raw: unknown,
+  templateIndex: number,
+): Record<string, string> {
+  if (raw === undefined || raw === null) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `templates[${templateIndex}].variable_mappings must be an object mapping variable slots to Workspace fields.`,
+    );
+  }
+  const out: Record<string, string> = {};
+  for (const [slotKey, fieldKey] of Object.entries(
+    raw as Record<string, unknown>,
+  )) {
+    if (!isSlotKey(slotKey)) {
+      throw new Error(
+        `templates[${templateIndex}].variable_mappings has an unknown variable "${slotKey}".`,
+      );
+    }
+    if (typeof fieldKey !== "string" || fieldKey.trim() === "") {
+      throw new Error(
+        `templates[${templateIndex}].variable_mappings["${slotKey}"] needs a selected Workspace field.`,
+      );
+    }
+    if (fieldKey.length > 200) {
+      throw new Error(
+        `templates[${templateIndex}].variable_mappings["${slotKey}"] is not a valid field reference.`,
+      );
+    }
+    out[slotKey] = fieldKey.trim();
+  }
+  return out;
 }
 
 /**

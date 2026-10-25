@@ -24,8 +24,18 @@ describe('validateAutoSendConfig', () => {
     expect(out.delay_seconds).toBe(60);
     expect(out.paused).toBe(false);
     expect(out.templates).toEqual([
-      { template_name: 'welcome', template_language: 'en_US', position: 0 },
-      { template_name: 'followup', template_language: 'en_US', position: 1 },
+      {
+        template_name: 'welcome',
+        template_language: 'en_US',
+        position: 0,
+        variable_mappings: {},
+      },
+      {
+        template_name: 'followup',
+        template_language: 'en_US',
+        position: 1,
+        variable_mappings: {},
+      },
     ]);
   });
 
@@ -39,6 +49,41 @@ describe('validateAutoSendConfig', () => {
       template_language: 'en_US',
       position: 0,
     });
+  });
+
+  it('normalizes per-template variable mappings', () => {
+    const out = validateAutoSendConfig({
+      templates: [
+        {
+          template_name: 'hello',
+          variable_mappings: { 'body:1': 'name', 'button:0:1': 'phone' },
+        },
+        { template_name: 'static' },
+      ],
+    });
+    expect(out.templates[0].variable_mappings).toEqual({
+      'body:1': 'name',
+      'button:0:1': 'phone',
+    });
+    expect(out.templates[1].variable_mappings).toEqual({});
+  });
+
+  it('rejects malformed variable mappings', () => {
+    expect(() =>
+      validateAutoSendConfig({
+        templates: [{ template_name: 'a', variable_mappings: { 'bogus': 'name' } }],
+      })
+    ).toThrow(/unknown variable/i);
+    expect(() =>
+      validateAutoSendConfig({
+        templates: [{ template_name: 'a', variable_mappings: { 'body:1': '' } }],
+      })
+    ).toThrow(/selected.*field/i);
+    expect(() =>
+      validateAutoSendConfig({
+        templates: [{ template_name: 'a', variable_mappings: ['body:1'] }],
+      })
+    ).toThrow(/must be an object/);
   });
 
   it('rejects out-of-range delays', () => {

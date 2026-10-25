@@ -35,16 +35,31 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 
+interface TemplateSlot {
+  key: string;
+  component: 'body' | 'header' | 'button';
+  position: number;
+  buttonIndex?: number;
+}
+
 interface SequenceItem {
   template_name: string;
   template_language: string;
   position: number;
+  variable_mappings: Record<string, string>;
 }
 
 interface ApprovedTemplate {
   template_name: string;
   template_language: string;
   preview: string | null;
+  body_text: string;
+  variables: TemplateSlot[];
+}
+
+interface FieldDef {
+  key: string;
+  label: string;
 }
 
 interface WhatsappTablePayload {
@@ -59,8 +74,35 @@ interface WhatsappTablePayload {
   paused: boolean;
   delay_seconds: number;
   items: SequenceItem[];
+  fields: FieldDef[];
+  sample_values: Record<string, string> | null;
   approved_templates: ApprovedTemplate[];
   counts: { pending: number; sending: number; sent: number; failed: number };
+}
+
+function slotLabel(slot: TemplateSlot): string {
+  if (slot.component === 'body') return `Body {{${slot.position}}}`;
+  if (slot.component === 'header') return `Header {{${slot.position}}}`;
+  return `Button ${slot.buttonIndex! + 1} {{${slot.position}}}`;
+}
+
+/** Display-only preview: sample values substituted, unmapped left as {{N}}. */
+function previewBody(
+  bodyText: string,
+  slots: TemplateSlot[],
+  mappings: Record<string, string>,
+  sample: Record<string, string> | null
+): string {
+  return bodyText.replace(/\{\{(\d+)\}\}/g, (placeholder, raw: string) => {
+    const slot = slots.find(
+      (s) => s.component === 'body' && s.position === Number(raw)
+    );
+    if (!slot) return placeholder;
+    const fieldKey = mappings[slot.key];
+    if (!fieldKey || !sample) return placeholder;
+    const value = (sample[fieldKey] ?? '').trim();
+    return value === '' ? placeholder : value;
+  });
 }
 
 /**
@@ -68,9 +110,10 @@ interface WhatsappTablePayload {
  * only — never rendered for Flow Tables).
  *
  * Lets the owner pick an ordered sequence of APPROVED templates,
- * set the delay between consecutive sends, and pause/resume the
- * automation for THIS table only. Keyed by flow so switching
- * tables loads that table's own settings.
+ * map each template variable to a field of THIS table's
+ * Workspace row, set the delay between consecutive sends, and
+ * pause/resume the automation for THIS table only. Keyed by flow
+ * so switching tables loads that table's own settings.
  */
 export function MetaTableWhatsappDialog({
   flowId,
@@ -105,7 +148,11 @@ export function MetaTableWhatsappDialog({
       }
       const next = json as unknown as WhatsappTablePayload;
       setPayload(next);
-      setItems([...(next.items ?? [])].sort((a, b) => a.position - b.position));
+      setItems(
+        [...(next.items ?? [])]
+          .sort((a, b) => a.position - b.position)
+          .map((t) => ({ ...t, variable_mappings: { ...(t.variable_mappings ?? {}) } }))
+      );
       setDelay(String(next.delay_seconds ?? 0));
       setPaused(next.paused);
     } catch (err) {
@@ -124,6 +171,26 @@ export function MetaTableWhatsappDialog({
     (t) => !chosen.has(`${t.template_name}\u0000${t.template_language}`)
   );
 
+  function slotsFor(item: SequenceItem): TemplateSlot[] {
+    return (
+      payload?.approved_templates.find(
+        (t) =>
+          t.template_name === item.template_name &&
+          t.template_language === item.template_language
+      )?.variables ?? []
+    );
+  }
+
+  function bodyFor(item: SequenceItem): string {
+    return (
+      payload?.approved_templates.find(
+        (t) =>
+          t.template_name === item.template_name &&
+          t.template_language === item.template_language
+      )?.body_text ?? ''
+    );
+  }
+
   function addPicked() {
     if (!pick) return;
     const found = (payload?.approved_templates ?? []).find(
@@ -136,6 +203,7 @@ export function MetaTableWhatsappDialog({
         template_name: found.template_name,
         template_language: found.template_language,
         position: cur.length,
+        variable_mappings: {},
       },
     ]);
     setPick('');
@@ -157,11 +225,33 @@ export function MetaTableWhatsappDialog({
     setItems((cur) => cur.filter((_, i) => i !== index).map((t, position) => ({ ...t, position })));
   }
 
+  function setMapping(index: number, slotKey: string, fieldKey: string) {
+    setItems((cur) =>
+      cur.map((t, i) =>
+        i === index
+          ? { ...t, variable_mappings: { ...t.variable_mappings, [slotKey]: fieldKey } }
+          : t
+      )
+    );
+  }
+
   function save() {
     const delayNum = Number(delay);
     if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
       toast.error('Delay must be a whole number of seconds between 0 and 86400.');
       return;
+    }
+    // Client-side guard (the server re-validates): every required
+    // variable must have a mapped field before saving.
+    for (const item of items) {
+      for (const slot of slotsFor(item)) {
+        if (!item.variable_mappings[slot.key]) {
+          toast.error(
+            `Template "${item.template_name}" needs a Workspace field for ${slotLabel(slot)}.`
+          );
+          return;
+        }
+      }
     }
     setSaving(true);
     fetch(
@@ -175,6 +265,7 @@ export function MetaTableWhatsappDialog({
           templates: items.map((t) => ({
             template_name: t.template_name,
             template_language: t.template_language,
+            variable_mappings: t.variable_mappings,
           })),
         }),
       }
@@ -190,7 +281,11 @@ export function MetaTableWhatsappDialog({
       })
       .then((next) => {
         setPayload(next);
-        setItems([...(next.items ?? [])].sort((a, b) => a.position - b.position));
+        setItems(
+          [...(next.items ?? [])]
+            .sort((a, b) => a.position - b.position)
+            .map((t) => ({ ...t, variable_mappings: { ...(t.variable_mappings ?? {}) } }))
+        );
         setDelay(String(next.delay_seconds ?? 0));
         setPaused(next.paused);
         toast.success(
@@ -237,6 +332,8 @@ export function MetaTableWhatsappDialog({
   }
 
   const counts = payload?.counts;
+  const fields = payload?.fields ?? [];
+  const sample = payload?.sample_values ?? null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -317,50 +414,97 @@ export function MetaTableWhatsappDialog({
                   first message.
                 </p>
               ) : (
-                items.map((item, index) => (
-                  <div
-                    key={`${item.template_name}::${item.template_language}`}
-                    className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-foreground">
-                        <span className="mr-2 tabular-nums text-muted-foreground">
-                          {index + 1}.
-                        </span>
-                        {item.template_name}
-                      </p>
-                      <p className="text-xs text-muted-foreground">{item.template_language}</p>
+                items.map((item, index) => {
+                  const slots = slotsFor(item);
+                  const rendered = previewBody(
+                    bodyFor(item),
+                    slots,
+                    item.variable_mappings,
+                    sample
+                  );
+                  return (
+                    <div
+                      key={`${item.template_name}::${item.template_language}`}
+                      className="space-y-2 rounded-md border border-border px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-foreground">
+                            <span className="mr-2 tabular-nums text-muted-foreground">
+                              {index + 1}.
+                            </span>
+                            {item.template_name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">{item.template_language}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => move(index, -1)}
+                            disabled={index === 0}
+                            aria-label={`Move ${item.template_name} up`}
+                          >
+                            <ArrowUp className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => move(index, 1)}
+                            disabled={index === items.length - 1}
+                            aria-label={`Move ${item.template_name} down`}
+                          >
+                            <ArrowDown className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => remove(index)}
+                            aria-label={`Remove ${item.template_name}`}
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </div>
+                      </div>
+                      {slots.length > 0 ? (
+                        <div className="space-y-1.5 border-t border-border pt-2">
+                          {slots.map((slot) => (
+                            <div key={slot.key} className="flex items-center gap-2">
+                              <span className="w-28 shrink-0 truncate text-xs text-muted-foreground">
+                                {slotLabel(slot)}
+                              </span>
+                              <Select
+                                value={item.variable_mappings[slot.key] ?? ''}
+                                onValueChange={(v: string | null) =>
+                                  setMapping(index, slot.key, v ?? '')
+                                }
+                              >
+                                <SelectTrigger className="flex-1">
+                                  <SelectValue placeholder="Select a field…" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {fields.map((f) => (
+                                    <SelectItem key={f.key} value={f.key}>
+                                      {f.label}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          ))}
+                          <p className="rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
+                            Preview: {rendered}
+                            {sample ? null : ' (no lead yet — live values fill in per lead)'}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Static template — sends as approved, no mapping needed.
+                        </p>
+                      )}
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => move(index, -1)}
-                        disabled={index === 0}
-                        aria-label={`Move ${item.template_name} up`}
-                      >
-                        <ArrowUp className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => move(index, 1)}
-                        disabled={index === items.length - 1}
-                        aria-label={`Move ${item.template_name} down`}
-                      >
-                        <ArrowDown className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => remove(index)}
-                        aria-label={`Remove ${item.template_name}`}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
               <div className="flex items-center gap-2">
                 <Select value={pick} onValueChange={(v: string | null) => setPick(v ?? '')}>
@@ -381,6 +525,9 @@ export function MetaTableWhatsappDialog({
                           value={`${t.template_name}\u0000${t.template_language}`}
                         >
                           {t.template_name} ({t.template_language})
+                          {t.variables.length > 0
+                            ? ` · ${t.variables.length} variable${t.variables.length === 1 ? '' : 's'}`
+                            : ''}
                         </SelectItem>
                       ))
                     )}
@@ -396,7 +543,7 @@ export function MetaTableWhatsappDialog({
               <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm">
                 <span className="text-muted-foreground">
                   {counts?.failed} failed send{(counts?.failed ?? 0) === 1 ? '' : 's'} — fix the
-                  cause (template approval, WhatsApp setup), then retry.
+                  cause (template approval, WhatsApp setup, missing values), then retry.
                 </span>
                 <Button variant="outline" size="sm" onClick={retryFailed} disabled={retrying}>
                   {retrying ? (
