@@ -16,20 +16,22 @@ import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 
 async function resolveAccount(request: Request): Promise<{
   accountId: string;
+  /** Set for user-token auth: poll only this user's own requests. */
+  userId: string | null;
   db: SupabaseClient;
 }> {
   const presented = bearerToken(request);
   if (presented && !looksLikeApiKey(presented)) {
     const dev = await requireDeviceUser(request);
-    return { accountId: dev.accountId, db: dev.service };
+    return { accountId: dev.accountId, userId: dev.userId, db: dev.service };
   }
   const ctx = await requireApiKey(request, 'recordings:write');
-  return { accountId: ctx.accountId, db: ctx.supabase };
+  return { accountId: ctx.accountId, userId: null, db: ctx.supabase };
 }
 
 export async function GET(request: Request) {
   try {
-    const { accountId, db } = await resolveAccount(request);
+    const { accountId, userId, db } = await resolveAccount(request);
 
     // Lazy expiry: anything past its TTL leaves pending/delivered.
     await db
@@ -44,10 +46,18 @@ export async function GET(request: Request) {
       Math.max(Number(url.searchParams.get('limit') ?? 10) || 10, 1),
       25
     );
-    const { data, error } = await db
+    // Recipient targeting: a device authenticated as a user only
+    // ever sees requests that user created (requested_by is set to
+    // the clicking user at creation). Assigned To is irrelevant and
+    // no device can pull another user's requests — first explicit
+    // tap consumes the row server-side. Machine keys keep the
+    // legacy account-wide view.
+    let query = db
       .from('dial_requests')
       .select('id, phone_number, contact_id, flow_id, run_id, status, expires_at, created_at')
-      .eq('account_id', accountId)
+      .eq('account_id', accountId);
+    if (userId) query = query.eq('requested_by', userId);
+    const { data, error } = await query
       .in('status', ['pending', 'delivered'])
       .gte('expires_at', new Date().toISOString())
       .order('created_at', { ascending: true })

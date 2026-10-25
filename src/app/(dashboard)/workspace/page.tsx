@@ -2058,7 +2058,12 @@ export default function WorkspacePage() {
                                 className="max-w-36 truncate border-r border-border whitespace-nowrap last:border-r-0"
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                <DialAction phone={row.phone} />
+                                <DialAction
+                                  phone={row.phone}
+                                  contactId={row.contactId}
+                                  flowId={flowId}
+                                  runId={row.runId}
+                                />
                               </TableCell>
                             )}
                           </Fragment>

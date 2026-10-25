@@ -7,7 +7,29 @@ const h = vi.hoisted(() => ({
   authed: true,
   list: [] as Array<Record<string, unknown>>,
   failUpdate: false,
+  seenFilters: [] as Array<[string, unknown]>,
 }));
+
+function selectChain(filters: Array<[string, unknown]> = []): Record<string, (...args: unknown[]) => unknown> {
+  const chain: Record<string, (...args: unknown[]) => unknown> = {};
+  chain.eq = ((col: unknown, val: unknown) =>
+    selectChain([...filters, [col as string, val]])) as (...args: unknown[]) => unknown;
+  chain.in = () => ({
+    gte: () => ({
+      order: () => ({
+        limit: async () => {
+          h.seenFilters = filters;
+          const rows = h.list.filter((r) =>
+            filters.every(([c, v]) => (r as Record<string, unknown>)[c] === v)
+          );
+          return { data: rows, error: null };
+        },
+      }),
+    }),
+  });
+  chain.maybeSingle = (async () => ({ data: h.row, error: null })) as (...args: unknown[]) => unknown;
+  return chain;
+}
 
 function fakeDb() {
   return {
@@ -39,20 +61,7 @@ function fakeDb() {
           }),
         };
       };
-      api.select = () => ({
-        eq: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({ data: h.row, error: null }),
-          }),
-          in: () => ({
-            gte: () => ({
-              order: () => ({
-                limit: async () => ({ data: h.list, error: null }),
-              }),
-            }),
-          }),
-        }),
-      });
+      api.select = () => selectChain();
       return api;
     },
   };
@@ -183,6 +192,8 @@ describe('GET /api/v1/dial-requests (device poll contract)', () => {
     h.list = [
       {
         id: 'd-1',
+        account_id: 'acct-A',
+        requested_by: 'u-1',
         phone_number: '+14155552671',
         contact_id: 'c-1',
         flow_id: 'f-1',
@@ -193,6 +204,8 @@ describe('GET /api/v1/dial-requests (device poll contract)', () => {
       },
       {
         id: 'd-2',
+        account_id: 'acct-A',
+        requested_by: 'u-1',
         phone_number: '+442079460958',
         contact_id: null,
         flow_id: null,
@@ -238,5 +251,44 @@ describe('GET /api/v1/dial-requests (device poll contract)', () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as { data: { dial_requests: unknown[] } };
     expect(json.data.dial_requests).toEqual([]);
+  });
+
+  it('only returns requests created by the authenticated user (recipient targeting)', async () => {
+    // The request goes to the CallVault device of the person who
+    // clicked Dial — never to an arbitrary employee. Assigned To
+    // is irrelevant: the server scopes device polls by the
+    // credential's own user id.
+    h.list = [
+      {
+        id: 'mine',
+        account_id: 'acct-A',
+        requested_by: 'u-1',
+        phone_number: '+14155552671',
+        status: 'pending',
+        expires_at: '2030-01-01T00:00:00Z',
+        created_at: '2030-01-01T00:00:00Z',
+      },
+      {
+        id: 'theirs',
+        account_id: 'acct-A',
+        requested_by: 'u-2',
+        phone_number: '+442079460958',
+        status: 'pending',
+        expires_at: '2030-01-01T00:00:00Z',
+        created_at: '2030-01-01T00:00:00Z',
+      },
+    ];
+    const res = await GET(
+      new Request('http://localhost/api/v1/dial-requests', {
+        headers: { authorization: 'Bearer user-token' },
+      })
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      data: { dial_requests: Array<{ id: string }> };
+    };
+    expect(json.data.dial_requests.map((r) => r.id)).toEqual(['mine']);
+    expect(h.seenFilters).toContainEqual(['account_id', 'acct-A']);
+    expect(h.seenFilters).toContainEqual(['requested_by', 'u-1']);
   });
 });
