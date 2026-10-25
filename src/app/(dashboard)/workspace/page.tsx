@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
@@ -63,6 +63,7 @@ import { ColumnResizeHandle } from '@/components/workspace/column-resize-handle'
 import { HiddenRowsMenu } from '@/components/workspace/hidden-rows-menu';
 import { RowActionsMenu } from '@/components/workspace/row-actions-menu';
 import { TravelCrmAction } from '@/components/workspace/travel-crm-action';
+import { DialAction } from '@/components/workspace/dial-action';
 import { WorkspacePagination } from '@/components/workspace/workspace-pagination';
 import {
   columnWidthStyle,
@@ -1851,39 +1852,60 @@ export default function WorkspacePage() {
                         const customLabel = renamable
                           ? (headerLabels[visId] ?? null)
                           : null;
+                        // Dial is an application action column for Meta
+                        // Lead Ads tables only: it renders immediately
+                        // after the Phone Number system column, is not
+                        // part of flowColumnsVisible, carries no
+                        // resize handle / visibility id / header color,
+                        // and is never sent to Google Sheets. Flow
+                        // Tables return the plain header unchanged.
+                        const showDialAfter =
+                          payload?.meta.kind === 'meta_lead_ads' &&
+                          c.system &&
+                          c.key === 'phone';
                         return (
-                          <TableHead
-                            key={flowColumnRenderKey(c)}
-                            className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
-                            style={headStyleAt(headerIdx)}
-                          >
-                            {renamable ? (
-                              <MetaColumnHeaderMenu
-                                columnKey={c.key}
-                                originalLabel={c.label}
-                                displayLabel={
-                                  customLabel ?? formatColumnLabel(c.label)
-                                }
-                                customLabel={customLabel}
-                                onRename={(label) =>
-                                  handleSaveHeaderLabel(c.key, label)
-                                }
-                                onRestore={() => handleSaveHeaderLabel(c.key, null)}
-                              />
-                            ) : (
-                              formatColumnLabel(c.label)
+                          <Fragment key={flowColumnRenderKey(c)}>
+                            <TableHead
+                              key={flowColumnRenderKey(c)}
+                              className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
+                              style={headStyleAt(headerIdx)}
+                            >
+                              {renamable ? (
+                                <MetaColumnHeaderMenu
+                                  columnKey={c.key}
+                                  originalLabel={c.label}
+                                  displayLabel={
+                                    customLabel ?? formatColumnLabel(c.label)
+                                  }
+                                  customLabel={customLabel}
+                                  onRename={(label) =>
+                                    handleSaveHeaderLabel(c.key, label)
+                                  }
+                                  onRestore={() => handleSaveHeaderLabel(c.key, null)}
+                                />
+                              ) : (
+                                formatColumnLabel(c.label)
+                              )}
+                              {canSendMessages && (
+                                <ColumnResizeHandle
+                                  columnKey={visId}
+                                  onResize={handleResizeWidth}
+                                  onCommit={handleCommitWidth}
+                                  onActiveChange={(active) =>
+                                    setResizingKey(active ? visId : null)
+                                  }
+                                />
+                              )}
+                            </TableHead>
+                            {showDialAfter && (
+                              <TableHead
+                                aria-label="Dial"
+                                className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
+                              >
+                                Dial
+                              </TableHead>
                             )}
-                            {canSendMessages && (
-                              <ColumnResizeHandle
-                                columnKey={visId}
-                                onResize={handleResizeWidth}
-                                onCommit={handleCommitWidth}
-                                onActiveChange={(active) =>
-                                  setResizingKey(active ? visId : null)
-                                }
-                              />
-                            )}
-                          </TableHead>
+                          </Fragment>
                         );
                       })}
                       {customFieldsOrdered.map((f, customIdx) => (
@@ -1985,7 +2007,15 @@ export default function WorkspacePage() {
                             row.conversationId,
                             rawCellValue,
                           );
+                          // Meta Lead Ads only: Dial action cell right
+                          // after Phone Number. Application-only (never
+                          // a sheet field, never editable, never stored).
+                          const showDialAfter =
+                            payload?.meta?.kind === 'meta_lead_ads' &&
+                            c.system &&
+                            c.key === 'phone';
                           return (
+                          <Fragment key={flowColumnRenderKey(c)}>
                             <TableCell
                               key={flowColumnRenderKey(c)}
                               className="max-w-56 truncate border-r border-border last:border-r-0"
@@ -2024,6 +2054,24 @@ export default function WorkspacePage() {
                                 cellText(row, c)
                               )}
                             </TableCell>
+                            {showDialAfter && (
+                              <TableCell
+                                aria-label="Dial"
+                                className="max-w-36 truncate border-r border-border whitespace-nowrap last:border-r-0"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <DialAction
+                                  phone={row.phone}
+                                  isMetaTable={
+                                    payload?.meta?.kind === 'meta_lead_ads'
+                                  }
+                                  runId={row.runId}
+                                  contactId={row.contactId}
+                                  flowId={flowId}
+                                />
+                              </TableCell>
+                            )}
+                          </Fragment>
                           );
                         })}
                         {flowId &&
