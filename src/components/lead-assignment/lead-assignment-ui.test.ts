@@ -237,6 +237,8 @@ describe("Flow Tables and shared paths stay untouched", () => {
     // can never fail processing.
     const hookIdx = proc.indexOf("maybeAutoAssignLead(db, {");
     expect(hookIdx).toBeGreaterThan(proc.indexOf("return { outcome: \"processed\" };") - 2000);
-    expect(proc.slice(hookIdx - 400, hookIdx)).toContain("ADDITIVE");
+    // Window covers the multi-line ADDITIVE marker comment directly
+    // above the call (adjacent block, not an exact char count).
+    expect(proc.slice(hookIdx - 800, hookIdx)).toContain("ADDITIVE");
   });
 });
