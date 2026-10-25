@@ -66,4 +66,17 @@ describe("Create dialog keeps working departure controls (India default)", () =>
     expect(actionSrc).toContain("resolveDepartureCityOnCountryChange(next, values.departureCity");
     expect(actionSrc).toContain("key={`departureCity:${country}`}");
   });
+
+  it("Departure City stays optional and out of the required path", () => {
+    // The city renders directly below the country as an editable
+    // select; it is never required for creation (the payload still
+    // carries a provided city via the normal override path).
+    expect(actionSrc).toContain('departureCity: "Departure City"');
+    const mappingSrc = readFileSync(
+      `${root}/src/lib/integrations/travel-crm/mapping.ts`,
+      "utf8",
+    );
+    expect(mappingSrc).not.toMatch(/TRAVEL_CRM_REQUIRED_FIELDS = \[[^\]]*departureCity/);
+    expect(mappingSrc).not.toMatch(/MAPPABLE_REQUIRED = \[[^\]]*departureCity/);
+  });
 });

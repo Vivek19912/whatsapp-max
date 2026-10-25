@@ -34,8 +34,6 @@ import {
   splitServiceLabels,
 } from "@/lib/integrations/travel-crm/services";
 import {
-  citiesForDestination,
-  cityLabelForValue,
   resolveSelectValue,
   validateNightsInput,
 } from "@/lib/integrations/travel-crm/itineraries";
@@ -418,13 +416,12 @@ export function travelerFormToOverrides(form: TravelerForm): TravelerOverrides {
 
 export interface ItineraryDialogRow {
   destination: string;
-  city: string;
   nights: string;
 }
 
 /** Blank dialog itinerary row (nights as text for typing). */
 export function createEmptyItineraryDialogRow(): ItineraryDialogRow {
-  return { destination: "", city: "", nights: "" };
+  return { destination: "", nights: "" };
 }
 
 /** Pure: append a blank row (Add More). Never mutates input. */
@@ -443,26 +440,16 @@ export function removeItineraryDialogRow(
 }
 
 /**
- * Pure: set a dialog row's destination, clearing an incompatible
- * city rather than keeping an invalid pairing. Never mutates.
+ * Pure: set a dialog row's destination. Rows carry Destination +
+ * Nights only (no per-row city — mirrors native Travel CRM).
+ * Never mutates.
  */
 export function updateItineraryDialogDestination(
   rows: ItineraryDialogRow[],
   index: number,
   destination: string,
-  cities: ReadonlyArray<{ value: string; destinationValue?: string | null }>,
 ): ItineraryDialogRow[] {
-  return rows.map((row, i) => {
-    if (i !== index) return row;
-    const next = { ...row, destination };
-    if (!next.city) return next;
-    const linked = cities.filter((c) => c.destinationValue != null);
-    if (linked.length === 0) return next;
-    const compatible = linked.some(
-      (c) => c.value === next.city && c.destinationValue === destination,
-    );
-    return compatible ? next : { ...next, city: "" };
-  });
+  return rows.map((row, i) => (i === index ? { ...row, destination } : row));
 }
 
 /**
@@ -481,15 +468,16 @@ export function seedItineraryDialogRows(
     const rec = item as Record<string, unknown>;
     const destination =
       typeof rec.destination === "string" ? rec.destination : "";
-    const city = typeof rec.city === "string" ? rec.city : "";
     const nights =
       typeof rec.nights === "number" && Number.isFinite(rec.nights)
         ? String(rec.nights)
         : typeof rec.nights === "string"
           ? rec.nights
           : "";
-    if (!destination && !city && !nights.trim()) continue;
-    out.push({ destination, city, nights });
+    // Rows carry Destination + Nights only: a prefilled city is
+    // intentionally not seeded (the dialog collects no city).
+    if (!destination && !nights.trim()) continue;
+    out.push({ destination, nights });
   }
   return out;
 }
@@ -501,16 +489,15 @@ export function seedItineraryDialogRows(
  */
 export function itineraryDialogRowsToOverrides(
   rows: ItineraryDialogRow[],
-): Array<{ destination: string; city: string; nights: number }> {
-  const out: Array<{ destination: string; city: string; nights: number }> = [];
+): Array<{ destination: string; nights: number }> {
+  const out: Array<{ destination: string; nights: number }> = [];
   for (const row of rows) {
-    if (!row.destination && !row.city && !row.nights.trim()) continue;
-    if (!row.destination || !row.city) continue;
+    if (!row.destination && !row.nights.trim()) continue;
+    if (!row.destination) continue;
     const err = validateNightsInput(row.nights);
     if (err) throw new Error(err);
     out.push({
       destination: row.destination,
-      city: row.city,
       nights: Number(row.nights.trim()),
     });
   }
@@ -528,9 +515,9 @@ export function itineraryDialogRowsToOverrides(
 export function validateItineraryRows(rows: ItineraryDialogRow[]): string | null {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (!row.destination && !row.city && !row.nights.trim()) continue;
-    if (!row.destination || !row.city) {
-      return `Itinerary row ${i + 1} needs a destination and a city. Select both or clear the row.`;
+    if (!row.destination && !row.nights.trim()) continue;
+    if (!row.destination || !row.nights.trim()) {
+      return `Itinerary row ${i + 1} needs a destination and nights. Add both or clear the row.`;
     }
     const err = validateNightsInput(row.nights);
     if (err) return `Itinerary row ${i + 1}: ${err.charAt(0).toLowerCase()}${err.slice(1)}`;
@@ -745,7 +732,8 @@ export function buildDialogInputs(
   // prefilled from the saved flow defaults (server prefill) —
   // never gated on the mapping flagging them, so saving Travel
   // CRM Settings (which marks them available) can never hide
-  // them. Per-lead edits ride the normal override path to the
+  // them. The city is optional (never required for creation).
+  // Per-lead edits ride the normal override path to the
   // payload only; saved Settings are never modified here.
   wanted.add("departureCountry");
   wanted.add("departureCity");
@@ -778,7 +766,8 @@ export function buildDialogInputs(
       // server carries no saved country (genuinely new entry),
       // the Workspace creation dialog defaults to India (from the
       // copied catalog) so the modal opens pre-selected; saved
-      // values are always preserved verbatim when present.
+      // values are always preserved verbatim when present. The
+      // city is optional and never blocks creation.
       const rawPrefillCountry =
         typeof prefill.departureCountry === "string"
           ? prefill.departureCountry.trim()
@@ -912,9 +901,8 @@ const DEPARTURE_COUNTRY_OPTIONS: LookupOption[] = [...DEPARTURE_COUNTRIES]
   .map((name) => ({ value: name, label: name }));
 
 /**
- * City rule shared with Settings: changing country clears an
- * incompatible city rather than keeping a value the new country
- * cannot offer. Pure — unit-tested.
+ * City rule: changing country clears an incompatible city rather
+ * than keeping a value the new country cannot offer. Pure.
  */
 export function resolveDepartureCityOnCountryChange(
   country: string,
@@ -1525,8 +1513,8 @@ export function ItineraryDestinationSelect({
  * A small × clear affordance renders beside the chevron whenever
  * a value is selected. Activating it clears through onClear
  * without opening the dropdown and without submitting: pointer
- * and keyboard activation both stop propagation and suppress the
- * trigger default, and the element is a span (never a nested
+ * and keyboard activation both stop propagation and suppress
+ * the trigger default, and the element is a span (never a nested
  * button). The dialog wires the country clear to also reset the
  * city, so no invalid pairing can remain.
  *
@@ -2354,22 +2342,8 @@ export function TravelCrmAction({
           ) : (
             <>
               {itineraryRows.map((row, i) => {
-                const cityOptions = row.destination
-                  ? citiesForDestination(allCities, row.destination)
-                  : [];
-                // Stored values are stable Travel CRM IDs. An ID with no
-                // matching option (stale/archived master) falls back to
-                // the placeholder instead of rendering a raw UUID; the
-                // stored value stays intact in state and on send.
-                const cityValue = resolveSelectValue(cityOptions, row.city);
-                // Explicit label resolution (ID → name) for display:
-                // the stored UUID is passed to the Select only as the
-                // value; the human-readable name is rendered directly
-                // so the trigger never shows a raw UUID, even during
-                // SSR or before Base UI registers its items.
-                const cityLabel = cityLabelForValue(cityOptions, row.city);
                 return (
-                  <div key={i} className="grid grid-cols-[1fr_1fr_64px_auto] items-end gap-2">
+                  <div key={i} className="grid grid-cols-[1fr_64px_auto] items-end gap-2">
                     <div className="grid gap-1">
                       <Label htmlFor={`lead-itin-dest-${i}`} className="text-xs">Destination</Label>
                       <ItineraryDestinationSelect
@@ -2378,39 +2352,10 @@ export function TravelCrmAction({
                         inputId={`lead-itin-dest-${i}`}
                         onChange={(v) =>
                           setItineraryRows((prev) =>
-                            updateItineraryDialogDestination(prev, i, v ?? "", allCities),
+                            updateItineraryDialogDestination(prev, i, v ?? ""),
                           )
                         }
                       />
-                    </div>
-                    <div className="grid gap-1">
-                      <Label htmlFor={`lead-itin-city-${i}`} className="text-xs">City</Label>
-                      <Select
-                        value={cityValue}
-                        onValueChange={(v) =>
-                          setItineraryRows((prev) =>
-                            prev.map((r, idx) => (idx === i ? { ...r, city: v ?? "" } : r)),
-                          )
-                        }
-                        disabled={!row.destination}
-                      >
-                      <SelectTrigger id={`lead-itin-city-${i}`} aria-label="City" className="min-h-8 w-full *:[data-slot=select-value]:line-clamp-none *:[data-slot=select-value]:whitespace-normal">
-                        <SelectValue placeholder={row.destination ? "Select" : "Pick destination first"}>
-                          {cityLabel !== null ? cityLabel : undefined}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectContent {...ITINERARY_DROPDOWN_ABOVE}>
-                        {cityOptions.map((o) => (
-                          <SelectItem
-                            key={`${o.destinationValue ?? ""}:${o.value}`}
-                            value={o.value}
-                            className="[&>div]:whitespace-normal [&>div]:break-words"
-                          >
-                            {o.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                      </Select>
                     </div>
                     <div className="grid gap-1">
                       <Label htmlFor={`lead-itin-nights-${i}`} className="text-xs">Nights</Label>

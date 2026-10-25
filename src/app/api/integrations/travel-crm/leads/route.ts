@@ -16,6 +16,7 @@ import {
   buildReceivedOptions,
   canonicalizeLeadSource,
   canonicalizeOptionLabel,
+  canonicalizeReceivedText,
   canonicalizeServices,
   isTravelCrmReady,
   mapLeadToTravelCrm,
@@ -806,8 +807,17 @@ export async function POST(request: Request) {
       leadStage: null,
     };
     for (const f of FUNNEL_FIELDS) {
-      const stored = rowStored[f];
-      if (stored === null) continue;
+      const rawStored = rowStored[f];
+      if (rawStored === null) continue;
+      // Lead Source: normalize bare/case variants to their supported
+      // Travel CRM label ("Facebook" → "Facebook Ads") before
+      // matching, so the selected row's Source value resolves to a
+      // live enum instead of blocking as unknown-option. Live enums,
+      // exact labels, and unmappable values pass through unchanged.
+      const stored =
+        f === "leadSource"
+          ? (canonicalizeReceivedText(rawStored) ?? rawStored)
+          : rawStored;
       if (!options) {
         rowResolved[f] = stored;
         if (funnel[f] === null) funnel[f] = stored;
@@ -977,8 +987,10 @@ export async function POST(request: Request) {
     // --- resolved to nothing (i.e. a genuinely new entry with no saved
     // --- value). Existing saved values (lead answers, flow defaults,
     // --- explicit overrides) always win and are never overwritten.
-    // --- Departure City stays empty for the agent to pick from the
-    // --- Indian catalog list. Stored flow configuration is never
+    // --- Departure City is no longer agent-editable in the dialog
+    // --- (country-level origin only); a mapped/default city value
+    // --- still rides the payload when lead data or saved flow
+    // --- defaults provide one. Stored flow configuration is never
     // --- modified here; the value rides the normal draft/prefill path
     // --- so initialization, validation, and submission all see India.
     if (mapping.fields.departureCountry?.status === "missing") {
@@ -1085,6 +1097,17 @@ export async function POST(request: Request) {
       return null;
     };
 
+    /**
+     * Normalize one Lead Source candidate to its supported Travel
+     * CRM label ("Facebook" → "Facebook Ads", "Whatsapp" stays
+     * "Whatsapp") before dropdown matching, so bare/case variants
+     * of the selected row's Source resolve to the exact accepted
+     * option. Live enums, exact labels, and unmappable values pass
+     * through unchanged. Pure.
+     */
+    const normalizeSourceCandidate = (value: string | null): string | null =>
+      value === null ? null : (canonicalizeReceivedText(value) ?? value);
+
     const prefill = {
       customerName: draft.customerName,
       phone: draft.phone,
@@ -1116,9 +1139,9 @@ export async function POST(request: Request) {
       // Type/Stage fall back to Fresh/New Lead via rowDisplay.
       leadSource: dialogFunnelValue(
         receivedOptions,
-        rowDisplay.leadSource,
-        draft.leadSource,
-        funnel.leadSource,
+        normalizeSourceCandidate(rowDisplay.leadSource),
+        normalizeSourceCandidate(draft.leadSource),
+        normalizeSourceCandidate(funnel.leadSource),
       ),
       leadType: dialogFunnelValue(
         options?.leadType ?? null,

@@ -5,6 +5,7 @@ import {
   buildReceivedOptions,
   canonicalizeLeadSource,
   canonicalizeOptionLabel,
+  canonicalizeReceivedText,
   canonicalizeServices,
   inferReceivedLabel,
   mapLeadToTravelCrm,
@@ -187,6 +188,75 @@ describe("missing / ambiguous / invalid classification", () => {
       null,
     );
     expect(r.fields.phone.status).toBe("available");
+  });
+
+  it("equivalent phone formats collapse to the canonical international form", () => {
+    // "918511880206" and "+918511880206" are the same number: the
+    // dialog must not ask the agent to choose between them.
+    for (const [contactPhone, answerPhone] of [
+      ["+918511880206", "918511880206"],
+      ["918511880206", "+918511880206"],
+    ] as const) {
+      const r = mapLeadToTravelCrm(
+        source({
+          contact: { name: null, phone: contactPhone, email: null },
+          answers: [{ key: "phone", label: "Phone", value: answerPhone }],
+        }),
+        null,
+      );
+      expect(r.fields.phone).toMatchObject({ status: "available" });
+      expect(r.draft.phone).toBe("+918511880206");
+      expect(r.ambiguous).toEqual([]);
+    }
+  });
+
+  it("equivalent phone formats with spacing/punctuation still collapse", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: null, phone: "+91 85118 80206", email: null },
+        answers: [{ key: "phone", label: "Phone", value: "918511880206" }],
+      }),
+      null,
+    );
+    expect(r.fields.phone.status).toBe("available");
+    expect(r.draft.phone).toBe("+91 85118 80206");
+    expect(r.ambiguous).toEqual([]);
+  });
+
+  it("genuinely different numbers still surface as ambiguous", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: null, phone: "+911111111111", email: null },
+        answers: [{ key: "phone", label: "Phone", value: "+912222222222" }],
+      }),
+      null,
+    );
+    expect(r.fields.phone.status).toBe("ambiguous");
+    expect(r.ambiguous).toEqual([
+      { field: "phone", candidates: ["+911111111111", "+912222222222"] },
+    ]);
+    expect(r.draft.phone).toBeNull();
+  });
+
+  it("a lone non-plus number keeps its verbatim form (no plus invented)", () => {
+    const r = mapLeadToTravelCrm(
+      source({ contact: { name: null, phone: "918511880206", email: null } }),
+      null,
+    );
+    expect(r.fields.phone.status).toBe("available");
+    expect(r.draft.phone).toBe("918511880206");
+  });
+
+  it("short equivalent phone values stay invalid, never available", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: null, phone: "123", email: null },
+        answers: [{ key: "phone", label: "Phone", value: "+123" }],
+      }),
+      null,
+    );
+    expect(r.fields.phone).toMatchObject({ status: "invalid" });
+    expect(r.draft.phone).toBeNull();
   });
 
   it("full fixture is ready with funnel fields still missing", () => {
@@ -475,6 +545,165 @@ describe("leadSource inference from WACRM source fields", () => {
     const r = mapLeadToTravelCrm(source(), null);
     expect(r.fields.leadSource.status).toBe("missing");
     expect(r.missing).toContain("leadSource");
+  });
+
+  it("Website source resolves to available Website (preserved verbatim)", () => {
+    for (const v of ["Website", "website", "WEBSITE"]) {
+      const r = mapLeadToTravelCrm(withSource(v), null);
+      expect(r.fields.leadSource.status).toBe("available");
+      expect(r.draft.leadSource).toBe("Website");
+      expect(r.missing).not.toContain("leadSource");
+    }
+  });
+
+  it("WhatsApp source resolves to available Whatsapp", () => {
+    for (const v of ["WhatsApp", "whatsapp", "WHATSAPP", "Whatsapp"]) {
+      const r = mapLeadToTravelCrm(withSource(v), null);
+      expect(r.fields.leadSource.status).toBe("available");
+      expect(r.draft.leadSource).toBe("Whatsapp");
+    }
+  });
+
+  it("Phone Call source resolves to available Phone Call", () => {
+    for (const v of ["Phone Call", "phone call", "PHONE CALL"]) {
+      const r = mapLeadToTravelCrm(withSource(v), null);
+      expect(r.fields.leadSource.status).toBe("available");
+      expect(r.draft.leadSource).toBe("Phone Call");
+    }
+  });
+
+  it("every other supported option resolves verbatim", () => {
+    for (const v of [
+      "Social Media",
+      "Google Ads",
+      "Referral",
+      "Walk In",
+      "Repeat Customer",
+      "Partner",
+      "Other",
+    ]) {
+      const r = mapLeadToTravelCrm(withSource(v), null);
+      expect(r.fields.leadSource.status).toBe("available");
+      expect(r.draft.leadSource).toBe(v);
+    }
+  });
+
+  it("unsupported values never resolve (no guessing)", () => {
+    for (const v of ["Teleport", "Carrier Pigeon", "FB IG"]) {
+      const r = mapLeadToTravelCrm(withSource(v), null);
+      expect(r.fields.leadSource.status).toBe("missing");
+      expect(r.draft.leadSource).toBeNull();
+    }
+  });
+
+  it("Meta Source column key resolves (actual runtime shape)", () => {
+    // Production Meta submissions store the Source answer under the
+    // virtual-flow key "meta_lead_source" with the label falling
+    // back to that same key (node config carries no header/label/
+    // title). Both shapes must match — this is the value the
+    // Workspace Source column displays.
+    for (const label of [null, "meta_lead_source"] as const) {
+      const r = mapLeadToTravelCrm(
+        source({
+          answers: [{ key: "meta_lead_source", label, value: "Facebook" }],
+        }),
+        null,
+      );
+      expect(r.fields.leadSource.status).toBe("available");
+      expect(r.draft.leadSource).toBe("Facebook Ads");
+      expect(r.missing).not.toContain("leadSource");
+    }
+  });
+
+  it("Meta Source Instagram and Other resolve to their options", () => {
+    const instagram = mapLeadToTravelCrm(
+      source({
+        answers: [{ key: "meta_lead_source", label: null, value: "Instagram" }],
+      }),
+      null,
+    );
+    expect(instagram.fields.leadSource.status).toBe("available");
+    expect(instagram.draft.leadSource).toBe("Instagram Ads");
+    // Unknown platforms stay explicitly unattributed as "Other" —
+    // a supported option, never a guess at Facebook/Instagram.
+    const other = mapLeadToTravelCrm(
+      source({
+        answers: [{ key: "meta_lead_source", label: null, value: "Other" }],
+      }),
+      null,
+    );
+    expect(other.fields.leadSource.status).toBe("available");
+    expect(other.draft.leadSource).toBe("Other");
+  });
+
+  it("same option in different cases is not ambiguous", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        answers: [
+          { key: "lead_source", label: "Lead Source", value: "Website" },
+          { key: "src", label: "Source", value: "website" },
+        ],
+      }),
+      null,
+    );
+    expect(r.fields.leadSource.status).toBe("available");
+    expect(r.draft.leadSource).toBe("Website");
+  });
+
+  it("different supported options stay ambiguous (never picks one)", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        answers: [
+          { key: "lead_source", label: "Lead Source", value: "Website" },
+          { key: "src", label: "Source", value: "Facebook" },
+        ],
+      }),
+      null,
+    );
+    expect(r.fields.leadSource.status).toBe("ambiguous");
+    expect(r.draft.leadSource).toBeNull();
+    expect(r.ambiguous).toEqual([
+      { field: "leadSource", candidates: ["Website", "Facebook"] },
+    ]);
+  });
+});
+
+describe("canonicalizeReceivedText", () => {
+  it("normalizes Facebook/Instagram shorthands to the Ads labels", () => {
+    for (const v of ["Facebook", "facebook ads", "FB", " FaceBook "]) {
+      expect(canonicalizeReceivedText(v)).toBe("Facebook Ads");
+    }
+    for (const v of ["Instagram", "instagram ads", "IG", " ig "]) {
+      expect(canonicalizeReceivedText(v)).toBe("Instagram Ads");
+    }
+  });
+
+  it("matches every supported option label (normalized)", () => {
+    for (const v of [
+      "Website",
+      "Social Media",
+      "Google Ads",
+      "Whatsapp",
+      "WhatsApp",
+      "Phone Call",
+      "Referral",
+      "Walk In",
+      "Walk-in",
+      "Repeat Customer",
+      "Partner",
+      "Other",
+    ]) {
+      expect(canonicalizeReceivedText(v)).not.toBeNull();
+    }
+    expect(canonicalizeReceivedText("Website")).toBe("Website");
+    expect(canonicalizeReceivedText("WhatsApp")).toBe("Whatsapp");
+    expect(canonicalizeReceivedText("Walk-in")).toBe("Walk In");
+  });
+
+  it("returns null for unsupported or empty values", () => {
+    for (const v of ["Google", "Teleport", "", "FB IG", "123"]) {
+      expect(canonicalizeReceivedText(v)).toBeNull();
+    }
   });
 });
 

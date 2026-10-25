@@ -409,57 +409,61 @@ describe("destination search and selection", () => {
   });
 });
 
-describe("city dependencies", () => {
-  it("city selection stays disabled until a destination is picked", () => {
+describe("no per-row city in the dialog", () => {
+  it("rows carry Destination + Nights only (no city control)", () => {
     const src = SRC();
-    expect(src).toContain("disabled={!row.destination}");
-    expect(src).toContain('"Pick destination first"');
+    expect(src).not.toContain("lead-itin-city-");
+    expect(src).not.toContain('aria-label="City"');
+    expect(src).not.toContain('"Pick destination first"');
+    expect(src).not.toContain("updateItineraryDialogDestination(prev, i, v ?? \"\", allCities)");
+    // Destination + Nights + Remove stay.
+    expect(src).toContain('aria-label="Nights"');
+    expect(src).toContain('aria-label="Remove itinerary row"');
+    expect(src).toContain("Add More");
   });
 
-  it("destination changes keep compatible cities and clear the rest", () => {
+  it("destination changes set the row destination directly", () => {
     const src = SRC();
-    expect(src).toContain("updateItineraryDialogDestination(prev, i, v ?? \"\", allCities)");
+    expect(src).toContain("updateItineraryDialogDestination(prev, i, v ?? \"\")");
   });
 });
 
 describe("incomplete itinerary rows block submission", () => {
   it("fully-empty rows stay skippable (flow-defaults path preserved)", () => {
     expect(validateItineraryRows([])).toBeNull();
-    expect(
-      validateItineraryRows([{ destination: "", city: "", nights: "  " }]),
-    ).toBeNull();
+    expect(validateItineraryRows([{ destination: "", nights: "  " }])).toBeNull();
   });
 
   it("partial rows name the row instead of being discarded", () => {
-    expect(
-      validateItineraryRows([{ destination: "d", city: "", nights: "" }]),
-    ).toBe("Itinerary row 1 needs a destination and a city. Select both or clear the row.");
+    expect(validateItineraryRows([{ destination: "d", nights: "" }])).toBe(
+      "Itinerary row 1 needs a destination and nights. Add both or clear the row.",
+    );
     expect(
       validateItineraryRows([
-        { destination: "d", city: "c", nights: "3" },
-        { destination: "", city: "c", nights: "" },
+        { destination: "d", nights: "3" },
+        { destination: "", nights: "4" },
       ]),
-    ).toBe("Itinerary row 2 needs a destination and a city. Select both or clear the row.");
+    ).toBe("Itinerary row 2 needs a destination and nights. Add both or clear the row.");
   });
 
   it("bad nights surface row-numbered without losing entered data", () => {
-    const rows = [{ destination: "d", city: "c", nights: "0" }];
+    const rows = [{ destination: "d", nights: "0" }];
     const message = validateItineraryRows(rows);
     expect(message).toContain("Itinerary row 1:");
     expect(message).toContain("nights");
     // Input untouched — the agent corrects in place.
-    expect(rows).toEqual([{ destination: "d", city: "c", nights: "0" }]);
+    expect(rows).toEqual([{ destination: "d", nights: "0" }]);
   });
 
   it("valid multi-row itineraries keep their existing submission behavior", () => {
     const rows = [
-      { destination: "d1", city: "c1", nights: "3" },
-      { destination: "d2", city: "c2", nights: "4" },
+      { destination: "d1", nights: "3" },
+      { destination: "d2", nights: "4" },
     ];
     expect(validateItineraryRows(rows)).toBeNull();
     expect(itineraryDialogRowsToOverrides(rows)).toEqual([
-      { destination: "d1", city: "c1", nights: 3 },
-      { destination: "d2", city: "c2", nights: 4 },
+      { destination: "d1", nights: 3 },
+      { destination: "d2", nights: 4 },
     ]);
   });
 
@@ -612,9 +616,9 @@ describe("itinerary dropdowns always open above their fields", () => {
     expect(settings).toContain("<ItineraryDestinationSelect");
   });
 
-  it("city dropdowns use the pinned placement in both locations", () => {
+  it("settings keeps the pinned city dropdown; the dialog has none", () => {
     const action = SRC();
-    expect(action).toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
+    expect(action).not.toContain("<SelectContent {...ITINERARY_DROPDOWN_ABOVE}>");
     const settings = readFileSync(
       `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
       "utf8",
@@ -702,24 +706,24 @@ describe("destination names render complete, never truncated", () => {
     expect(html).not.toContain("truncate");
   });
 
-  it("city triggers wrap instead of clamping to one line", () => {
-    for (const rel of [
-      "src/components/workspace/travel-crm-action.tsx",
-      "src/components/workspace/travel-crm-settings.tsx",
-    ]) {
-      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
-      expect(src).toContain("min-h-8 w-full *:[data-slot=select-value]:line-clamp-none");
-      expect(src).toContain("*:[data-slot=select-value]:whitespace-normal");
-    }
+  it("settings city triggers wrap instead of clamping to one line", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("min-h-8 w-full *:[data-slot=select-value]:line-clamp-none");
+    expect(src).toContain("*:[data-slot=select-value]:whitespace-normal");
+    // The dialog no longer renders a city trigger at all.
+    expect(SRC()).not.toContain('aria-label="City"');
   });
 
-  it("city options wrap instead of truncating", () => {
-    for (const rel of [
-      "src/components/workspace/travel-crm-action.tsx",
-      "src/components/workspace/travel-crm-settings.tsx",
-    ]) {
-      const src = readFileSync(`${process.cwd()}/${rel}`, "utf8");
-      expect(src).toContain("[&>div]:whitespace-normal [&>div]:break-words");
-    }
+  it("settings city options wrap instead of truncating", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("[&>div]:whitespace-normal [&>div]:break-words");
+    // The dialog no longer renders city options at all.
+    expect(SRC()).not.toContain("lead-itin-city-");
   });
 });

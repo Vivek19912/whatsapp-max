@@ -214,6 +214,33 @@ export function canonicalizeServices(
 }
 
 /**
+ * Normalize one WACRM source text to a supported Travel CRM
+ * Received label. Facebook/Instagram shorthands resolve to their
+ * Ads labels ("Facebook" → "Facebook Ads", "IG" → "Instagram
+ * Ads"); every other value must match a supported label exactly
+ * (normalized — "WhatsApp" → "Whatsapp", "Walk-in" → "Walk In").
+ * Returns null when the value maps to nothing — the caller leaves
+ * the field unselected instead of guessing. Deterministic and
+ * pure. The 12 labels mirror the Travel CRM lead-source contract
+ * (see RECEIVED_LABELS / the shared LEAD_SOURCES enum).
+ */
+export function canonicalizeReceivedText(
+  value: string,
+): (typeof RECEIVED_LABELS)[number] | null {
+  const token = normalizeFieldToken(value);
+  if (token === "facebook" || token === "facebookads" || token === "fb") {
+    return "Facebook Ads";
+  }
+  if (token === "instagram" || token === "instagramads" || token === "ig") {
+    return "Instagram Ads";
+  }
+  for (const label of RECEIVED_LABELS) {
+    if (normalizeFieldToken(label) === token) return label;
+  }
+  return null;
+}
+
+/**
  * Resolve a Workspace display label (e.g. a business-column
  * default like "Fresh" or "New Lead") to a live Travel CRM option
  * value, matched by normalized value OR label. Returns null when
@@ -426,7 +453,17 @@ function splitMulti(value: string): string[] {
 }
 
 const SYNONYMS: Readonly<Record<string, ReadonlySet<string>>> = {
-  leadSource: new Set(["leadsource", "source", "leadsrc"]),
+  leadSource: new Set([
+    "leadsource",
+    "source",
+    "leadsrc",
+    // Actual Meta Source column key (META_SOURCE_COLUMN_KEY in the
+    // virtual flow, normalized): Meta submissions store the Source
+    // answer under "meta_lead_source", and the label derivation
+    // falls back to that same key — without this entry the
+    // Workspace Source value never reaches the mapping at all.
+    "metaleadsource",
+  ]),
   customerName: new Set([
     "name",
     "fullname",
@@ -502,6 +539,32 @@ const SYNONYMS: Readonly<Record<string, ReadonlySet<string>>> = {
   infants: new Set(["infants", "infant", "noofinfants"]),
   dateOfBirth: new Set(["dateofbirth", "dob", "birthdate", "birthdatedate"]),
 };
+
+/**
+ * Collapse phone candidates that differ only in formatting (spaces,
+ * dashes, parentheses, a missing "+" prefix) into one candidate per
+ * distinct digit string, preferring an explicit international ("+")
+ * form as the representative. "918511880206" and "+918511880206"
+ * are the same number and must not surface as an ambiguity;
+ * genuinely different numbers stay separate candidates and remain
+ * ambiguous. Candidates with no digits at all never merge (each
+ * keeps its own raw key) so non-numeric values keep the legacy
+ * behavior. Pure.
+ */
+function dedupePhoneCandidates(candidates: Candidate[]): Candidate[] {
+  const groups = new Map<string, Candidate[]>();
+  for (const c of candidates) {
+    const digits = c.value.replace(/\D/g, "");
+    const key = digits === "" ? `raw:${c.value.trim()}` : `digits:${digits}`;
+    const list = groups.get(key);
+    if (list) list.push(c);
+    else groups.set(key, [c]);
+  }
+  return [...groups.values()].map(
+    (group) =>
+      group.find((c) => c.value.trim().startsWith("+")) ?? group[0],
+  );
+}
 
 function singleText(
   candidates: Candidate[],
@@ -660,9 +723,21 @@ export function mapLeadToTravelCrm(
   } else {
     text("customerName", SYNONYMS.customerName, (c) => c.name, "contact.name", validateName);
   }
-  text("phone", SYNONYMS.phone, (c) => c.phone, "contact.phone", (v) =>
-    digits(v).length >= 5 ? null : "phone-too-short",
-  );
+  {
+    // Phone values that differ only in formatting collapse to one
+    // canonical candidate (preferring the "+" form) before the
+    // available/ambiguous decision, so equivalent representations
+    // never ask the agent to choose. Distinct numbers still surface
+    // as ambiguous; validation is unchanged.
+    const { mapping, value } = singleText(
+      dedupePhoneCandidates(
+        collectCandidates(source, SYNONYMS.phone, (c) => c.phone, "contact.phone"),
+      ),
+      (v) => (digits(v).length >= 5 ? null : "phone-too-short"),
+    );
+    fields.phone = mapping;
+    draft.phone = value;
+  }
   text("email", SYNONYMS.email, (c) => c.email, "contact.email", (v) =>
     EMAIL_RE.test(v.trim()) ? null : "bad-email",
   );
@@ -797,13 +872,14 @@ export function mapLeadToTravelCrm(
   fields.leadType = { status: "missing" };
   fields.leadStage = { status: "missing" };
 
-  // Received inference: match WACRM source fields semantically,
-  // then map unambiguous Facebook/Instagram signals to the
-  // Travel CRM label. The ad-platform icon signal (same
-  // contacts.source_url the Lead Source column renders) joins as
-  // one more vote — never an override. Any disagreement stays
-  // ambiguous (never guess); unmappable values stay missing for
-  // manual selection.
+  // Received inference: normalize every WACRM source text to a
+  // supported Travel CRM option ("Facebook" → "Facebook Ads",
+  // "WhatsApp" → "Whatsapp", "Website" → "Website", …). The
+  // ad-platform icon signal (same contacts.source_url the Lead
+  // Source column renders) joins as one more vote — never an
+  // override. Unanimous normalized meanings resolve to available;
+  // any disagreement stays ambiguous (never guess); unmappable
+  // values stay missing for manual selection.
   {
     const srcCands = collectCandidates(
       source,
@@ -830,14 +906,14 @@ export function mapLeadToTravelCrm(
         fields.leadSource = { status: "missing" };
       }
     } else {
-      const inferred = distinct.map((v) => inferReceivedLabel(v));
+      const canonical = distinct.map((v) => canonicalizeReceivedText(v));
       const resolvedMeanings = new Set(
-        inferred.filter(
-          (l): l is "Facebook Ads" | "Instagram Ads" => l !== null,
+        canonical.filter(
+          (l): l is (typeof RECEIVED_LABELS)[number] => l !== null,
         ),
       );
       const agrees =
-        inferred.every((l) => l !== null) &&
+        canonical.every((l) => l !== null) &&
         resolvedMeanings.size === 1 &&
         (platformLabel === null || platformLabel === [...resolvedMeanings][0]);
       if (agrees && textSource !== null) {

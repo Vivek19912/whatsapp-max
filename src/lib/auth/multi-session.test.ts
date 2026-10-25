@@ -39,11 +39,13 @@ async function listTsFiles(dir: string): Promise<string[]> {
 }
 
 function relative(file: string): string {
-  return "/" + file.replace(SRC, "");
+  // Normalize Windows separators so the allowlist below matches on
+  // every platform (POSIX paths are unchanged by this replace).
+  return "/" + file.replace(SRC, "").replace(/\\/g, "/");
 }
 
 describe("multi-session safety — a new login must never sign out existing sessions", () => {
-  it("the ONLY signOut() call sites are the three explicit, user-initiated ones", async () => {
+  it("the ONLY signOut() call sites are the explicit, user-initiated ones plus expired-session cleanup", async () => {
     const files = await listTsFiles(SRC);
     const found: Array<{ file: string; line: string }> = [];
 
@@ -61,14 +63,18 @@ describe("multi-session safety — a new login must never sign out existing sess
       });
     }
 
-    // The only three legitimate sign-out triggers in the whole app:
+    // The only legitimate sign-out triggers in the whole app:
     //  - the dashboard header's normal logout (current session only),
     //  - the explicit "Sign out of all devices" card (global scope),
-    //  - the join-flow conflict modal's "sign out & use a different email".
+    //  - the join-flow conflict modal's "sign out & use a different email",
+    //  - the shared expired-session handler, which clears a session the
+    //    server already rejected with 401 (local scope — it never
+    //    touches other devices/sessions).
     const allowed = new Set([
       "/hooks/use-auth.tsx",
       "/components/settings/sessions-card.tsx",
       "/app/join/[token]/page.tsx",
+      "/lib/auth/expired-session.ts",
     ]);
     const disallowed = found.filter((site) => !allowed.has(site.file));
     expect(disallowed).toEqual([]);

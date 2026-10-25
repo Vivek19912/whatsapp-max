@@ -133,7 +133,7 @@ describe("buildDialogInputs (missing fields + always Name/Phone)", () => {
       null,
     );
     // Legacy single destination ambiguity is subsumed by the
-    // multi-row itinerary editor (Destination/City/Nights + Add
+    // multi-row itinerary editor (Destination/Nights + Add
     // More/Remove) — the editor is shown instead of a lone text input.
     const itin = inputs.find((i) => i.field === "itinerary");
     expect(itin).toBeDefined();
@@ -209,6 +209,38 @@ describe("buildDialogInputs (missing fields + always Name/Phone)", () => {
     for (const f of ["leadType", "leadStage"] as const) {
       expect(inputs.find((i) => i.field === f)?.kind).toBe("select");
     }
+  });
+
+  it("prefilled Lead Source renders selected (never the placeholder)", () => {
+    // The server-resolved enum (FACEBOOK_ADS) matches a dialog
+    // option by value, so the trigger shows the label — the agent
+    // never sees "Select Lead Source" for a known row Source.
+    const receivedOptions = [{ value: "FACEBOOK_ADS", label: "Facebook Ads" }];
+    const html = renderToStaticMarkup(
+      <FunnelSelect
+        label="Lead Source"
+        value="FACEBOOK_ADS"
+        options={receivedOptions}
+        fieldName="Lead Received"
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain("Facebook Ads");
+    expect(html).not.toContain("Select Lead Source</span>");
+  });
+
+  it("the select stays controlled by dialog state (no reset on rerender)", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-action.tsx`,
+      "utf8",
+    );
+    // FunnelSelect renders the live value from dialog state —
+    // never a stale prefill snapshot — and every pick writes back
+    // to the same state key, so editing unrelated fields (or any
+    // rerender) preserves the confirmed Lead Source.
+    expect(src).toContain("const val = values[input.field] ?? \"\";");
+    // Re-round seeding only fills keys the agent has not touched.
+    expect(src).toContain("if (!(k in next))");
   });
 });
 
@@ -690,7 +722,7 @@ describe("Travelers section (Adults/CWB/CWOB/Infants + ages)", () => {
     expect(travelers?.value).toMatchObject({ adults: "1" });
     // Position preserved: where Adults used to sit.
     const fields = inputs.map((i) => i.field);
-    expect(fields.indexOf("travelers")).toBeGreaterThan(fields.indexOf("departureCity"));
+    expect(fields.indexOf("travelers")).toBeGreaterThan(fields.indexOf("departureCountry"));
   });
 
   it("prefilled traveler values seed the section", () => {
@@ -756,55 +788,45 @@ describe("seedValues (dialog-open prefill preservation)", () => {  it("11. prefi
   });
 });
 
-describe("Departure Country/City catalog selects (saved flow defaults)", () => {
-  // Regression condition: saving Travel CRM Settings marks both
-  // fields available (not missing). The dialog must still render
-  // them, prefilled from the saved defaults.
+describe("Departure Country catalog select (saved flow defaults)", () => {
+  // Regression condition: saving Travel CRM Settings marks the
+  // country available (not missing). The dialog must still render
+  // it, prefilled from the saved default.
   const savedMapping = {
-    available: ["customerName", "departureCountry", "departureCity"],
+    available: ["customerName", "departureCountry"],
     missing: ["travelStartDate"],
     ambiguous: [],
     invalid: [],
     ready: false,
   };
 
-  it("1+9. saved India/Delhi render prefilled even though marked available", () => {
+  it("1+9. saved India renders prefilled even though marked available", () => {
     const inputs = buildDialogInputs(
       savedMapping,
       {
         departureCountry: "India",
-        departureCity: "Delhi",
         assignedToEmail: "agent@acme.com",
       },
       null,
       null,
     );
     const country = inputs.find((i) => i.field === "departureCountry");
-    const city = inputs.find((i) => i.field === "departureCity");
     expect(country?.kind).toBe("select");
     expect(country?.label).toBe("Departure Country");
     expect(country?.value).toBe("India");
-    expect(city?.kind).toBe("select");
-    expect(city?.label).toBe("Departure City");
-    expect(city?.value).toBe("Delhi");
     // Country options come from the copied catalog.
     expect(country?.options?.some((o) => o.value === "India")).toBe(true);
-    // City options are the Indian catalog list containing Delhi.
-    expect(city?.options).toEqual(
-      departureCityOptions("India").map((o) => ({ value: o.value, label: o.label })),
-    );
-    expect(city?.options?.some((o) => o.value === "Delhi")).toBe(true);
     // Saved defaults seed dialog state verbatim (initial values).
-    expect(
-      seedValues({ departureCountry: "India", departureCity: "Delhi" }),
-    ).toMatchObject({ departureCountry: "India", departureCity: "Delhi" });
+    expect(seedValues({ departureCountry: "India" })).toMatchObject({
+      departureCountry: "India",
+    });
   });
 
-  it("3. no saved defaults render with India pre-selected; city stays empty", () => {
+  it("3. no saved defaults render with India pre-selected", () => {
     const inputs = buildDialogInputs(
       {
         available: ["customerName"],
-        missing: ["travelStartDate", "departureCountry", "departureCity"],
+        missing: ["travelStartDate", "departureCountry"],
         ambiguous: [],
         invalid: [],
         ready: false,
@@ -814,20 +836,11 @@ describe("Departure Country/City catalog selects (saved flow defaults)", () => {
       null,
     );
     const country = inputs.find((i) => i.field === "departureCountry");
-    const city = inputs.find((i) => i.field === "departureCity");
     expect(country?.kind).toBe("select");
     // Workspace creation-dialog default: genuinely new entries open
     // with India pre-selected (from the copied catalog).
     expect(country?.value).toBe(DEFAULT_DEPARTURE_COUNTRY);
     expect(country?.value).toBe("India");
-    expect(city?.kind).toBe("select");
-    expect(city?.value).toBeNull();
-    // City offers the Indian catalog list while the selection stays
-    // empty for the agent to pick.
-    expect(city?.options).toEqual(
-      departureCityOptions("India").map((o) => ({ value: o.value, label: o.label })),
-    );
-    expect(city?.options?.some((o) => o.value === "Delhi")).toBe(true);
   });
 
   it("3b. India default comes from the copied country master data", () => {
@@ -843,79 +856,90 @@ describe("Departure Country/City catalog selects (saved flow defaults)", () => {
       savedMapping,
       {
         departureCountry: "France",
-        departureCity: "Paris",
         assignedToEmail: "agent@acme.com",
       },
       null,
       null,
     );
     expect(inputs.find((i) => i.field === "departureCountry")?.value).toBe("France");
-    expect(inputs.find((i) => i.field === "departureCity")?.value).toBe("Paris");
-    // Manual change to India swaps the city list; an incompatible
-    // saved city is dropped rather than kept as an invalid pairing.
-    expect(resolveDepartureCityOnCountryChange("India", "Paris")).toBe("");
-    expect(resolveDepartureCityOnCountryChange("France", "Paris")).toBe("Paris");
+  });
+});
+
+describe("Departure City restored as an optional dialog field", () => {
+  it("emits a Departure City input directly below Departure Country", () => {
+    const inputs = buildDialogInputs(
+      { available: ["customerName"], missing: ["travelStartDate"], ambiguous: [], invalid: [], ready: false },
+      { assignedToEmail: "agent@acme.com" },
+      null,
+      null,
+    );
+    const fields = inputs.map((i) => i.field);
+    expect(fields).toContain("departureCountry");
+    expect(fields).toContain("departureCity");
+    // City renders immediately below Country.
+    expect(fields.indexOf("departureCity")).toBe(fields.indexOf("departureCountry") + 1);
+    const city = inputs.find((i) => i.field === "departureCity");
+    expect(city?.kind).toBe("select");
+    expect(city?.label).toBe("Departure City");
+    // Empty for the agent to pick — never a required marker.
+    expect(city?.value).toBeNull();
   });
 
-  it("3d. India city options come from the JSON master with state disambiguation", () => {
+  it("renders prefilled/saved cities and clears them on incompatible country change", () => {
+    const savedMapping = {
+      available: ["customerName", "departureCountry", "departureCity"],
+      missing: ["travelStartDate"],
+      ambiguous: [],
+      invalid: [],
+      ready: false,
+    };
     const inputs = buildDialogInputs(
       savedMapping,
       {
         departureCountry: "India",
-        departureCity: null,
+        departureCity: "Delhi",
         assignedToEmail: "agent@acme.com",
       },
       null,
       null,
     );
     const city = inputs.find((i) => i.field === "departureCity");
-    // Unique names render bare; duplicates carry the state.
-    expect(city?.options).toContainEqual({ value: "Delhi", label: "Delhi" });
-    expect(city?.options).toContainEqual({
-      value: "Aurangabad",
-      label: "Aurangabad (Bihar)",
-    });
-    expect(city?.options).toContainEqual({
-      value: "Aurangabad",
-      label: "Aurangabad (Maharashtra)",
-    });
-    // Submitted values are bare master city names: both duplicate
-    // labels share one value, so either selection submits "Aurangabad".
-    const aurangabads = (city?.options ?? []).filter(
-      (o) => o.label === "Aurangabad (Bihar)" || o.label === "Aurangabad (Maharashtra)",
-    );
-    expect(aurangabads).toHaveLength(2);
-    for (const o of aurangabads) expect(o.value).toBe("Aurangabad");
-  });
-
-  it("4. city options follow the prefilled country via the catalog", () => {
-    const forCountry = (c: string | null) =>
-      buildDialogInputs(
-        savedMapping,
-        {
-          departureCountry: c,
-          departureCity: null,
-          assignedToEmail: "agent@acme.com",
-        },
-        null,
-        null,
-      ).find((i) => i.field === "departureCity")?.options ?? null;
-    expect(forCountry("India")).toEqual(
+    expect(city?.kind).toBe("select");
+    expect(city?.value).toBe("Delhi");
+    expect(city?.options).toEqual(
       departureCityOptions("India").map((o) => ({ value: o.value, label: o.label })),
     );
-    expect(forCountry("France")).toEqual(
-      departureCityOptions("France").map((o) => ({ value: o.value, label: o.label })),
-    );
-    expect(forCountry("India")).not.toEqual(forCountry("France"));
+    // A country change clears an incompatible city; a manual city
+    // stays when compatible.
+    expect(resolveDepartureCityOnCountryChange("India", "Paris")).toBe("");
+    expect(resolveDepartureCityOnCountryChange("France", "Paris")).toBe("Paris");
+    expect(resolveDepartureCityOnCountryChange("India", "Delhi")).toBe("Delhi");
   });
 
-  it("5. changing country clears only an incompatible city", () => {
-    // Agra is India-list-only; Dubai is curated-list-only.
-    expect(resolveDepartureCityOnCountryChange("United Arab Emirates", "Agra")).toBe("");
-    expect(resolveDepartureCityOnCountryChange("India", "Dubai")).toBe("");
-    expect(resolveDepartureCityOnCountryChange("United Arab Emirates", "Dubai")).toBe("Dubai");
-    expect(resolveDepartureCityOnCountryChange("India", "Delhi")).toBe("Delhi");
-    expect(resolveDepartureCityOnCountryChange("India", "")).toBe("");
+  it("Departure City never blocks creation (optional, payload still carries it)", () => {
+    // Empty city: dialog opens, validation passes, and the payload
+    // path still accepts a provided city (server mapping + flow
+    // defaults unchanged).
+    const inputs = buildDialogInputs(
+      {
+        available: ["customerName"],
+        missing: ["travelStartDate", "departureCountry", "departureCity"],
+        ambiguous: [],
+        invalid: [],
+        ready: false,
+      },
+      { assignedToEmail: "agent@acme.com", departureCountry: "India" },
+      null,
+      null,
+    );
+    const fields = inputs.map((i) => i.field);
+    expect(fields).toContain("departureCity");
+    expect(inputs.find((i) => i.field === "departureCity")?.value).toBeNull();
+    // departureCity is not a required field: a complete lead without
+    // one stays ready.
+    expect(
+      ["customerName", "phone", "leadSource", "leadType", "leadStage", "assignedToEmail", "travelStartDate", "adults", "services", "itinerary"],
+    ).not.toContain("departureCity");
   });
 });
 
@@ -1112,6 +1136,15 @@ describe("Departure clear buttons (Create in Travel CRM dialog)", () => {
     expect(src).toContain('onClear={() => set(input.field, "")}');
   });
 
+  it("changing country clears only an incompatible city", () => {
+    // Agra is India-list-only; Dubai is curated-list-only.
+    expect(resolveDepartureCityOnCountryChange("United Arab Emirates", "Agra")).toBe("");
+    expect(resolveDepartureCityOnCountryChange("India", "Dubai")).toBe("");
+    expect(resolveDepartureCityOnCountryChange("United Arab Emirates", "Dubai")).toBe("Dubai");
+    expect(resolveDepartureCityOnCountryChange("India", "Delhi")).toBe("Delhi");
+    expect(resolveDepartureCityOnCountryChange("India", "")).toBe("");
+  });
+
   it("manual clear sticks: explicit empty is never forced back to India", () => {
     // Fresh modal (no live selection yet) defaults to India…
     expect(resolveEffectiveDepartureCountry(undefined, "")).toBe("India");
@@ -1267,10 +1300,9 @@ describe("Create Lead itinerary displays names — never raw UUIDs", () => {
   it("resolves IDs to labels and renders them as SelectValue children", () => {
     const src = readFileSync(`${process.cwd()}/src/components/workspace/travel-crm-action.tsx`, "utf8");
     // The destination select resolves the stored UUID to its public
-    // name for display (city keeps its explicit resolution).
+    // name for display. Rows carry Destination + Nights only.
     expect(src).toContain("<ItineraryDestinationSelect");
-    expect(src).toContain("cityLabelForValue(cityOptions, row.city)");
-    expect(src).toContain("cityLabel !== null ? cityLabel : undefined");
+    expect(src).not.toContain("lead-itin-city-");
     // The stored UUID stays the Select value; only display resolves.
     expect(src).toContain("resolveSelectValue(destinations, row.destination)");
   });

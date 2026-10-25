@@ -331,6 +331,53 @@ describe("5. editing a lead itinerary does not mutate saved defaults", () => {
   });
 });
 
+describe("city-less dialog overrides are accepted (Destination + Nights only)", () => {
+  it("a city-less row creates with the destination name and empty city", async () => {
+    h.flow_runs[0].vars = {
+      ...(h.flow_runs[0].vars as Record<string, unknown>),
+      service: "Flight",
+    };
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: {
+          ...FUNNEL,
+          itinerary: [{ destination: "dest-sg", nights: 3 }],
+        },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls[0].body).toMatchObject({
+      itinerary: [{ country: "Singapore", destination: "", nights: 3, sequence: 1 }],
+    });
+  });
+
+  it("a destination-less row is still dropped while valid rows send", async () => {
+    h.flow_runs[0].vars = {
+      ...(h.flow_runs[0].vars as Record<string, unknown>),
+      service: "Flight",
+    };
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: {
+          ...FUNNEL,
+          itinerary: [
+            { destination: "", nights: 2 },
+            { destination: "dest-bali", nights: 4 },
+          ],
+        },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls[0].body).toMatchObject({
+      itinerary: [{ country: "Bali", destination: "", nights: 4, sequence: 1 }],
+    });
+  });
+});
+
 describe("13. existing Travel CRM lead payload mapping remains correct", () => {
   it("sends itinerary as country/destination/nights/sequence", async () => {
     h.flowSettings.push({

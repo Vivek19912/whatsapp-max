@@ -46,13 +46,49 @@ describe("normalizeItineraryDefaults (storage shape)", () => {
     ).toEqual([]);
   });
 
-  it("drops rows missing destination/city but keeps complete ones", () => {
+  it("drops rows missing destination but keeps complete ones", () => {
     expect(
       normalizeItineraryDefaults([
         { destination: "", city: "city-x", nights: 2 },
         { destination: "dest-a", city: "city-a", nights: 2 },
       ]),
     ).toEqual([{ destination: "dest-a", city: "city-a", nights: 2 }]);
+  });
+
+  it("accepts city-less dialog rows (Destination + Nights only)", () => {
+    // The Create dialog no longer collects a per-row city: such rows
+    // must survive normalization with an empty city, not be dropped.
+    expect(
+      normalizeItineraryDefaults([
+        { destination: "dest-sg", nights: 4 },
+        { destination: "dest-bali", city: "", nights: "3" },
+      ]),
+    ).toEqual([
+      { destination: "dest-sg", city: "", nights: 4 },
+      { destination: "dest-bali", city: "", nights: 3 },
+    ]);
+    // City-ful Settings rows keep working alongside city-less rows.
+    expect(
+      normalizeItineraryDefaults([
+        { destination: "dest-sg", city: "city-marina", nights: 4 },
+        { destination: "dest-sg", nights: 3 },
+      ]),
+    ).toEqual([
+      { destination: "dest-sg", city: "city-marina", nights: 4 },
+      { destination: "dest-sg", city: "", nights: 3 },
+    ]);
+  });
+
+  it("still drops destination-less rows and rejects bad nights without a city", () => {
+    expect(
+      normalizeItineraryDefaults([{ destination: "", nights: 2 }]),
+    ).toEqual([]);
+    expect(() =>
+      normalizeItineraryDefaults([{ destination: "d", nights: 0 }]),
+    ).toThrow();
+    expect(() =>
+      normalizeItineraryDefaults([{ destination: "d", nights: "two" }]),
+    ).toThrow();
   });
 
   it("rejects non-lists and non-object rows", () => {

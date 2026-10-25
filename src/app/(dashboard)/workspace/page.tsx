@@ -32,6 +32,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { handleExpiredSessionResponse } from '@/lib/auth/expired-session';
 import { useAuth } from '@/hooks/use-auth';
 import { useWorkspaceRealtime } from '@/hooks/use-workspace-realtime';
 import type { WorkspaceField } from '@/lib/flows/workspace-fields';
@@ -440,6 +441,11 @@ export default function WorkspacePage() {
     const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';
     fetch(flowsUrl, { signal: ctrl.signal, cache: 'no-store' })
       .then(async (res) => {
+        // Expired/invalid session: clear client auth state and go to
+        // the existing sign-in page instead of showing a raw 401 on
+        // the Workspace. Any other status keeps its current handling
+        // (403, validation, and 5xx never redirect).
+        if (handleExpiredSessionResponse(res)) return;
         if (!res.ok) throw new Error(`Couldn't load flows (${res.status})`);
         const json = (await res.json()) as {
           flows?: Array<{ id: string; name?: string | null }>;
@@ -789,6 +795,11 @@ export default function WorkspacePage() {
       cache: 'no-store',
     })
       .then(async (res) => {
+        // Same expired-session rule as the flows list above: a 401
+        // redirects to sign-in via the shared handler and never
+        // surfaces as a raw table error. Other statuses fall through
+        // to the existing error handling below.
+        if (handleExpiredSessionResponse(res)) return;
         const json = (await res.json().catch(() => null)) as
           (FlowTablePayload & { error?: unknown }) | null;
         if (!res.ok || !json || !('rows' in json)) {

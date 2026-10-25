@@ -18,15 +18,11 @@ import {
 import { validateNightsInput } from "@/lib/integrations/travel-crm/itineraries";
 
 // ---------------------------------------------------------------------------
-// Focused UI tests: Add More / Remove / dependent cities / clearing /
-// nights validation / stable IDs / dialog prefill without mutating.
+// Focused UI tests: Add More / Remove / nights validation / stable
+// IDs / dialog prefill without mutating. Dialog rows carry
+// Destination + Nights only (no per-row city — mirrors native
+// Travel CRM); the Settings editor keeps its own city handling.
 // ---------------------------------------------------------------------------
-
-const CITIES = [
-  { value: "city-marina", destinationValue: "dest-sg" },
-  { value: "city-sentosa", destinationValue: "dest-sg" },
-  { value: "city-kuta", destinationValue: "dest-bali" },
-];
 
 describe("6. Add More works (settings + dialog)", () => {
   it("settings appends a blank row", () => {
@@ -36,10 +32,9 @@ describe("6. Add More works (settings + dialog)", () => {
     ).toHaveLength(2);
   });
 
-  it("dialog appends a blank row", () => {
-    expect(addItineraryDialogRow([])).toEqual([
-      { destination: "", city: "", nights: "" },
-    ]);
+  it("dialog appends a blank row (Destination + Nights, no City)", () => {
+    expect(addItineraryDialogRow([])).toEqual([{ destination: "", nights: "" }]);
+    expect(addItineraryDialogRow([{ destination: "d", nights: "2" }])).toHaveLength(2);
   });
 });
 
@@ -58,10 +53,7 @@ describe("7. Remove works (zero rows allowed)", () => {
 
   it("dialog removes the indexed row, allowing empty", () => {
     expect(
-      removeItineraryDialogRow(
-        [{ destination: "d", city: "c", nights: "2" }],
-        0,
-      ),
+      removeItineraryDialogRow([{ destination: "d", nights: "2" }], 0),
     ).toEqual([]);
   });
 
@@ -71,8 +63,13 @@ describe("7. Remove works (zero rows allowed)", () => {
   });
 });
 
-describe("9+10. city depends on destination; change clears incompatible", () => {
+describe("9+10. destination change keeps the row (no city to clear)", () => {
   it("settings clears an incompatible city on destination change", () => {
+    const CITIES = [
+      { value: "city-marina", destinationValue: "dest-sg" },
+      { value: "city-sentosa", destinationValue: "dest-sg" },
+      { value: "city-kuta", destinationValue: "dest-bali" },
+    ];
     const rows = [{ destination: "dest-sg", city: "city-marina", nights: "4" }];
     const kept = updateItineraryDestination(rows, 0, "dest-sg", CITIES);
     expect(kept[0].city).toBe("city-marina");
@@ -82,24 +79,38 @@ describe("9+10. city depends on destination; change clears incompatible", () => 
     expect(rows).toEqual([{ destination: "dest-sg", city: "city-marina", nights: "4" }]);
   });
 
-  it("dialog clears an incompatible city on destination change", () => {
-    const rows = [{ destination: "dest-sg", city: "city-marina", nights: "4" }];
-    expect(updateItineraryDialogDestination(rows, 0, "dest-bali", CITIES)[0].city).toBe("");
-    expect(updateItineraryDialogDestination(rows, 0, "dest-sg", CITIES)[0].city).toBe(
-      "city-marina",
-    );
+  it("dialog sets the destination and preserves nights (no city field)", () => {
+    const rows = [{ destination: "dest-sg", nights: "4" }];
+    expect(updateItineraryDialogDestination(rows, 0, "dest-bali")).toEqual([
+      { destination: "dest-bali", nights: "4" },
+    ]);
+    // Input never mutated.
+    expect(rows).toEqual([{ destination: "dest-sg", nights: "4" }]);
   });
 });
 
 describe("11. nights validation in UI helpers", () => {
   it("rejects bad nights when building overrides", () => {
     expect(() =>
-      itineraryDialogRowsToOverrides([{ destination: "d", city: "c", nights: "0" }]),
+      itineraryDialogRowsToOverrides([{ destination: "d", nights: "0" }]),
     ).toThrow();
     expect(validateNightsInput("two")).not.toBeNull();
+    expect(itineraryDialogRowsToOverrides([{ destination: "d", nights: "3" }])).toEqual([
+      { destination: "d", nights: 3 },
+    ]);
+  });
+
+  it("city-less rows build overrides with destination + nights only", () => {
     expect(
-      itineraryDialogRowsToOverrides([{ destination: "d", city: "c", nights: "3" }]),
-    ).toEqual([{ destination: "d", city: "c", nights: 3 }]);
+      itineraryDialogRowsToOverrides([
+        { destination: "d1", nights: "3" },
+        { destination: "", nights: "" },
+        { destination: "d2", nights: "4" },
+      ]),
+    ).toEqual([
+      { destination: "d1", nights: 3 },
+      { destination: "d2", nights: 4 },
+    ]);
   });
 });
 
@@ -111,9 +122,11 @@ describe("4+5+12. dialog prefill keeps stable IDs, edits don't mutate", () => {
         { destination: "dest-sg", city: "city-sentosa", nights: 3 },
       ],
     };
+    // City is not seeded: the dialog collects Destination + Nights
+    // only, so a prefilled city never lingers as hidden state.
     expect(seedItineraryDialogRows(prefill)).toEqual([
-      { destination: "dest-sg", city: "city-marina", nights: "4" },
-      { destination: "dest-sg", city: "city-sentosa", nights: "3" },
+      { destination: "dest-sg", nights: "4" },
+      { destination: "dest-sg", nights: "3" },
     ]);
   });
 
@@ -135,9 +148,7 @@ describe("4+5+12. dialog prefill keeps stable IDs, edits don't mutate", () => {
     const itin = inputs.find((i) => i.field === "itinerary");
     expect(itin).toBeDefined();
     expect(itin?.kind).toBe("itinerary");
-    expect(itin?.value).toEqual([
-      { destination: "dest-sg", city: "city-marina", nights: "4" },
-    ]);
+    expect(itin?.value).toEqual([{ destination: "dest-sg", nights: "4" }]);
   });
 
   it("buildDialogInputs shows an empty itinerary editor when itinerary is missing", () => {
@@ -153,9 +164,9 @@ describe("4+5+12. dialog prefill keeps stable IDs, edits don't mutate", () => {
   });
 
   it("editing rows never mutates the seeded defaults array", () => {
-    const seeded = [{ destination: "dest-sg", city: "city-marina", nights: "4" }];
-    const edited = updateItineraryDialogDestination(seeded, 0, "dest-bali", CITIES);
-    expect(edited[0]).toEqual({ destination: "dest-bali", city: "", nights: "4" });
-    expect(seeded).toEqual([{ destination: "dest-sg", city: "city-marina", nights: "4" }]);
+    const seeded = [{ destination: "dest-sg", nights: "4" }];
+    const edited = updateItineraryDialogDestination(seeded, 0, "dest-bali");
+    expect(edited[0]).toEqual({ destination: "dest-bali", nights: "4" });
+    expect(seeded).toEqual([{ destination: "dest-sg", nights: "4" }]);
   });
 });

@@ -479,10 +479,13 @@ function toNights(value: unknown): number | null {
 
 /**
  * Validate + normalize itinerary defaults for storage. Drops
- * empty rows (no destination, no city, no nights); throws with a
+ * empty rows (no destination and no nights); throws with a
  * human-readable message on structurally invalid input or on a
- * non-empty row with an invalid nights value. Preserves order,
- * keeps stable Travel CRM identifiers verbatim.
+ * non-empty row with an invalid nights value. The per-row city
+ * is optional (the Create dialog collects Destination + Nights
+ * only) — city-ful rows keep working for saved Settings
+ * defaults. Preserves order, keeps stable Travel CRM identifiers
+ * verbatim.
  */
 export function normalizeItineraryDefaults(
   value: unknown,
@@ -502,7 +505,7 @@ export function normalizeItineraryDefaults(
     }
     const rec = raw as Record<string, unknown>;
     const destination = asNonEmptyString(rec.destination);
-    const city = asNonEmptyString(rec.city);
+    const city = asNonEmptyString(rec.city) ?? "";
     const nightsRaw =
       rec.nights === undefined || rec.nights === null
         ? ""
@@ -512,13 +515,12 @@ export function normalizeItineraryDefaults(
 
     const isEmptyRow =
       !destination &&
-      !city &&
       (nightsText === "" ||
         nightsText === null ||
         nightsText === undefined);
     if (isEmptyRow) continue;
 
-    if (!destination || !city) continue;
+    if (!destination) continue;
 
     if (
       destination.length > TRAVEL_CRM_MAX_LOCATION_LENGTH ||
