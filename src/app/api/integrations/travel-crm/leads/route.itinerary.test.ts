@@ -332,7 +332,11 @@ describe("5. editing a lead itinerary does not mutate saved defaults", () => {
 });
 
 describe("city-less dialog overrides are accepted (Destination + Nights only)", () => {
-  it("a city-less row creates with the destination name and empty city", async () => {
+  it("a city-less row repeats the destination name (never an empty destination)", async () => {
+    // The integration contract requires a non-empty destination per
+    // row while the dialog collects no city: the resolved
+    // destination name fills the city slot so Travel CRM accepts
+    // the row. City-carrying rows are untouched (see below).
     h.flow_runs[0].vars = {
       ...(h.flow_runs[0].vars as Record<string, unknown>),
       service: "Flight",
@@ -349,7 +353,7 @@ describe("city-less dialog overrides are accepted (Destination + Nights only)", 
     );
     expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
     expect(h.travelCalls[0].body).toMatchObject({
-      itinerary: [{ country: "Singapore", destination: "", nights: 3, sequence: 1 }],
+      itinerary: [{ country: "Singapore", destination: "Singapore", nights: 3, sequence: 1 }],
     });
   });
 
@@ -373,7 +377,28 @@ describe("city-less dialog overrides are accepted (Destination + Nights only)", 
     );
     expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
     expect(h.travelCalls[0].body).toMatchObject({
-      itinerary: [{ country: "Bali", destination: "", nights: 4, sequence: 1 }],
+      itinerary: [{ country: "Bali", destination: "Bali", nights: 4, sequence: 1 }],
+    });
+  });
+
+  it("city-carrying rows keep their city verbatim", async () => {
+    h.flow_runs[0].vars = {
+      ...(h.flow_runs[0].vars as Record<string, unknown>),
+      service: "Flight",
+    };
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: {
+          ...FUNNEL,
+          itinerary: [{ destination: "dest-sg", city: "city-marina", nights: 4 }],
+        },
+      }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls[0].body).toMatchObject({
+      itinerary: [{ country: "Singapore", destination: "Marina Bay", nights: 4, sequence: 1 }],
     });
   });
 });
@@ -475,6 +500,118 @@ describe("6. itinerary master UUIDs resolve to display names in the Travel CRM p
       itinerary: [
         { country: "dest-foreign", destination: "city-foreign", nights: 3, sequence: 1 },
       ],
+    });
+  });
+});
+
+describe("reported dialog: city-less itinerary must send a valid destination", () => {
+  // Exact reported shape: Facebook source, month/year travel date,
+  // no departure city, travelers + services, itinerary with
+  // Destination + Nights only (no City field anywhere).
+  const FULL_SOURCES = [
+    { value: "WEBSITE", label: "Website" },
+    { value: "SOCIAL_MEDIA", label: "Social Media" },
+    { value: "FACEBOOK_ADS", label: "Facebook Ads" },
+    { value: "INSTAGRAM_ADS", label: "Instagram Ads" },
+    { value: "GOOGLE_ADS", label: "Google Ads" },
+    { value: "WHATSAPP", label: "Whatsapp" },
+    { value: "PHONE_CALL", label: "Phone Call" },
+    { value: "REFERRAL", label: "Referral" },
+    { value: "WALK_IN", label: "Walk In" },
+    { value: "REPEAT_CUSTOMER", label: "Repeat Customer" },
+    { value: "PARTNER", label: "Partner" },
+    { value: "OTHER", label: "Other" },
+  ];
+
+  it("sends the destination name in the city slot (never an empty destination)", async () => {
+    h.lookupsOverride = { ...LOOKUPS, leadSources: FULL_SOURCES };
+    h.flow_runs[0].vars = {
+      adults: "1",
+      service: "Flight",
+      meta_lead_source: "Facebook",
+    };
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: {
+          leadType: "HOT",
+          leadStage: "NEW_LEAD",
+          travelMonth: 5,
+          travelYear: 2027,
+          departureCountry: "India",
+          itinerary: [{ destination: "dest-sg", nights: 3 }],
+        },
+      }),
+    );
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.success).toBe(true);
+    expect(h.travelCalls).toHaveLength(1);
+    expect(h.travelCalls[0].body).toMatchObject({
+      leadSource: "FACEBOOK_ADS",
+      travelMonth: 5,
+      travelYear: 2027,
+      departureCountry: "India",
+      departureCity: null,
+      itinerary: [
+        { country: "Singapore", destination: "Singapore", nights: 3, sequence: 1 },
+      ],
+    });
+  });
+
+  it("Travel CRM field errors surface with the rejected field identified", async () => {
+    h.lookupsOverride = { ...LOOKUPS, leadSources: FULL_SOURCES };
+    vi.spyOn(globalThis, "fetch").mockImplementation((async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/integrations/wacrm/lookups")) {
+        return new Response(JSON.stringify({ success: true, data: h.lookupsOverride }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "The submitted data is invalid.",
+            fields: {
+              "itinerary.0.destination": ["String must contain at least 1 character(s)"],
+            },
+          },
+        }),
+        { status: 400 },
+      );
+    }) as typeof fetch);
+    h.flow_runs[0].vars = {
+      adults: "1",
+      service: "Flight",
+      meta_lead_source: "Facebook",
+    };
+    const res = await POST(
+      post({
+        flow_id: "flow-1",
+        flow_run_id: "run-1",
+        overrides: {
+          leadType: "HOT",
+          leadStage: "NEW_LEAD",
+          travelMonth: 5,
+          travelYear: 2027,
+          departureCountry: "India",
+          itinerary: [{ destination: "dest-sg", nights: 3 }],
+        },
+      }),
+    );
+    const json = (await res.json()) as {
+      success: boolean;
+      code: string;
+      error: string;
+      fields: Record<string, string[]>;
+    };
+    expect(json.success).toBe(false);
+    expect(json.code).toBe("TRAVEL_CRM_VALIDATION_FAILED");
+    expect(json.error).toContain("The submitted data is invalid.");
+    expect(json.fields).toMatchObject({
+      "itinerary.0.destination": expect.any(Array),
     });
   });
 });

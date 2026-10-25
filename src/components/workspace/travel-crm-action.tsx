@@ -870,6 +870,33 @@ export function buildDialogInputs(
   });
 }
 
+/**
+ * Combine a failed API message with its per-field details so the
+ * dialog names the rejected field instead of showing only a
+ * generic message (e.g. Travel CRM's "The submitted data is
+ * invalid." plus `itinerary.0.destination: ...`). Known dialog
+ * fields render with their input labels; anything else keeps its
+ * raw key. Pure — unit-tested.
+ */
+export function formatApiError(
+  message: string,
+  fields: unknown,
+): string {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    return message;
+  }
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+    const messages = Array.isArray(value) ? value.map(String) : [String(value)];
+    if (messages.length === 0) continue;
+    const head = key.split(".")[0] ?? key;
+    const label = INPUT_LABELS[head] ?? head;
+    const rest = key.slice(head.length);
+    parts.push(`${label}${rest}: ${messages.join(", ")}`);
+  }
+  return parts.length > 0 ? `${message} ${parts.join("; ")}` : message;
+}
+
 /** Seed editable inputs from known values (true prefill). */
 export function seedValues(prefill: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2019,7 +2046,7 @@ export function TravelCrmAction({
         openDialog(json as PrepareResult & { mapping: MappingPayload; prefill: Record<string, unknown> });
         return;
       }
-      throw new Error(json.error ?? "Request failed.");
+      throw new Error(formatApiError(json.error ?? "Request failed.", json.fields));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Request failed.");
     } finally {
@@ -2191,7 +2218,7 @@ export function TravelCrmAction({
         });
         return;
       }
-      throw new Error(json.error ?? "Request failed.");
+      throw new Error(formatApiError(json.error ?? "Request failed.", json.fields));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Request failed.");
     } finally {

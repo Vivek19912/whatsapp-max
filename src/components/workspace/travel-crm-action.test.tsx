@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   buildDialogInputs,
   DepartureSearchSelect,
+  formatApiError,
   FunnelSelect,
   resizeAgeRows,
   resolveDepartureCityOnCountryChange,
@@ -43,6 +44,45 @@ describe("TravelCrmAction (Phase 3: connected)", () => {
     expect(html).not.toContain("Creating");
     expect(html).not.toContain("Created in Travel CRM");
     expect(html).not.toContain("Lead Created");
+  });
+});
+
+describe("formatApiError (failed Create names the rejected field)", () => {
+  it("appends per-field details to the generic message", () => {
+    expect(
+      formatApiError("The submitted data is invalid.", {
+        "itinerary.0.destination": ["String must contain at least 1 character(s)"],
+      }),
+    ).toBe(
+      "The submitted data is invalid. Itinerary.0.destination: String must contain at least 1 character(s)",
+    );
+  });
+
+  it("maps known dialog fields to their input labels", () => {
+    const message = formatApiError("Enter a valid phone number.", {
+      phone: ["Enter a valid phone number."],
+      leadSource: ["Invalid leadSource selection."],
+    });
+    expect(message).toContain("Phone: Enter a valid phone number.");
+    expect(message).toContain("Lead Source: Invalid leadSource selection.");
+  });
+
+  it("leaves the message untouched without usable fields", () => {
+    expect(formatApiError("Request failed.", undefined)).toBe("Request failed.");
+    expect(formatApiError("Request failed.", null)).toBe("Request failed.");
+    expect(formatApiError("Request failed.", [])).toBe("Request failed.");
+    expect(formatApiError("Request failed.", {})).toBe("Request failed.");
+  });
+
+  it("both create paths surface field details instead of only the message", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/travel-crm-action.tsx`,
+      "utf8",
+    );
+    // start() and submit() both thread the response `fields`
+    // through the same formatter before setError.
+    const uses = src.split("formatApiError(json.error").length - 1;
+    expect(uses).toBe(2);
   });
 });
 

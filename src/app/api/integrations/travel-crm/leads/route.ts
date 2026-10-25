@@ -136,6 +136,13 @@ function invalidOverrides(message: string, fields?: Record<string, string[]>) {
  *   - any other value (free text, flow-answer names, or a UUID from
  *     another workspace absent from the scoped lookups) passes through
  *     unchanged.
+ *
+ * City-less rows (the dialog collects Destination + Nights only):
+ * the integration contract requires a non-empty `destination`
+ * while the native form accepts a blank city — so when no city is
+ * known, the resolved destination name is repeated in the city
+ * slot instead of sending "" (which Travel CRM rejects) or
+ * inventing a city. Rows that carry a city keep it verbatim.
  */
 function resolveItineraryForSend(
   rows: ReadonlyArray<{
@@ -148,14 +155,18 @@ function resolveItineraryForSend(
     cities: ReadonlyArray<{ value: string; label: string }>;
   },
 ): Array<{ country: string; destination: string; nights: number; sequence: number }> {
-  return rows.map((row, i) => ({
-    country:
-      destinationLabelForValue(lookups.destinations, row.country ?? "") ?? (row.country ?? ""),
-    destination:
-      cityLabelForValue(lookups.cities, row.destination ?? "") ?? (row.destination ?? ""),
-    nights: (row.nights ?? 0) as number,
-    sequence: i + 1,
-  }));
+  return rows.map((row, i) => {
+    const country =
+      destinationLabelForValue(lookups.destinations, row.country ?? "") ?? (row.country ?? "");
+    const city =
+      cityLabelForValue(lookups.cities, row.destination ?? "") ?? (row.destination ?? "");
+    return {
+      country,
+      destination: city.trim() === "" ? country : city,
+      nights: (row.nights ?? 0) as number,
+      sequence: i + 1,
+    };
+  });
 }
 
 /** Maximum traveler age accepted per entry (Travel CRM validates authoritatively). */
