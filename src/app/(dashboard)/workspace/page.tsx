@@ -1852,17 +1852,16 @@ export default function WorkspacePage() {
                         const customLabel = renamable
                           ? (headerLabels[visId] ?? null)
                           : null;
-                        // Dial is an application action column for Meta
-                        // Lead Ads tables only: it renders immediately
-                        // after the Phone Number system column, is not
-                        // part of flowColumnsVisible, carries no
-                        // resize handle / visibility id / header color,
-                        // and is never sent to Google Sheets. Flow
-                        // Tables return the plain header unchanged.
+                        // Dial is an application action column for EVERY
+                        // Workspace table (Meta Lead Ads, Flow, and any
+                        // other table with a Phone Number column): it
+                        // renders immediately after the Phone Number
+                        // system column, is not part of
+                        // flowColumnsVisible, carries no resize handle
+                        // / visibility id / header color, and is never
+                        // sent to Google Sheets.
                         const showDialAfter =
-                          payload?.meta.kind === 'meta_lead_ads' &&
-                          c.system &&
-                          c.key === 'phone';
+                          c.system && c.key === 'phone';
                         return (
                           <Fragment key={flowColumnRenderKey(c)}>
                             <TableHead
@@ -2007,13 +2006,12 @@ export default function WorkspacePage() {
                             row.conversationId,
                             rawCellValue,
                           );
-                          // Meta Lead Ads only: Dial action cell right
-                          // after Phone Number. Application-only (never
-                          // a sheet field, never editable, never stored).
+                          // Every Workspace table: Dial action cell
+                          // right after Phone Number. Application-only
+                          // (never a sheet field, never editable, never
+                          // stored).
                           const showDialAfter =
-                            payload?.meta?.kind === 'meta_lead_ads' &&
-                            c.system &&
-                            c.key === 'phone';
+                            c.system && c.key === 'phone';
                           return (
                           <Fragment key={flowColumnRenderKey(c)}>
                             <TableCell
@@ -2060,15 +2058,7 @@ export default function WorkspacePage() {
                                 className="max-w-36 truncate border-r border-border whitespace-nowrap last:border-r-0"
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                <DialAction
-                                  phone={row.phone}
-                                  isMetaTable={
-                                    payload?.meta?.kind === 'meta_lead_ads'
-                                  }
-                                  runId={row.runId}
-                                  contactId={row.contactId}
-                                  flowId={flowId}
-                                />
+                                <DialAction phone={row.phone} />
                               </TableCell>
                             )}
                           </Fragment>
