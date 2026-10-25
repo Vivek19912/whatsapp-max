@@ -45,7 +45,11 @@ function relative(file: string): string {
 }
 
 describe("multi-session safety — a new login must never sign out existing sessions", () => {
-  it("the ONLY signOut() call sites are the explicit, user-initiated ones plus expired-session cleanup", async () => {
+  // These tests walk the whole src tree from disk (thousands of
+  // files); under a loaded CI runner that I/O can exceed vitest's
+  // default 5s per-test timeout, so the budget is raised explicitly.
+  // No behavior under test changes with the extra time.
+  it("the ONLY signOut() call sites are the explicit, user-initiated ones plus expired-session cleanup", { timeout: 60000 }, async () => {
     const files = await listTsFiles(SRC);
     const found: Array<{ file: string; line: string }> = [];
 
@@ -80,7 +84,7 @@ describe("multi-session safety — a new login must never sign out existing sess
     expect(disallowed).toEqual([]);
   });
 
-  it("no module pairs a login (signInWithPassword) with a signOut — a second login never terminates sessions", async () => {
+  it("no module pairs a login (signInWithPassword) with a signOut — a second login never terminates sessions", { timeout: 60000 }, async () => {
     const files = await listTsFiles(SRC);
     const offenders: string[] = [];
 
@@ -97,7 +101,7 @@ describe("multi-session safety — a new login must never sign out existing sess
     expect(offenders).toEqual([]);
   });
 
-  it("the normal logout uses the local scope; only the sessions card uses global scope", async () => {
+  it("the normal logout uses the local scope; only the sessions card uses global scope", { timeout: 60000 }, async () => {
     const useAuth = await readFile(join(SRC, "hooks/use-auth.tsx"), "utf8");
     const sessionsCard = await readFile(
       join(SRC, "components/settings/sessions-card.tsx"),
