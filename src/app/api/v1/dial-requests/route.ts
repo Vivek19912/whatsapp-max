@@ -53,9 +53,18 @@ export async function GET(request: Request) {
       .order('created_at', { ascending: true })
       .limit(limit);
     if (error) {
+      // Sanitized: error message only, never row contents (phone
+      // numbers must not reach logs).
+      console.error('[api/v1/dial-requests] read failed:', error.message);
       return fail('internal', 'Failed to read dial requests.', 500);
     }
-    return ok({ dial_requests: data ?? [] });
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    if (rows.length > 0) {
+      console.log(
+        `[api/v1/dial-requests] polled account=${accountId.slice(0, 8)} pending=${rows.length}`
+      );
+    }
+    return ok({ dial_requests: rows });
   } catch (err) {
     return toApiErrorResponse(err);
   }

@@ -1,5 +1,10 @@
 // ============================================================
-// PATCH /api/v1/dial-requests/{id} — device acknowledges a handoff.
+// PATCH|POST /api/v1/dial-requests/{id} — device acknowledges a
+// handoff. POST is an alias of PATCH: some Android/JDK
+// HttpURLConnection stacks reject the PATCH method itself
+// ("Invalid HTTP method"), which would make every acknowledgement
+// fail before it reaches the server. Both verbs run the identical
+// handler below.
 //
 // Device auth only (user token or API key, same as GET). Enforces:
 // - account + device ownership (row must belong to the account),
@@ -41,9 +46,19 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  return handleAck(request, (await params).id, 'PATCH');
+}
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  return handleAck(request, (await params).id, 'POST');
+}
+
+async function handleAck(request: Request, id: string, method: string) {
   try {
     const { accountId, db } = await resolveAccount(request);
-    const { id } = await params;
 
     let body: Record<string, unknown>;
     try {
@@ -60,8 +75,16 @@ export async function PATCH(
       .eq('id', id)
       .eq('account_id', accountId)
       .maybeSingle();
-    if (readError) return fail('internal', 'Failed to read dial request.', 500);
-    if (!row) return fail('not_found', 'Dial request not found.', 404);
+    if (readError) {
+      console.error('[api/v1/dial-requests] ack read failed:', readError.message);
+      return fail('internal', 'Failed to read dial request.', 500);
+    }
+    if (!row) {
+      console.warn(
+        `[api/v1/dial-requests] ack ${String(id).slice(0, 8)} not found (account=${accountId.slice(0, 8)})`
+      );
+      return fail('not_found', 'Dial request not found.', 404);
+    }
 
     const current = String((row as Record<string, unknown>).status ?? '');
     if (new Date(String((row as Record<string, unknown>).expires_at)).getTime() < Date.now()) {
@@ -91,8 +114,14 @@ export async function PATCH(
       .select('id, phone_number, status, expires_at, created_at')
       .maybeSingle();
     if (updateError || !updated) {
+      console.error(
+        `[api/v1/dial-requests] ack ${String(id).slice(0, 8)} ${current}->${next} failed:`,
+        updateError?.message ?? 'no row returned'
+      );
       return fail('internal', 'Failed to update dial request.', 500);
     }
+    // Sanitized: transition + id prefix only, never the number.
+    console.log(`[api/v1/dial-requests] ack ${String(id).slice(0, 8)} ${current}->${next} via ${method}`);
     return ok({ dial_request: updated });
   } catch (err) {
     return toApiErrorResponse(err);

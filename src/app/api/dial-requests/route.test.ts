@@ -99,6 +99,8 @@ describe('POST /api/dial-requests', () => {
   it('creates a request with normalized number and tel-safe storage', async () => {
     const res = await POST(req({ phone_number: '+91 88856 38563', idempotency_key: 'k-1' }));
     expect(res.status).toBe(201);
+    const json = (await res.json()) as { tel_uri?: string };
+    expect(json.tel_uri).toBe('tel:+918885638563');
     expect(h.lastInsert?.phone_number).toBe('+918885638563');
     // Account/user derive from session, never from body.
     expect(h.lastInsert?.account_id).toBe('acct-A');

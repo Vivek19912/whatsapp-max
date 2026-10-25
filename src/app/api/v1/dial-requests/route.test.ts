@@ -5,6 +5,8 @@ const h = vi.hoisted(() => ({
   row: null as Record<string, unknown> | null,
   updated: null as Record<string, unknown> | null,
   authed: true,
+  list: [] as Array<Record<string, unknown>>,
+  failUpdate: false,
 }));
 
 function fakeDb() {
@@ -18,10 +20,17 @@ function fakeDb() {
           eq: () => ({
             eq: () => ({
               select: () => ({
-                maybeSingle: async () => ({
-                  data: { id: 'd-1', phone_number: '+14155552671', status: patch.status },
-                  error: null,
-                }),
+                maybeSingle: async () =>
+                  h.failUpdate
+                    ? { data: null, error: { message: 'boom' } }
+                    : {
+                        data: {
+                          id: 'd-1',
+                          phone_number: '+14155552671',
+                          status: patch.status,
+                        },
+                        error: null,
+                      },
               }),
             }),
             in: () => ({
@@ -38,7 +47,7 @@ function fakeDb() {
           in: () => ({
             gte: () => ({
               order: () => ({
-                limit: async () => ({ data: [], error: null }),
+                limit: async () => ({ data: h.list, error: null }),
               }),
             }),
           }),
@@ -70,7 +79,7 @@ vi.mock('@/lib/api-keys/keys', () => ({
   looksLikeApiKey: (t: string | null) => !!t?.startsWith('wacrm_live_'),
 }));
 
-import { PATCH } from '@/app/api/v1/dial-requests/[id]/route';
+import { PATCH, POST as ACK_POST } from '@/app/api/v1/dial-requests/[id]/route';
 import { GET } from '@/app/api/v1/dial-requests/route';
 
 function patchReq(id: string, status: string) {
@@ -122,9 +131,112 @@ describe('PATCH /api/v1/dial-requests/[id]', () => {
     expect(nf.status).toBe(404);
   });
 
+  it('completes the full tap lifecycle delivered -> opened -> completed', async () => {
+    h.row = { id: 'd-1', account_id: 'acct-A', status: 'opened', expires_at: new Date(Date.now() + 600000).toISOString(), consumed_at: new Date().toISOString() };
+    const res = await PATCH(patchReq('d-1', 'completed'), { params: Promise.resolve({ id: 'd-1' }) });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { data: { dial_request: { status: string } } };
+    expect(json.data.dial_request.status).toBe('completed');
+  });
+
+  it('accepts the POST alias with the identical handler', async () => {
+    // Device transport is POST (some HttpURLConnection stacks
+    // reject the PATCH method itself); both verbs share handleAck.
+    h.row = { id: 'd-1', account_id: 'acct-A', status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(), consumed_at: null };
+    const res = await ACK_POST(
+      new Request('http://localhost/api/v1/dial-requests/d-1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', authorization: 'Bearer user-token' },
+        body: JSON.stringify({ status: 'delivered' }),
+      }),
+      { params: Promise.resolve({ id: 'd-1' }) }
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('surfaces persistence failures instead of false success', async () => {
+    h.failUpdate = true;
+    h.row = { id: 'd-1', account_id: 'acct-A', status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(), consumed_at: null };
+    const res = await PATCH(patchReq('d-1', 'delivered'), { params: Promise.resolve({ id: 'd-1' }) });
+    expect(res.status).toBe(500);
+    h.failUpdate = false;
+  });
+
   it('rejects unauthenticated device polling', async () => {
     h.authed = false;
     const res = await GET(new Request('http://localhost/api/v1/dial-requests', { headers: { authorization: 'Bearer bad' } }));
     expect(res.status).toBe(401);
+    h.authed = true;
+  });
+});
+
+describe('GET /api/v1/dial-requests (device poll contract)', () => {
+  beforeEach(() => {
+    h.authed = true;
+    h.list = [];
+  });
+
+  it('returns the exact envelope CallVault parses', async () => {
+    // Must stay in lockstep with DialRequests.parseList on Android:
+    // { data: { dial_requests: [ {id, phone_number, contact_id,
+    // flow_id, run_id, status, expires_at, created_at} ] } }.
+    h.list = [
+      {
+        id: 'd-1',
+        phone_number: '+14155552671',
+        contact_id: 'c-1',
+        flow_id: 'f-1',
+        run_id: 'r-1',
+        status: 'pending',
+        expires_at: '2030-01-01T00:00:00Z',
+        created_at: '2030-01-01T00:00:00Z',
+      },
+      {
+        id: 'd-2',
+        phone_number: '+442079460958',
+        contact_id: null,
+        flow_id: null,
+        run_id: null,
+        status: 'delivered',
+        expires_at: '2030-01-01T00:00:00Z',
+        created_at: '2030-01-01T00:00:00Z',
+      },
+    ];
+    const res = await GET(
+      new Request('http://localhost/api/v1/dial-requests', {
+        headers: { authorization: 'Bearer user-token' },
+      })
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      data: { dial_requests: Array<Record<string, unknown>> };
+    };
+    expect(json.data.dial_requests).toHaveLength(2);
+    const first = json.data.dial_requests[0] as Record<string, unknown>;
+    for (const field of [
+      'id',
+      'phone_number',
+      'contact_id',
+      'flow_id',
+      'run_id',
+      'status',
+      'expires_at',
+      'created_at',
+    ]) {
+      expect(first, `field ${field}`).toHaveProperty(field);
+    }
+    expect(first.phone_number).toBe('+14155552671');
+  });
+
+  it('returns an empty list (not an error) when nothing is pending', async () => {
+    h.list = [];
+    const res = await GET(
+      new Request('http://localhost/api/v1/dial-requests', {
+        headers: { authorization: 'Bearer user-token' },
+      })
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { data: { dial_requests: unknown[] } };
+    expect(json.data.dial_requests).toEqual([]);
   });
 });
