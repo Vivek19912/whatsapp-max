@@ -442,9 +442,11 @@ describe("workspace table wiring (scoped, design preserved)", () => {
   });
 
   it("preserves palette, typography, borders, and table design", () => {
-    expect(page).toContain("h-16");
-    expect(page).toContain("text-[15px]");
-    expect(page).toContain("font-bold");
+    // Compact header band (44px, 13px semibold) with the same
+    // positional colors, borders, and sticky behavior.
+    expect(page).toContain("h-11");
+    expect(page).toContain("text-[13px]");
+    expect(page).toContain("font-semibold");
     expect(page).toContain("border-border");
     expect(page).toContain("sticky top-0");
   });

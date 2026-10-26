@@ -52,7 +52,7 @@ export function HiddenRowsMenu({
         aria-label={
           count > 0 ? `Show ${count} hidden rows` : "Show hidden rows"
         }
-        className="border-border bg-card text-muted-foreground hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-sm"
+        className="border-border bg-card text-muted-foreground hover:text-foreground inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-sm shadow-xs transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       >
         <EyeOff className="h-4 w-4" />
         Hidden{count > 0 ? ` (${count})` : ""}

@@ -14,16 +14,7 @@ import {
   Trash2,
 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -34,6 +25,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import {
+  ConfigDialog,
+  ConfigFooterActions,
+  ConfigSection,
+  ConfigStatusBadge,
+} from './config-dialog';
 
 interface TemplateSlot {
   key: string;
@@ -335,44 +332,54 @@ export function MetaTableWhatsappDialog({
   const fields = payload?.fields ?? [];
   const sample = payload?.sample_values ?? null;
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <MessageCircle className="size-4" />
-            WhatsApp Auto-send Templates
-          </DialogTitle>
-          <DialogDescription>
-            {payload?.form.form_name ?? 'This table'} — new leads automatically receive
-            these templates in order. Other tables are unaffected.
-          </DialogDescription>
-        </DialogHeader>
+  const statusTone = !payload?.configured
+    ? 'outline'
+    : payload.paused
+      ? 'secondary'
+      : 'default';
 
-        {loading || !payload ? (
-          <p className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Loading…
-          </p>
-        ) : (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <Badge variant={payload.configured && !payload.paused ? 'secondary' : 'outline'}>
-                {payload.configured
-                  ? payload.paused
-                    ? 'Paused'
-                    : 'Active'
-                  : 'Not configured'}
-              </Badge>
-              {counts ? (
-                <span className="text-muted-foreground">
+  return (
+    <ConfigDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      width="lg"
+      icon={<MessageCircle aria-hidden />}
+      title="Auto-send WhatsApp"
+      tableLine={payload?.form.form_name ?? 'This table'}
+      description="New leads automatically receive these templates in order. Other tables are unaffected."
+      status={
+        <ConfigStatusBadge tone={statusTone as 'default' | 'secondary' | 'outline'}>
+          {!payload || !payload.configured ? 'Not configured' : payload.paused ? 'Paused' : 'Active'}
+        </ConfigStatusBadge>
+      }
+      loading={loading || !payload}
+      footer={
+        <ConfigFooterActions
+          onClose={() => onOpenChange(false)}
+          closeLabel="Close"
+          onSave={save}
+          saveLabel="Save Changes"
+          saving={saving}
+          saveDisabled={loading || !payload}
+        />
+      }
+    >
+      {payload ? (
+        <div className="flex flex-col gap-5">
+          <ConfigSection
+            title="Status"
+            hint="Pause stops new sends. History, order, and counts are kept."
+            action={
+              counts ? (
+                <p className="shrink-0 text-xs tabular-nums text-muted-foreground">
                   {counts.sent} sent · {counts.pending + counts.sending} pending ·{' '}
                   {counts.failed} failed
-                </span>
-              ) : null}
-            </div>
-
-            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-              <div>
+                </p>
+              ) : null
+            }
+          >
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5">
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-foreground">
                   {paused ? 'Automation paused' : 'Automation running'}
                 </p>
@@ -382,8 +389,12 @@ export function MetaTableWhatsappDialog({
                     : 'New leads receive the sequence below.'}
                 </p>
               </div>
-              <div className="flex items-center gap-2">
-                {paused ? <Pause className="size-4" /> : <Play className="size-4" />}
+              <div className="flex shrink-0 items-center gap-2">
+                {paused ? (
+                  <Pause className="size-4 text-muted-foreground" aria-hidden />
+                ) : (
+                  <Play className="size-4 text-muted-foreground" aria-hidden />
+                )}
                 <Switch
                   checked={!paused}
                   onCheckedChange={(v) => setPaused(!v)}
@@ -391,30 +402,39 @@ export function MetaTableWhatsappDialog({
                 />
               </div>
             </div>
+          </ConfigSection>
 
-            <div>
+          <ConfigSection
+            title="Timing"
+            hint="Delay applied between consecutive messages. 0 sends all templates immediately, still in order."
+          >
+            <div className="flex flex-col gap-1.5">
               <Label htmlFor="wa-delay">Delay between messages (seconds)</Label>
               <Input
                 id="wa-delay"
                 inputMode="numeric"
                 value={delay}
                 onChange={(e) => setDelay(e.target.value)}
-                className="mt-1 max-w-[160px]"
+                className="max-w-[160px]"
               />
-              <p className="mt-1 text-xs text-muted-foreground">
-                0 sends all templates immediately, still in order.
-              </p>
             </div>
+          </ConfigSection>
 
-            <div className="space-y-2">
-              <Label>Send sequence (in order)</Label>
-              {items.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No templates yet — pick an approved template below to add the
-                  first message.
+          <ConfigSection
+            title={`Send sequence${items.length > 0 ? ` · ${items.length} step${items.length === 1 ? '' : 's'}` : ''}`}
+            hint="Templates send top to bottom. Reorder, remap fields, or remove steps at any time."
+          >
+            {items.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border px-3 py-5 text-center">
+                <p className="text-sm font-medium text-foreground">No templates yet</p>
+                <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+                  Pick an approved template below to add the first message of
+                  the sequence.
                 </p>
-              ) : (
-                items.map((item, index) => {
+              </div>
+            ) : (
+              <ol className="flex flex-col gap-2">
+                {items.map((item, index) => {
                   const slots = slotsFor(item);
                   const rendered = previewBody(
                     bodyFor(item),
@@ -423,21 +443,24 @@ export function MetaTableWhatsappDialog({
                     sample
                   );
                   return (
-                    <div
+                    <li
                       key={`${item.template_name}::${item.template_language}`}
-                      className="space-y-2 rounded-md border border-border px-3 py-2"
+                      className="rounded-lg border border-border bg-card px-3 py-2.5"
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
+                      <div className="flex items-center gap-2.5">
+                        <span
+                          aria-hidden
+                          className="bg-primary text-primary-foreground flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-bold tabular-nums"
+                        >
+                          {index + 1}
+                        </span>
+                        <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium text-foreground">
-                            <span className="mr-2 tabular-nums text-muted-foreground">
-                              {index + 1}.
-                            </span>
                             {item.template_name}
                           </p>
                           <p className="text-xs text-muted-foreground">{item.template_language}</p>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div className="flex shrink-0 items-center gap-0.5">
                           <Button
                             variant="ghost"
                             size="icon-sm"
@@ -497,14 +520,15 @@ export function MetaTableWhatsappDialog({
                             {sample ? null : ' (no lead yet — live values fill in per lead)'}
                           </p>
                         </div>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
+                    ) : (
+                        <p className="mt-1.5 text-xs text-muted-foreground">
                           Static template — sends as approved, no mapping needed.
                         </p>
                       )}
-                    </div>
+                    </li>
                   );
-                })
+                })}
+              </ol>
               )}
               <div className="flex items-center gap-2">
                 <Select value={pick} onValueChange={(v: string | null) => setPick(v ?? '')}>
@@ -533,41 +557,30 @@ export function MetaTableWhatsappDialog({
                     )}
                   </SelectContent>
                 </Select>
-                <Button variant="outline" size="sm" onClick={addPicked} disabled={!pick}>
-                  <Plus className="size-4" /> Add
+                <Button variant="outline" size="sm" onClick={addPicked} disabled={!pick} className="shrink-0">
+                  <Plus className="size-4" aria-hidden /> Add
                 </Button>
               </div>
-            </div>
+            </ConfigSection>
 
             {(counts?.failed ?? 0) > 0 ? (
-              <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                <span className="text-muted-foreground">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
+                <span className="min-w-0 text-muted-foreground">
                   {counts?.failed} failed send{(counts?.failed ?? 0) === 1 ? '' : 's'} — fix the
                   cause (template approval, WhatsApp setup, missing values), then retry.
                 </span>
-                <Button variant="outline" size="sm" onClick={retryFailed} disabled={retrying}>
+                <Button variant="outline" size="sm" onClick={retryFailed} disabled={retrying} className="shrink-0">
                   {retrying ? (
-                    <Loader2 className="size-4 animate-spin" />
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
                   ) : (
-                    <RotateCcw className="size-4" />
+                    <RotateCcw className="size-4" aria-hidden />
                   )}
                   Retry
                 </Button>
               </div>
             ) : null}
           </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-          <Button onClick={save} disabled={loading || saving || !payload}>
-            {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
+        ) : null}
+      </ConfigDialog>
+    );
+  }

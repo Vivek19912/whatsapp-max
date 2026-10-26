@@ -209,8 +209,10 @@ describe('per-table sheets settings - table resolution and enforcement', () => {
     expect(s).toContain('Meta Lead ID');
     const page = src('src/app/(dashboard)/workspace/page.tsx');
     expect(page).toContain('MetaTableSheetsDialog');
-    expect(page).toContain('isMetaTable && isOwner');
-    expect(page).toContain('Configure Sheet');
+    // Owner-gated per-table toolbar; sheet actions only exist in
+    // the Meta tables' action set.
+    expect(page).toContain('isOwner && flowId');
+    expect(page).toContain("label: 'Configure Sheet'");
   });
 
   it('settings keeps only the connection card', () => {

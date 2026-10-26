@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { ChevronDown, Filter } from 'lucide-react';
+import { ChevronDown, Filter, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -24,6 +24,8 @@ import {
   assigneeDisplayName,
   type AssigneeMember,
 } from '@/lib/flows/workspace-assignee';
+import { SearchableSelect } from './searchable-select';
+import { WS_CONTROL_BUTTON } from './workspace-tokens';
 import {
   WORKSPACE_ASSIGNEE_ALL,
   WORKSPACE_ASSIGNEE_UNASSIGNED,
@@ -452,17 +454,25 @@ export function WorkspaceFilters({
     );
   }
 
+  const assigneeOptions = useMemo(
+    () => [
+      { value: WORKSPACE_ASSIGNEE_ALL, label: 'All' },
+      { value: WORKSPACE_ASSIGNEE_UNASSIGNED, label: 'Unassigned' },
+      ...members.map((m) => ({
+        value: m.user_id,
+        label: assigneeDisplayName(m),
+      })),
+    ],
+    [members]
+  );
+
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger
-        className={cn(
-          'border-border bg-card inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-sm font-medium',
-          'text-muted-foreground hover:bg-muted hover:text-foreground transition-colors',
-          'focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none'
-        )}
+        className={cn(WS_CONTROL_BUTTON, "shrink-0")}
         aria-label="Filter table"
       >
-        <Filter className="h-4 w-4" />
+        <Filter className="h-4 w-4" aria-hidden />
         Filters
         {activeCount > 0 && (
           <span className="bg-primary text-primary-foreground flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold">
@@ -470,16 +480,28 @@ export function WorkspaceFilters({
           </span>
         )}
       </PopoverTrigger>
-      <PopoverContent align="end" sideOffset={6} className="max-h-[70vh] w-80 overflow-y-auto">
-        <div className="px-1 pt-1">
-          <p className="text-foreground text-sm font-semibold">Filters</p>
-          <p className="text-muted-foreground text-xs">
-            All sections combine — every active filter applies at once.
+      <PopoverContent
+        align="end"
+        sideOffset={6}
+        className="max-h-[min(80vh,560px)] w-[min(92vw,400px)] overflow-y-auto p-0"
+      >
+        <div className="sticky top-0 z-10 border-b border-border bg-popover px-4 pt-3 pb-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-foreground text-sm font-semibold">Filters</p>
+            {activeCount > 0 && (
+              <span className="bg-primary text-primary-foreground flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-bold">
+                {activeCount} active
+              </span>
+            )}
+          </div>
+          <p className="text-muted-foreground mt-0.5 text-xs">
+            Sections combine — every active filter applies at once.
           </p>
         </div>
 
-        <div className="px-1">
-          <p className="text-muted-foreground text-[11px] tracking-wide uppercase">
+        <div className="flex flex-col gap-4 px-4 py-3">
+        <section aria-label="Date filter">
+          <p className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
             Date
           </p>
           <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="Date range">
@@ -528,33 +550,27 @@ export function WorkspaceFilters({
               </div>
             </div>
           )}
-        </div>
+        </section>
 
-        <div className="px-1">
-          <p className="text-muted-foreground text-[11px] tracking-wide uppercase">
+        <section aria-label="Assignee filter">
+          <p className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
             Assigned To
           </p>
-          <Select value={assigneeDraft} onValueChange={(v) => v && setAssigneeDraft(v)}>
-            <SelectTrigger
-              className="border-border bg-card mt-1.5 w-full"
-              aria-label="Filter by assignee"
-            >
-              <SelectValue placeholder="All" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={WORKSPACE_ASSIGNEE_ALL}>All</SelectItem>
-              <SelectItem value={WORKSPACE_ASSIGNEE_UNASSIGNED}>Unassigned</SelectItem>
-              {members.map((m) => (
-                <SelectItem key={m.user_id} value={m.user_id}>
-                  {assigneeDisplayName(m)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+          <SearchableSelect
+            value={assigneeDraft}
+            options={assigneeOptions}
+            onChange={(v) => setAssigneeDraft(v)}
+            placeholder="All"
+            searchPlaceholder="Search team members…"
+            emptyText="No team members match."
+            ariaLabel="Filter by assignee"
+            triggerClassName="mt-1.5"
+            contentClassName="w-[var(--radix-popover-trigger-width)]"
+          />
+        </section>
 
         {columnOptions.callStatus.length > 0 && (
-          <div className="px-1">
+          <section aria-label="Call status filter" className="rounded-lg border border-border bg-card/50 p-2.5">
             {renderSectionHeader('callStatus')}
             {openSections.has('callStatus') &&
               renderMultiSelect(
@@ -563,10 +579,10 @@ export function WorkspaceFilters({
                 (v) => setCallStatusDraft(toggleMultiValue(callStatusDraft, v)),
                 'Call Status'
               )}
-          </div>
+          </section>
         )}
 
-        <div className="px-1">
+        <section aria-label="Calls tried filter" className="rounded-lg border border-border bg-card/50 p-2.5">
           {renderSectionHeader('callsTried')}
           {openSections.has('callsTried') && (
             <div className="mt-1.5 grid gap-2">
@@ -643,20 +659,20 @@ export function WorkspaceFilters({
                       inputMode="numeric"
                       min={0}
                       max={999}
-                      value={callsTriedMax}
-                      onChange={(e) => setCallsTriedMax(e.target.value)}
-                      placeholder="e.g. 5"
-                      className="h-8 text-[13px]"
-                    />
+                    value={callsTriedMax}
+                    onChange={(e) => setCallsTriedMax(e.target.value)}
+                    placeholder="e.g. 5"
+                    className="h-8 text-[13px]"
+                  />
                   </div>
                 </div>
               )}
             </div>
           )}
-        </div>
+        </section>
 
         {columnOptions.followUpStatus.length > 0 && (
-          <div className="px-1">
+          <section aria-label="Follow-up status filter" className="rounded-lg border border-border bg-card/50 p-2.5">
             {renderSectionHeader('followUpStatus')}
             {openSections.has('followUpStatus') &&
               renderMultiSelect(
@@ -665,11 +681,11 @@ export function WorkspaceFilters({
                 (v) => setFollowUpStatusDraft(toggleMultiValue(followUpStatusDraft, v)),
                 'Follow-Up Status'
               )}
-          </div>
+          </section>
         )}
 
         {columnOptions.lastContactDate && (
-          <div className="px-1">
+          <section aria-label="Last contact date filter" className="rounded-lg border border-border bg-card/50 p-2.5">
             {renderSectionHeader('lastContact')}
             {openSections.has('lastContact') && (
               <div>
@@ -740,11 +756,11 @@ export function WorkspaceFilters({
                 )}
               </div>
             )}
-          </div>
+          </section>
         )}
 
         {columnOptions.nextFollowUp && (
-          <div className="px-1">
+          <section aria-label="Next follow-up filter" className="rounded-lg border border-border bg-card/50 p-2.5">
             {renderSectionHeader('nextFollowUp')}
             {openSections.has('nextFollowUp') && (
               <div>
@@ -815,18 +831,139 @@ export function WorkspaceFilters({
                 )}
               </div>
             )}
-          </div>
+          </section>
         )}
+        </div>
 
-        <div className="border-border flex items-center justify-between gap-2 border-t px-1 pt-2">
-          <Button type="button" variant="ghost" size="sm" onClick={handleClearAll}>
-            Clear all
-          </Button>
-          <Button type="button" size="sm" onClick={handleApply}>
-            Apply
-          </Button>
+        <div className="sticky bottom-0 border-t border-border bg-popover px-4 py-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={handleClearAll}>
+              Clear all
+            </Button>
+            <Button type="button" size="sm" onClick={handleApply} className="min-w-20">
+              Apply{activeCount > 0 ? ` (${activeCount})` : ''}
+            </Button>
+          </div>
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+export type ActiveColumnSectionKey =
+  | 'callStatus'
+  | 'callsTried'
+  | 'followUpStatus'
+  | 'lastContact'
+  | 'nextFollowUp';
+
+/**
+ * Removable chips summarizing the applied filters. Rendered above
+ * the grid; each chip clears exactly its own slice through the
+ * same onApply funnel as the panel, so semantics stay identical
+ * (Apply-all vs clear-one paths converge).
+ */
+export function ActiveFilterChips({
+  date,
+  assignee,
+  columns,
+  members,
+  onClearDate,
+  onClearAssignee,
+  onClearColumn,
+  onClearAll,
+}: {
+  date: AppliedDateFilter | null;
+  assignee: WorkspaceAssigneeSelection;
+  columns: WorkspaceColumnFilters;
+  members: readonly AssigneeMember[];
+  onClearDate: () => void;
+  onClearAssignee: () => void;
+  onClearColumn: (section: ActiveColumnSectionKey) => void;
+  onClearAll: () => void;
+}) {
+  const chips: Array<{ key: string; label: string; onClear: () => void }> = [];
+  if (date) {
+    const label =
+      date.preset === 'custom'
+        ? `Date: ${date.customFrom || '…'} → ${date.customTo || '…'}`
+        : WORKSPACE_DATE_PRESET_LABELS[date.preset] ?? date.preset;
+    chips.push({ key: 'date', label, onClear: onClearDate });
+  }
+  if (assignee.type === 'unassigned') {
+    chips.push({ key: 'assignee', label: 'Assigned: Unassigned', onClear: onClearAssignee });
+  } else if (assignee.type === 'member') {
+    const member = members.find((m) => m.user_id === assignee.userId);
+    chips.push({
+      key: 'assignee',
+      label: `Assigned: ${member ? assigneeDisplayName(member) : 'Member'}`,
+      onClear: onClearAssignee,
+    });
+  }
+  if (columns.callStatus.length > 0) {
+    chips.push({
+      key: 'callStatus',
+      label: `Call status · ${columns.callStatus.length}`,
+      onClear: () => onClearColumn('callStatus'),
+    });
+  }
+  if (columns.callsTried) {
+    const op = columns.callsTried;
+    const detail =
+      'value' in op && op.value !== undefined
+        ? `${CALLS_TRIED_OP_LABELS[op.op]} ${op.value}`
+        : `between ${op.min ?? ''}–${op.max ?? ''}`;
+    chips.push({ key: 'callsTried', label: `Calls tried ${detail}`, onClear: () => onClearColumn('callsTried') });
+  }
+  if (columns.followUpStatus.length > 0) {
+    chips.push({
+      key: 'followUpStatus',
+      label: `Follow-up · ${columns.followUpStatus.length}`,
+      onClear: () => onClearColumn('followUpStatus'),
+    });
+  }
+  if (columns.lastContact) {
+    chips.push({
+      key: 'lastContact',
+      label: `Last contact: ${COLUMN_DATE_MODE_LABELS[columns.lastContact.mode] ?? columns.lastContact.mode}`,
+      onClear: () => onClearColumn('lastContact'),
+    });
+  }
+  if (columns.nextFollowUp) {
+    chips.push({
+      key: 'nextFollowUp',
+      label: `Next follow-up: ${FOLLOW_UP_MODE_LABELS[columns.nextFollowUp.mode] ?? columns.nextFollowUp.mode}`,
+      onClear: () => onClearColumn('nextFollowUp'),
+    });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" aria-label="Active filters">
+      {chips.map((chip) => (
+        <span
+          key={chip.key}
+          className="bg-muted text-foreground inline-flex h-7 max-w-full items-center gap-1 rounded-full border border-border pr-1 pl-2.5 text-xs font-medium"
+        >
+          <span className="min-w-0 truncate">{chip.label}</span>
+          <button
+            type="button"
+            onClick={chip.onClear}
+            aria-label={`Remove ${chip.label} filter`}
+            className="hover:bg-background flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            <X className="size-3" aria-hidden />
+          </button>
+        </span>
+      ))}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={onClearAll}
+        className="h-7 rounded-full px-2 text-xs"
+      >
+        Clear all
+      </Button>
+    </div>
   );
 }

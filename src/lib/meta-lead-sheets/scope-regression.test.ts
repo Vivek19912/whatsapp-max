@@ -228,7 +228,9 @@ describe('settings UI separation', () => {
     expect(page).toContain('MetaTableSheetsDialog');
     // Only rendered for Meta Lead Ads tables with the owner behind
     // the wheel — admins, agents, and viewers see no sheet actions.
-    expect(page).toContain('isMetaTable && isOwner');
+    // (The toolbar is owner-gated per table; Meta tables get the
+    // sheet actions in their action set.)
+    expect(page).toContain('isOwner && flowId');
     // Flow Table rendering paths are untouched.
     expect(page).toContain('{isMetaTable ? null : (');
   });

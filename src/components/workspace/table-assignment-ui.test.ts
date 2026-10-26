@@ -13,18 +13,33 @@ const src = (p: string) => readFileSync(`${root}/${p}`, "utf8");
 
 describe("assignment entry points in the workspace header", () => {
   const page = src("src/app/(dashboard)/workspace/page.tsx");
+  const header = src("src/components/workspace/workspace-header.tsx");
 
   it("shows Assignment for Meta tables next to Configure Sheet (owner only)", () => {
-    expect(page).toContain("Assignment");
+    expect(page).toContain("label: 'Assignment'");
+    expect(page).toContain("label: 'Configure Sheet'");
+    expect(page).toContain("label: 'Auto-send WhatsApp'");
+    expect(page).toContain("label: 'Open Sheet'");
     expect(page).toContain("setAssignmentDialogOpen(true)");
-    // Same owner + table gate family as Configure Sheet.
-    expect(page).toContain("{isMetaTable && isOwner && flowId ?");
+    // Same owner + table gate family as Configure Sheet: the page
+    // gates the toolbar on owner + selected table, and Meta tables
+    // get the full per-table action set.
+    expect(page).toContain("isOwner && flowId");
+    expect(page).toContain("key: 'sheet-config'");
+    expect(page).toContain("key: 'assignment'");
+    // The shared toolbar renders labeled actions side by side with
+    // a "More actions" overflow menu on small screens.
+    expect(header).toContain("WorkspaceToolbar");
+    expect(header).toContain("More actions");
   });
 
   it("shows Assignment for Flow tables too (owner only, no sheet actions)", () => {
-    expect(page).toContain("{!isMetaTable && isOwner && flowId ?");
     expect(page).toContain("TableAssignmentDialog");
     expect(page).not.toContain("Configure Sheet\" : null");
+    // Owner-gated toolbar with an Assignment action for both
+    // table kinds; sheet actions only for Meta tables.
+    expect(page).toContain("label: 'Assignment'");
+    expect(page).toContain("isMetaTable");
   });
 
   it("mounts one shared dialog keyed by flow for both table kinds", () => {

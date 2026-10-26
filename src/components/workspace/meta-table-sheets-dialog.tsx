@@ -17,18 +17,16 @@ import {
   XCircle,
 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import {
+  ConfigDialog,
+  ConfigFooterActions,
+  ConfigSection,
+  ConfigStatusBadge,
+} from './config-dialog';
 import { formatColumnLabel } from '@/lib/flows/column-label';
 import { isAssigneeField } from '@/lib/flows/workspace-assignee';
 import { META_SOURCE_COLUMN_KEY } from '@/lib/meta-lead-ads/virtual-flow';
@@ -988,68 +986,65 @@ export function MetaTableSheetsDialog({
     spreadsheetId: status?.spreadsheetId ?? null,
   });
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Table2 className="size-4" /> Configure Google Sheet
-          </DialogTitle>
-          <DialogDescription>
-            {payload ? (
-              <>
-                Table “
-                {payload.form.form_name ??
-                  payload.flow.name ??
-                  payload.form.form_id}
-                ”
-                {payload.form.enabled
-                  ? ''
-                  : ' (form disabled — historical leads still sync)'}
-                . Syncs only this table&apos;s leads into its own spreadsheet,
-                tab, and columns.
-              </>
-            ) : (
-              "Sync this table's leads into its own spreadsheet, tab, and columns."
-            )}
-          </DialogDescription>
-        </DialogHeader>
+  const tableName =
+    payload?.form.form_name ?? payload?.flow.name ?? payload?.form.form_id ?? 'This table';
 
-        {loading ? (
-          <p className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
-            <Loader2 className="size-4 animate-spin" /> Loading…
-          </p>
-        ) : !payload ? (
-          <p className="text-destructive text-sm" role="alert">
-            Could not load this table&apos;s sheet configuration.
-          </p>
-        ) : !payload.connection.connected ? (
-          <p className="text-muted-foreground text-sm">
-            Connect a Google account first in Settings → Google Sheets — Meta
-            Lead Ads, then configure this table here.
-          </p>
-        ) : (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <Badge variant="secondary">
-                <CheckCircle2 className="mr-1 size-3" />{' '}
-                {payload.connection.email ?? 'Connected'}
-              </Badge>
-              {payload.connection.needsReauth ? (
-                <Badge variant="destructive">Needs reconnect</Badge>
-              ) : null}
-              {status?.remapPending ? (
-                <Badge variant="outline">Column rollout in progress</Badge>
-              ) : null}
-              <span className="text-muted-foreground">
-                Last success: {fmt(status?.lastSuccessAt ?? null)} · Pending:{' '}
-                {status?.pending ?? 0}
-                {(status?.retrying ?? 0) > 0 ? (
-                  <> · Retrying: {status?.retrying ?? 0}</>
-                ) : null}{' '}
-                · Failed: {status?.failed ?? 0}
-              </span>
-              {(status?.failed ?? 0) > 0 || (status?.retrying ?? 0) > 0 ? (
+  return (
+    <ConfigDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      width="lg"
+      icon={<Table2 aria-hidden />}
+      title="Configure Google Sheet"
+      tableLine={payload ? `Table “${tableName}”${payload.form.enabled ? '' : ' (form disabled — historical leads still sync)'}` : undefined}
+      description="Syncs only this table's leads into its own spreadsheet, tab, and columns."
+      status={
+        payload && payload.connection.connected ? (
+          <span className="flex shrink-0 items-center gap-1.5">
+            <ConfigStatusBadge tone="secondary">
+              <CheckCircle2 className="mr-1 size-3" aria-hidden />
+              {payload.connection.email ?? 'Connected'}
+            </ConfigStatusBadge>
+            {payload.connection.needsReauth ? (
+              <ConfigStatusBadge tone="destructive">Needs reconnect</ConfigStatusBadge>
+            ) : null}
+            {status?.remapPending ? (
+              <ConfigStatusBadge tone="outline">Column rollout in progress</ConfigStatusBadge>
+            ) : null}
+          </span>
+        ) : undefined
+      }
+      loading={loading}
+      loadingText="Loading sheet configuration…"
+      footer={
+        payload?.connection.connected ? (
+          <ConfigFooterActions
+            onClose={() => onOpenChange(false)}
+            closeLabel="Close"
+            onSave={save}
+            saveLabel="Save Configuration"
+            saving={busy === 'save'}
+            saveDisabled={busy === 'save'}
+          />
+        ) : undefined
+      }
+    >
+      {!loading && !payload ? (
+        <p className="text-destructive text-sm" role="alert">
+          Could not load this table&apos;s sheet configuration.
+        </p>
+      ) : !loading && payload && !payload.connection.connected ? (
+        <p className="text-muted-foreground text-sm">
+          Connect a Google account first in Settings → Google Sheets — Meta
+          Lead Ads, then configure this table here.
+        </p>
+      ) : payload ? (
+        <div className="flex flex-col gap-5">
+          <ConfigSection
+            title="Sync status"
+            hint={`Last success: ${fmt(status?.lastSuccessAt ?? null)} · Pending: ${status?.pending ?? 0}${(status?.retrying ?? 0) > 0 ? ` · Retrying: ${status?.retrying ?? 0}` : ''} · Failed: ${status?.failed ?? 0}`}
+            action={
+              (status?.failed ?? 0) > 0 || (status?.retrying ?? 0) > 0 ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1058,21 +1053,32 @@ export function MetaTableSheetsDialog({
                   title="Requeue failed syncs for this table (already-synced rows are never duplicated)"
                 >
                   {busy === 'retry-failed' ? (
-                    <Loader2 className="size-3.5 animate-spin" />
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
                   ) : (
-                    <RotateCcw className="size-3.5" />
+                    <RotateCcw className="size-3.5" aria-hidden />
                   )}
                   Retry failed
                 </Button>
-              ) : null}
-            </div>
+              ) : null
+            }
+          >
             {status?.lastError ? (
               <p className="text-destructive flex items-start gap-2 text-xs">
-                <XCircle className="mt-0.5 size-3.5 shrink-0" />{' '}
+                <XCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden />{' '}
                 {status.lastError}
               </p>
-            ) : null}
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Rows reconcile by stable Meta Lead ID — retries update in place and never
+                duplicate.
+              </p>
+            )}
+          </ConfigSection>
 
+          <ConfigSection
+            title="Spreadsheet target"
+            hint="Pasted URLs are validated against your connected Google account. Creating a spreadsheet writes the header row; nothing syncs until you save."
+          >
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <Label htmlFor="meta-table-sheets-url">
@@ -1251,18 +1257,19 @@ export function MetaTableSheetsDialog({
                       Create tab
                     </Button>
                   </div>
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    Created inside the spreadsheet above, then selected
-                    automatically. Existing tabs are never modified.
-                  </p>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Created inside the spreadsheet above, then selected
+                      automatically. Existing tabs are never modified.
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
+            </ConfigSection>
 
-            <div>
-              <Label className="mb-2 block text-sm font-medium">
-                Columns for this table
-              </Label>
+            <ConfigSection
+              title="Columns for this table"
+              hint="Choose the column order for new and updated rows. The Meta Lead ID column stays pinned for matching."
+            >
               <div className="grid gap-3 lg:grid-cols-2">
                 <div>
                   <p className="text-muted-foreground mb-1 text-xs font-medium">
@@ -1430,36 +1437,34 @@ export function MetaTableSheetsDialog({
                   </div>
                 </div>
               </div>
-            </div>
+            </ConfigSection>
 
-            <label className="flex w-fit items-center gap-2 text-xs text-muted-foreground">
-              <Switch
-                checked={autoSync}
-                onCheckedChange={setAutoSync}
-                aria-label="Enable automatic sync"
-              />
-              Automatic sync for new + updated leads
-            </label>
+            <ConfigSection
+              title="Sync & import"
+              hint="Automatic sync writes new and updated leads as they arrive. Imports backfill history by stable lead ID — never duplicated."
+            >
+              <label className="flex w-fit cursor-pointer items-center gap-2 text-sm text-foreground">
+                <Switch
+                  checked={autoSync}
+                  onCheckedChange={setAutoSync}
+                  aria-label="Enable automatic sync"
+                />
+                Automatic sync for new + updated leads
+              </label>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Button onClick={save} disabled={busy === 'save'}>
-                {busy === 'save' ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : null}
-                Save Configuration
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setImportJob(null);
-                  setImportError(null);
-                  setImportOpen((v) => !v);
-                }}
-              >
-                <Download className="size-4" />
-                Import Leads
-              </Button>
-            </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setImportJob(null);
+                    setImportError(null);
+                    setImportOpen((v) => !v);
+                  }}
+                >
+                  <Download className="size-4" aria-hidden />
+                  Import Leads
+                </Button>
+              </div>
 
             {importOpen ? (
               <div
@@ -1645,36 +1650,32 @@ export function MetaTableSheetsDialog({
                 </div>
               </div>
             ) : null}
+          </ConfigSection>
 
-            {managedRows > 0 ? (
-              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                <p className="text-xs font-medium text-destructive">
-                  Danger zone
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  Delete spreadsheet rows previously synced from this
-                  table. Only rows WhatsApp Max wrote are removed —
-                  your own content is never touched.
-                </p>
+          {managedRows > 0 ? (
+            <ConfigSection
+              title="Danger zone"
+              hint="Delete spreadsheet rows previously synced from this table. Only rows WhatsApp Max wrote are removed — your own content is never touched."
+            >
+              <div>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="mt-2"
                   onClick={cleanupTable}
                   disabled={busy === 'cleanup'}
                 >
                   {busy === 'cleanup' ? (
-                    <Loader2 className="size-4 animate-spin" />
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
                   ) : (
-                    <Trash2 className="size-4" />
+                    <Trash2 className="size-4" aria-hidden />
                   )}
                   Remove {managedRows} synced row{managedRows === 1 ? '' : 's'}
                 </Button>
               </div>
-            ) : null}
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+            </ConfigSection>
+          ) : null}
+        </div>
+      ) : null}
+    </ConfigDialog>
   );
 }

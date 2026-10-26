@@ -5,15 +5,12 @@ import { Loader2, Plus, Settings2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  ConfigDialog,
+  ConfigFooterActions,
+  ConfigSection,
+} from "./config-dialog";
 import {
   resolveDisplayServiceLabel,
   TRAVEL_CRM_SERVICE_LABELS,
@@ -246,32 +243,47 @@ export function TravelCrmSettings({
         type="button"
         variant="outline"
         size="sm"
-        className="h-8 text-sm"
+        className="h-9 shrink-0 text-sm"
         disabled={!flowId}
         onClick={() => setOpen(true)}
       >
-        <Settings2 className="h-4 w-4" />
+        <Settings2 className="h-4 w-4" aria-hidden />
         Travel CRM Settings
       </Button>
-      <Dialog open={open} onOpenChange={(v) => !v && setOpen(false)}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Travel CRM Settings</DialogTitle>
-            <DialogDescription>Flow: {flowName}</DialogDescription>
-          </DialogHeader>
-          <div className="max-h-[60vh] space-y-5 overflow-y-auto pr-1">
-            <div className="space-y-2">
-              <p className="text-foreground text-sm font-semibold">Travel CRM Defaults</p>
-              <p className="text-muted-foreground text-xs">
-                Default Services — preselected when creating a lead in Travel CRM.
-              </p>
+      <ConfigDialog
+        open={open}
+        onOpenChange={(v) => !v && setOpen(false)}
+        width="md"
+        icon={<Settings2 aria-hidden />}
+        title="Travel CRM Settings"
+        tableLine={`Flow: ${flowName}`}
+        description="Defaults apply to this flow only. Saving never changes existing leads."
+        loading={loading || lookupsLoading}
+        loadingText="Loading settings…"
+        error={error}
+        footer={
+          <ConfigFooterActions
+            onClose={() => setOpen(false)}
+            onSave={save}
+            saveLabel="Save"
+            saving={busy}
+            saveDisabled={busy || loading}
+          />
+        }
+      >
+        <div className="flex flex-col gap-5">
+          <section aria-label="Default services">
+            <ConfigSection
+              title="Travel CRM Defaults"
+              hint="Default Services — preselected when creating a lead in Travel CRM."
+            >
               {loading ? (
                 <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                   Loading…
                 </p>
               ) : (
-                <div className="grid gap-1.5" role="group" aria-label="Default services">
+                <div className="grid gap-1 sm:grid-cols-2" role="group" aria-label="Default services">
                   {TRAVEL_CRM_SERVICE_LABELS.map((label) => {
                     // Retired stored labels resolve to the current
                     // name, so previously saved selections keep
@@ -282,158 +294,141 @@ export function TravelCrmSettings({
                         label.toLowerCase(),
                     );
                     return (
-                      <label
-                        key={label}
-                        className="text-foreground flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-sm hover:bg-muted"
-                      >
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={() => toggle(label)}
-                          aria-label={label}
-                        />
-                        <span className="truncate">{label}</span>
-                      </label>
+                    <label
+                      key={label}
+                      className="text-foreground flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md border border-transparent px-2 py-1.5 text-sm transition-colors hover:bg-muted has-checked:border-primary/40 has-checked:bg-primary/5"
+                    >
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={() => toggle(label)}
+                        aria-label={label}
+                      />
+                      <span className="truncate">{label}</span>
+                    </label>
                     );
                   })}
                 </div>
               )}
-            </div>
-            <div className="space-y-2">
-              <p className="text-foreground text-sm font-semibold">Itinerary Defaults</p>
-              <p className="text-muted-foreground text-xs">
-                Prefilled in the Travel CRM lead dialog. Empty means no itinerary is
-                prefilled. Editing a lead never changes these defaults.
-              </p>
-              {loading ? (
-                <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading…
-                </p>
-              ) : lookupsLoading ? (
-                <p className="text-muted-foreground flex items-center gap-2 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading Travel CRM destinations…
-                </p>
-              ) : lookupsError ? (
-                <p role="alert" className="text-xs text-red-500">
-                  {lookupsError} Destinations come from Travel CRM — no options are
-                  shown until it loads.
-                </p>
-              ) : rows.length === 0 ? (
-                <div className="flex items-center justify-between gap-2 rounded-md border border-dashed p-3">
-                  <p className="text-muted-foreground text-xs">
-                    No itinerary defaults — leads start with an empty itinerary.
+            </ConfigSection>
+          </section>
+          <section aria-label="Itinerary defaults">
+            <ConfigSection
+              title="Itinerary Defaults"
+              hint="Prefilled in the Travel CRM lead dialog. Empty means no itinerary is prefilled. Editing a lead never changes these defaults."
+            >
+                {loading ? (
+                  <p className="text-muted-foreground flex items-center gap-2 text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    Loading…
                   </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setRows(addItineraryRow([]))}
-                  >
-                    <Plus className="h-4 w-4" />
-                    Add itinerary
-                  </Button>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {rows.map((row, i) => {
-                    // Stored values are stable Travel CRM IDs. When a
-                    // stored ID has no matching lookup option (stale or
-                    // archived master), show the "Select" placeholder
-                    // instead of a raw UUID — the stored value stays
-                    // intact in state and on save.
-                    const destinationValue = resolveSelectValue(destinations, row.destination);
-                    // Destination uses the shared country-grouped
-                    // selector (same component as the creation
-                    // dialog): groups appear when the lookup feed
-                    // carries country metadata, otherwise the flat
-                    // list renders exactly as before.
-                    return (
-                      <div
-                        key={i}
-                        className="grid grid-cols-[1fr_72px_auto] items-end gap-2"
-                      >
-                        <div className="grid gap-1">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor={`itin-dest-${i}`}
-                          >
-                            Destination
-                          </label>
-                          <ItineraryDestinationSelect
-                            value={destinationValue}
-                            options={destinations}
-                            inputId={`itin-dest-${i}`}
-                            onChange={(v) => setDestination(i, v ?? "")}
-                          />
-                        </div>
-                        <div className="grid gap-1">
-                          <label
-                            className="text-muted-foreground text-xs"
-                            htmlFor={`itin-nights-${i}`}
-                          >
-                            Nights
-                          </label>
-                          <Input
-                            id={`itin-nights-${i}`}
-                            aria-label="Nights"
-                            type="number"
-                            min={1}
-                            className="h-8"
-                            value={row.nights}
-                            onChange={(e) => setNights(i, e.target.value)}
-                            placeholder="4"
-                          />
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 px-2"
-                          onClick={() => setRows((prev) => removeItineraryRow(prev, i))}
-                          aria-label="Remove itinerary row"
+                ) : lookupsLoading ? (
+                  <p className="text-muted-foreground flex items-center gap-2 text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    Loading Travel CRM destinations…
+                  </p>
+                ) : lookupsError ? (
+                  <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-muted-foreground">
+                    {lookupsError} Destinations come from Travel CRM — no options are
+                    shown until it loads.
+                  </p>
+                ) : rows.length === 0 ? (
+                  <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border p-4 text-center sm:flex-row sm:items-center sm:justify-between sm:text-left">
+                    <p className="text-muted-foreground text-xs">
+                      No itinerary defaults — leads start with an empty itinerary.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => setRows(addItineraryRow([]))}
+                    >
+                      <Plus className="h-4 w-4" aria-hidden />
+                      Add itinerary
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {rows.map((row, i) => {
+                      // Stored values are stable Travel CRM IDs. When a
+                      // stored ID has no matching lookup option (stale or
+                      // archived master), show the "Select" placeholder
+                      // instead of a raw UUID — the stored value stays
+                      // intact in state and on save.
+                      const destinationValue = resolveSelectValue(destinations, row.destination);
+                      // Destination uses the shared country-grouped
+                      // selector (same component as the creation
+                      // dialog): groups appear when the lookup feed
+                      // carries country metadata, otherwise the flat
+                      // list renders exactly as before.
+                      return (
+                        <div
+                          key={i}
+                          className="grid grid-cols-[1fr_72px] items-end gap-2 sm:grid-cols-[1fr_72px_auto]"
                         >
-                          <Trash2 className="h-4 w-4" />
-                          Remove
-                        </Button>
-                      </div>
-                    );
-                  })}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setRows((prev) => addItineraryRow(prev))}
-                  >
-                    <Plus className="h-4 w-4" />
-                    Add More
-                  </Button>
-                </div>
-              )}
-            </div>
+                          <div className="grid gap-1">
+                            <label
+                              className="text-muted-foreground text-xs font-medium"
+                              htmlFor={`itin-dest-${i}`}
+                            >
+                              Destination
+                            </label>
+                            <ItineraryDestinationSelect
+                              value={destinationValue}
+                              options={destinations}
+                              inputId={`itin-dest-${i}`}
+                              onChange={(v) => setDestination(i, v ?? "")}
+                            />
+                          </div>
+                          <div className="grid gap-1">
+                            <label
+                              className="text-muted-foreground text-xs font-medium"
+                              htmlFor={`itin-nights-${i}`}
+                            >
+                              Nights
+                            </label>
+                            <Input
+                              id={`itin-nights-${i}`}
+                              aria-label="Nights"
+                              type="number"
+                              min={1}
+                              className="h-8"
+                              value={row.nights}
+                              onChange={(e) => setNights(i, e.target.value)}
+                              placeholder="4"
+                            />
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 sm:col-auto"
+                            onClick={() => setRows((prev) => removeItineraryRow(prev, i))}
+                            aria-label="Remove itinerary row"
+                          >
+                            <Trash2 className="h-4 w-4" aria-hidden />
+                            <span className="sm:hidden">Remove</span>
+                          </Button>
+                        </div>
+                      );
+                    })}
+                    <div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setRows((prev) => addItineraryRow(prev))}
+                      >
+                        <Plus className="h-4 w-4" aria-hidden />
+                        Add More
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </ConfigSection>
+            </section>
           </div>
-          {error !== null && (
-            <p role="alert" className="text-xs text-red-500">
-              {error}
-            </p>
-          )}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="button" disabled={busy || loading} onClick={save}>
-              {busy ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Saving…
-                </>
-              ) : (
-                "Save"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      </ConfigDialog>
     </>
   );
 }

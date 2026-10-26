@@ -4,19 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pause, Play, Plus, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -27,6 +26,59 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import {
+  ConfigDialog,
+  ConfigFooterActions,
+  ConfigSection,
+  ConfigStatusBadge,
+} from "./config-dialog";
+import { SearchableSelect } from "./searchable-select";
+
+/** Common IANA zones for quick picking; full list follows. */
+const COMMON_TIMEZONES = [
+  "UTC",
+  "Asia/Kolkata",
+  "Asia/Dubai",
+  "Asia/Singapore",
+  "Europe/London",
+  "Europe/Berlin",
+  "America/New_York",
+  "America/Chicago",
+  "America/Los_Angeles",
+  "Australia/Sydney",
+];
+
+function allTimezones(): string[] {
+  try {
+    const supported = (Intl as unknown as {
+      supportedValuesOf?: (kind: string) => string[];
+    }).supportedValuesOf;
+    if (typeof supported === "function") {
+      const zones = supported.call(Intl, "timeZone");
+      if (Array.isArray(zones) && zones.length > 0) return zones;
+    }
+  } catch {
+    // Fall through to the curated list below.
+  }
+  return COMMON_TIMEZONES;
+}
+
+/** "Paused until 29 Oct, 5:00 PM" in the table's zone (display only). */
+function formatPausedUntilFull(iso: string, timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      day: "numeric",
+      month: "short",
+      hour: "numeric",
+      minute: "2-digit",
+    }).formatToParts(new Date(iso));
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    return `${get("day")} ${get("month")}, ${get("hour")}:${get("minute")} ${get("dayPeriod")}`.replace("  ", " ");
+  } catch {
+    return iso;
+  }
+}
 
 /**
  * Per-table Lead Assignment settings (Meta Lead Ads tables and
@@ -146,6 +198,7 @@ export function TableAssignmentDialog({
   const [pauseScope, setPauseScope] = useState<"table" | "account">("table");
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRow[] | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const readJson = async (res: Response) => {
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -215,6 +268,25 @@ export function TableAssignmentDialog({
   const rosterById = useMemo(() => {
     return new Map(roster.map((m) => [m.user_id, m]));
   }, [roster]);
+
+  const timezoneOptions = useMemo(() => {
+    const zones = allTimezones();
+    const ordered = [
+      ...COMMON_TIMEZONES.filter((z) => zones.includes(z)),
+      ...zones.filter((z) => !COMMON_TIMEZONES.includes(z)),
+    ];
+    return ordered.map((z) => ({ value: z, label: z }));
+  }, []);
+
+  const rosterOptions = useMemo(
+    () =>
+      roster.map((m) => ({
+        value: m.user_id,
+        label: m.full_name?.trim() || m.email || m.user_id,
+        hint: m.role,
+      })),
+    [roster]
+  );
 
   const activeWeightTotal = useMemo(() => {
     return drafts
@@ -299,6 +371,7 @@ export function TableAssignmentDialog({
       return;
     }
     setBusy("save");
+    setSaveError(null);
     try {
       const json = (await readJson(
         await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment`, {
@@ -331,7 +404,9 @@ export function TableAssignmentDialog({
       }
       await load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save assignment settings.");
+      const message = err instanceof Error ? err.message : "Failed to save assignment settings.";
+      setSaveError(message);
+      toast.error(message);
     } finally {
       setBusy(null);
     }
@@ -381,125 +456,196 @@ export function TableAssignmentDialog({
     }
   };
 
+  const kindLabel = tableKind === "meta_lead_ads" ? "Meta Lead Ads table" : "Flow table";
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Assignment — {flowName ?? "this table"}</DialogTitle>
-          <DialogDescription>
-            {tableKind === "meta_lead_ads" ? "Meta Lead Ads table" : "Flow table"} · settings
-            apply to this table only. Assignment never rewrites existing owners.
-          </DialogDescription>
-        </DialogHeader>
+    <ConfigDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      width="xl"
+      icon={<UserPlus aria-hidden />}
+      title="Assignment"
+      tableLine={`${flowName ?? "This table"} · ${kindLabel}`}
+      description="Settings apply to this table only. Saving never rewrites existing lead owners."
+      status={
+        <ConfigStatusBadge tone={enabled ? "default" : "secondary"}>
+          {enabled ? "Automatic" : "Manual"}
+        </ConfigStatusBadge>
+      }
+      loading={loading}
+      loadingText="Loading assignment settings…"
+      error={saveError}
+      footer={
+        <ConfigFooterActions
+          onClose={() => onOpenChange(false)}
+          closeLabel="Cancel"
+          onSave={save}
+          saveLabel="Save Assignment Settings"
+          saving={busy === "save"}
+          saveDisabled={loading}
+        />
+      }
+    >
+      {!loading && (
+        <div className="flex flex-col gap-5">
+          <section aria-label="Automatic assignment">
+            <ConfigSection
+              title="Automatic assignment"
+              hint={
+                enabled
+                  ? "New leads are distributed to eligible assignees."
+                  : "Off — new leads stay unassigned until someone assigns them."
+              }
+              action={
+                <Switch
+                  checked={enabled}
+                  onCheckedChange={setEnabled}
+                  aria-label="Automatic assignment"
+                />
+              }
+            >
+              <div />
+            </ConfigSection>
+          </section>
 
-        {loading ? (
-          <p className="text-muted-foreground py-6 text-center text-sm">
-            Loading assignment settings…
-          </p>
-        ) : (
-          <div className="flex flex-col gap-4">
-            <Card>
-              <CardContent className="flex flex-col gap-3 pt-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">Automatic assignment</p>
-                    <p className="text-muted-foreground text-xs">
-                      {enabled
-                        ? "New leads are distributed to eligible assignees."
-                        : "New leads stay unassigned."}
-                    </p>
-                  </div>
-                  <Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Automatic assignment" />
+          <section aria-label="Distribution method">
+            <ConfigSection
+              title="Distribution method"
+              hint={
+                mode === "round_robin"
+                  ? "Leads go to each eligible assignee in turn."
+                  : "A paused assignee's share is redistributed across the remaining eligible assignees; shares always total 100% of the active pool."
+              }
+            >
+              <RadioGroup
+                value={mode}
+                onValueChange={(v) => {
+                  if (v === "round_robin" || v === "percentage") setMode(v);
+                }}
+                aria-label="Distribution method"
+                className="grid gap-2 sm:grid-cols-2"
+              >
+                <label
+                  htmlFor="assign-mode-rr"
+                  className={cn(
+                    "flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors",
+                    mode === "round_robin"
+                      ? "border-primary/60 bg-primary/5"
+                      : "border-border bg-card hover:bg-muted/50"
+                  )}
+                >
+                  <RadioGroupItem value="round_robin" id="assign-mode-rr" className="mt-0.5" />
+                  <span>
+                    <span className="block text-sm font-medium text-foreground">Round robin</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Equal rotation across everyone eligible.
+                    </span>
+                  </span>
+                </label>
+                <label
+                  htmlFor="assign-mode-pct"
+                  className={cn(
+                    "flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors",
+                    mode === "percentage"
+                      ? "border-primary/60 bg-primary/5"
+                      : "border-border bg-card hover:bg-muted/50"
+                  )}
+                >
+                  <RadioGroupItem value="percentage" id="assign-mode-pct" className="mt-0.5" />
+                  <span>
+                    <span className="block text-sm font-medium text-foreground">
+                      Percentage-based
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      Weighted shares; paused members drop out and the rest absorb their share.
+                    </span>
+                  </span>
+                </label>
+              </RadioGroup>
+            </ConfigSection>
+          </section>
+
+          <section aria-label="Timezone">
+            <ConfigSection
+              title="Timezone"
+              hint="Controls pause calculations (“Pause for today” ends at local midnight here) and how availability times are displayed."
+            >
+              <div className="flex w-full flex-col gap-1.5">
+                <Label htmlFor="assign-tz">Table timezone (IANA name)</Label>
+                <SearchableSelect
+                  value={timezoneOptions.some((o) => o.value === timezone) ? timezone : ""}
+                  options={timezoneOptions}
+                  onChange={(v) => setTimezone(v)}
+                  placeholder="Select a timezone…"
+                  searchPlaceholder="Search timezones…"
+                  emptyText="No matching timezone."
+                  ariaLabel="Table timezone"
+                  triggerClassName="h-9 font-mono text-[13px]"
+                />
+              </div>
+            </ConfigSection>
+          </section>
+
+          <section aria-label="WhatsApp notifications">
+            <ConfigSection
+              title="WhatsApp notifications"
+              hint="Separate from assignment ownership: these alerts notify assignees without changing who owns the lead. They send only when the template below is set, APPROVED, and the account sender is connected. Email alerts use SMTP."
+            >
+              <div className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor="assign-wa-template">WhatsApp template (optional)</Label>
+                  <Input
+                    id="assign-wa-template"
+                    value={templateName}
+                    onChange={(e) => setTemplateName(e.target.value)}
+                    placeholder="new_lead_assigned"
+                    className="h-9"
+                  />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5">
-                    <Label>Distribution method</Label>
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        variant={mode === "round_robin" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setMode("round_robin")}
-                      >
-                        Round robin
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={mode === "percentage" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setMode("percentage")}
-                      >
-                        Percentage
-                      </Button>
-                    </div>
-                    <p className="text-muted-foreground text-xs">
-                      {mode === "round_robin"
-                        ? "Leads go to each eligible assignee in turn."
-                        : "Paused assignees are skipped; their share is redistributed across the remaining eligible assignees."}
-                    </p>
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="assign-tz">Timezone (pause math + display)</Label>
-                    <Input
-                      id="assign-tz"
-                      value={timezone}
-                      onChange={(e) => setTimezone(e.target.value)}
-                      placeholder="UTC"
-                    />
-                    <p className="text-muted-foreground text-xs">
-                      IANA name, e.g. Asia/Kolkata. “Pause for today” ends at local midnight here.
-                    </p>
-                  </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="assign-wa-lang">Template language</Label>
+                  <Input
+                    id="assign-wa-lang"
+                    value={templateLanguage}
+                    onChange={(e) => setTemplateLanguage(e.target.value)}
+                    placeholder="en_US"
+                    className="h-9 max-w-48"
+                  />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="assign-wa-template">WhatsApp template (optional)</Label>
-                    <Input
-                      id="assign-wa-template"
-                      value={templateName}
-                      onChange={(e) => setTemplateName(e.target.value)}
-                      placeholder="new_lead_assigned"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="assign-wa-lang">Template language</Label>
-                    <Input
-                      id="assign-wa-lang"
-                      value={templateLanguage}
-                      onChange={(e) => setTemplateLanguage(e.target.value)}
-                      placeholder="en_US"
-                    />
-                  </div>
-                </div>
-                <p className="text-muted-foreground text-xs">
-                  WhatsApp alerts send only when the template is set, APPROVED, and the account
-                  sender is connected. Email alerts use SMTP.
+              </div>
+            </ConfigSection>
+          </section>
+
+          <section aria-label="Assignees">
+            <ConfigSection
+              title={`Assignees (${drafts.length})`}
+              hint={
+                mode === "percentage"
+                  ? `Active shares must total exactly 100% — current active total: ${activeWeightTotal}%.`
+                  : "Everyone listed takes turns receiving new leads while eligible."
+              }
+              action={
+                <Button type="button" variant="outline" size="sm" onClick={startAdd}>
+                  <Plus className="mr-1.5 size-4" aria-hidden /> Add assignee
+                </Button>
+              }
+            >
+              {weightError ? (
+                <p role="alert" className="text-xs font-medium text-destructive">
+                  {weightError}
                 </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardContent className="flex flex-col gap-3 pt-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium">
-                    Assignees ({drafts.length})
-                    {mode === "percentage" && drafts.some((d) => d.is_active) && (
-                      <span className={cn("ml-2 text-xs", weightError ? "text-destructive" : "text-muted-foreground")}>
-                        active total: {activeWeightTotal}%
-                      </span>
-                    )}
+              ) : null}
+              {drafts.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-3 py-5 text-center">
+                  <p className="text-sm font-medium text-foreground">No assignees yet</p>
+                  <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+                    Link a team member or add an external contact. New leads stay
+                    unassigned until someone is eligible.
                   </p>
-                  <Button type="button" variant="outline" size="sm" onClick={startAdd}>
-                    <Plus className="mr-1.5 size-4" /> Add assignee
-                  </Button>
                 </div>
-                {weightError && <p className="text-destructive text-xs">{weightError}</p>}
-                {drafts.length === 0 ? (
-                  <p className="text-muted-foreground text-xs">
-                    No assignees yet. Link a team member or add an external contact below. New
-                    leads stay unassigned until someone is eligible.
-                  </p>
-                ) : (
+              ) : (
+                <>
+                <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -544,20 +690,29 @@ export function TableAssignmentDialog({
                                 />
                               </TableCell>
                             )}
-                            <TableCell>
-                              {saved ? (
-                                <Badge variant={saved.available ? "default" : "secondary"}>
-                                  {saved.status_label}
-                                </Badge>
-                              ) : (
-                                <Badge variant="outline">Unsaved</Badge>
-                              )}
+                      <TableCell>
+                        {saved ? (
+                          <div className="flex flex-col items-start gap-1">
+                            <span className="flex items-center gap-1">
+                              <Badge variant={saved.available ? "default" : "secondary"}>
+                                {saved.available ? "Available" : saved.status_label}
+                              </Badge>
                               {!d.is_active && (
-                                <Badge variant="secondary" className="ml-1">
+                                <Badge variant="secondary">
                                   Inactive
                                 </Badge>
                               )}
-                            </TableCell>
+                            </span>
+                            {saved.paused_until && (
+                              <span className="text-[11px] tabular-nums text-muted-foreground">
+                                until {formatPausedUntilFull(saved.paused_until, timezone)}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <Badge variant="outline">Unsaved</Badge>
+                        )}
+                      </TableCell>
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
                                 <Button
@@ -603,30 +758,154 @@ export function TableAssignmentDialog({
                         );
                       })}
                     </TableBody>
-                  </Table>
+                    </Table>
+                  </div>
+                  <div className="flex flex-col gap-2 md:hidden">
+                    {drafts.map((d) => {
+                      const saved = payload?.assignees.find((a) => a.id === d.key);
+                      return (
+                        <div
+                          key={d.key}
+                          className={cn(
+                            "rounded-lg border border-border bg-card p-3",
+                            !d.is_active && "opacity-60"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium text-foreground">
+                                {d.display_name || "—"}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {d.user_id ? "Team member" : "External recipient"}
+                              </p>
+                            </div>
+                            {saved ? (
+                              <Badge variant={saved.available ? "default" : "secondary"} className="shrink-0">
+                                {saved.status_label}
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="shrink-0">
+                                Unsaved
+                              </Badge>
+                            )}
+                          </div>
+                          <dl className="mt-2 space-y-1 text-xs">
+                            <div className="flex gap-1.5">
+                              <dt className="w-16 shrink-0 text-muted-foreground">Contact</dt>
+                              <dd className="min-w-0 flex-1 truncate text-foreground">
+                                {[d.email, d.phone].filter(Boolean).join(" · ") || "—"}
+                              </dd>
+                            </div>
+                            {mode === "percentage" ? (
+                              <div className="flex items-center gap-1.5">
+                                <dt className="w-16 shrink-0 text-muted-foreground">Share</dt>
+                                <dd className="flex flex-1 items-center gap-1">
+                                  <Input
+                                    value={d.weight}
+                                    inputMode="numeric"
+                                    className="h-8 w-20"
+                                    aria-label={`Share percentage for ${d.display_name}`}
+                                    onChange={(e) =>
+                                      patchDraft(d.key, {
+                                        weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3),
+                                      })
+                                    }
+                                  />
+                                  <span className="text-muted-foreground">%</span>
+                                </dd>
+                              </div>
+                            ) : null}
+                            <div className="flex gap-1.5">
+                              <dt className="w-16 shrink-0 text-muted-foreground">Alerts</dt>
+                              <dd className="flex-1 text-foreground">
+                                {d.notify_email ? "Email on" : "Email off"} ·{" "}
+                                {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
+                              </dd>
+                            </div>
+                          </dl>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={() => patchDraft(d.key, { is_active: !d.is_active })}
+                            >
+                              {d.is_active ? "Deactivate" : "Activate"}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={() => startEdit(d)}
+                            >
+                              Edit
+                            </Button>
+                            {saved ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() => setPauseFor(saved.id)}
+                              >
+                                {saved.paused_until ? "Resume / extend" : "Pause"}
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs text-destructive"
+                              onClick={() => removeDraft(d.key)}
+                              aria-label={`Remove ${d.display_name || "assignee"}`}
+                            >
+                              <Trash2 className="size-4" aria-hidden /> Remove
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  </>
                 )}
+              </ConfigSection>
+            </section>
 
-                {editingKey && (
+                {(editingKey || pauseFor) && (
+                  <section aria-label="Assignee editor">
+                    <ConfigSection
+                      title={pauseFor ? "Pause controls" : editingKey === "__new__" ? "Add assignee" : "Edit assignee"}
+                      hint={
+                        pauseFor
+                          ? "Pauses take effect immediately for new leads. Existing ownership never changes."
+                          : "Link a team member for ownership, or enter contact details for a notification-only recipient."
+                      }
+                    >
+                      <div className="flex flex-col gap-3">
+                  {editingKey && (
                   <Card className="border-dashed">
                     <CardContent className="flex flex-col gap-3 pt-4">
                       <p className="text-sm font-medium">
                         {editingKey === "__new__" ? "Add assignee" : "Edit assignee"}
                       </p>
                       <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="flex flex-col gap-1.5">
+                        <div className="flex flex-col gap-1.5 sm:col-span-2">
                           <Label>Link team member (optional)</Label>
-                          <select
-                            className="border-input bg-background rounded-md border px-3 py-2 text-sm"
+                          <SearchableSelect
                             value={form.user_id ?? ""}
-                            onChange={(e) => linkMember(e.target.value)}
-                          >
-                            <option value="">External contact (no login)</option>
-                            {roster.map((m) => (
-                              <option key={m.user_id} value={m.user_id}>
-                                {m.full_name || m.email || m.user_id} · {m.role}
-                              </option>
-                            ))}
-                          </select>
+                            options={[
+                              { value: "", label: "External contact (no login)" },
+                              ...rosterOptions,
+                            ]}
+                            onChange={(v) => linkMember(v)}
+                            placeholder="External contact (no login)"
+                            searchPlaceholder="Search team members…"
+                            emptyText="No team members match."
+                            ariaLabel="Link team member"
+                          />
                         </div>
                         <div className="flex flex-col gap-1.5">
                           <Label>Display name</Label>
@@ -698,13 +977,14 @@ export function TableAssignmentDialog({
                           <p className="text-sm font-medium">
                             {target ? `Pause ${target.display_name}` : "Pause assignee"}
                           </p>
-                          {target?.pause_reason && (
-                            <p className="text-muted-foreground text-xs">
-                              Current: {target.status_label}
-                              {target.pause_reason ? ` — ${target.pause_reason}` : ""} (
-                              {target.pause_scope === "account" ? "whole account" : "this table"})
-                            </p>
-                          )}
+                      {target?.paused_until ? (
+                        <p className="text-muted-foreground text-xs">
+                          Current: Paused until{" "}
+                          {formatPausedUntilFull(target.paused_until, timezone)}
+                          {target.pause_reason ? ` — ${target.pause_reason}` : ""} (
+                          {target.pause_scope === "account" ? "whole account" : "this table"})
+                        </p>
+                      ) : null}
                           <div className="flex flex-wrap gap-2">
                             {(
                               [
@@ -801,25 +1081,41 @@ export function TableAssignmentDialog({
                       </Card>
                     );
                   })()}
-              </CardContent>
-            </Card>
+                    </div>
+                  </ConfigSection>
+                </section>
+              )}
 
-            <Card>
-              <CardContent className="flex flex-col gap-2 pt-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium">Recent alert deliveries</p>
-                  {!showNotifications ? (
-                    <Button type="button" variant="outline" size="sm" onClick={loadNotifications}>
-                      Show deliveries
-                    </Button>
+          <section aria-label="Alert deliveries">
+            <Accordion
+              value={showNotifications ? ["deliveries"] : []}
+              onValueChange={(v: unknown) => {
+                const open = Array.isArray(v) && v.includes("deliveries");
+                setShowNotifications(open);
+                if (open && notifications === null) void loadNotifications();
+              }}
+            >
+              <AccordionItem value="deliveries" className="rounded-lg border border-border bg-card/50 px-3">
+                <AccordionTrigger className="py-2.5 text-sm font-semibold hover:no-underline">
+                  Recent alert deliveries
+                  {notifications && notifications.length > 0 ? (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      · {notifications.length} shown
+                    </span>
                   ) : null}
-                </div>
-                {showNotifications &&
-                  (notifications === null ? (
-                    <p className="text-muted-foreground text-xs">Loading…</p>
+                </AccordionTrigger>
+                <AccordionContent className="pb-3">
+                  {!showNotifications && notifications === null ? (
+                    <p className="text-xs text-muted-foreground">
+                      Expand to load the latest email and WhatsApp delivery attempts for this
+                      table, with per-row status and error details.
+                    </p>
+                  ) : notifications === null ? (
+                    <p className="text-xs text-muted-foreground">Loading…</p>
                   ) : notifications.length === 0 ? (
-                    <p className="text-muted-foreground text-xs">No alerts sent yet.</p>
+                    <p className="text-xs text-muted-foreground">No alerts sent yet.</p>
                   ) : (
+                    <div className="overflow-x-auto">
                     <Table>
                       <TableHeader>
                         <TableRow>
@@ -833,7 +1129,7 @@ export function TableAssignmentDialog({
                         {notifications.slice(0, 20).map((n) => (
                           <TableRow key={n.id}>
                             <TableCell className="text-xs">{n.channel}</TableCell>
-                            <TableCell className="text-xs">
+                            <TableCell className="max-w-40 truncate text-xs">
                               {n.to_email || n.to_phone || "—"}
                             </TableCell>
                             <TableCell>
@@ -853,22 +1149,15 @@ export function TableAssignmentDialog({
                         ))}
                       </TableBody>
                     </Table>
-                  ))}
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-          <Button type="button" disabled={busy === "save" || loading} onClick={save}>
-            {busy === "save" ? "Saving…" : "Save assignment settings"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+                    </div>
+                  )}
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          </section>
+        </div>
+      )}
+    </ConfigDialog>
   );
 }
 

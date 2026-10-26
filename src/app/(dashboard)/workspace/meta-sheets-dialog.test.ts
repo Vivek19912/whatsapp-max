@@ -20,16 +20,26 @@ const dialog = () =>
     `${root}/src/components/workspace/meta-table-sheets-dialog.tsx`,
     'utf8'
   );
+const header = () =>
+  readFileSync(
+    `${root}/src/components/workspace/workspace-header.tsx`,
+    'utf8'
+  );
 
 describe('workspace page — per-table Google Sheets action', () => {
   it('shows Configure Sheet only for Meta tables and only for the owner', () => {
     const src = page();
-    expect(src).toContain('Configure Sheet');
-    // Owner-only: admins, agents, and viewers never see the sheet
-    // actions (the APIs enforce the same rule server-side).
-    expect(src).toContain('isMetaTable && isOwner && flowId');
+    // Owner-only gate lives on the page toolbar wiring (the APIs
+    // enforce the same rule server-side); the shared toolbar
+    // component renders the labeled actions.
+    expect(src).toContain('isOwner && flowId');
     expect(src).not.toContain('isMetaTable && canEditSettings && flowId');
     expect(src).toContain('setSheetDialogOpen(true)');
+    expect(src).toContain("key: 'sheet-config'");
+    expect(src).toContain("label: 'Configure Sheet'");
+    expect(src).toContain("label: 'Auto-send WhatsApp'");
+    expect(header()).toContain('WorkspaceToolbar');
+    expect(header()).toContain('More actions');
   });
 
   it('refreshes the Open Sheet URL when the dialog closes (no stale sheet)', () => {
@@ -56,27 +66,35 @@ describe('workspace page — per-table Google Sheets action', () => {
     expect(dialogSrc).toContain('/sheets/tables/${encodeURIComponent(flowId)}/config');
   });
 
-  it('groups Configure Sheet and Open Sheet in one compact right-aligned group', () => {
+  it('groups Configure Sheet and Open Sheet in one compact toolbar group', () => {
+    // The shared toolbar keeps all actions in one row with a
+    // single 8px gap and collapses extras into a "More actions"
+    // menu on small screens — no wrapping or overlap.
+    const toolbar = header();
+    expect(toolbar).toContain('WorkspaceToolbar');
+    expect(toolbar).toContain('gap-2');
+    expect(toolbar).toContain('More actions');
+    expect(toolbar).toContain('ToolbarButton');
+    // Styling, icons, and labels are applied per action.
+    expect(toolbar).toContain('WS_ACTION_BUTTON');
+    expect(toolbar).toContain('DropdownMenu');
     const src = page();
-    // One wrapping group with a single 8px gap (gap-2) holds both
-    // buttons together — no excessive separation, still responsive.
-    expect(src).toContain('<div className="flex shrink-0 items-center gap-2">');
-    const groupIdx = src.indexOf('<div className="flex shrink-0 items-center gap-2">');
-    const configIdx = src.indexOf('Configure Sheet');
-    const openIdx = src.indexOf('Open Sheet');
-    expect(configIdx).toBeGreaterThan(groupIdx);
+    const configIdx = src.indexOf("label: 'Configure Sheet'");
+    const openIdx = src.indexOf("label: 'Open Sheet'");
+    expect(configIdx).toBeGreaterThan(-1);
     expect(openIdx).toBeGreaterThan(configIdx);
-    // Styling, icons, and labels are unchanged.
     expect(src).toContain('Table2');
     expect(src).toContain('ExternalLink');
   });
 
   it('shows Open Sheet only for the owner with this table’s saved URL, in a new tab', () => {
     const src = page();
-    expect(src).toContain('Open Sheet');
-    // Same owner + Meta + table gate as Configure Sheet (which
-    // remains as the path when no spreadsheet is configured).
-    expect(src).toContain('isMetaTable && isOwner && flowId');
+    expect(src).toContain("label: 'Open Sheet'");
+    // The open-sheet action is secondary-only and gated on the
+    // table's own saved spreadsheet URL (Configure Sheet remains
+    // the path when no spreadsheet is configured).
+    expect(src).toContain("key: 'open-sheet'");
+    expect(src).toContain('isMetaTable && sheetUrl');
     expect(src).toContain('setSheetDialogOpen(true)');
     // Per-table saved URL: refetched when the selected table
     // changes (previous URL cleared first), resolved through the
@@ -84,13 +102,12 @@ describe('workspace page — per-table Google Sheets action', () => {
     expect(src).toContain('setSheetUrl(null)');
     expect(src).toContain('/sheets/tables/${encodeURIComponent(flowId)}/config');
     expect(src).toContain('resolveSpreadsheetOpenUrl');
-    expect(src).toContain("{sheetUrl ? (");
     expect(src).toContain("window.open(sheetUrl, '_blank', 'noopener,noreferrer')");
-    // The button lives inside the Meta-only branch: the last
-    // isMetaTable gate before it guards both sheet actions.
-    const buttonIdx = src.indexOf('Open Sheet');
-    const metaGateIdx = src.lastIndexOf('isMetaTable', buttonIdx);
-    expect(metaGateIdx).toBeGreaterThan(-1);
+    // Meta tables get sheet actions, Flow tables do not: the
+    // actions list branches on the table kind.
+    const sheetIdx = src.indexOf("key: 'sheet-config'");
+    const kindIdx = src.lastIndexOf('isMetaTable', sheetIdx);
+    expect(kindIdx).toBeGreaterThan(-1);
   });
 
   it("keys the dialog by flow so switching tables loads that table's settings", () => {
@@ -103,13 +120,14 @@ describe('workspace page — per-table Google Sheets action', () => {
 
   it('keeps Flow Tables exactly as before (no sheet action, no gating change)', () => {
     const src = page();
-    // The completion-tabs gate is untouched; the sheet button lives
-    // inside the isMetaTable branch only.
+    // The completion-tabs gate is untouched; sheet actions are
+    // offered only inside the Meta branch of the toolbar config.
     expect(src).toContain('{isMetaTable ? null : (');
-    expect(src).toContain('Configure Sheet');
-    const buttonIdx = src.indexOf('Configure Sheet');
+    expect(src).toContain("key: 'sheet-config'");
+    const buttonIdx = src.indexOf("key: 'sheet-config'");
     const metaGateIdx = src.lastIndexOf('isMetaTable', buttonIdx);
     expect(metaGateIdx).toBeGreaterThan(-1);
+    expect(src).toContain("label: 'Configure Sheet'");
   });
 });
 
@@ -324,8 +342,10 @@ describe('workspace dialog — per-table sheets configuration', () => {
     expect(saveFn).toContain('onOpenChange(false)');
     // Validation errors return before the request — dialog stays open.
     expect(saveFn).toContain('Paste a Google Sheets URL or spreadsheet ID.');
-    // Duplicate submissions are blocked while saving.
-    expect(src).toContain("disabled={busy === 'save'}");
+    // The shared footer passes the saving state through and blocks
+    // duplicate submissions while the save request is in flight.
+    expect(src).toContain('saving={busy === ');
+    expect(src).toContain('saveLabel="Save Configuration"');
     for (const other of [
       'function startImport()',
       'function createSpreadsheet()',
@@ -336,7 +356,11 @@ describe('workspace dialog — per-table sheets configuration', () => {
       const start = src.indexOf(other);
       expect(start).toBeGreaterThan(-1);
       const nextFn = src.indexOf('\n  function ', start + 1);
-      const body = nextFn === -1 ? src.slice(start) : src.slice(start, nextFn);
+      // The shared footer (rendered after all handlers) owns the
+      // Close button — handler bodies must never close the dialog.
+      const renderStart = src.indexOf('<ConfigDialog');
+      const end = nextFn === -1 ? renderStart : Math.min(nextFn, renderStart);
+      const body = src.slice(start, end);
       expect(body).not.toContain('onOpenChange(false)');
     }
   });

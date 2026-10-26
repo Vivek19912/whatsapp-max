@@ -593,30 +593,36 @@ describe("uniqueness beyond the palette (overflow ring)", () => {
   });
 });
 
-describe("taller headers, sticky intact, functionality intact", () => {
+describe("compact headers, sticky intact, functionality intact", () => {
   const root = process.cwd();
   const page = readFileSync(`${root}/src/app/(dashboard)/workspace/page.tsx`, "utf8");
 
-  it("headers are taller, bold, and vertically stuck (no pinned columns)", () => {
-    // 64px sits inside the 58–64px prominent-header band.
-    expect(page).toContain("h-16");
-    expect(page).toContain("text-[15px]");
-    expect(page).toContain("font-bold");
+  it("headers are compact, semibold, and vertically stuck (no pinned columns)", () => {
+    // 44px compact headers keep the sticky grid while giving rows
+    // room: density over prominence on the lead work surface.
+    expect(page).toContain("h-11");
+    expect(page).toContain("text-[13px]");
+    expect(page).toContain("font-semibold");
     expect(page).toContain("sticky top-0");
     expect(page).not.toContain("resolveStickyLayouts(");
     expect(page).not.toContain("stickyLayouts");
   });
 
-  it("workspace uses DM Sans locally with a larger type scale", () => {
+  it("workspace uses DM Sans locally with a restrained type scale", () => {
     // Scoped to the Workspace page only — the app font system is untouched.
     // The face is vendored and loaded through next/font/local so builds
-    // never depend on Google Fonts.
+    // never depend on Google Fonts. The title lives in the shared page
+    // header component now (text-xl semibold, compact 13px grid type).
+    const header = readFileSync(
+      `${root}/src/components/workspace/workspace-header.tsx`,
+      "utf8"
+    );
     expect(page).toContain("localFont");
     expect(page).toContain("dm-sans-latin-wght-normal.woff2");
     expect(page).toContain("dmSans.className");
-    expect(page).toContain("text-[30px]");
-    // Prominent headers: 64px, 15–16px, weight 700.
-    expect(page).toContain("text-[15px] font-bold");
+    expect(header).toContain("text-xl font-semibold");
+    // Compact headers: 44px, 13px, weight 600.
+    expect(page).toContain("text-[13px] font-semibold");
   });
 
   it("every header paints via the shared positional resolver", () => {

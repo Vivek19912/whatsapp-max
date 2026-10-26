@@ -5,17 +5,16 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { ExternalLink, Inbox, MessageCircle, Plus, Search, Table2, UserPlus } from 'lucide-react';
+import { ExternalLink, Inbox, MessageCircle, Plus, Table2, UserPlus } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+  WorkspacePageHeader,
+  WorkspaceSearchField,
+  WorkspaceTableSelector,
+  WorkspaceToolbar,
+} from '@/components/workspace/workspace-header';
+import { WS_CONTROL_BUTTON } from '@/components/workspace/workspace-tokens';
 import {
   Sheet,
   SheetContent,
@@ -56,7 +55,9 @@ import { FlowAnswerCell } from '@/components/workspace/flow-answer-cell';
 import { TravelCrmSettings } from '@/components/workspace/travel-crm-settings';
 import { CustomCell } from '@/components/workspace/custom-cell';
 import {
+  ActiveFilterChips,
   WorkspaceFilters,
+  type ActiveColumnSectionKey,
   type AppliedDateFilter,
 } from '@/components/workspace/workspace-filters';
 import { ColumnResizeHandle } from '@/components/workspace/column-resize-handle';
@@ -1107,14 +1108,6 @@ export default function WorkspacePage() {
     },
     [requestKey, appliedAssignee, customFields, reloadTable]
   );
-  // Closed-trigger label: Base UI falls back to the raw value when
-  // the selected item's text isn't resolved, which leaked the flow
-  // UUID — always render the matched name explicitly instead. An
-  // unmatched id (stale selection) shows the safe fallback, never
-  // the UUID; with no selection yet the placeholder shows.
-  const activeFlowLabel =
-    flowId == null ? undefined : flowDisplayName(activeFlowName);
-
   // UI-only: the Status column is hidden — the Completed/Incomplete
   // tabs already communicate classification. The column stays in the
   // payload (drawer badges, types, API untouched).
@@ -1509,20 +1502,85 @@ export default function WorkspacePage() {
   }, [flowId, rowActionPending, hiddenRows, markRowPending, reloadRowPrefs, reloadTable]);
 
   return (
-    <div className={cn('space-y-5', dmSans.className)}>
-      <div>
-        <h1 className="text-foreground text-[30px] font-bold tracking-tight">
-          Workspace
-        </h1>
-        {/* Meta Lead Ads tables hide this subtitle; Flow Tables
-            keep it exactly as before. */}
-        {payload?.meta.kind === 'meta_lead_ads' ? null : (
-          <p className="text-muted-foreground mt-1 text-sm">
-            One live table per flow — every run, completed or not.
-          </p>
-        )}
-      </div>
-
+    <div className={cn('space-y-4', dmSans.className)}>
+      <WorkspacePageHeader
+        subtitle={
+          /* Meta Lead Ads tables hide this subtitle; Flow Tables
+             keep it exactly as before. */
+          payload?.meta.kind === 'meta_lead_ads'
+            ? undefined
+            : 'One live table per flow — every run, completed or not.'
+        }
+        kindLabel={
+          payload?.meta.kind === 'meta_lead_ads'
+            ? 'Meta Lead Ads'
+            : payload
+              ? 'Flow'
+              : null
+        }
+        selector={
+          flows !== null && flows.length > 0 ? (
+            <WorkspaceTableSelector
+              flows={flows}
+              flowId={flowId}
+              onSelect={selectFlow}
+              wide={isMetaTable}
+              displayName={flowDisplayName}
+            />
+          ) : null
+        }
+        toolbar={
+          isOwner && flowId ? (
+            <WorkspaceToolbar
+              primary={
+                isMetaTable
+                  ? [
+                      {
+                        key: 'sheet-config',
+                        label: 'Configure Sheet',
+                        icon: Table2,
+                        onClick: () => setSheetDialogOpen(true),
+                      },
+                      {
+                        key: 'wa-autosend',
+                        label: 'Auto-send WhatsApp',
+                        icon: MessageCircle,
+                        onClick: () => setWhatsappDialogOpen(true),
+                      },
+                      {
+                        key: 'assignment',
+                        label: 'Assignment',
+                        icon: UserPlus,
+                        onClick: () => setAssignmentDialogOpen(true),
+                      },
+                    ]
+                  : [
+                      {
+                        key: 'assignment',
+                        label: 'Assignment',
+                        icon: UserPlus,
+                        onClick: () => setAssignmentDialogOpen(true),
+                      },
+                    ]
+              }
+              secondary={
+                isMetaTable && sheetUrl
+                  ? [
+                      {
+                        key: 'open-sheet',
+                        label: 'Open Sheet',
+                        icon: ExternalLink,
+                        ariaLabel: "Open this table's spreadsheet in a new tab",
+                        onClick: () =>
+                          window.open(sheetUrl, '_blank', 'noopener,noreferrer'),
+                      },
+                    ]
+                  : []
+              }
+            />
+          ) : null
+        }
+      />
       {flows === null ? (
         <Skeleton className="h-10 w-72" />
       ) : flowsError ? (
@@ -1541,159 +1599,34 @@ export default function WorkspacePage() {
         />
       ) : (
         <>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <Select value={flowId ?? ''} onValueChange={selectFlow}>
-              <SelectTrigger
-                className={
-                  isMetaTable
-                    ? // Meta-only: long Instant Form names need room.
-                      // 24rem (~384px) on desktop, capped at the
-                      // container so nothing overflows; full width
-                      // on small screens.
-                      "border-border bg-card w-full sm:w-[min(24rem,100%)]"
-                    : "border-border bg-card w-full sm:w-72"
-                }
-                aria-label="Select flow"
-              >
-                <SelectValue placeholder="Select Flow">
-                  {isMetaTable && activeFlowLabel ? (
-                    // Ellipsis + native tooltip when the viewport
-                    // still forces truncation. min-w-0 lets the
-                    // label actually shrink inside the flex value.
-                    <span className="block min-w-0 truncate" title={activeFlowLabel}>
-                      {activeFlowLabel}
-                    </span>
-                  ) : (
-                    activeFlowLabel
-                  )}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent
-                className={
-                  isMetaTable
-                    ? "max-w-[calc(100vw-2rem)]"
-                    : undefined
-                }
-              >
-                {flows.map((f) => (
-                  <SelectItem
-                    key={f.id}
-                    value={f.id}
-                    title={isMetaTable ? flowDisplayName(f.name) : undefined}
-                    className={
-                      isMetaTable
-                        // Let long option names ellipsize inside the
-                        // (trigger-width) menu instead of clipping.
-                        // shrink-0 on the item text must be overridden
-                        // or flex refuses to shrink and no ellipsis
-                        // appears; the arbitrary variant outranks it.
-                        ? "[&>span]:min-w-0 [&>span]:shrink [&>span]:truncate"
-                        : undefined
-                    }
-                  >
-                    {flowDisplayName(f.name)}
-                  </SelectItem>
-                ))}
-                </SelectContent>
-              </Select>
-              {/* Meta Lead Ads tables get a per-table Google Sheets
-                  action here. Flow Tables keep exactly what they had
-                  (no sheet action is rendered for them). */}
-              {/* Owner-only sheet actions, grouped compactly: one
-                  right-aligned group with a single 8px gap, so the
-                  buttons always sit together. Admins, agents, and
-                  viewers never see either button (the APIs enforce
-                  the same owner rule server-side). */}
-              {isMetaTable && isOwner && flowId ? (
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setSheetDialogOpen(true)}
-                  >
-                    <Table2 className="mr-1.5 size-4" />
-                    Configure Sheet
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setWhatsappDialogOpen(true)}
-                  >
-                    <MessageCircle className="mr-1.5 size-4" />
-                    Auto-send WhatsApp
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setAssignmentDialogOpen(true)}
-                  >
-                    <UserPlus className="mr-1.5 size-4" />
-                    Assignment
-                  </Button>
-                  {/* This table's own saved spreadsheet only — the
-                      URL is refetched per selected table above, and
-                      the button renders solely with a valid URL.
-                      Without one, the configuration dialog is the path. */}
-                  {sheetUrl ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      aria-label="Open this table's spreadsheet in a new tab"
-                      onClick={() =>
-                        window.open(sheetUrl, '_blank', 'noopener,noreferrer')
-                      }
-                    >
-                      <ExternalLink className="mr-1.5 size-4" />
-                      Open Sheet
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
-              {/* Flow Tables get their own per-table Assignment
-                  action here. Owner-only (the APIs enforce the same
-                  rule server-side); Flow Tables never see the
-                  Meta-only sheet actions above. */}
-              {!isMetaTable && isOwner && flowId ? (
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setAssignmentDialogOpen(true)}
-                  >
-                    <UserPlus className="mr-1.5 size-4" />
-                    Assignment
-                  </Button>
-                </div>
-              ) : null}
-              {/* Meta Lead Ads tables show one unified table (view=all),
+          {/* Meta Lead Ads tables show one unified table (view=all),
               so the Completed/Incomplete tabs are hidden here.
               Flow Tables keep the tabs exactly as before. */}
-            {isMetaTable ? null : (
-              <div
-                className="flex items-center gap-1.5"
-                role="tablist"
-                aria-label="Completion filter"
-              >
-                {VIEWS.map((v) => (
-                  <Button
-                    key={v.id}
-                    role="tab"
-                    aria-selected={view === v.id}
-                    variant={view === v.id ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => selectView(v.id)}
-                    className={cn(
-                      'h-8 rounded-full px-3.5 text-sm font-medium',
-                      view !== v.id &&
-                        'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
-                    )}
-                  >
-                    {v.label}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </div>
+          {isMetaTable ? null : (
+            <div
+              className="flex items-center gap-1.5"
+              role="tablist"
+              aria-label="Completion filter"
+            >
+              {VIEWS.map((v) => (
+                <Button
+                  key={v.id}
+                  role="tab"
+                  aria-selected={view === v.id}
+                  variant={view === v.id ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => selectView(v.id)}
+                  className={cn(
+                    'h-8 rounded-full px-3.5 text-sm font-medium',
+                    view !== v.id &&
+                      'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
+                  )}
+                >
+                  {v.label}
+                </Button>
+              ))}
+            </div>
+          )}
 
           {payload?.meta.kind === 'meta_lead_ads' ? null : payload?.meta.completionNodeId ? (
             <p className="text-muted-foreground text-xs">
@@ -1724,73 +1657,99 @@ export default function WorkspacePage() {
             )
           )}
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="relative w-full sm:max-w-sm">
-              <Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name or phone…"
-                className="pl-9"
-                aria-label="Search table"
-              />
-            </div>
-            <div className="flex items-center gap-2 sm:ml-auto">
-              <WorkspaceFilters
-                members={teamMembers}
-                appliedDate={appliedDate}
-                appliedAssignee={appliedAssignee}
-                appliedColumns={appliedColumns}
-                columnOptions={columnFilterOptions}
-                onApply={applyFilters}
-              />
-              <ColumnsMenu
-                flowId={flowId}
-                flowColumns={payload?.columns ?? []}
-                customFields={customFieldsScoped}
-                hiddenIds={visibility.hiddenIds}
-                onToggleVisibility={visibility.toggle}
-                onShowAll={visibility.showAll}
-                onReset={visibility.reset}
-                onEditField={(f) => {
-                  setEditingField(f);
-                  setAddColumnOpen(true);
-                }}
-                onChanged={reloadTable}
-                headerColors={headerColors}
-                onSaveHeaderColor={handleSaveHeaderColor}
-                canCustomizeColors={canSendMessages}
-                headerColorMap={headerMap}
-              />
-              {canSendMessages && (
-                <HiddenRowsMenu
-                  hidden={hiddenRows}
-                  pendingIds={rowActionPending}
-                  restoreAllPending={rowActionPending.has('__all__')}
-                  onRestore={handleRestoreRow}
-                  onRestoreAll={handleRestoreAllHidden}
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+              <div className="min-w-0 flex-1 lg:max-w-sm">
+                <WorkspaceSearchField
+                  value={search}
+                  onChange={setSearch}
                 />
-              )}
-              {canEditSettings && (
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => {
-                    setEditingField(null);
+              </div>
+              {/* Table utilities: wrap cleanly on small screens without ever
+                  scrolling the page itself sideways (the grid keeps its own
+                  scroll viewport). All controls share one h-9 height. */}
+              <div className="flex flex-wrap items-center gap-2 lg:ml-auto lg:justify-end">
+                <WorkspaceFilters
+                  members={teamMembers}
+                  appliedDate={appliedDate}
+                  appliedAssignee={appliedAssignee}
+                  appliedColumns={appliedColumns}
+                  columnOptions={columnFilterOptions}
+                  onApply={applyFilters}
+                />
+                <ColumnsMenu
+                  flowId={flowId}
+                  flowColumns={payload?.columns ?? []}
+                  customFields={customFieldsScoped}
+                  hiddenIds={visibility.hiddenIds}
+                  onToggleVisibility={visibility.toggle}
+                  onShowAll={visibility.showAll}
+                  onReset={visibility.reset}
+                  onEditField={(f) => {
+                    setEditingField(f);
                     setAddColumnOpen(true);
                   }}
-                  className="h-8 text-sm"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add Column
-                </Button>
-              )}
-              <TravelCrmSettings
-                key={flowId ?? 'no-flow'}
-                flowId={flowId}
-                flowName={flowDisplayName(activeFlowName)}
-              />
+                  onChanged={reloadTable}
+                  headerColors={headerColors}
+                  onSaveHeaderColor={handleSaveHeaderColor}
+                  canCustomizeColors={canSendMessages}
+                  headerColorMap={headerMap}
+                />
+                {canSendMessages && (
+                  <HiddenRowsMenu
+                    hidden={hiddenRows}
+                    pendingIds={rowActionPending}
+                    restoreAllPending={rowActionPending.has('__all__')}
+                    onRestore={handleRestoreRow}
+                    onRestoreAll={handleRestoreAllHidden}
+                  />
+                )}
+                {canEditSettings && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setEditingField(null);
+                      setAddColumnOpen(true);
+                    }}
+                    className={cn(WS_CONTROL_BUTTON, 'shrink-0 border-primary/30 bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground')}
+                  >
+                    <Plus className="h-4 w-4" aria-hidden />
+                    Add Column
+                  </Button>
+                )}
+                <TravelCrmSettings
+                  key={flowId ?? 'no-flow'}
+                  flowId={flowId}
+                  flowName={flowDisplayName(activeFlowName)}
+                />
+              </div>
             </div>
+            {hasActiveWorkspaceFilters({
+              dateRange: appliedDateRange,
+              assignee: appliedAssignee,
+              columns: appliedColumns,
+            }) ? (
+              <ActiveFilterChips
+                date={appliedDate}
+                assignee={appliedAssignee}
+                columns={appliedColumns}
+                members={teamMembers}
+                onClearDate={() => applyFilters(null, appliedAssignee, appliedColumns)}
+                onClearAssignee={() => applyFilters(appliedDate, { type: 'all' }, appliedColumns)}
+                onClearColumn={(section: ActiveColumnSectionKey) =>
+                  applyFilters(appliedDate, appliedAssignee, {
+                    ...appliedColumns,
+                    callStatus: section === 'callStatus' ? [] : appliedColumns.callStatus,
+                    callsTried: section === 'callsTried' ? null : appliedColumns.callsTried,
+                    followUpStatus: section === 'followUpStatus' ? [] : appliedColumns.followUpStatus,
+                    lastContact: section === 'lastContact' ? null : appliedColumns.lastContact,
+                    nextFollowUp: section === 'nextFollowUp' ? null : appliedColumns.nextFollowUp,
+                  })
+                }
+                onClearAll={() => applyFilters(null, { type: 'all' }, emptyColumnFilters())}
+              />
+            ) : null}
           </div>
 
           {tableError ? (
@@ -1860,7 +1819,7 @@ export default function WorkspacePage() {
                       )}
                       {rowVisible && (
                       <TableHead
-                        className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold last:border-r-0"
+                        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
                         style={headStyleAt(0)}
                       >
                         No.
@@ -1902,11 +1861,11 @@ export default function WorkspacePage() {
                           c.system && c.key === 'phone';
                         return (
                           <Fragment key={flowColumnRenderKey(c)}>
-                            <TableHead
-                              key={flowColumnRenderKey(c)}
-                              className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
-                              style={headStyleAt(headerIdx)}
-                            >
+                    <TableHead
+                      key={flowColumnRenderKey(c)}
+                      className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                      style={headStyleAt(headerIdx)}
+                    >
                               {renamable ? (
                                 <MetaColumnHeaderMenu
                                   columnKey={c.key}
@@ -1935,10 +1894,10 @@ export default function WorkspacePage() {
                               )}
                             </TableHead>
                             {showDialAfter && (
-                              <TableHead
-                                aria-label="Dial"
-                                className="sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0"
-                              >
+                      <TableHead
+                        aria-label="Dial"
+                        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                      >
                                 Dial
                               </TableHead>
                             )}
@@ -1946,10 +1905,10 @@ export default function WorkspacePage() {
                         );
                       })}
                       {customFieldsOrdered.map((f, customIdx) => (
-                        <TableHead
-                          key={f.id}
-                          className={cn(
-                            'sticky top-0 z-20 h-16 truncate border-r border-b border-border px-4 align-middle text-[15px] font-bold whitespace-nowrap last:border-r-0',
+                    <TableHead
+                      key={f.id}
+                      className={cn(
+                        'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
                             // Customer Response / Next Action headers
                             // center their labels within the full
                             // 448px cell (the resize handle is
@@ -2052,14 +2011,14 @@ export default function WorkspacePage() {
                             c.system && c.key === 'phone';
                           return (
                           <Fragment key={flowColumnRenderKey(c)}>
-                            <TableCell
-                              key={flowColumnRenderKey(c)}
-                              className="max-w-56 truncate border-r border-border last:border-r-0"
-                              style={columnWidthStyle(
-                                flowColumnVisId(c.key),
-                                effectiveColumnWidths
-                              )}
-                            >
+                      <TableCell
+                        key={flowColumnRenderKey(c)}
+                        className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
+                        style={columnWidthStyle(
+                          flowColumnVisId(c.key),
+                          effectiveColumnWidths
+                        )}
+                      >
                               {!c.system && flowId !== null ? (
                                 <FlowAnswerCell
                                   flowId={flowId}
@@ -2091,11 +2050,11 @@ export default function WorkspacePage() {
                               )}
                             </TableCell>
                             {showDialAfter && (
-                              <TableCell
-                                aria-label="Dial"
-                                className="max-w-36 truncate border-r border-border whitespace-nowrap last:border-r-0"
-                                onClick={(e) => e.stopPropagation()}
-                              >
+                      <TableCell
+                        aria-label="Dial"
+                        className="max-w-36 truncate border-r border-border px-2 py-1.5 whitespace-nowrap last:border-r-0"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                                 <DialAction
                                   phone={row.phone}
                                   contactId={row.contactId}
@@ -2129,9 +2088,9 @@ export default function WorkspacePage() {
                                 // comes from the primitive's
                                 // align-middle). Every other column
                                 // keeps max-w-56 + natural width.
-                                isWideTextColumnName(f.name)
-                                  ? 'max-w-112 whitespace-normal px-3 py-2'
-                                  : 'max-w-56'
+                        isWideTextColumnName(f.name)
+                          ? 'max-w-112 whitespace-normal px-3 py-2'
+                          : 'max-w-56 px-2.5 py-1.5 text-[13px]'
                               )}
                               style={columnWidthStyle(
                                 customFieldVisId(f.id),

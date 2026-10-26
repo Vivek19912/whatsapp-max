@@ -144,7 +144,7 @@ export function ColumnsMenu({
       <DropdownMenu>
         <DropdownMenuTrigger
           className={cn(
-            'border-border bg-card inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-sm font-medium',
+            'border-border bg-card inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-sm font-medium shadow-xs',
             'text-muted-foreground hover:bg-muted hover:text-foreground transition-colors',
             'focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none'
           )}
