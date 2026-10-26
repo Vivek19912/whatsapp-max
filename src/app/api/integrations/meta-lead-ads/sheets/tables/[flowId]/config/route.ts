@@ -31,6 +31,7 @@ import {
   drainSheetsQueue,
   enqueueFormsDelta,
   getTableSheetsStatus,
+  invalidateTableRowMappings,
   remapLayoutChunk,
 } from '@/lib/meta-lead-sheets/queue';
 import {
@@ -174,6 +175,7 @@ export async function PUT(request: Request, { params }: Ctx) {
       auto_sync?: unknown;
       import_existing?: unknown;
       columns?: unknown;
+      expected_updated_at?: unknown;
     } | null;
 
     const rawInput =
@@ -257,7 +259,7 @@ export async function PUT(request: Request, { params }: Ctx) {
     const { data: oldConfig } = await admin
       .from('meta_lead_sheets_configs')
       .select(
-        'spreadsheet_id, sheet_tab, column_config, auto_sync, pending_remap, remap_cursor'
+        'spreadsheet_id, sheet_tab, column_config, auto_sync, pending_remap, remap_cursor, updated_at'
       )
       .eq('account_id', ctx.accountId)
       .eq('form_id', table.formId)
@@ -269,7 +271,28 @@ export async function PUT(request: Request, { params }: Ctx) {
       auto_sync?: boolean;
       pending_remap?: boolean | null;
       remap_cursor?: number | null;
+      updated_at?: string | null;
     } | null;
+
+    // Optimistic concurrency: when the dialog sends the
+    // `updated_at` it rendered from, a mismatch means another
+    // save landed first — fail loudly instead of silently
+    // last-write-wins overwriting the other save's target or
+    // columns. Absent when the dialog predates the guard.
+    const expectedUpdatedAt =
+      typeof body?.expected_updated_at === 'string' &&
+      body.expected_updated_at.trim() !== ''
+        ? body.expected_updated_at.trim()
+        : null;
+    if (expectedUpdatedAt && old?.updated_at && old.updated_at !== expectedUpdatedAt) {
+      return NextResponse.json(
+        {
+          error:
+            'This table’s sheet settings changed in another tab. Reload and save again.',
+        },
+        { status: 409 }
+      );
+    }
 
     const requestedTab = cleanTab(body?.sheet_tab);
     const choice = chooseWorksheetTab({
@@ -381,37 +404,30 @@ export async function PUT(request: Request, { params }: Ctx) {
       skipped: number;
     } | null = null;
     let reseeded = 0;
+    let invalidated = 0;
     try {
       if (targetChanged || !old) {
         // New target (or first setup): the new sheet starts empty of
         // managed rows. Previously synced rows belong to the old sheet
-        // (left untouched). Reseed this table's history so the new
-        // sheet fills without duplicates (stable IDs dedupe).
+        // (left untouched — never cleared). Stale row numbers from the
+        // old sheet are INVALIDATED (not deleted): the drain
+        // reconciles by stable Meta Lead ID against the new sheet
+        // (update in place when found, append when genuinely
+        // missing), so old positions can never become wrong PUT
+        // targets. Invalidation is scoped to this table's queue rows
+        // (account + form) — other tables' mappings, lead identity,
+        // and successful history are preserved. Both steps page
+        // through the full history (no 2,000/5,000 caps) and are
+        // idempotent, so an interrupted target change resumes safely
+        // by re-saving.
         if (targetChanged && old) {
-          await admin
-            .from('meta_lead_sheets_queue')
-            .delete()
-            .eq('account_id', ctx.accountId)
-            .in(
-              'submission_id',
-              (
-                ((
-                  await admin
-                    .from('meta_lead_submissions')
-                    .select('id')
-                    .eq('account_id', ctx.accountId)
-                    .eq('form_id', table.formId)
-                    .limit(5000)
-                ).data as Array<{ id: string }> | null) ?? []
-              ).map((s) => s.id)
-            );
+          ({ invalidated } = await invalidateTableRowMappings(
+            admin,
+            ctx.accountId,
+            table.formId
+          ));
         }
-        const delta = await enqueueFormsDelta(
-          admin,
-          ctx.accountId,
-          [table.formId],
-          2000
-        );
+        const delta = await enqueueFormsDelta(admin, ctx.accountId, [table.formId]);
         reseeded = delta.enqueued;
         await ensureSheetsHeader(
           accessToken,
@@ -547,6 +563,7 @@ export async function PUT(request: Request, { params }: Ctx) {
       backfill,
       drain,
       ...(reseeded > 0 ? { reseeded } : {}),
+      ...(invalidated > 0 ? { invalidated } : {}),
       ...(remapSummary ? { remap: remapSummary } : {}),
     });
   } catch (err) {

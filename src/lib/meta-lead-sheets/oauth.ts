@@ -269,11 +269,57 @@ export async function getSheetsAccessToken(
   } | null;
   if (!conn) throw new SheetsAuthError("No Google account is connected.");
 
+  // Corrupt or undecryptable tokens (rotated app secret, truncated
+  // ciphertext) are a permanently unusable grant — not a transient
+  // 500. Convert decryption failures into the established safe
+  // auth path: flag reconnect once (best-effort persist) and throw
+  // SheetsAuthError so callers park rows with backoff instead of
+  // retrying forever. Plaintext tokens are never logged.
+  const decryptOrThrow = (ciphertext: string): string => {
+    try {
+      return decrypt(ciphertext);
+    } catch {
+      throw new SheetsAuthError(
+        "The stored Google credentials cannot be decrypted. Reconnect Google Sheets.",
+      );
+    }
+  };
+  const markUnusable = async (): Promise<void> => {
+    try {
+      await db
+        .from("meta_lead_sheets_connections")
+        .update({
+          last_error:
+            "The stored Google credentials are corrupt or unreadable. Reconnect Google Sheets.",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("account_id", accountId);
+    } catch (persistErr) {
+      console.warn(
+        "[meta-sheets] could not flag unreadable Google token:",
+        persistErr instanceof Error ? persistErr.message : persistErr,
+      );
+    }
+  };
+
   if (new Date(conn.token_expiry).getTime() - EXPIRY_SKEW_MS > Date.now()) {
-    return decrypt(conn.access_token);
+    try {
+      return decrypt(conn.access_token);
+    } catch {
+      await markUnusable();
+      throw new SheetsAuthError(
+        "The stored Google credentials cannot be decrypted. Reconnect Google Sheets.",
+      );
+    }
   }
 
-  const refreshToken = decrypt(conn.refresh_token);
+  let refreshToken: string;
+  try {
+    refreshToken = decryptOrThrow(conn.refresh_token);
+  } catch (err) {
+    await markUnusable();
+    throw err;
+  }
   const res = await fetchImpl(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -339,6 +385,36 @@ export async function getSheetsAccessToken(
     );
   }
   return refreshed.access_token;
+}
+
+/**
+ * Delete OAuth states that can never be used again (consumed or
+ * expired). Safe retention: active (unconsumed, unexpired) states
+ * are untouched. Called best-effort from the cron sweep; the
+ * migration 137 one-time cleanup covers pre-existing rows.
+ */
+export async function purgeExpiredSheetsOAuthStates(
+  db: SupabaseClient,
+): Promise<{ purged: number }> {
+  const nowIso = new Date().toISOString();
+  // Supabase-js has no OR across columns here; two scoped deletes
+  // (consumed states, then expired states) cover both cases.
+  const first = await db
+    .from("meta_lead_sheets_oauth_states")
+    .delete()
+    .not("consumed_at", "is", null)
+    .select("state_hash");
+  if (first.error) throw first.error;
+  const second = await db
+    .from("meta_lead_sheets_oauth_states")
+    .delete()
+    .lte("expires_at", nowIso)
+    .select("state_hash");
+  if (second.error) throw second.error;
+  const purged =
+    ((first.data ?? []) as unknown[]).length +
+    ((second.data ?? []) as unknown[]).length;
+  return { purged };
 }
 
 /** Remove the Meta Sheets connection (config auto_sync is disabled separately). */

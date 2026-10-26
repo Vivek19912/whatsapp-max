@@ -8,6 +8,7 @@ import { decrypt } from "@/lib/whatsapp/encryption";
 
 import {
   getSheetsAccessToken,
+  purgeExpiredSheetsOAuthStates,
   saveSheetsConnection,
   SheetsAuthError,
 } from "./oauth";
@@ -19,19 +20,19 @@ function makeDb(initial: Record<string, Row[]>, opts: { denyWrites?: boolean } =
   for (const [table, rows] of Object.entries(initial)) {
     data[table] = rows.map((r) => ({ ...r }));
   }
-  function matches(
-    row: Row,
-    filters: Array<{ col: string; val: unknown }>
-  ): boolean {
+  type Filter = { col: string; op: string; val: unknown };
+  function matches(row: Row, filters: Array<Filter>): boolean {
     for (const f of filters) {
-      if ((row[f.col] ?? null) !== (f.val ?? null)) return false;
+      if (f.op === "eq" && (row[f.col] ?? null) !== (f.val ?? null)) return false;
+      if (f.op === "lte" && String(row[f.col] ?? "") > String(f.val)) return false;
+      if (f.op === "not-null" && row[f.col] === null) return false;
     }
     return true;
   }
   function builder(table: string) {
     let op: "select" | "update" | "upsert" | "insert" | "delete" = "select";
     let payload: Row | Row[] | null = null;
-    const filters: Array<{ col: string; val: unknown }> = [];
+    const filters: Array<Filter> = [];
     const b: Record<string, (...args: never[]) => unknown> = {
       select: (() => b) as never,
       upsert: ((rows: Row | Row[]) => {
@@ -44,11 +45,28 @@ function makeDb(initial: Record<string, Row[]>, opts: { denyWrites?: boolean } =
         payload = p;
         return b;
       }) as never,
+      delete: (() => {
+        op = "delete";
+        return b;
+      }) as never,
       eq: ((col: string, val: unknown) => {
-        filters.push({ col, val });
+        filters.push({ col, op: "eq", val });
+        return b;
+      }) as never,
+      lte: ((col: string, val: unknown) => {
+        filters.push({ col, op: "lte", val });
+        return b;
+      }) as never,
+      not: ((col: string, _op: string, val: unknown) => {
+        if (val === null) filters.push({ col, op: "not-null", val });
         return b;
       }) as never,
       maybeSingle: (async () => {
+        if (op === "delete") {
+          const targets = (data[table] ?? []).filter((r) => matches(r, filters));
+          data[table] = (data[table] ?? []).filter((r) => !matches(r, filters));
+          return { data: targets[0] ?? null, error: null };
+        }
         if (op === "update") {
           if (opts.denyWrites) {
             return { data: null, error: { message: "RLS deny", code: "42501" } };
@@ -78,6 +96,11 @@ function makeDb(initial: Record<string, Row[]>, opts: { denyWrites?: boolean } =
         return { data: rows[0] ?? null, error: null };
       }) as never,
       then: ((res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
+        if (op === "delete") {
+          const targets = (data[table] ?? []).filter((r) => matches(r, filters));
+          data[table] = (data[table] ?? []).filter((r) => !matches(r, filters));
+          return Promise.resolve({ data: targets, error: null }).then(res, rej);
+        }
         if (op === "update") {
           if (opts.denyWrites) {
             return Promise.resolve({
@@ -267,5 +290,64 @@ describe("meta sheets oauth — account isolation and switching", () => {
     await expect(getSheetsAccessToken(db, "acct-1", fetchImpl)).rejects.toBeInstanceOf(
       SheetsAuthError
     );
+  });
+
+  it("converts corrupt stored tokens into the safe auth path (never a bare 500)", async () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const { db, data } = makeDb({
+      meta_lead_sheets_connections: [
+        {
+          account_id: "acct-1",
+          google_email: "a@example.com",
+          // Ciphertext the app key cannot decrypt (rotated secret).
+          access_token: "not-encrypted-at-all",
+          refresh_token: "also-not-encrypted",
+          token_expiry: future,
+          scope: "scope",
+          last_error: null,
+        },
+      ],
+    });
+    await expect(getSheetsAccessToken(db, "acct-1")).rejects.toBeInstanceOf(
+      SheetsAuthError
+    );
+    // Flagged for reconnect (persisted), with no secret material.
+    const stored = data.meta_lead_sheets_connections[0].last_error as string;
+    expect(stored).toContain("Reconnect");
+    expect(stored).not.toContain("not-encrypted");
+  });
+
+  it("converts a corrupt refresh token into the safe auth path", async () => {
+    const { db, data } = makeDb({ meta_lead_sheets_connections: [] });
+    await connect(db, "a@example.com", "old-access", "refresh-1");
+    data.meta_lead_sheets_connections[0].token_expiry = pastExpiry();
+    data.meta_lead_sheets_connections[0].refresh_token = "garbage";
+
+    const fetchImpl = tokenFetch(() => {
+      throw new Error("token endpoint must not be called with garbage");
+    });
+    await expect(getSheetsAccessToken(db, "acct-1", fetchImpl)).rejects.toBeInstanceOf(
+      SheetsAuthError
+    );
+    expect(
+      (data.meta_lead_sheets_connections[0].last_error as string) ?? ""
+    ).toContain("Reconnect");
+  });
+
+  it("purges only consumed/expired oauth states, keeping active ones", async () => {
+    const old = new Date(Date.now() - 8 * 24 * 3600_000).toISOString();
+    const fresh = new Date(Date.now() + 5 * 60_000).toISOString();
+    const { db, data } = makeDb({
+      meta_lead_sheets_oauth_states: [
+        { state_hash: "consumed", account_id: "a", user_id: "u", expires_at: fresh, consumed_at: fresh },
+        { state_hash: "expired", account_id: "a", user_id: "u", expires_at: old, consumed_at: null },
+        { state_hash: "active", account_id: "a", user_id: "u", expires_at: fresh, consumed_at: null },
+      ],
+    });
+    const { purged } = await purgeExpiredSheetsOAuthStates(db);
+    expect(purged).toBe(2);
+    expect(data.meta_lead_sheets_oauth_states.map((r) => r.state_hash)).toEqual([
+      "active",
+    ]);
   });
 });

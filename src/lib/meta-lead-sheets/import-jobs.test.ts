@@ -131,6 +131,9 @@ function makeDb(initial: Record<string, Row[]>) {
         return false;
       if (f.op === 'lte' && String(row[f.col] ?? '') > String(f.val))
         return false;
+      if (f.op === 'gte' && String(row[f.col] ?? '') < String(f.val))
+        return false;
+      if (f.op === 'not-null' && row[f.col] === null) return false;
       if (f.op === 'neq' && row[f.col] === f.val) return false;
     }
     return true;
@@ -142,10 +145,20 @@ function makeDb(initial: Record<string, Row[]>) {
     let insertRows: Row[] = [];
     const filters: Array<{ op: string; col: string; val: unknown }> = [];
     let limitN: number | null = null;
+    let rangeFrom: number | null = null;
+    let rangeTo: number | null = null;
     const orders: string[] = [];
 
     const matched = () =>
       (data[table] ?? []).filter((r) => matches(r, filters));
+
+    const paged = (rows: Row[]) => {
+      if (rangeFrom !== null && rangeTo !== null) {
+        return rows.slice(rangeFrom, rangeTo + 1);
+      }
+      if (limitN !== null) return rows.slice(0, limitN);
+      return rows;
+    };
 
     function applyInsert(): { rows: Row[]; error: { code: string; message: string } | null } {
       const inserted: Row[] = [];
@@ -224,12 +237,25 @@ function makeDb(initial: Record<string, Row[]>) {
         filters.push({ op: 'lte', col, val });
         return b;
       }) as never,
+      gte: ((col: string, val: unknown) => {
+        filters.push({ op: 'gte', col, val });
+        return b;
+      }) as never,
+      not: ((col: string, _op: string, val: unknown) => {
+        if (val === null) filters.push({ op: 'not-null', col, val });
+        return b;
+      }) as never,
       order: ((col: string) => {
         orders.push(col);
         return b;
       }) as never,
       limit: ((n: number) => {
         limitN = n;
+        return b;
+      }) as never,
+      range: ((from: number, to: number) => {
+        rangeFrom = from;
+        rangeTo = to;
         return b;
       }) as never,
       single: (async () => {
@@ -255,8 +281,7 @@ function makeDb(initial: Record<string, Row[]>) {
           const { rows, error } = applyInsert();
           return { data: rows[0] ?? null, error };
         }
-        let rows = matched();
-        if (limitN !== null) rows = rows.slice(0, limitN);
+        const rows = paged(matched());
         return { data: rows[0] ?? null, error: null };
       }) as never,
       then: ((res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
@@ -269,8 +294,7 @@ function makeDb(initial: Record<string, Row[]>) {
           const { rows, error } = applyInsert();
           return Promise.resolve({ data: rows, error }).then(res, rej);
         }
-        let rows = matched();
-        if (limitN !== null) rows = rows.slice(0, limitN);
+        const rows = paged(matched());
         return Promise.resolve({ data: rows, error: null }).then(res, rej);
       }) as never,
     };

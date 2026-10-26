@@ -7,10 +7,12 @@
 // uses the account's own Google connection, and only ever affects
 // the pasted spreadsheet — never any other table's config.
 //
-// GET (members+) — ?spreadsheet_id=... List the existing worksheet
-//   tabs (leftmost first) so the dialog can default to the first
-//   existing tab. Validates access server-side; tokens never leave
-//   the server.
+// GET (members+) — ?spreadsheet_id=...&flow_id=... List the existing
+//   worksheet tabs (leftmost first) so the dialog can default to the
+//   first existing tab. The flow_id scope is mandatory: the table
+//   must resolve to the caller's own account (tenant + table guard),
+//   so arbitrary spreadsheets cannot be enumerated with guessed IDs.
+//   Validates access server-side; tokens never leave the server.
 // POST (owner-only) — { flow_id, spreadsheet_id|spreadsheet_url, tab }.
 //   Create one worksheet tab inside the given spreadsheet, then
 //   return the refreshed tab list. Rejects blank/invalid names
@@ -47,7 +49,23 @@ import { resolveTableForm } from '@/lib/meta-lead-sheets/tables';
 export async function GET(request: Request) {
   try {
     const ctx = await getCurrentAccount();
-    const raw = new URL(request.url).searchParams.get('spreadsheet_id') ?? '';
+    const params = new URL(request.url).searchParams;
+    // Table scope is mandatory: without the caller's own table
+    // (same account, Meta table, same-account form) the endpoint
+    // would let anyone enumerate arbitrary spreadsheet tabs using
+    // guessed spreadsheet IDs.
+    const flowId = cleanFlowId(params.get('flow_id'));
+    if (!flowId) {
+      return NextResponse.json(
+        { error: 'A Workspace table is required.' },
+        { status: 400 }
+      );
+    }
+    const table = await resolveTableForm(ctx.supabase, ctx.accountId, flowId);
+    if (!table) {
+      return NextResponse.json({ error: 'Table not found.' }, { status: 404 });
+    }
+    const raw = params.get('spreadsheet_id') ?? '';
     const spreadsheetId = parseSheetsSpreadsheetId(raw);
     if (!spreadsheetId) {
       return NextResponse.json(

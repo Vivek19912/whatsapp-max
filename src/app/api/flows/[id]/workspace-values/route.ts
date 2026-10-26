@@ -187,8 +187,14 @@ export async function PUT(
       // ADDITIVE Meta Sheets sync — a Workspace cell was cleared on a
       // Meta table; queue an in-place sheet row update. Flow Tables
       // never reach this branch (kind gate). Best-effort: never fails
-      // the save; Uses the RLS client (admin-insert policy scopes it
-      // to this account).
+      // the save. Uses the service-role client for the queue write:
+      // the queue's RLS policy only allows admin inserts, so the
+      // user-scoped client of an authorized agent edit would be
+      // denied (and the UI would falsely look synced). Server-side
+      // validation above (run belongs to this account + flow, agent
+      // ownership) already authorizes this exact (account, run)
+      // pair, so the elevated client cannot reach other tenants.
+      let sheetsSync: 'queued' | 'failed' = 'failed';
       try {
         const { enqueueSheetsSyncForRun } = await import(
           "@/lib/meta-lead-sheets/queue"
@@ -200,7 +206,11 @@ export async function PUT(
           .eq("account_id", accountId)
           .maybeSingle();
         if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
-          await enqueueSheetsSyncForRun(supabase, { accountId, runId });
+          const queued = await enqueueSheetsSyncForRun(supabaseAdmin(), {
+            accountId,
+            runId,
+          });
+          sheetsSync = queued.enqueued ? 'queued' : 'failed';
           // Prompt post-response drain (tracked `after()`, never a
           // detached promise); the cron remains the fallback.
           const { scheduleSheetsDrainSoon } = await import(
@@ -211,7 +221,7 @@ export async function PUT(
       } catch (err) {
         console.error("[meta-sheets] cell-clear enqueue failed:", err);
       }
-      return NextResponse.json({ value: null });
+      return NextResponse.json({ value: null, sheetsSync });
     }
 
     const { data, error } = await supabase
@@ -248,7 +258,14 @@ export async function PUT(
 
     // ADDITIVE Meta Sheets sync — a Workspace cell changed on a Meta
     // table; queue an in-place sheet row update. Meta-only (kind
-    // gate); Flow Tables skip this entirely. Best-effort.
+    // gate); Flow Tables skip this entirely. Best-effort: never
+    // fails the save. Uses the service-role client for the queue
+    // write (see the clear path above): the queue's RLS policy only
+    // allows admin inserts, so an authorized agent's user-scoped
+    // client would be denied and the UI would falsely look synced.
+    // The (account, run) pair is already server-side validated
+    // above, so no other tenant is reachable.
+    let sheetsSync: 'queued' | 'skipped' | 'failed' = 'skipped';
     try {
       const { enqueueSheetsSyncForRun } = await import(
         "@/lib/meta-lead-sheets/queue"
@@ -261,7 +278,11 @@ export async function PUT(
         .maybeSingle();
       if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
         if (storedValue !== previous) {
-          await enqueueSheetsSyncForRun(supabase, { accountId, runId });
+          const queued = await enqueueSheetsSyncForRun(supabaseAdmin(), {
+            accountId,
+            runId,
+          });
+          sheetsSync = queued.enqueued ? 'queued' : 'failed';
           // Prompt post-response drain (tracked `after()`, never a
           // detached promise); the cron remains the fallback.
           const { scheduleSheetsDrainSoon } = await import(
@@ -272,9 +293,10 @@ export async function PUT(
       }
     } catch (err) {
       console.error("[meta-sheets] cell-save enqueue failed:", err);
+      sheetsSync = 'failed';
     }
 
-    return NextResponse.json({ value: storedValue });
+    return NextResponse.json({ value: storedValue, sheetsSync });
   } catch (err) {
     return toErrorResponse(err);
   }

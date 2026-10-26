@@ -386,7 +386,7 @@ export function MetaTableSheetsDialog({
           try {
             const tabsJson = (await readJson(
               await fetch(
-                `/api/integrations/meta-lead-ads/sheets/tabs?spreadsheet_id=${encodeURIComponent(url.trim())}`,
+                `/api/integrations/meta-lead-ads/sheets/tabs?spreadsheet_id=${encodeURIComponent(url.trim())}&flow_id=${encodeURIComponent(flowId)}`,
                 { cache: 'no-store' }
               )
             )) as unknown as { tabs: string[]; title: string };
@@ -444,7 +444,7 @@ export function MetaTableSheetsDialog({
     await act('tabs', async () => {
       const json = (await readJson(
         await fetch(
-          `/api/integrations/meta-lead-ads/sheets/tabs?spreadsheet_id=${encodeURIComponent(spreadsheetInput.trim())}`,
+          `/api/integrations/meta-lead-ads/sheets/tabs?spreadsheet_id=${encodeURIComponent(spreadsheetInput.trim())}&flow_id=${encodeURIComponent(flowId)}`,
           { cache: 'no-store' }
         )
       )) as unknown as { tabs: string[]; title: string };

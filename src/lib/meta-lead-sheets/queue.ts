@@ -32,7 +32,6 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { isUniqueViolation } from '@/lib/contacts/dedupe';
 
 import {
-  META_SHEETS_BATCH_SIZE,
   META_SHEETS_LEAD_ID_COL,
   META_SHEETS_MAX_ATTEMPTS,
   META_SHEETS_SWEEP_LIMIT,
@@ -67,7 +66,9 @@ import {
   ensureSheetsHeader,
   findSheetsRowsByLeadId,
   isQuotaSheetsError,
+  isReconnectErrorText,
   isTransientSheetsError,
+  normalizeMetaLeadId,
   rewriteSheetRows,
   setSheetColumnHidden,
   SheetsApiError,
@@ -230,55 +231,71 @@ export interface BackfillResult {
   total: number;
 }
 
+/** Rows read per backfill/reseed page (offset-paged, stable order). */
+export const BACKFILL_PAGE_SIZE = 1000;
+
 /**
- * Historical sync for ONE table: enqueue that form's processed
- * submissions in batches. Idempotent (unique key) — safe to resume
- * after interruption.
+ * Historical sync for ONE table: page through ALL of that form's
+ * processed submissions (stable created_at order, offset pages —
+ * new arrivals sort last so they never shift an in-flight page)
+ * and enqueue them with bulk inserts. Idempotent (unique key) —
+ * safe to resume after interruption; re-running only counts more
+ * alreadyQueued rows. Only this table's config row is touched
+ * (account_id AND form_id scoped): configuring one table can
+ * never change another table's import status or counts.
  */
 export async function backfillFormSheets(
   db: SupabaseClient,
   accountId: string,
   formId: string,
-  limit = 500
+  limit = BACKFILL_PAGE_SIZE
 ): Promise<BackfillResult> {
-  const bounded = Math.max(1, Math.min(limit, 2000));
-  const { data, error } = await db
-    .from('meta_lead_submissions')
-    .select('id, flow_run_id, meta_lead_id, form_id')
-    .eq('account_id', accountId)
-    .eq('status', 'processed')
-    .not('flow_run_id', 'is', null)
-    .eq('form_id', formId)
-    .order('created_at', { ascending: true })
-    .limit(bounded);
-  if (error) throw error;
-  const rows = (data ?? []) as Array<{
-    id: string;
-    flow_run_id: string | null;
-    meta_lead_id: string;
-  }>;
+  const pageSize = Math.max(1, Math.min(limit, BACKFILL_PAGE_SIZE));
   let enqueued = 0;
   let alreadyQueued = 0;
-  for (let i = 0; i < rows.length; i += META_SHEETS_BATCH_SIZE) {
-    const batch = rows.slice(i, i + META_SHEETS_BATCH_SIZE);
-    for (const row of batch) {
-      const { error: insertErr } = await db
-        .from('meta_lead_sheets_queue')
-        .insert({
-          account_id: accountId,
-          submission_id: row.id,
-          flow_run_id: row.flow_run_id,
-          meta_lead_id: row.meta_lead_id,
-        });
-      if (insertErr) {
-        if (isUniqueViolation(insertErr)) {
-          alreadyQueued += 1;
-          continue;
-        }
-        throw insertErr;
-      }
-      enqueued += 1;
-    }
+  let total = 0;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await db
+      .from('meta_lead_submissions')
+      .select('id, flow_run_id, meta_lead_id, form_id')
+      .eq('account_id', accountId)
+      .eq('status', 'processed')
+      .not('flow_run_id', 'is', null)
+      .eq('form_id', formId)
+      .order('created_at', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const rows = (data ?? []) as Array<{
+      id: string;
+      flow_run_id: string | null;
+      meta_lead_id: string;
+    }>;
+    if (rows.length === 0) break;
+    total += rows.length;
+    const outcome = await bulkEnqueueSubmissions(
+      db,
+      accountId,
+      rows.map((row) => ({
+        id: row.id,
+        flow_run_id: row.flow_run_id,
+        meta_lead_id: row.meta_lead_id,
+      }))
+    );
+    enqueued += outcome.enqueued;
+    alreadyQueued += outcome.alreadyQueued;
+    // Persist progress per page so an interrupted backfill resumes
+    // (re-running skips everything already queued via the unique
+    // key) instead of restarting blind.
+    await db
+      .from('meta_lead_sheets_configs')
+      .update({
+        historical_import_status: 'importing',
+        historical_imported_count: enqueued + alreadyQueued,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('account_id', accountId)
+      .eq('form_id', formId);
+    if (rows.length < pageSize) break;
   }
   await db
     .from('meta_lead_sheets_configs')
@@ -287,8 +304,58 @@ export async function backfillFormSheets(
       historical_imported_count: enqueued + alreadyQueued,
       updated_at: new Date().toISOString(),
     })
-    .eq('account_id', accountId);
-  return { enqueued, alreadyQueued, total: rows.length };
+    .eq('account_id', accountId)
+    .eq('form_id', formId);
+  return { enqueued, alreadyQueued, total };
+}
+
+/**
+ * Bulk-insert queue rows with per-row fallback: one chunked
+ * INSERT per page (fast path); a unique violation on a chunk
+ * (a concurrent worker won the race) falls back to per-row
+ * writes so one bad row cannot fail the page. Unique violations
+ * count as alreadyQueued; other per-row errors are re-thrown.
+ */
+async function bulkEnqueueSubmissions(
+  db: SupabaseClient,
+  accountId: string,
+  rows: Array<{ id: string; flow_run_id: string | null; meta_lead_id: string }>
+): Promise<{ enqueued: number; alreadyQueued: number }> {
+  let enqueued = 0;
+  let alreadyQueued = 0;
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    const { error: insertErr } = await db
+      .from('meta_lead_sheets_queue')
+      .insert(
+        chunk.map((row) => ({
+          account_id: accountId,
+          submission_id: row.id,
+          flow_run_id: row.flow_run_id,
+          meta_lead_id: row.meta_lead_id,
+        }))
+      );
+    if (!insertErr) {
+      enqueued += chunk.length;
+      continue;
+    }
+    if (!isUniqueViolation(insertErr)) throw insertErr;
+    for (const row of chunk) {
+      const { error: singleErr } = await db
+        .from('meta_lead_sheets_queue')
+        .insert({
+          account_id: accountId,
+          submission_id: row.id,
+          flow_run_id: row.flow_run_id,
+          meta_lead_id: row.meta_lead_id,
+        });
+      if (!singleErr) enqueued += 1;
+      else if (isUniqueViolation(singleErr)) alreadyQueued += 1;
+      else throw singleErr;
+    }
+  }
+  return { enqueued, alreadyQueued };
 }
 
 export interface FormsDeltaResult {
@@ -298,56 +365,99 @@ export interface FormsDeltaResult {
 }
 
 /**
- * Reconcile newly selected forms: enqueue their processed submissions
- * without duplicating anything already queued or sent (UNIQUE key).
- * Used when the form selection gains forms; deselection needs no
- * queue writes (pending rows are skipped by the drain filter and an
+ * Reconcile newly selected forms: page through ALL of those
+ * forms' processed submissions (stable created_at order — new
+ * arrivals sort last) and enqueue them with bulk inserts, without
+ * duplicating anything already queued or sent (UNIQUE key).
+ * Used when a table's target changes or on first setup; re-running
+ * is resumable (already-queued rows are only counted). Used when
+ * the form selection gains forms; deselection needs no queue
+ * writes (pending rows are skipped by the drain filter and an
  * explicit cleanup removes sheet rows on request).
  */
 export async function enqueueFormsDelta(
   db: SupabaseClient,
   accountId: string,
   formIds: string[],
-  limit = 2000
+  limit = BACKFILL_PAGE_SIZE
 ): Promise<FormsDeltaResult> {
   if (formIds.length === 0) return { enqueued: 0, alreadyQueued: 0, total: 0 };
-  const bounded = Math.max(1, Math.min(limit, 2000));
-  const { data, error } = await db
-    .from('meta_lead_submissions')
-    .select('id, flow_run_id, meta_lead_id')
-    .eq('account_id', accountId)
-    .eq('status', 'processed')
-    .not('flow_run_id', 'is', null)
-    .in('form_id', formIds)
-    .order('created_at', { ascending: true })
-    .limit(bounded);
-  if (error) throw error;
-  const rows = (data ?? []) as Array<{
-    id: string;
-    flow_run_id: string | null;
-    meta_lead_id: string;
-  }>;
+  const pageSize = Math.max(1, Math.min(limit, BACKFILL_PAGE_SIZE));
   let enqueued = 0;
   let alreadyQueued = 0;
-  for (const row of rows) {
-    const { error: insertErr } = await db
-      .from('meta_lead_sheets_queue')
-      .insert({
-        account_id: accountId,
-        submission_id: row.id,
-        flow_run_id: row.flow_run_id,
-        meta_lead_id: row.meta_lead_id,
-      });
-    if (insertErr) {
-      if (isUniqueViolation(insertErr)) {
-        alreadyQueued += 1;
-        continue;
-      }
-      throw insertErr;
-    }
-    enqueued += 1;
+  let total = 0;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await db
+      .from('meta_lead_submissions')
+      .select('id, flow_run_id, meta_lead_id')
+      .eq('account_id', accountId)
+      .eq('status', 'processed')
+      .not('flow_run_id', 'is', null)
+      .in('form_id', formIds)
+      .order('created_at', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const rows = (data ?? []) as Array<{
+      id: string;
+      flow_run_id: string | null;
+      meta_lead_id: string;
+    }>;
+    if (rows.length === 0) break;
+    total += rows.length;
+    const outcome = await bulkEnqueueSubmissions(db, accountId, rows);
+    enqueued += outcome.enqueued;
+    alreadyQueued += outcome.alreadyQueued;
+    if (rows.length < pageSize) break;
   }
-  return { enqueued, alreadyQueued, total: rows.length };
+  return { enqueued, alreadyQueued, total };
+}
+
+/**
+ * Invalidate stale row mappings after a table's spreadsheet or
+ * worksheet target changes. Old sheet_row_numbers belong to the
+ * OLD sheet and must never be used as PUT targets in the new one
+ * (row positions differ); clearing them forces the drain to
+ * reconcile by stable Meta Lead ID against the new sheet (update
+ * in place when found, append when genuinely missing). Scoped to
+ * this table's submissions only (account + form) — other tables'
+ * mappings, lead identity, and successful history are untouched.
+ * Paged + idempotent: re-running only clears what is left, so an
+ * interrupted invalidation resumes safely.
+ */
+export async function invalidateTableRowMappings(
+  db: SupabaseClient,
+  accountId: string,
+  formId: string
+): Promise<{ invalidated: number }> {
+  let invalidated = 0;
+  for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
+    const { data: submissionRows, error: subError } = await db
+      .from('meta_lead_submissions')
+      .select('id')
+      .eq('account_id', accountId)
+      .eq('form_id', formId)
+      .order('created_at', { ascending: true })
+      .range(offset, offset + BACKFILL_PAGE_SIZE - 1);
+    if (subError) throw subError;
+    const ids = ((submissionRows ?? []) as Array<{ id: string }>).map(
+      (s) => s.id
+    );
+    if (ids.length === 0) break;
+    const { data, error } = await db
+      .from('meta_lead_sheets_queue')
+      .update({
+        sheet_row_number: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('account_id', accountId)
+      .in('submission_id', ids)
+      .not('sheet_row_number', 'is', null)
+      .select('id');
+    if (error) throw error;
+    invalidated += ((data ?? []) as unknown[]).length;
+    if (ids.length < BACKFILL_PAGE_SIZE) break;
+  }
+  return { invalidated };
 }
 
 /** Inclusive YYYY-MM-DD day range (UTC) for a manual import. */
@@ -371,8 +481,14 @@ export interface TableImportResult {
   truncated: boolean;
 }
 
-/** Max submissions classified per manual import call (bounded request). */
-export const TABLE_IMPORT_LIMIT = 2000;
+/**
+ * Submissions read per import-planning page. Imports page through
+ * the ENTIRE in-scope set (no total cap, no truncation): this is
+ * the per-query bound, not a total limit. Kept modest so planning
+ * stays a handful of fast bulk queries even for 5,000+ lead
+ * tables.
+ */
+export const TABLE_IMPORT_LIMIT = 1000;
 
 /**
  * Effective Workspace submission time for one lead: the run's
@@ -434,11 +550,19 @@ export interface ImportScope {
 
 /**
  * Classify ONE table's processed submissions for manual import
- * (all, or an inclusive submission-day range) with a bounded
- * number of queries — no per-row round trips. Read-only: Workspace
- * rows are never written. Returns the exact candidate snapshot an
- * import job persists, so re-pumps and retries reconcile the same
- * set. Only the caller's (account, form) scope is read.
+ * (all, or an inclusive submission-day range). Pages through the
+ * ENTIRE in-scope set in stable created_at order — there is no
+ * total cap and nothing is silently omitted, so repeating an
+ * import always advances (the `truncated` flag is kept for API
+ * compatibility and is always false). Each page uses bulk reads
+ * (one submissions page + one run lookup + one queue lookup), so
+ * planning stays a handful of fast queries even for 5,000+ lead
+ * tables. Read-only: Workspace rows are never written. Returns
+ * the exact candidate snapshot an import job persists, so
+ * re-pumps and retries reconcile the same set. Only the caller's
+ * (account, form) scope is read. New leads arriving mid-import
+ * sort last and are picked up by the live auto-sync drain, never
+ * silently dropped from the snapshot.
  */
 export async function planImportScope(
   db: SupabaseClient,
@@ -447,83 +571,82 @@ export async function planImportScope(
   range: TableImportRange | null,
   limit = TABLE_IMPORT_LIMIT
 ): Promise<ImportScope> {
-  const bounded = Math.max(1, Math.min(limit, TABLE_IMPORT_LIMIT));
-  const { data, error } = await db
-    .from('meta_lead_submissions')
-    .select('id, flow_run_id, meta_lead_id, meta_created_time, created_at')
-    .eq('account_id', accountId)
-    .eq('status', 'processed')
-    .eq('form_id', formId)
-    .order('created_at', { ascending: true })
-    .limit(bounded + 1);
-  if (error) throw error;
-  const rows = ((data ?? []) as Array<{
-    id: string;
-    flow_run_id: string | null;
-    meta_lead_id: string;
-    meta_created_time: string | null;
-    created_at: string;
-  }>);
-  const truncated = rows.length > bounded;
-  const batch = rows.slice(0, bounded);
-
-  // Workspace submission times (run start wins) for range filtering.
-  const runIds = [...new Set(batch.map((r) => r.flow_run_id).filter((v): v is string => typeof v === 'string' && v !== ''))];
-  const startedByRun = new Map<string, string | null>();
-  if (runIds.length > 0) {
-    const { data: runs, error: runErr } = await db
-      .from('flow_runs')
-      .select('id, started_at')
-      .eq('account_id', accountId)
-      .in('id', runIds);
-    if (runErr) throw runErr;
-    for (const run of (runs ?? []) as Array<{ id: string; started_at: string | null }>) {
-      startedByRun.set(run.id, run.started_at ?? null);
-    }
-  }
-
-  // Already-mapped submissions (have a sheet row): the drain will
-  // update them in place rather than append. Also doubles as the
-  // existing-queue-row set for duplicate-safe bulk inserts.
-  const mapped = new Set<string>();
-  const existing = new Set<string>();
-  const subIds = batch.map((r) => r.id);
-  if (subIds.length > 0) {
-    const { data: queued, error: queueErr } = await db
-      .from('meta_lead_sheets_queue')
-      .select('submission_id, sheet_row_number')
-      .eq('account_id', accountId)
-      .in('submission_id', subIds);
-    if (queueErr) throw queueErr;
-    for (const q of (queued ?? []) as Array<{ submission_id: string; sheet_row_number: number | null }>) {
-      existing.add(q.submission_id);
-      if (typeof q.sheet_row_number === 'number') mapped.add(q.submission_id);
-    }
-  }
-
+  const pageSize = Math.max(1, Math.min(limit, TABLE_IMPORT_LIMIT));
   const candidates: ImportCandidate[] = [];
+  const mapped = new Set<string>();
   let skipped = 0;
-  for (const row of batch) {
-    // No Workspace run: nothing syncable to write.
-    if (!row.flow_run_id) {
-      skipped += 1;
-      continue;
-    }
-    if (range) {
-      const effective = resolveImportSubmittedAt({
-        runStartedAt: startedByRun.get(row.flow_run_id) ?? null,
-        metaCreatedTime: row.meta_created_time ?? null,
-        createdAt: row.created_at ?? null,
-      });
-      if (effective === null || !isWithinImportRange(effective, range.from, range.to)) {
-        continue;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await db
+      .from('meta_lead_submissions')
+      .select('id, flow_run_id, meta_lead_id, meta_created_time, created_at')
+      .eq('account_id', accountId)
+      .eq('status', 'processed')
+      .eq('form_id', formId)
+      .order('created_at', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const batch = ((data ?? []) as Array<{
+      id: string;
+      flow_run_id: string | null;
+      meta_lead_id: string;
+      meta_created_time: string | null;
+      created_at: string;
+    }>);
+    if (batch.length === 0) break;
+
+    // Workspace submission times (run start wins) for range filtering.
+    const runIds = [...new Set(batch.map((r) => r.flow_run_id).filter((v): v is string => typeof v === 'string' && v !== ''))];
+    const startedByRun = new Map<string, string | null>();
+    if (runIds.length > 0) {
+      const { data: runs, error: runErr } = await db
+        .from('flow_runs')
+        .select('id, started_at')
+        .eq('account_id', accountId)
+        .in('id', runIds);
+      if (runErr) throw runErr;
+      for (const run of (runs ?? []) as Array<{ id: string; started_at: string | null }>) {
+        startedByRun.set(run.id, run.started_at ?? null);
       }
     }
-    candidates.push({
-      id: row.id,
-      flow_run_id: row.flow_run_id,
-      meta_lead_id: row.meta_lead_id,
-    });
+
+    // Already-mapped submissions (have a sheet row): the drain will
+    // update them in place rather than append.
+    const subIds = batch.map((r) => r.id);
+    if (subIds.length > 0) {
+      const { data: queued, error: queueErr } = await db
+        .from('meta_lead_sheets_queue')
+        .select('submission_id, sheet_row_number')
+        .eq('account_id', accountId)
+        .in('submission_id', subIds);
+      if (queueErr) throw queueErr;
+      for (const q of (queued ?? []) as Array<{ submission_id: string; sheet_row_number: number | null }>) {
+        if (typeof q.sheet_row_number === 'number') mapped.add(q.submission_id);
+      }
+    }
+
+    for (const row of batch) {
+      // No Workspace run: nothing syncable to write.
+      if (!row.flow_run_id) {
+        skipped += 1;
+        continue;
+      }
+      if (range) {
+        const effective = resolveImportSubmittedAt({
+          runStartedAt: startedByRun.get(row.flow_run_id) ?? null,
+          metaCreatedTime: row.meta_created_time ?? null,
+          createdAt: row.created_at ?? null,
+        });
+        if (effective === null || !isWithinImportRange(effective, range.from, range.to)) {
+          continue;
+        }
+      }
+      candidates.push({
+        id: row.id,
+        flow_run_id: row.flow_run_id,
+        meta_lead_id: row.meta_lead_id,
+      });
+    }
+    if (batch.length < pageSize) break;
   }
 
   let updated = 0;
@@ -539,7 +662,7 @@ export async function planImportScope(
     imported: candidates.length - updated,
     updated,
     skipped,
-    truncated,
+    truncated: false,
   };
 }
 
@@ -1210,21 +1333,33 @@ export async function applyIdColumnVisibility(
 }
 
 /**
- * Drain one pending layout rollout (bounded chunk). Returns true
- * when a remap was in flight (normal due-row processing should
- * wait one run so the sheet holds exactly one layout at a time).
+ * Roll ONE pending layout rollout forward by a single bounded
+ * chunk, then let the drain continue with live-sync work in the
+ * SAME run (interleaved). A large remap therefore cannot starve
+ * newly arriving leads for hours: every drain makes progress on
+ * both the rollout and due rows. When the caller scopes the drain
+ * to one account/table (per-table sync-now, retry, import pump),
+ * only that scope's remap is eligible — one table's layout change
+ * never triggers unrelated accounts' remap writes or consumes
+ * their quota. The global cron (unscoped) still advances pending
+ * rollouts, one chunk per drain, each with that table's own
+ * credentials and config. Returns true while any remap is still
+ * pending (observability only — never blocks live sync).
  */
 async function drainPendingRemap(
   db: SupabaseClient,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  scope: { accountId?: string; formId?: string } = {}
 ): Promise<boolean> {
-  const { data, error } = await db
+  let query = db
     .from('meta_lead_sheets_configs')
     .select(
       'account_id, form_id, spreadsheet_id, sheet_tab, column_config, remap_cursor'
     )
-    .eq('pending_remap', true)
-    .limit(3);
+    .eq('pending_remap', true);
+  if (scope.accountId) query = query.eq('account_id', scope.accountId);
+  if (scope.formId) query = query.eq('form_id', scope.formId);
+  const { data, error } = await query.limit(2);
   if (error) {
     console.error('[meta-sheets] remap scan failed:', error.message);
     return false;
@@ -1238,36 +1373,45 @@ async function drainPendingRemap(
     remap_cursor: number | null;
   }>;
   if (pending.length === 0) return false;
-  for (const cfg of pending) {
-    try {
-      const token = await getSheetsAccessToken(db, cfg.account_id, fetchImpl);
-      await remapLayoutChunk(
-        db,
-        token,
-        cfg,
-        cfg.remap_cursor ?? 0,
-        fetchImpl,
-        REMAP_CHUNK_SIZE
-      );
-    } catch (err) {
-      await db
-        .from('meta_lead_sheets_configs')
-        .update({
-          last_error: (err instanceof Error ? err.message : String(err)).slice(
-            0,
-            500
-          ),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('account_id', cfg.account_id)
-        .eq('form_id', cfg.form_id);
-      console.error(
-        `[meta-sheets] remap chunk failed for ${cfg.account_id}:`,
-        err instanceof Error ? err.message : err
-      );
-    }
+  // One bounded chunk of the oldest pending rollout per drain —
+  // live sync proceeds in the same run (see drainSheetsQueue).
+  const cfg = pending[0];
+  try {
+    const token = await getSheetsAccessToken(db, cfg.account_id, fetchImpl);
+    await remapLayoutChunk(
+      db,
+      token,
+      cfg,
+      cfg.remap_cursor ?? 0,
+      fetchImpl,
+      REMAP_CHUNK_SIZE
+    );
+  } catch (err) {
+    await db
+      .from('meta_lead_sheets_configs')
+      .update({
+        last_error: (err instanceof Error ? err.message : String(err)).slice(
+          0,
+          500
+        ),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('account_id', cfg.account_id)
+      .eq('form_id', cfg.form_id);
+    console.error(
+      `[meta-sheets] remap chunk failed for ${cfg.account_id}:`,
+      err instanceof Error ? err.message : err
+    );
   }
-  return true;
+  // Re-check: true while THIS scope still has pending rollout work.
+  let recheck = db
+    .from('meta_lead_sheets_configs')
+    .select('form_id')
+    .eq('pending_remap', true);
+  if (scope.accountId) recheck = recheck.eq('account_id', scope.accountId);
+  if (scope.formId) recheck = recheck.eq('form_id', scope.formId);
+  const { data: remaining } = await recheck.limit(1);
+  return ((remaining ?? []) as unknown[]).length > 0;
 }
 
 export interface CleanupResult {
@@ -1275,16 +1419,63 @@ export interface CleanupResult {
   skippedUnmapped: number;
 }
 
+/** Sheet rows deleted per cleanup batch (bounded, resumable). */
+export const CLEANUP_BATCH_SIZE = 100;
+
+export interface CleanupVerifyResult {
+  verified: Array<{ queueId: string; rowNumber: number }>;
+  skippedStale: number;
+}
+
+/**
+ * Verify one batch of candidate deletions against the LIVE sheet:
+ * a stored row number is only deleted when the sheet's ID column
+ * still holds that row's Meta Lead ID at that exact row. Shifted
+ * or overwritten rows (user deleted rows above, cell edited by
+ * hand) are skipped — never deleted on a guess. Pure helper over
+ * an ID-column scan result.
+ */
+export function verifyCleanupBatch(
+  candidates: Array<{
+    queueId: string;
+    rowNumber: number;
+    metaLeadId: string;
+  }>,
+  liveByLeadId: Map<string, number>
+): CleanupVerifyResult {
+  const verified: Array<{ queueId: string; rowNumber: number }> = [];
+  let skippedStale = 0;
+  for (const c of candidates) {
+    const live = liveByLeadId.get(normalizeMetaLeadId(c.metaLeadId));
+    if (live === c.rowNumber) {
+      verified.push({ queueId: c.queueId, rowNumber: c.rowNumber });
+    } else {
+      skippedStale += 1;
+    }
+  }
+  return { verified, skippedStale };
+}
+
 /**
  * Explicit, confirmed cleanup of ONE table's managed rows (used when
- * a table's target changes or its sheet is retired). Only rows with
- * a verified queue mapping (account + submission of THIS form +
- * recorded sheet_row_number) are ever deleted; sent rows without a
- * recorded number and all user content are never touched. Remaining
- * managed row numbers are fixed arithmetically after the bottom-to-
- * top delete, and the removed queue rows are dropped so the leads
- * do not re-sync. Throws on Google failures (nothing is half-applied
- * except the sheet delete itself, which is reported).
+ * a table's sheet is retired). Consistency design (safe against
+ * partial failure between the sheet delete and the DB updates):
+ *   * Work proceeds in bounded batches (CLEANUP_BATCH_SIZE). Each
+ *     batch is verified against the LIVE ID column immediately
+ *     before deleting — a stored row number that no longer holds
+ *     its lead's ID (sheet shifted, cell overwritten) is skipped,
+ *     never deleted on a guess.
+ *   * The sheet delete for a batch is immediately followed by that
+ *     batch's DB updates (survivor renumber fix + dropping the
+ *     removed queue rows). A crash between batches leaves earlier
+ *     batches fully applied and later batches untouched — re-running
+ *     re-verifies from the live sheet, so a retry can never delete
+ *     the wrong rows.
+ *   * Only rows with a verified queue mapping (account +
+ *     submission of THIS form + recorded sheet_row_number) are ever
+ *     deleted; sent rows without a recorded number and all user
+ *     content are never touched. Throws on Google failures, after
+ *     reporting how far the cleanup got.
  */
 export async function cleanupTableRows(
   db: SupabaseClient,
@@ -1295,17 +1486,33 @@ export async function cleanupTableRows(
 ): Promise<CleanupResult> {
   const config = await loadTableConfig(db, accountId, formId);
   if (!config) throw new Error('Sheets sync is not configured for this table.');
-  const { data: queued, error: queueErr } = await db
-    .from('meta_lead_sheets_queue')
-    .select('id, submission_id, sheet_row_number')
-    .eq('account_id', accountId)
-    .eq('status', 'sent');
-  if (queueErr) throw queueErr;
-  const sentRows = (queued ?? []) as Array<{
+  const columns = resolveEffectiveColumns(config.column_config);
+  const layout = computeManagedLayout(columns);
+  // Page through ALL sent rows (no fixed cap): tables larger than
+  // any single-query bound clean up completely and resumably.
+  const sentRows: Array<{
     id: string;
     submission_id: string;
     sheet_row_number: number | null;
-  }>;
+  }> = [];
+  for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
+    const { data: queued, error: queueErr } = await db
+      .from('meta_lead_sheets_queue')
+      .select('id, submission_id, sheet_row_number')
+      .eq('account_id', accountId)
+      .eq('status', 'sent')
+      .order('sheet_row_number', { ascending: true })
+      .range(offset, offset + BACKFILL_PAGE_SIZE - 1);
+    if (queueErr) throw queueErr;
+    const page = (queued ?? []) as Array<{
+      id: string;
+      submission_id: string;
+      sheet_row_number: number | null;
+    }>;
+    if (page.length === 0) break;
+    sentRows.push(...page);
+    if (page.length < BACKFILL_PAGE_SIZE) break;
+  }
   const mapped = sentRows.filter(
     (r) =>
       typeof r.sheet_row_number === 'number' &&
@@ -1313,64 +1520,171 @@ export async function cleanupTableRows(
   );
   let skippedUnmapped = sentRows.length - mapped.length;
 
-  // Keep only this table's verified rows (tenant + form scoped).
-  const toDelete: Array<{ queueId: string; rowNumber: number }> = [];
+  // Keep only this table's rows (tenant + form scoped), carrying
+  // the stable lead ID for live verification.
+  const candidates: Array<{
+    queueId: string;
+    rowNumber: number;
+    metaLeadId: string;
+  }> = [];
   for (const row of mapped) {
     const submission = await loadSubmission(db, accountId, row.submission_id);
     if (!submission) {
-      // Orphaned mapping (submission gone): drop the queue row and
-      // count it as skipped — never delete a sheet row we cannot
-      // verify (it may be user content by now).
+      // Orphaned mapping (submission gone): never delete a sheet
+      // row we cannot verify (it may be user content by now).
       skippedUnmapped += 1;
       continue;
     }
     if (submission.form_id === formId) {
-      toDelete.push({
+      candidates.push({
         queueId: row.id,
         rowNumber: row.sheet_row_number as number,
+        metaLeadId: submission.meta_lead_id,
       });
     }
   }
-  if (toDelete.length === 0) {
+  if (candidates.length === 0) {
     return { removed: 0, skippedUnmapped };
   }
 
-  const numbers = toDelete.map((d) => d.rowNumber).sort((a, b) => a - b);
-  await deleteSheetRows(
-    accessToken,
-    config.spreadsheet_id,
-    config.sheet_tab,
-    numbers,
-    fetchImpl
-  );
-
-  // Fix surviving managed row numbers arithmetically (a bottom-to-top
-  // delete shifts every row below each deletion up by one).
-  const remaining = sentRows.filter(
-    (r) => !toDelete.some((d) => d.queueId === r.id)
-  );
-  for (const row of remaining) {
-    if (typeof row.sheet_row_number !== 'number') continue;
-    let shift = 0;
-    for (const n of numbers) {
-      if (n < (row.sheet_row_number as number)) shift += 1;
-      else break;
-    }
-    if (shift > 0) {
+  let removed = 0;
+  // Row numbers below the deleted range shift after every batch,
+  // so survivor mappings are refreshed from the live sheet after
+  // each batch instead of arithmetically.
+  for (let i = 0; i < candidates.length; i += CLEANUP_BATCH_SIZE) {
+    const batch = candidates.slice(i, i + CLEANUP_BATCH_SIZE);
+    // Live verification immediately before the destructive call.
+    const live = await findSheetsRowsByLeadId(
+      accessToken,
+      config.spreadsheet_id,
+      config.sheet_tab,
+      batch.map((c) => c.metaLeadId),
+      fetchImpl,
+      layout.idColumnIndex
+    );
+    const { verified, skippedStale } = verifyCleanupBatch(batch, live);
+    skippedUnmapped += skippedStale;
+    // Drop stale mappings whose sheet row no longer holds their
+    // lead: the row is gone (or user content now) — keeping a
+    // wrong number would corrupt the next retry. Sent status is
+    // preserved; the lead simply has no recorded row anymore.
+    const stale = batch.filter(
+      (c) => !verified.some((v) => v.queueId === c.queueId)
+    );
+    for (const s of stale) {
       await db
         .from('meta_lead_sheets_queue')
-        .update({ sheet_row_number: (row.sheet_row_number as number) - shift })
-        .eq('id', row.id);
+        .update({
+          sheet_row_number: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', s.queueId);
+    }
+    if (verified.length === 0) continue;
+    const numbers = verified.map((v) => v.rowNumber).sort((a, b) => a - b);
+    await deleteSheetRows(
+      accessToken,
+      config.spreadsheet_id,
+      config.sheet_tab,
+      numbers,
+      fetchImpl
+    );
+    // Batch checkpoint: drop exactly the rows just deleted so a
+    // retry never re-deletes shifted positions. A DB failure here
+    // throws AFTER reporting — re-running re-verifies against the
+    // live sheet (already-deleted rows simply verify as stale).
+    await db
+      .from('meta_lead_sheets_queue')
+      .delete()
+      .in(
+        'id',
+        verified.map((v) => v.queueId)
+      );
+    removed += verified.length;
+  }
+  // Refresh every surviving managed mapping against its own
+  // table's live sheet so no stale number survives the shift
+  // (bounded: one ID-column read per affected table, paged DB
+  // work, no per-row API calls).
+  await refreshSurvivingRowNumbers(db, accessToken, accountId, fetchImpl);
+  return { removed, skippedUnmapped };
+}
+
+/**
+ * Re-resolve surviving sent-row mappings after a cleanup shifted
+ * positions. Survivors are grouped by their own table (account +
+ * form) and re-scanned against THAT table's sheet — never against
+ * another table's spreadsheet. Rows still found keep their true
+ * number; rows no longer on their sheet are unmapped (sent status
+ * preserved). Tables without a config are left untouched. One
+ * live scan per affected table (chunked to bound URL length), no
+ * per-row API calls.
+ */
+async function refreshSurvivingRowNumbers(
+  db: SupabaseClient,
+  accessToken: string,
+  accountId: string,
+  fetchImpl: typeof fetch
+): Promise<void> {
+  const byForm = new Map<
+    string,
+    Array<{ queueId: string; metaLeadId: string }>
+  >();
+  for (let offset = 0; ; offset += BACKFILL_PAGE_SIZE) {
+    const { data, error } = await db
+      .from('meta_lead_sheets_queue')
+      .select('id, submission_id, sheet_row_number')
+      .eq('account_id', accountId)
+      .eq('status', 'sent')
+      .not('sheet_row_number', 'is', null)
+      .order('sheet_row_number', { ascending: true })
+      .range(offset, offset + BACKFILL_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as Array<{
+      id: string;
+      submission_id: string;
+      sheet_row_number: number | null;
+    }>;
+    if (page.length === 0) break;
+    for (const row of page) {
+      const submission = await loadSubmission(db, accountId, row.submission_id);
+      if (submission?.form_id) {
+        const list = byForm.get(submission.form_id) ?? [];
+        list.push({ queueId: row.id, metaLeadId: submission.meta_lead_id });
+        byForm.set(submission.form_id, list);
+      }
+    }
+    if (page.length < BACKFILL_PAGE_SIZE) break;
+  }
+  for (const [survivorFormId, survivors] of byForm) {
+    const tableConfig = await loadTableConfig(db, accountId, survivorFormId);
+    if (!tableConfig) continue;
+    const tableColumns = resolveEffectiveColumns(tableConfig.column_config);
+    const tableLayout = computeManagedLayout(tableColumns);
+    const live = new Map<string, number>();
+    for (let i = 0; i < survivors.length; i += 500) {
+      const chunk = survivors.slice(i, i + 500);
+      const found = await findSheetsRowsByLeadId(
+        accessToken,
+        tableConfig.spreadsheet_id,
+        tableConfig.sheet_tab,
+        chunk.map((s) => s.metaLeadId),
+        fetchImpl,
+        tableLayout.idColumnIndex
+      );
+      for (const [k, v] of found) live.set(k, v);
+    }
+    for (const s of survivors) {
+      const rowNumber = live.get(normalizeMetaLeadId(s.metaLeadId)) ?? null;
+      await db
+        .from('meta_lead_sheets_queue')
+        .update({
+          sheet_row_number: rowNumber,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', s.queueId);
     }
   }
-  await db
-    .from('meta_lead_sheets_queue')
-    .delete()
-    .in(
-      'id',
-      toDelete.map((d) => d.queueId)
-    );
-  return { removed: toDelete.length, skippedUnmapped };
 }
 
 /**
@@ -1378,10 +1692,11 @@ export async function cleanupTableRows(
  * failures; each outcome is recorded on its row + config.
  *
  * Idempotent: a lead maps to exactly one sheet row via the
- * configured Meta Lead ID column. Stored `sheet_row_number` is
- * preferred; on resume (row appended but mapping not saved) we
- * re-scan the ID column before appending, so retries never
- * duplicate.
+ * configured Meta Lead ID column. Every write reconciles against
+ * a live ID-column scan first — the scanned row wins over a
+ * stored `sheet_row_number` when they disagree (the sheet may
+ * have shifted since the mapping was saved), so retries never
+ * update the wrong row and never duplicate.
  */
 interface ReadyRow {
   row: QueueRow;
@@ -1443,11 +1758,16 @@ export async function drainSheetsQueue(
     .eq('status', 'sending')
     .lte('updated_at', staleIso);
 
-  // A layout rollout in flight takes over the drain (bounded chunk);
-  // due rows wait one run so each sheet holds exactly one layout.
-  if (await drainPendingRemap(db, fetchImpl)) {
-    return result;
-  }
+  // A pending layout rollout advances one bounded chunk scoped to
+  // this drain's account/table, then live sync proceeds in the SAME
+  // run (interleaved): a large remap never blocks newly arriving
+  // leads, and a per-table drain never triggers unrelated
+  // accounts' remap writes. Both paths write the CURRENT column
+  // layout, so interleaving cannot corrupt column order.
+  await drainPendingRemap(db, fetchImpl, {
+    accountId: opts.onlyAccountId,
+    formId: opts.onlyFormId,
+  });
 
   let query = db
     .from('meta_lead_sheets_queue')
@@ -1811,10 +2131,16 @@ export async function drainSheetsQueue(
     const updates: typeof withValues = [];
     const creates: typeof withValues = [];
     for (const item of withValues) {
-      const target =
-        item.row.sheet_row_number ??
-        found.get(item.submission.meta_lead_id) ??
-        null;
+      // Reconcile row identity against the live ID-column scan
+      // FIRST: when the sheet shifted (user deleted rows, a prior
+      // partial cleanup), the stored number is stale and the scan
+      // holds the truth — writing to the stale number would
+      // overwrite the wrong lead. The stored number is only a
+      // fallback for when the scan missed the ID entirely (in
+      // which case the row is treated as missing below).
+      const scanned =
+        found.get(normalizeMetaLeadId(item.submission.meta_lead_id)) ?? null;
+      const target = scanned ?? item.row.sheet_row_number ?? null;
       if (target) {
         item.targetRow = target;
         updates.push(item);
@@ -1945,7 +2271,9 @@ export async function drainSheetsQueue(
         for (const item of appended) {
           await markSent(
             item,
-            resolved.get(item.submission.meta_lead_id) ?? null
+            resolved.get(
+              normalizeMetaLeadId(item.submission.meta_lead_id)
+            ) ?? null
           );
         }
       } catch (err) {
@@ -2173,9 +2501,14 @@ export async function getTableSheetsStatus(
   return {
     configured: metaSheetsOAuthConfiguredSafe(),
     connected: !!connection,
+    // The reconnect badge derives from persisted auth-flavored
+    // error text only: revoked/expired credentials. Sharing (403
+    // PERMISSION_DENIED), quota, validation, and missing-tab
+    // errors never raise it, and a stale reconnect note is cleared
+    // on successful reauthorization (see the OAuth callback).
     needsReauth:
-      !!connection?.last_error ||
-      (lastError ?? '').toLowerCase().includes('reconnect'),
+      isReconnectErrorText(connection?.last_error) ||
+      isReconnectErrorText(config?.last_error),
     email: connection?.google_email ?? null,
     spreadsheetId: config?.spreadsheet_id ?? null,
     spreadsheetUrl: config?.spreadsheet_url ?? null,

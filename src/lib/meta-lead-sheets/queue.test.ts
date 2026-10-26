@@ -238,13 +238,17 @@ import {
   backfillFormSheets,
   cleanupTableRows,
   drainSheetsQueue,
+  enqueueFormsDelta,
   getTableSheetsStatus,
   importTableLeads,
+  invalidateTableRowMappings,
   isWithinImportRange,
   maybeEnqueueSheetsSync,
+  planImportScope,
   remapLayoutChunk,
   resolveImportSubmittedAt,
   reviveTableFailedRows,
+  verifyCleanupBatch,
 } from './queue';
 
 type Row = Record<string, unknown>;
@@ -266,6 +270,11 @@ function makeDb(initial: Record<string, Row[]>) {
         return false;
       if (f.op === 'lte' && String(row[f.col] ?? '') > String(f.val))
         return false;
+      if (f.op === 'gte' && String(row[f.col] ?? '') < String(f.val))
+        return false;
+      if (f.op === 'gt' && String(row[f.col] ?? '') <= String(f.val))
+        return false;
+      if (f.op === 'neq' && row[f.col] === f.val) return false;
       if (f.op === 'not-null' && row[f.col] === null) return false;
     }
     return true;
@@ -278,10 +287,20 @@ function makeDb(initial: Record<string, Row[]>) {
     const filters: Array<{ op: string; col: string; val: unknown }> = [];
     let orderCol: string | null = null;
     let limitN: number | null = null;
+    let rangeFrom: number | null = null;
+    let rangeTo: number | null = null;
     let selectCols = '*';
 
     const matched = () =>
       (data[table] ?? []).filter((r) => matches(r, filters));
+
+    const paged = (rows: Row[]) => {
+      if (rangeFrom !== null && rangeTo !== null) {
+        return rows.slice(rangeFrom, rangeTo + 1);
+      }
+      if (limitN !== null) return rows.slice(0, limitN);
+      return rows;
+    };
 
     const b: Record<string, (...args: never[]) => unknown> = {
       select: ((cols?: string) => {
@@ -355,6 +374,23 @@ function makeDb(initial: Record<string, Row[]>) {
         limitN = n;
         return b;
       }) as never,
+      range: ((from: number, to: number) => {
+        rangeFrom = from;
+        rangeTo = to;
+        return b;
+      }) as never,
+      gte: ((col: string, val: unknown) => {
+        filters.push({ op: 'gte', col, val });
+        return b;
+      }) as never,
+      gt: ((col: string, val: unknown) => {
+        filters.push({ op: 'gt', col, val });
+        return b;
+      }) as never,
+      neq: ((col: string, val: unknown) => {
+        filters.push({ op: 'neq', col, val });
+        return b;
+      }) as never,
       maybeSingle: (async () => {
         if (op === 'update') {
           // Capture targets BEFORE patching: real Supabase returns the
@@ -374,7 +410,7 @@ function makeDb(initial: Record<string, Row[]>) {
             String(a[orderCol!] ?? '').localeCompare(String(b[orderCol!] ?? ''))
           );
         }
-        if (limitN !== null) rows = rows.slice(0, limitN);
+        rows = paged(rows);
         return { data: rows[0] ?? null, error: null };
       }) as never,
       then: ((res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
@@ -396,7 +432,7 @@ function makeDb(initial: Record<string, Row[]>) {
             String(a[orderCol!] ?? '').localeCompare(String(b[orderCol!] ?? ''))
           );
         }
-        if (limitN !== null) rows = rows.slice(0, limitN);
+        rows = paged(rows);
         void selectCols;
         return Promise.resolve({ data: rows, error: null }).then(res, rej);
       }) as never,
@@ -1234,11 +1270,12 @@ describe('custom columns — drain rendering', () => {
     expect(h.findCalls[0]).toMatchObject({ idColumnIndex: 0 });
   });
 
-  it('updates the stored row when the ID column is hidden', async () => {
+  it('updates the live row when the ID column is hidden', async () => {
     h.accessTokenFor.set('acct-1', 'token-1');
     // The trailing ID column still carries "lead-c" on the sheet,
-    // but the ID is not a visible column — updates must still land
-    // on the stored row.
+    // but the ID is not a visible column. The stored number (5) is
+    // stale — the live scan (row 2) wins, so the update lands on
+    // the true row instead of overwriting an unrelated row 5.
     h.columnValues.set('sheet-1::Meta Leads', ['lead-c']);
     const { db } = makeDb({
       meta_lead_sheets_configs: [
@@ -1285,7 +1322,7 @@ describe('custom columns — drain rendering', () => {
     expect(result.sent).toBe(1);
     expect(h.updated).toHaveLength(1);
     expect(h.updated[0]).toMatchObject({
-      row: 5,
+      row: 2,
       values: ['+911234567890', 'lead-c'],
     });
     expect(h.appended).toHaveLength(0);
@@ -1427,11 +1464,12 @@ describe('layout remap', () => {
     expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(false);
   });
 
-  it('a drain pauses normal work while a remap is pending, then resumes', async () => {
+  it('a drain interleaves one remap chunk with live sync (no starvation)', async () => {
     h.accessTokenFor.set('acct-1', 'token-1');
     h.columnValues.set('sheet-1::Meta Leads', ['lead-a', 'lead-b']);
     const { db, data } = makeDb(remapTables(0));
-    // A due row waits while the rollout runs.
+    // A due row is delivered in the SAME run that advances the
+    // rollout: large remaps never block newly arriving leads.
     data.meta_lead_sheets_queue.push({
       id: 'q-new',
       account_id: 'acct-1',
@@ -1448,8 +1486,11 @@ describe('layout remap', () => {
       onlyAccountId: 'acct-1',
       force: true,
     });
-    expect(first).toMatchObject({ attempted: 0, sent: 0 });
     expect(h.rewritten).toHaveLength(1);
+    expect(first.sent).toBe(1);
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-new')?.status,
+    ).toBe('sent');
 
     const second = await drainSheetsQueue(db, {
       onlyAccountId: 'acct-1',
@@ -1457,12 +1498,49 @@ describe('layout remap', () => {
     });
     expect(second).toMatchObject({ attempted: 0, sent: 0 });
     expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(false);
+  });
 
-    const third = await drainSheetsQueue(db, {
+  it("a table-scoped drain never runs another account's remap", async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.columnValues.set('sheet-2::Other', ['lead-x']);
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [
+        {
+          ...CONFIG,
+          account_id: 'acct-2',
+          form_id: 'form-remote',
+          spreadsheet_id: 'sheet-2',
+          sheet_tab: 'Other',
+          column_config: NEW_COLS,
+          pending_remap: true,
+          remap_cursor: 0,
+        },
+      ],
+      meta_lead_sheets_connections: [
+        {
+          account_id: 'acct-2',
+          access_token: 'x',
+          refresh_token: 'y',
+          token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+        },
+      ],
+      meta_lead_submissions: [],
+      meta_lead_sheets_queue: [],
+      flow_runs: [],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, {
       onlyAccountId: 'acct-1',
+      onlyFormId: 'form-sg',
       force: true,
     });
-    expect(third.sent).toBe(1);
+    // No cross-account remap writes, no quota consumed elsewhere.
+    expect(h.rewritten).toHaveLength(0);
+    expect(data.meta_lead_sheets_configs[0].pending_remap).toBe(true);
+    expect(data.meta_lead_sheets_configs[0].remap_cursor).toBe(0);
+    expect(result).toMatchObject({ attempted: 0, sent: 0 });
   });
 });
 
@@ -1956,15 +2034,62 @@ describe('importTableLeads — manual historical import', () => {
     ).toEqual(['a']);
   });
 
-  it('flags truncation past the limit', async () => {
-    const { db } = importDb({
-      meta_lead_submissions: [sub('a'), sub('b'), sub('c', { runId: null })],
-      flow_runs: [run('run-a', '2026-03-10T12:00:00.000Z'), run('run-b', '2026-03-11T12:00:00.000Z')],
+  it('pages through the full set past the per-page bound (never truncated)', async () => {
+    const { db, data } = importDb({
+      meta_lead_submissions: [
+        sub('a'),
+        sub('b'),
+        sub('c'),
+        sub('d'),
+        sub('e', { runId: null }),
+      ],
+      flow_runs: [
+        run('run-a', '2026-03-10T12:00:00.000Z'),
+        run('run-b', '2026-03-11T12:00:00.000Z'),
+        run('run-c', '2026-03-12T12:00:00.000Z'),
+        run('run-d', '2026-03-13T12:00:00.000Z'),
+      ],
       meta_lead_sheets_queue: [],
     });
+    // limit is now the per-page bound, not a total cap: all four
+    // syncable leads classify (one run-less row skipped), and the
+    // flag stays false so the UI never asks for a repeat that
+    // could not advance pagination.
     const res = await importTableLeads(db, 'acct-1', FORM, null, 2);
-    expect(res.truncated).toBe(true);
-    expect(res.total).toBe(2);
+    expect(res.truncated).toBe(false);
+    expect(res.total).toBe(4);
+    expect(res.imported).toBe(4);
+    expect(res.skipped).toBe(1);
+    expect(
+      data.meta_lead_sheets_queue.map((r) => r.submission_id).sort(),
+    ).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('filters a multi-page set by inclusive date range without gaps', async () => {
+    const subs = ['a', 'b', 'c', 'd', 'e'].map((id, i) =>
+      sub(id, {
+        created: `2026-03-0${i + 1}T10:00:00.000Z`,
+        metaCreated: `2026-03-0${i + 1}T10:00:00.000Z`,
+      }),
+    );
+    const runs = ['a', 'b', 'c', 'd', 'e'].map((id, i) =>
+      run(`run-${id}`, `2026-03-0${i + 1}T12:00:00.000Z`),
+    );
+    const { db } = importDb({
+      meta_lead_submissions: subs,
+      flow_runs: runs,
+      meta_lead_sheets_queue: [],
+    });
+    const res = await importTableLeads(
+      db,
+      'acct-1',
+      FORM,
+      { from: '2026-03-02', to: '2026-03-04' },
+      2,
+    );
+    expect(res.truncated).toBe(false);
+    expect(res.total).toBe(3);
+    expect(res.imported).toBe(3);
   });
 });
 
@@ -2348,6 +2473,42 @@ describe('drainSheetsQueue — quota, batching, and safe retry', () => {
     expect(data.meta_lead_sheets_queue[0].status).toBe('sent');
   });
 
+  it('exhausted rows stay queued-excluded until revived, then deliver', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.columnValues.set('sheet-1::Meta Leads', []);
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-exhausted', 'sub-a', 'lead-a', {
+            status: 'failed',
+            attempts: 8,
+          }),
+        ],
+        [SUBQ('sub-a', FSG, 'lead-a')],
+        [CFGQ(FSG)]
+      )
+    );
+    // Terminal rows never auto-retry and never stall the drain.
+    const parked = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(parked).toMatchObject({ attempted: 0, sent: 0, failed: 0 });
+    // Revival resets the FULL retry state (attempts, error, due-now).
+    const { revived } = await reviveTableFailedRows(db, 'acct-1', FSG);
+    expect(revived).toBe(1);
+    const row = data.meta_lead_sheets_queue.find((r) => r.id === 'q-exhausted')!;
+    expect(row).toMatchObject({ status: 'queued', attempts: 0, last_error: null });
+    // And the revived row delivers on the next drain (no duplicate:
+    // the scan finds nothing, one append carries the lead ID).
+    const delivered = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(delivered.sent).toBe(1);
+    expect(h.appended).toHaveLength(1);
+  });
+
   it('reviveTableFailedRows revives one table only and never sent rows', async () => {
     const { db, data } = makeDb(
       quotaTables(
@@ -2389,5 +2550,345 @@ describe('drainSheetsQueue — quota, batching, and safe retry', () => {
     expect(byId['q-sent'].status).toBe('sent');
     expect(byId['q-other'].status).toBe('failed');
     expect(byId['q-other'].attempts).toBe(0);
+  });
+});
+
+describe('audit remediation — data integrity, imports, cleanup, status', () => {
+  const FSG = 'form-sg';
+  const FOTHER = 'form-other';
+  const sub = (id: string, form: string, day: string, lead?: string) => ({
+    id,
+    account_id: 'acct-1',
+    meta_lead_id: lead ?? `lead-${id}`,
+    flow_run_id: `run-${id}`,
+    form_id: form,
+    form_name: 'Form',
+    campaign_name: 'Camp',
+    ad_name: 'Ad',
+    source: 'facebook',
+    answers: { full_name: 'Asha' },
+    meta_created_time: `${day}T10:00:00.000Z`,
+    created_at: `${day}T10:00:00.000Z`,
+    status: 'processed',
+  });
+  const cfg = (formId: string, over: Row = {}) => ({
+    ...CONFIG,
+    form_id: formId,
+    ...over,
+  });
+
+  it('backfill pages the full history and scopes the config update to its form', async () => {
+    const subs = ['a', 'b', 'c', 'd', 'e'].map((id, i) =>
+      sub(`s-${id}`, FSG, `2026-03-0${i + 1}`),
+    );
+    subs.push(sub('s-x', FOTHER, '2026-03-01'));
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [
+        cfg(FSG, { historical_import_status: 'idle', historical_imported_count: 0 }),
+        cfg(FOTHER, {
+          historical_import_status: 'done',
+          historical_imported_count: 99,
+        }),
+      ],
+      meta_lead_submissions: subs,
+      meta_lead_sheets_queue: [],
+    });
+    // Page size 2 forces three pages for the five rows.
+    const result = await backfillFormSheets(db, 'acct-1', FSG, 2);
+    expect(result).toMatchObject({ enqueued: 5, alreadyQueued: 0, total: 5 });
+    expect(data.meta_lead_sheets_queue).toHaveLength(5);
+    const mine = data.meta_lead_sheets_configs.find((c) => c.form_id === FSG)!;
+    expect(mine.historical_import_status).toBe('done');
+    expect(mine.historical_imported_count).toBe(5);
+    // The sibling table's import status and counts are untouched.
+    const sibling = data.meta_lead_sheets_configs.find(
+      (c) => c.form_id === FOTHER
+    )!;
+    expect(sibling.historical_import_status).toBe('done');
+    expect(sibling.historical_imported_count).toBe(99);
+  });
+
+  it('backfill is resumable: a second run only counts alreadyQueued', async () => {
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [cfg(FSG)],
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01'), sub('s-b', FSG, '2026-03-02')],
+      meta_lead_sheets_queue: [],
+    });
+    const first = await backfillFormSheets(db, 'acct-1', FSG, 2);
+    expect(first).toMatchObject({ enqueued: 2, total: 2 });
+    const second = await backfillFormSheets(db, 'acct-1', FSG, 2);
+    expect(second).toMatchObject({ enqueued: 0, alreadyQueued: 2, total: 2 });
+  });
+
+  it('enqueueFormsDelta pages the full history without duplicates', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: ['a', 'b', 'c', 'd', 'e'].map((id, i) =>
+        sub(`s-${id}`, FSG, `2026-03-0${i + 1}`),
+      ),
+      meta_lead_sheets_queue: [],
+    });
+    const result = await enqueueFormsDelta(db, 'acct-1', [FSG], 2);
+    expect(result).toMatchObject({ enqueued: 5, total: 5 });
+    expect(data.meta_lead_sheets_queue).toHaveLength(5);
+    const again = await enqueueFormsDelta(db, 'acct-1', [FSG], 2);
+    expect(again).toMatchObject({ enqueued: 0, alreadyQueued: 5, total: 5 });
+  });
+
+  it('invalidateTableRowMappings clears only this table’s stale numbers', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01'), sub('s-b', FOTHER, '2026-03-01')],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-a',
+          account_id: 'acct-1',
+          submission_id: 's-a',
+          flow_run_id: 'run-s-a',
+          meta_lead_id: 'lead-s-a',
+          status: 'sent',
+          attempts: 1,
+          max_attempts: 8,
+          sheet_row_number: 7,
+          next_retry_at: new Date(0).toISOString(),
+        },
+        {
+          id: 'q-b',
+          account_id: 'acct-1',
+          submission_id: 's-b',
+          flow_run_id: 'run-s-b',
+          meta_lead_id: 'lead-s-b',
+          status: 'sent',
+          attempts: 1,
+          max_attempts: 8,
+          sheet_row_number: 9,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+    });
+    const { invalidated } = await invalidateTableRowMappings(db, 'acct-1', FSG);
+    expect(invalidated).toBe(1);
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-a')?.sheet_row_number,
+    ).toBeNull();
+    // History preserved (row kept, sent status kept), sibling untouched.
+    expect(data.meta_lead_sheets_queue.find((r) => r.id === 'q-a')?.status).toBe('sent');
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-b')?.sheet_row_number,
+    ).toBe(9);
+  });
+
+  it('planImportScope covers 5,000+ scale tables without truncation', async () => {
+    const subs = Array.from({ length: 12 }, (_, i) =>
+      sub(`big-${i}`, FSG, '2026-03-01', `lead-big-${i}`),
+    );
+    const { db } = makeDb({
+      meta_lead_submissions: subs,
+      flow_runs: subs.map((s) => ({
+        id: s.flow_run_id,
+        account_id: 'acct-1',
+        flow_id: 'flow-1',
+        started_at: '2026-03-01T12:00:00.000Z',
+      })),
+      meta_lead_sheets_queue: [],
+    });
+    const scope = await planImportScope(db, 'acct-1', FSG, null, 5);
+    expect(scope.total).toBe(12);
+    expect(scope.candidates).toHaveLength(12);
+    expect(scope.truncated).toBe(false);
+  });
+
+  it('cleanup verifies live identity: shifted rows are skipped, never deleted', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    // The sheet shifted: row 2 now holds lead-b, not lead-a.
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-b', 'lead-c']);
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [cfg(FSG)],
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01', 'lead-a')],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-a',
+          account_id: 'acct-1',
+          submission_id: 's-a',
+          flow_run_id: 'run-s-a',
+          meta_lead_id: 'lead-a',
+          status: 'sent',
+          attempts: 1,
+          max_attempts: 8,
+          sheet_row_number: 2,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const pure = verifyCleanupBatch(
+      [{ queueId: 'q-a', rowNumber: 2, metaLeadId: 'lead-a' }],
+      new Map([['lead-a', 5]])
+    );
+    expect(pure).toEqual({ verified: [], skippedStale: 1 });
+    // End-to-end: nothing is deleted on a guess, the stale mapping
+    // is unmapped (sent history preserved), and a retry stays safe.
+    const result = await cleanupTableRows(db, 'token-1', 'acct-1', FSG);
+    expect(result).toMatchObject({ removed: 0 });
+    expect(h.deleted).toHaveLength(0);
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-a')?.sheet_row_number,
+    ).toBeNull();
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-a')?.status,
+    ).toBe('sent');
+  });
+
+  it('cleanup retries after a partial sheet delete stay safe (no double delete)', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-a']);
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [cfg(FSG)],
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01', 'lead-a')],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-a',
+          account_id: 'acct-1',
+          submission_id: 's-a',
+          flow_run_id: 'run-s-a',
+          meta_lead_id: 'lead-a',
+          status: 'sent',
+          attempts: 1,
+          max_attempts: 8,
+          sheet_row_number: 2,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await cleanupTableRows(db, 'token-1', 'acct-1', FSG);
+    expect(result.removed).toBe(1);
+    expect(h.deleted).toHaveLength(1);
+    expect(h.deleted[0]).toMatchObject({ rows: [2] });
+    // Re-running after the delete finds nothing live: no second
+    // delete of a shifted position, no duplicate removal.
+    const again = await cleanupTableRows(db, 'token-1', 'acct-1', FSG);
+    expect(again.removed).toBe(0);
+    expect(h.deleted).toHaveLength(1);
+    expect(data.meta_lead_sheets_queue).toHaveLength(0);
+  });
+
+  it('status badge: sharing/quota errors never raise reconnect, auth errors do', async () => {
+    const base = {
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01')],
+      meta_lead_sheets_queue: [],
+    };
+    for (const [error, expected] of [
+      ['Google Sheets API quota exceeded — backing off', false],
+      [
+        'The connected Google account cannot access that spreadsheet (sharing required)',
+        false,
+      ],
+      ['Worksheet "Old" was not found. Select a replacement tab', false],
+      [null, false],
+      ['Google authorization expired or was revoked. Reconnect Google Sheets.', true],
+      ['The stored Google credentials are corrupt or unreadable. Reconnect Google Sheets.', true],
+      ['revoked', true],
+    ] as Array<[string | null, boolean]>) {
+      const { db } = makeDb({
+        ...base,
+        meta_lead_submissions: [sub('s-a', FSG, '2026-03-01')],
+        meta_lead_sheets_connections: [
+          { account_id: 'acct-1', google_email: 'g@x.com', last_error: error },
+        ],
+        meta_lead_sheets_configs: [cfg(FSG, { last_error: null })],
+      });
+      const status = await getTableSheetsStatus(db, 'acct-1', FSG);
+      expect(status.needsReauth).toBe(expected);
+    }
+  });
+
+  it('drain prefers the live scan over a stale stored row number', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    // Sheet shifted: lead-a actually lives at row 4 now.
+    h.columnValues.set('sheet-1::Meta Leads', ['x', 'y', 'lead-a']);
+    const { db } = makeDb({
+      meta_lead_sheets_configs: [cfg(FSG)],
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01', 'lead-a')],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-a',
+          account_id: 'acct-1',
+          submission_id: 's-a',
+          flow_run_id: 'run-s-a',
+          meta_lead_id: 'lead-a',
+          status: 'queued',
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: 2,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [
+        { id: 'run-s-a', account_id: 'acct-1', flow_id: 'flow-1' },
+      ],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.sent).toBe(1);
+    // Updated at the TRUE row (4), not the stale stored row (2).
+    expect(h.updated).toHaveLength(1);
+    expect(h.updated[0].row).toBe(4);
+    expect(h.appended).toHaveLength(0);
+  });
+
+  it('a worker crash after a Google write resumes without duplicating', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    // The append already landed (visible in the ID scan) but the
+    // worker crashed before recording the mapping: stale `sending`
+    // claim, no stored row number.
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-a']);
+    const { db, data } = makeDb({
+      meta_lead_sheets_configs: [cfg(FSG)],
+      meta_lead_submissions: [sub('s-a', FSG, '2026-03-01', 'lead-a')],
+      meta_lead_sheets_queue: [
+        {
+          id: 'q-a',
+          account_id: 'acct-1',
+          submission_id: 's-a',
+          flow_run_id: 'run-s-a',
+          meta_lead_id: 'lead-a',
+          status: 'sending',
+          claimed_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+          updated_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+          attempts: 0,
+          max_attempts: 8,
+          sheet_row_number: null,
+          next_retry_at: new Date(0).toISOString(),
+        },
+      ],
+      flow_runs: [
+        { id: 'run-s-a', account_id: 'acct-1', flow_id: 'flow-1' },
+      ],
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    });
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.sent).toBe(1);
+    // No duplicate append: the scan found the crashed write and the
+    // drain updated it in place.
+    expect(h.appended).toHaveLength(0);
+    expect(h.updated).toHaveLength(1);
+    expect(
+      data.meta_lead_sheets_queue.find((r) => r.id === 'q-a')?.status,
+    ).toBe('sent');
   });
 });

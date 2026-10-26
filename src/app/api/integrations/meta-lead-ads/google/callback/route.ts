@@ -55,7 +55,45 @@ export async function GET(request: Request) {
     }
     const redirectUri = metaSheetsRedirectUri(request);
     const grant = await exchangeSheetsCodeForTokens(code, redirectUri);
-    await saveSheetsConnection(supabaseAdmin(), ctx.accountId, grant, ctx.userId);
+    const admin = supabaseAdmin();
+    await saveSheetsConnection(admin, ctx.accountId, grant, ctx.userId);
+    // Recovery: a successful reconnection clears only
+    // reconnect-related stale errors on this account's table
+    // configs (revoked/expired notes). Quota, sharing,
+    // validation, and missing-tab errors are preserved — they
+    // describe live state, not the old credential. The new grant
+    // saved above already reset the connection's own last_error.
+    try {
+      const { data: configs } = await admin
+        .from("meta_lead_sheets_configs")
+        .select("form_id, last_error")
+        .eq("account_id", ctx.accountId);
+      const { isReconnectErrorText } = await import(
+        "@/lib/meta-lead-sheets/sheets-client"
+      );
+      for (const cfg of ((configs ?? []) as Array<{
+        form_id: string;
+        last_error: string | null;
+      }>)) {
+        if (isReconnectErrorText(cfg.last_error)) {
+          await admin
+            .from("meta_lead_sheets_configs")
+            .update({
+              last_error: null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("account_id", ctx.accountId)
+            .eq("form_id", cfg.form_id);
+        }
+      }
+    } catch (clearErr) {
+      // Best-effort: the reconnect itself succeeded; a stale note
+      // is cosmetic and clears on the next successful sync.
+      console.warn(
+        "[meta-sheets-oauth] could not clear stale reconnect errors:",
+        clearErr instanceof Error ? clearErr.message : clearErr,
+      );
+    }
     return backTo(request, "connected");
   } catch (err) {
     console.error("[meta-sheets-oauth] callback failed:", err);

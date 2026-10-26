@@ -132,10 +132,18 @@ export function sheetsUserError(
       };
     }
     if (err.status === 403) {
+      if (classifySheetsError(err) === 'auth') {
+        return {
+          status: 409,
+          error:
+            'Google rejected the connected account’s credentials or OAuth scopes. Reconnect Google Sheets in Settings → Meta, then try again.',
+          retryAfterMs: null,
+        };
+      }
       return {
         status: 502,
         error:
-          `Google refused ${action} for the connected account. Check that the account has access (share the spreadsheet with it as Editor for existing sheets) and try again.`,
+          `The connected Google account cannot access that spreadsheet (${action} was not completed). Share the spreadsheet with the connected account as Editor and try again — reconnecting will not fix this.`,
         retryAfterMs: null,
       };
     }
@@ -180,6 +188,85 @@ export function sheetsUserError(
  * 429, or a quota reason code (notably 403 rateLimitExceeded,
  * which Google reports as 403, plus RESOURCE_EXHAUSTED text).
  */
+/**
+ * Classify a Google Sheets failure into an actionable bucket so
+ * callers never confuse a sharing problem with revoked
+ * credentials (or a quota trip with a permission failure):
+ *   * `auth`      — expired/revoked credentials or insufficient
+ *                   OAuth scopes (401, 403 with an auth-flavored
+ *                   reason). The fix is reconnecting.
+ *   * `sharing`   — 403 PERMISSION_DENIED / accessNotConfigured:
+ *                   the connected account cannot access THIS
+ *                   spreadsheet. The fix is sharing the sheet with
+ *                   the connected account as Editor — reconnecting
+ *                   cannot help and must not be suggested.
+ *   * `quota`     — 429 or a quota reason (notably 403
+ *                   rateLimitExceeded, which Google reports as
+ *                   403, plus RESOURCE_EXHAUSTED text). The fix is
+ *                   backoff with Retry-After, never re-auth.
+ *   * `notFound`  — invalid spreadsheet id (404).
+ *   * `invalid`   — 400 validation failures (never retried).
+ *   * `transient` — 5xx / network failures (safe to retry).
+ *   * `unknown`   — anything else.
+ * Quota is checked BEFORE auth: a throttled credential is not a
+ * revoked one. Pure.
+ */
+export type SheetsErrorKind =
+  | 'auth'
+  | 'sharing'
+  | 'quota'
+  | 'notFound'
+  | 'invalid'
+  | 'transient'
+  | 'unknown';
+
+export function classifySheetsError(err: unknown): SheetsErrorKind {
+  if (isQuotaSheetsError(err)) return 'quota';
+  if (err instanceof SheetsApiError) {
+    if (err.status === 401) return 'auth';
+    if (err.status === 403) {
+      const reason = (err.reason ?? '').toLowerCase();
+      const message = err.message.toLowerCase();
+      // Insufficient OAuth scopes: the grant itself is wrong.
+      if (
+        reason.includes('auth') ||
+        reason.includes('scope') ||
+        message.includes('insufficient authentication scopes') ||
+        message.includes('insufficientauthentication')
+      ) {
+        return 'auth';
+      }
+      return 'sharing';
+    }
+    if (err.status === 404) return 'notFound';
+    if (err.status === 400) return 'invalid';
+    if (err.status >= 500 && err.status < 600) return 'transient';
+    return 'unknown';
+  }
+  if (err instanceof TypeError) return 'transient';
+  return 'unknown';
+}
+
+/**
+ * True when the persisted last_error text describes revoked/
+ * expired credentials (the only signal that may raise a
+ * reconnect prompt). Sharing, quota, validation, and missing-tab
+ * errors must NEVER flip the reconnect badge. Pure.
+ */
+export function isReconnectErrorText(text: string | null | undefined): boolean {
+  if (typeof text !== 'string' || text.trim() === '') return false;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('reconnect') ||
+    lower.includes('revoked') ||
+    lower.includes('expired') ||
+    lower.includes('authorization expired') ||
+    lower.includes('needs_reauth') ||
+    lower.includes('401') ||
+    lower.includes('no google account is connected')
+  );
+}
+
 export function isQuotaSheetsError(err: unknown): boolean {
   // Name-based match first: the token-refresh path throws a
   // SheetsQuotaError (defined in ./oauth), and duck-typing keeps
@@ -242,6 +329,34 @@ export function resolveSpreadsheetOpenUrl(args: {
     return `https://docs.google.com/spreadsheets/d/${id}`;
   }
   return null;
+}
+
+/**
+ * Normalize a Meta Lead ID for stable identity comparison.
+ * Meta Lead IDs are opaque numeric strings that can exceed
+ * Number.MAX_SAFE_INTEGER — they must NEVER pass through Number,
+ * parseInt, or any float formatting (scientific notation and
+ * precision loss would fork one lead into two rows). Strings are
+ * trimmed (Sheets cells often carry stray whitespace); numbers
+ * that are already safe integers are stringified, and anything
+ * else falls back to a trimmed String() form. Comparison is
+ * always string-to-string on the normalized form — never by
+ * name, phone, or any other field.
+ */
+export function normalizeMetaLeadId(input: unknown): string {
+  if (typeof input === 'string') return input.trim();
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    if (Number.isInteger(input) && Math.abs(input) <= Number.MAX_SAFE_INTEGER) {
+      return String(input);
+    }
+    // Non-integers or unsafe magnitudes cannot round-trip through
+    // a JS number without precision loss: keep the fullest text
+    // form available rather than inventing digits.
+    return String(input).trim();
+  }
+  if (typeof input === 'bigint') return input.toString();
+  if (input === null || input === undefined) return '';
+  return String(input).trim();
 }
 
 /** Extract a spreadsheet id from a full URL or accept a bare id. */
@@ -740,7 +855,11 @@ export async function deleteSheetRows(
  * configured ID column (single read). Callers pass the layout's
  * `idColumnIndex` so matching follows the ID wherever the column
  * order puts it; the default preserves the legacy column-A scan.
- * Returns only IDs that were found.
+ * Returns only IDs that were found, keyed by NORMALIZED lead id
+ * (see normalizeMetaLeadId) — look callers up with the same
+ * normalization. Comparison is string-only: IDs are never
+ * coerced through Number, and deduplication is never by name or
+ * phone.
  */
 export async function findSheetsRowsByLeadId(
   accessToken: string,
@@ -761,10 +880,17 @@ export async function findSheetsRowsByLeadId(
   if (!res.ok) await throwForResponse(res, 'Google Sheets column read failed');
   const data = (await res.json()) as { values?: unknown[][] };
   const cells = data.values?.[0] ?? [];
-  const wanted = new Set(leadIds);
+  // Normalized string comparison on both sides: trims stray
+  // whitespace from sheet cells and never coerces through Number
+  // (precision loss would fork one lead into duplicate rows).
+  // Keys are the NORMALIZED ids — callers must look up with
+  // normalizeMetaLeadId(submission.meta_lead_id).
+  const wanted = new Set(leadIds.map((id) => normalizeMetaLeadId(id)));
   cells.forEach((cell, index) => {
-    const value = String(cell ?? '');
-    if (wanted.has(value) && !found.has(value)) found.set(value, index + 2);
+    const key = normalizeMetaLeadId(cell);
+    if (key !== '' && wanted.has(key) && !found.has(key)) {
+      found.set(key, index + 2);
+    }
   });
   return found;
 }

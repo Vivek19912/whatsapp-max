@@ -102,6 +102,7 @@ vi.mock("@/lib/meta-lead-sheets/queue", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/meta-lead-sheets/queue")>();
   return {
     ...actual,
+    invalidateTableRowMappings: async () => ({ invalidated: 0 }),
     enqueueFormsDelta: async () => ({ enqueued: 0, alreadyQueued: 0, total: 0 }),
     backfillFormSheets: async () => {
       h.backfillCalls += 1;

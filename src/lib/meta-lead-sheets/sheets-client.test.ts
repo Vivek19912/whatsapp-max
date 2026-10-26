@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  classifySheetsError,
   createSheetsSpreadsheet,
   deleteSheetRows,
   deleteWorksheetTab,
@@ -12,7 +13,9 @@ import {
   findSheetsRowsByLeadId,
   isAuthSheetsError,
   isQuotaSheetsError,
+  isReconnectErrorText,
   isTransientSheetsError,
+  normalizeMetaLeadId,
   parseSheetsSpreadsheetId,
   quoteTabTitle,
   resolveSpreadsheetOpenUrl,
@@ -419,6 +422,75 @@ describe("findSheetsRowsByLeadId", () => {
     const [url] = lastCall(fetchImpl);
     // 0-based index 3 → column D.
     expect(String(url)).toContain("!D2:D");
+  });
+
+  it("matches IDs after normalization (whitespace-tolerant, string-only)", async () => {
+    const fetchImpl = columnFetch(["  lead-a  ", "lead-b", 987654321012345]);
+    const found = await findSheetsRowsByLeadId(
+      "t",
+      "s",
+      "Tab",
+      ["lead-a", "  lead-b ", "987654321012345"],
+      fetchImpl,
+    );
+    expect(found.get("lead-a")).toBe(2);
+    expect(found.get("lead-b")).toBe(3);
+    expect(found.get("987654321012345")).toBe(4);
+  });
+});
+
+describe("normalizeMetaLeadId — stable string identity", () => {
+  it("trims strings and never coerces through Number", () => {
+    expect(normalizeMetaLeadId("  lead-1  ")).toBe("lead-1");
+    // Large numeric IDs stay exact (no precision loss).
+    expect(normalizeMetaLeadId("9876543210123456789")).toBe("9876543210123456789");
+    expect(normalizeMetaLeadId(42)).toBe("42");
+    expect(normalizeMetaLeadId(null)).toBe("");
+    expect(normalizeMetaLeadId(undefined)).toBe("");
+  });
+});
+
+describe("classifySheetsError — actionable buckets", () => {
+  it("separates sharing denials from auth, quota, and outage failures", () => {
+    expect(classifySheetsError(new SheetsApiError("x", 401))).toBe("auth");
+    expect(classifySheetsError(new SheetsApiError("x", 403))).toBe("sharing");
+    expect(
+      classifySheetsError(new SheetsApiError("x", 403, { reason: "rateLimitExceeded" })),
+    ).toBe("quota");
+    expect(
+      classifySheetsError(
+        new SheetsApiError("quota exceeded [RESOURCE_EXHAUSTED]", 403, {
+          reason: "RESOURCE_EXHAUSTED",
+        }),
+      ),
+    ).toBe("quota");
+    expect(classifySheetsError(new SheetsApiError("x", 404))).toBe("notFound");
+    expect(classifySheetsError(new SheetsApiError("x", 400))).toBe("invalid");
+    expect(classifySheetsError(new SheetsApiError("x", 500))).toBe("transient");
+    expect(classifySheetsError(new TypeError("fetch failed"))).toBe("transient");
+  });
+
+  it("never suggests reconnecting for a sharing denial", () => {
+    const mapped = sheetsUserError(
+      new SheetsApiError("PERMISSION_DENIED", 403, { reason: "forbidden" }),
+      "spreadsheet validation",
+    );
+    expect(mapped.status).toBe(502);
+    expect(mapped.error).toContain("Editor");
+    expect(mapped.error).not.toContain("Reconnect");
+  });
+});
+
+describe("isReconnectErrorText — auth-only reconnect badge", () => {
+  it("flags credential failures and ignores quota/sharing/config errors", () => {
+    expect(isReconnectErrorText("Google authorization expired or was revoked. Reconnect Google Sheets.")).toBe(true);
+    expect(isReconnectErrorText("revoked")).toBe(true);
+    expect(isReconnectErrorText(null)).toBe(false);
+    expect(isReconnectErrorText("Google Sheets API quota exceeded — backing off")).toBe(false);
+    expect(
+      isReconnectErrorText("The connected Google account cannot access that spreadsheet"),
+    ).toBe(false);
+    expect(isReconnectErrorText('Worksheet "Old" was not found.')).toBe(false);
   });
 });
 

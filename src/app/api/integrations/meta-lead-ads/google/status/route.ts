@@ -10,6 +10,7 @@ import { NextResponse } from 'next/server';
 
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
 import { metaSheetsOAuthConfigured } from '@/lib/meta-lead-sheets/oauth';
+import { isReconnectErrorText } from '@/lib/meta-lead-sheets/sheets-client';
 
 export async function GET() {
   try {
@@ -23,10 +24,15 @@ export async function GET() {
       google_email: string | null;
       last_error: string | null;
     } | null;
+    // needsReauth derives from persisted auth-flavored error text
+    // only (revoked/expired credentials). Quota, sharing,
+    // validation, or missing-tab errors must never flip the
+    // reconnect badge — and a stale reconnect note must clear on
+    // reconnection (see the OAuth callback).
     return NextResponse.json({
       configured: metaSheetsOAuthConfigured(),
       connected: !!conn,
-      needsReauth: !!conn?.last_error,
+      needsReauth: isReconnectErrorText(conn?.last_error),
       email: conn?.google_email ?? null,
       lastError: conn?.last_error ?? null,
     });

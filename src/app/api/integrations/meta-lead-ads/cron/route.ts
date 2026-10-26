@@ -15,6 +15,7 @@ import { drainMetaLeadNotifications } from '@/lib/meta-lead-ads/notify';
 import { runDueRetries } from '@/lib/meta-lead-ads/process-lead';
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from '@/lib/meta-lead-ads/sync';
 import { pumpActiveImportJobs } from '@/lib/meta-lead-sheets/import-jobs';
+import { purgeExpiredSheetsOAuthStates } from '@/lib/meta-lead-sheets/oauth';
 import { drainSheetsQueue } from '@/lib/meta-lead-sheets/queue';
 import { drainWhatsappQueue } from '@/lib/meta-lead-whatsapp/queue';
 
@@ -148,6 +149,20 @@ export async function GET(request: Request) {
       );
     }
 
+    // ADDITIVE OAuth-state retention. Same sweep: consumed/expired
+    // one-time states are purged (safe retention — active states
+    // are untouched). Failures are isolated and never affect
+    // polling, notifications, or sync.
+    let oauthStatesPurged = 0;
+    try {
+      ({ purged: oauthStatesPurged } = await purgeExpiredSheetsOAuthStates(db));
+    } catch (error) {
+      console.error(
+        '[meta-lead-ads-cron] oauth-state purge failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+
     return NextResponse.json({
       ...retries,
       sync,
@@ -155,6 +170,7 @@ export async function GET(request: Request) {
       sheets,
       whatsapp,
       imports,
+      oauthStatesPurged,
       ...(retryError ? { retryError } : {}),
     });
   } catch (error) {

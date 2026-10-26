@@ -174,6 +174,13 @@ function del(query: string) {
   );
 }
 
+function get(query: string) {
+  return new Request(
+    `https://app.test/api/integrations/meta-lead-ads/sheets/tabs?${query}`,
+    { method: "GET" },
+  );
+}
+
 beforeEach(() => {
   h.authed = true;
   h.role = "owner";
@@ -263,6 +270,44 @@ describe("POST /sheets/tabs (create)", () => {
     );
     expect(denied.status).toBe(502);
     expect(((await denied.json()) as { error: string }).error).toMatch(/Editor/);
+  });
+});
+
+describe("GET /sheets/tabs (list)", () => {
+  const q = (extra: string) =>
+    `spreadsheet_id=${encodeURIComponent(SPREADSHEET)}&flow_id=flow-1&${extra}`;
+
+  it("lists tabs for the caller's own table", async () => {
+    const res = await route.GET(get(q("")));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { tabs: string[]; spreadsheet_id: string };
+    expect(json.tabs).toEqual(["Leads", "Archive"]);
+    expect(json.spreadsheet_id).toBe("spreadsheet-1");
+  });
+
+  it("requires the table scope (no enumeration with guessed IDs)", async () => {
+    expect(
+      (await route.GET(get(`spreadsheet_id=${encodeURIComponent(SPREADSHEET)}`))).status,
+    ).toBe(400);
+    expect(
+      (await route.GET(get(`spreadsheet_id=${encodeURIComponent(SPREADSHEET)}&flow_id=nope`))).status,
+    ).toBe(404);
+    // Another account's table is invisible (tenant isolation).
+    expect(
+      (
+        await route.GET(
+          get(`spreadsheet_id=${encodeURIComponent(SPREADSHEET)}&flow_id=flow-other`),
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it("rejects bad spreadsheet IDs and surfaces Google failures", async () => {
+    expect((await route.GET(get("spreadsheet_id=nope&flow_id=flow-1"))).status).toBe(400);
+    h.spreadsheetShouldFail = true;
+    const res = await route.GET(get(q("")));
+    expect(res.status).toBe(502);
+    h.spreadsheetShouldFail = false;
   });
 });
 

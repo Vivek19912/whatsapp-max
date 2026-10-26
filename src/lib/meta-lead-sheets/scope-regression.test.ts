@@ -43,6 +43,21 @@ describe('meta sheets — assignment hooks stay Meta-only', () => {
     // Conversions API hook preserved.
     expect(s).toContain('recordWorkspaceStatusChanged');
   });
+
+  it('workspace cell edits enqueue through the service role (agent RLS cannot starve sync)', () => {
+    const s = src('src/app/api/flows/[id]/workspace-values/route.ts');
+    // The queue's RLS policy only allows admin inserts: a
+    // user-scoped agent client would be denied and the UI would
+    // falsely look synced. Both the clear and the save paths must
+    // use the service-role client after the server-side
+    // (account, run) authorization above.
+    expect(
+      s.match(/enqueueSheetsSyncForRun\(supabaseAdmin\(\)/g) ?? []
+    ).toHaveLength(2);
+    expect(s).not.toContain('enqueueSheetsSyncForRun(supabase,');
+    // The enqueue outcome is reported, never faked as success.
+    expect(s).toContain('sheetsSync');
+  });
 });
 
 describe('meta sheets — cron stays additive', () => {
@@ -156,6 +171,19 @@ describe('migration scope', () => {
       expect(stmt).toContain('meta_lead_sheets_configs');
     }
     expect(s).not.toContain('CREATE TABLE');
+  });
+
+  it('migration 137 only retains oauth states without touching other tables', () => {
+    const s = src('supabase/migrations/137_meta_lead_sheets_retention.sql');
+    expect(s).toContain('meta_lead_sheets_oauth_states');
+    expect(s).toContain('meta_lead_sheets_import_jobs');
+    expect(s).not.toContain('ALTER TABLE public.flows');
+    expect(s).not.toContain('ALTER TABLE public.flow_runs');
+    expect(s).not.toContain('ALTER TABLE public.workspace');
+    expect(s).not.toContain('DROP TABLE');
+    expect(s).not.toContain('DELETE FROM public.meta_lead_sheets_queue');
+    // Terminal import jobs are retained as the audit trail.
+    expect(s).not.toContain('DELETE FROM public.meta_lead_sheets_import_jobs');
   });
 
   it('migration 131 moves configs to per-table rows without touching other tables', () => {
