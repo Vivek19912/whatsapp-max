@@ -7,7 +7,7 @@ import {
 } from "../_components/legal-content";
 import {
   COMPANY_NAME,
-  EFFECTIVE_DATE,
+  TERMS_EFFECTIVE_DATE as EFFECTIVE_DATE,
   PRODUCT_NAME,
   SUPPORT_EMAIL,
   WEBSITE_DOMAIN,
