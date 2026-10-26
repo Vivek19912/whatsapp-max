@@ -565,7 +565,6 @@ export function WorkspaceFilters({
             emptyText="No team members match."
             ariaLabel="Filter by assignee"
             triggerClassName="mt-1.5"
-            contentClassName="w-[var(--radix-popover-trigger-width)]"
           />
         </section>
 

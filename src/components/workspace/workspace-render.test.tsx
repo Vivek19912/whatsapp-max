@@ -100,7 +100,7 @@ describe("toolbar renders desktop actions plus a mobile overflow", () => {
 });
 
 describe("searchable select renders an accessible trigger", () => {
-  it("shows the placeholder and exposes a labeled combobox", () => {
+  it("shows the placeholder and exposes a labeled listbox trigger", () => {
     const html = renderToStaticMarkup(
       <SearchableSelect
         value=""
@@ -111,7 +111,45 @@ describe("searchable select renders an accessible trigger", () => {
       />,
     );
     expect(html).toContain("Pick one");
-    expect(html).toContain('role="combobox"');
+    // Closed popovers render only the trigger; the combobox input
+    // lives in the popup. The trigger advertises the listbox.
+    expect(html).toContain('aria-haspopup="listbox"');
+    expect(html).toContain('aria-label="Pick one"');
+    expect(html).not.toContain("radix-popover-trigger-width");
+  });
+
+  it("anchors, bounds, flips, and keyboard-navigates the dropdown", () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/components/workspace/searchable-select.tsx`,
+      "utf8"
+    );
+    // Width follows the trigger through Base UI's anchor variable
+    // (never the Radix variable, which does not exist here).
+    expect(src).toContain("w-[var(--anchor-width)]");
+    expect(src).toContain("max-w-[calc(100vw-2rem)]");
+    expect(src).not.toContain("w-[var(--radix-popover-trigger-width)]");
+    // Only the option list scrolls, capped at ~240px or the space
+    // actually available — the dropdown can never push past the
+    // viewport or cover unrelated dialog sections.
+    expect(src).toContain("max-h-[min(15rem,var(--available-height))]");
+    expect(src).toContain("overflow-y-auto");
+    expect(src).toContain("overscroll-contain");
+    // The cap belongs on the scrolling viewport itself, not on a
+    // non-scrolling wrapper (a previous regression put max-h on
+    // the ScrollArea root, so the list grew unbounded).
+    expect(src).not.toContain("ScrollArea");
+    // Flip above when there is no room below; shift into view
+    // horizontally; keep clear of edges.
+    expect(src).toContain("collisionAvoidance");
+    expect(src).toContain("side: \"flip\"");
+    expect(src).toContain("align: \"shift\"");
+    expect(src).toContain("collisionPadding");
+    // Arrow/Home/End/Enter keyboard selection with scroll-into-view.
+    expect(src).toContain("moveHighlight");
+    expect(src).toContain("scrollIntoView");
+    expect(src).toContain('aria-activedescendant');
+    expect(src).toContain('role="combobox"');
+    expect(src).toContain('aria-autocomplete="list"');
   });
 });
 
