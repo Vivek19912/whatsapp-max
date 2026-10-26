@@ -127,11 +127,42 @@ describe('meta sheets routes — authorization', () => {
     expect(s).toContain(
       'resolveTableForm(ctx.supabase, ctx.accountId, flowId)'
     );
-    expect(s).toContain('importTableLeads');
-    expect(s).toContain('drainSheetsQueue');
+    // Durable jobs: the route only starts a job and runs a single
+    // bounded worker pass — bulk Google work happens in bounded
+    // drains, never inline in the request.
+    expect(s).toContain('createImportJob');
+    expect(s).toContain('pumpImportJob');
+    expect(s).toContain('scheduleSheetsDrainSoon');
+    expect(s).not.toContain('importTableLeads');
     expect(s).not.toContain('workspace_values');
     expect(s).not.toContain('access_token');
     expect(s).not.toContain('refresh_token');
+  });
+
+  it('import job routes stay table-scoped and never write Workspace rows', () => {
+    for (const file of [
+      'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/route.ts',
+      'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/resume/route.ts',
+      'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/cancel/route.ts',
+      'src/lib/meta-lead-sheets/import-jobs.ts',
+    ]) {
+      const s = src(file);
+      expect(s).not.toContain('workspace_values');
+      expect(s).not.toContain('access_token');
+      expect(s).not.toContain('refresh_token');
+    }
+    // Status reads are member-visible; mutations require the owner.
+    expect(
+      src(
+        'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/route.ts'
+      )
+    ).toContain('getCurrentAccount');
+    for (const file of [
+      'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/resume/route.ts',
+      'src/app/api/integrations/meta-lead-ads/sheets/tables/[flowId]/import/jobs/[jobId]/cancel/route.ts',
+    ]) {
+      expect(src(file)).toContain("requireRole('owner')");
+    }
   });
 
   it('account-wide retry requires the owner and stays account-scoped', () => {

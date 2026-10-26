@@ -23,7 +23,11 @@ import {
   getSheetsAccessToken,
   SheetsAuthError,
 } from '@/lib/meta-lead-sheets/oauth';
-import { createSheetsSpreadsheet } from '@/lib/meta-lead-sheets/sheets-client';
+import {
+  createSheetsSpreadsheet,
+  isQuotaSheetsError,
+  sheetsUserError,
+} from '@/lib/meta-lead-sheets/sheets-client';
 import { resolveTableForm } from '@/lib/meta-lead-sheets/tables';
 
 const INITIAL_TAB = 'Sheet1';
@@ -72,6 +76,25 @@ export async function POST(request: Request) {
           { status: 409 }
         );
       }
+      if (isQuotaSheetsError(err)) {
+        // Throttled token endpoint: retryable, never a reconnect.
+        const mapped = sheetsUserError(err, 'spreadsheet creation');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       throw err;
     }
 
@@ -88,13 +111,25 @@ export async function POST(request: Request) {
         title,
         INITIAL_TAB
       );
-    } catch {
+    } catch (err) {
+      // Classify instead of swallowing: revoked credentials ask
+      // for a reconnect, throttling asks for a wait + retry, and
+      // permission problems name the fix.
+      const mapped = sheetsUserError(err, 'spreadsheet creation');
       return NextResponse.json(
+        { error: mapped.error },
         {
-          error:
-            'Could not create that spreadsheet with the connected Google account. Check its permissions and try again.',
-        },
-        { status: 502 }
+          status: mapped.status,
+          ...(mapped.retryAfterMs !== null
+            ? {
+                headers: {
+                  'retry-after': String(
+                    Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                  ),
+                },
+              }
+            : {}),
+        }
       );
     }
 

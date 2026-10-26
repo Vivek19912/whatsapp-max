@@ -296,28 +296,48 @@ export async function getSheetsAccessToken(
         { status: res.status, retryAfterMs: parseRetryAfterMs(safeHeader(res, "retry-after")) },
       );
     }
-    await db
-      .from("meta_lead_sheets_connections")
-      .update({
-        last_error: `Google authorization expired or was revoked (${res.status}). Reconnect Google Sheets.`,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("account_id", accountId);
+    // Best-effort: record the failure for the settings status, but
+    // never let a write denial (e.g. a non-admin caller through an
+    // RLS-scoped client) mask the real auth error below.
+    try {
+      await db
+        .from("meta_lead_sheets_connections")
+        .update({
+          last_error: `Google authorization expired or was revoked (${res.status}). Reconnect Google Sheets.`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("account_id", accountId);
+    } catch (persistErr) {
+      console.warn(
+        "[meta-sheets] could not persist token refresh failure:",
+        persistErr instanceof Error ? persistErr.message : persistErr,
+      );
+    }
     throw new SheetsAuthError(
       `Google token refresh failed (${res.status}): ${text.slice(0, 200)}`,
     );
   }
   const refreshed = (await res.json()) as TokenResponse;
   const newExpiry = new Date(Date.now() + refreshed.expires_in * 1000);
-  await db
-    .from("meta_lead_sheets_connections")
-    .update({
-      access_token: encrypt(refreshed.access_token),
-      token_expiry: newExpiry.toISOString(),
-      last_error: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("account_id", accountId);
+  // Best-effort persist: an RLS-scoped caller without write rights
+  // (member-level reads) still gets a valid token for this request;
+  // the next call refreshes again. Owners persist normally.
+  try {
+    await db
+      .from("meta_lead_sheets_connections")
+      .update({
+        access_token: encrypt(refreshed.access_token),
+        token_expiry: newExpiry.toISOString(),
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("account_id", accountId);
+  } catch (persistErr) {
+    console.warn(
+      "[meta-sheets] could not persist refreshed Google token:",
+      persistErr instanceof Error ? persistErr.message : persistErr,
+    );
+  }
   return refreshed.access_token;
 }
 

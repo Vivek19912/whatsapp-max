@@ -46,8 +46,9 @@ describe('workspace page — per-table Google Sheets action', () => {
 
   it('saves the created spreadsheet URL to the selected table’s configuration', () => {
     const dialogSrc = dialog();
-    // Create Spreadsheet fills the URL field from the response…
-    expect(dialogSrc).toContain('setSpreadsheet(json.url');
+    // Create Spreadsheet fills the URL field from the response
+    // (coerced: bare id fallback, never undefined)…
+    expect(dialogSrc).toContain('setSpreadsheet(createdUrl');
     // …and Save Configuration persists that exact field value for
     // this table (flowId-scoped endpoint), so Open Sheet later
     // reads back the newly configured spreadsheet.
@@ -362,8 +363,8 @@ describe('workspace dialog — per-table sheets configuration', () => {
     expect(src).toContain('/sheets/spreadsheets');
     // Populates the URL field and selects the first tab without
     // touching columns or starting a sync.
-    expect(src).toContain('setSpreadsheet(json.url');
-    expect(src).toContain('setTab(json.tabs[0]');
+    expect(src).toContain('setSpreadsheet(createdUrl');
+    expect(src).toContain('setTab(createdTabs[0]');
     expect(src).toContain('setTabTouched(true)');
     expect(src).toContain('Nothing');
     expect(src).toContain('syncs until you save');
@@ -375,5 +376,35 @@ describe('workspace dialog — per-table sheets configuration', () => {
     expect(src).not.toContain('@/lib/flows/sheet-');
     expect(src).not.toContain('access_token');
     expect(src).not.toContain('refresh_token');
+  });
+
+  it('tolerates malformed create responses without breaking the form', () => {
+    const src = dialog();
+    const fn = src.slice(src.indexOf('function createSpreadsheet()'));
+    // Coerced, never trusted verbatim: a missing URL falls back to
+    // the bare id (or empty — never undefined), and non-array tabs
+    // degrade to an empty list instead of crashing the selector.
+    expect(fn).toContain('Array.isArray(json.tabs)');
+    expect(fn).toContain("typeof json.url === 'string'");
+    expect(fn).toContain('Spreadsheet "');
+  });
+
+  it('opens the persisted table spreadsheet, never a stale or foreign URL', () => {
+    const src = dialog();
+    // The icon reads the saved config (status), never the editable
+    // text field and never another table: switching tables remounts
+    // the dialog by flow key and every fetch is flowId-scoped.
+    expect(src).toContain('savedSpreadsheetUrl');
+    expect(src).toContain('status?.spreadsheetUrl');
+    expect(src).not.toContain('window.open(spreadsheet,');
+    // ID fallback when no URL was saved; invalid values hide the
+    // button instead of opening the wrong sheet.
+    expect(src).toContain('spreadsheetId: status?.spreadsheetId');
+    expect(src).toContain('resolveSpreadsheetOpenUrl');
+    expect(src).toContain('disabled={!savedSpreadsheetUrl}');
+    expect(src).toContain('window.open(');
+    expect(src).toContain('savedSpreadsheetUrl,');
+    expect(src).toContain("'_blank'");
+    expect(src).toContain("'noopener,noreferrer'");
   });
 });

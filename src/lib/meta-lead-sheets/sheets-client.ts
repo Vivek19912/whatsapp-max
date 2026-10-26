@@ -95,6 +95,87 @@ async function throwForResponse(
 }
 
 /**
+ * User-facing mapping for a Google API failure: HTTP status plus
+ * an actionable message (reconnect vs share vs wait-and-retry vs
+ * outage). Used by the interactive routes (create spreadsheet,
+ * tabs, save) so failures never surface as a generic 502 or a
+ * misleading "reconnect" prompt. Pure.
+ */
+export function sheetsUserError(
+  err: unknown,
+  action: string
+): { status: number; error: string; retryAfterMs: number | null } {
+  const quotaRetryAfter =
+    err instanceof SheetsApiError
+      ? err.retryAfterMs
+      : (err as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+  const retryAfterMs =
+    typeof quotaRetryAfter === 'number' ? quotaRetryAfter : null;
+  if (isQuotaSheetsError(err)) {
+    const wait =
+      retryAfterMs !== null && retryAfterMs > 0
+        ? ` Wait about ${Math.max(1, Math.round(retryAfterMs / 1000))} seconds and try again.`
+        : ' Wait a minute and try again.';
+    return {
+      status: 429,
+      error: `Google is rate-limiting requests right now (${action} was not completed).${wait}`,
+      retryAfterMs,
+    };
+  }
+  if (err instanceof SheetsApiError) {
+    if (err.status === 401) {
+      return {
+        status: 409,
+        error:
+          'Google rejected the connected account’s credentials. Reconnect Google Sheets in Settings → Meta, then try again.',
+        retryAfterMs: null,
+      };
+    }
+    if (err.status === 403) {
+      return {
+        status: 502,
+        error:
+          `Google refused ${action} for the connected account. Check that the account has access (share the spreadsheet with it as Editor for existing sheets) and try again.`,
+        retryAfterMs: null,
+      };
+    }
+    if (err.status === 404) {
+      return {
+        status: 502,
+        error: `Google could not find the spreadsheet for ${action}. Check the URL or ID and try again.`,
+        retryAfterMs: null,
+      };
+    }
+    if (err.status === 400) {
+      return {
+        status: 400,
+        error: `Google rejected the ${action} request as invalid. Check the name and try again.`,
+        retryAfterMs: null,
+      };
+    }
+    if (err.status >= 500 && err.status < 600) {
+      return {
+        status: 502,
+        error: `Google Sheets had a temporary problem during ${action}. Nothing was changed — try again in a moment.`,
+        retryAfterMs: null,
+      };
+    }
+  }
+  if (err instanceof TypeError) {
+    return {
+      status: 502,
+      error: `Could not reach Google Sheets during ${action}. Check your connection and try again.`,
+      retryAfterMs: null,
+    };
+  }
+  return {
+    status: 502,
+    error: `Could not complete ${action} with the connected Google account. Check its permissions and try again.`,
+    retryAfterMs: null,
+  };
+}
+
+/**
  * True for quota errors that must back off, never re-auth: HTTP
  * 429, or a quota reason code (notably 403 rateLimitExceeded,
  * which Google reports as 403, plus RESOURCE_EXHAUSTED text).

@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   spreadsheetShouldFail: false,
   createShouldFail: false,
   deleteShouldFail: false,
+  createFailure: null as { status: number; reason?: string; retryAfterMs?: number | null } | null,
   flows: [
     {
       id: "flow-1",
@@ -99,6 +100,16 @@ vi.mock("@/lib/meta-lead-sheets/sheets-client", async (importOriginal) => {
       if (h.createShouldFail) {
         throw new actual.SheetsApiError("Google Sheets tab create failed (500)", 500);
       }
+      if (h.createFailure) {
+        throw new actual.SheetsApiError(
+          `Google Sheets tab create failed (${h.createFailure.status})${h.createFailure.reason ? ` [${h.createFailure.reason}]` : ""}`,
+          h.createFailure.status,
+          {
+            reason: h.createFailure.reason ?? null,
+            retryAfterMs: h.createFailure.retryAfterMs ?? null,
+          }
+        );
+      }
       h.tabs.push(tab);
     },
     deleteWorksheetTab: async (_token: string, _id: string, tab: string) => {
@@ -171,6 +182,7 @@ beforeEach(() => {
   h.spreadsheetShouldFail = false;
   h.createShouldFail = false;
   h.deleteShouldFail = false;
+  h.createFailure = null;
 });
 
 describe("POST /sheets/tabs (create)", () => {
@@ -233,6 +245,24 @@ describe("POST /sheets/tabs (create)", () => {
       post({ flow_id: "flow-1", spreadsheet_url: SPREADSHEET, tab: "June" }),
     );
     expect(res.status).toBe(502);
+  });
+
+  it("classifies tab-creation failures (quota vs permission vs outage)", async () => {
+    h.createFailure = { status: 429, reason: "rateLimitExceeded", retryAfterMs: 20_000 };
+    const throttled = await route.POST(
+      post({ flow_id: "flow-1", spreadsheet_url: SPREADSHEET, tab: "June" }),
+    );
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("retry-after")).toBe("20");
+    expect(((await throttled.json()) as { error: string }).error).toMatch(/rate-limiting/);
+    expect(h.tabs).toEqual(["Leads", "Archive"]);
+
+    h.createFailure = { status: 403 };
+    const denied = await route.POST(
+      post({ flow_id: "flow-1", spreadsheet_url: SPREADSHEET, tab: "June" }),
+    );
+    expect(denied.status).toBe(502);
+    expect(((await denied.json()) as { error: string }).error).toMatch(/Editor/);
   });
 });
 

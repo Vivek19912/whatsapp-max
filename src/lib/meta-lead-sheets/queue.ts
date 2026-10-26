@@ -409,24 +409,44 @@ export function isWithinImportRange(
   return at >= from && at <= to;
 }
 
+export interface ImportCandidate {
+  id: string;
+  flow_run_id: string;
+  meta_lead_id: string;
+}
+
+export interface ImportScope {
+  /** In-scope candidates in import order. */
+  candidates: ImportCandidate[];
+  /** Candidate ids that already have a sheet row (refreshed in place). */
+  mappedIds: string[];
+  /** In-scope total (excludes out-of-range and run-less rows). */
+  total: number;
+  /** Candidates without a sheet row yet. */
+  imported: number;
+  /** Candidates already mapped (updated in place, never appended twice). */
+  updated: number;
+  /** In-scope submissions with no Workspace run (nothing syncable). */
+  skipped: number;
+  /** True when more candidates exist than the limit allowed. */
+  truncated: boolean;
+}
+
 /**
- * Manual historical import for ONE table: classify + enqueue that
- * form's processed submissions (all, or an inclusive submission-day
- * range), resetting already-mapped rows to queued so the drain
- * refreshes them in place. Matching is always by stable Meta Lead
- * ID downstream, so re-imports update instead of duplicating;
- * Workspace rows are only read, never written. Only callers'
- * (account, form) scope is touched — every query below carries
- * both. Throws on DB failures (callers surface them); per-row
- * enqueue errors are counted, never thrown.
+ * Classify ONE table's processed submissions for manual import
+ * (all, or an inclusive submission-day range) with a bounded
+ * number of queries — no per-row round trips. Read-only: Workspace
+ * rows are never written. Returns the exact candidate snapshot an
+ * import job persists, so re-pumps and retries reconcile the same
+ * set. Only the caller's (account, form) scope is read.
  */
-export async function importTableLeads(
+export async function planImportScope(
   db: SupabaseClient,
   accountId: string,
   formId: string,
   range: TableImportRange | null,
   limit = TABLE_IMPORT_LIMIT
-): Promise<TableImportResult> {
+): Promise<ImportScope> {
   const bounded = Math.max(1, Math.min(limit, TABLE_IMPORT_LIMIT));
   const { data, error } = await db
     .from('meta_lead_submissions')
@@ -463,8 +483,10 @@ export async function importTableLeads(
   }
 
   // Already-mapped submissions (have a sheet row): the drain will
-  // update them in place rather than append.
+  // update them in place rather than append. Also doubles as the
+  // existing-queue-row set for duplicate-safe bulk inserts.
   const mapped = new Set<string>();
+  const existing = new Set<string>();
   const subIds = batch.map((r) => r.id);
   if (subIds.length > 0) {
     const { data: queued, error: queueErr } = await db
@@ -474,16 +496,13 @@ export async function importTableLeads(
       .in('submission_id', subIds);
     if (queueErr) throw queueErr;
     for (const q of (queued ?? []) as Array<{ submission_id: string; sheet_row_number: number | null }>) {
+      existing.add(q.submission_id);
       if (typeof q.sheet_row_number === 'number') mapped.add(q.submission_id);
     }
   }
 
-  const nowIso = new Date().toISOString();
-  let total = 0;
-  let imported = 0;
-  let updated = 0;
+  const candidates: ImportCandidate[] = [];
   let skipped = 0;
-  let failed = 0;
   for (const row of batch) {
     // No Workspace run: nothing syncable to write.
     if (!row.flow_run_id) {
@@ -500,36 +519,147 @@ export async function importTableLeads(
         continue;
       }
     }
-    total += 1;
-    // Reset sent/failed rows so the drain refreshes them in place
-    // (matched by lead ID downstream — never appended twice).
-    // In-flight (queued/sending) rows are left untouched.
-    const { error: resetErr } = await db
-      .from('meta_lead_sheets_queue')
-      .update({ status: 'queued', claimed_at: null, next_retry_at: nowIso, updated_at: nowIso })
-      .eq('account_id', accountId)
-      .eq('submission_id', row.id)
-      .in('status', ['sent', 'failed']);
-    if (resetErr) {
-      failed += 1;
-      continue;
-    }
-    const { error: insertErr } = await db
-      .from('meta_lead_sheets_queue')
-      .insert({
-        account_id: accountId,
-        submission_id: row.id,
-        flow_run_id: row.flow_run_id,
-        meta_lead_id: row.meta_lead_id,
-      });
-    if (insertErr && !isUniqueViolation(insertErr)) {
-      failed += 1;
-      continue;
-    }
-    if (mapped.has(row.id)) updated += 1;
-    else imported += 1;
+    candidates.push({
+      id: row.id,
+      flow_run_id: row.flow_run_id,
+      meta_lead_id: row.meta_lead_id,
+    });
   }
-  return { total, imported, updated, skipped, failed, truncated };
+
+  let updated = 0;
+  for (const c of candidates) {
+    if (mapped.has(c.id)) updated += 1;
+  }
+  return {
+    candidates,
+    mappedIds: [...mapped].filter((id) =>
+      candidates.some((c) => c.id === id)
+    ),
+    total: candidates.length,
+    imported: candidates.length - updated,
+    updated,
+    skipped,
+    truncated,
+  };
+}
+
+export interface EnqueueImportResult {
+  enqueued: number;
+  alreadyQueued: number;
+  failed: number;
+}
+
+/**
+ * Enqueue a classification snapshot with bulk operations: one
+ * reset for sent/failed rows (drain refreshes them in place,
+ * matched by lead ID downstream — never appended twice), one
+ * existence check, and chunked bulk inserts for the rest.
+ * In-flight (queued/sending) rows are left untouched. Bulk
+ * failures fall back to per-row writes so one bad row cannot fail
+ * the batch; per-row enqueue errors are counted, never thrown.
+ */
+export async function enqueueImportCandidates(
+  db: SupabaseClient,
+  accountId: string,
+  candidates: ImportCandidate[],
+): Promise<EnqueueImportResult> {
+  const out: EnqueueImportResult = { enqueued: 0, alreadyQueued: 0, failed: 0 };
+  if (candidates.length === 0) return out;
+  const nowIso = new Date().toISOString();
+  const ids = candidates.map((c) => c.id);
+
+  // Reset sent/failed rows so the drain refreshes them in place.
+  const { error: resetErr } = await db
+    .from('meta_lead_sheets_queue')
+    .update({ status: 'queued', claimed_at: null, next_retry_at: nowIso, updated_at: nowIso })
+    .eq('account_id', accountId)
+    .in('submission_id', ids)
+    .in('status', ['sent', 'failed']);
+  if (resetErr) throw resetErr;
+
+  // Insert only rows with no queue row yet (bulk insert aborts the
+  // whole statement on a unique violation, so pre-check first).
+  const { data: existingRows, error: existingErr } = await db
+    .from('meta_lead_sheets_queue')
+    .select('submission_id')
+    .eq('account_id', accountId)
+    .in('submission_id', ids);
+  if (existingErr) throw existingErr;
+  const existing = new Set(
+    ((existingRows ?? []) as Array<{ submission_id: string }>).map((r) => r.submission_id)
+  );
+  const fresh = candidates.filter((c) => !existing.has(c.id));
+  out.alreadyQueued = candidates.length - fresh.length;
+
+  const CHUNK = 200;
+  for (let i = 0; i < fresh.length; i += CHUNK) {
+    const chunk = fresh.slice(i, i + CHUNK);
+    const { error: insertErr } = await db.from('meta_lead_sheets_queue').insert(
+      chunk.map((c) => ({
+        account_id: accountId,
+        submission_id: c.id,
+        flow_run_id: c.flow_run_id,
+        meta_lead_id: c.meta_lead_id,
+      }))
+    );
+    if (!insertErr) {
+      out.enqueued += chunk.length;
+      continue;
+    }
+    if (!isUniqueViolation(insertErr)) throw insertErr;
+    // A concurrent worker won the race on some row: fall back to
+    // per-row writes so the rest still land.
+    for (const c of chunk) {
+      const { error: singleErr } = await db
+        .from('meta_lead_sheets_queue')
+        .insert({
+          account_id: accountId,
+          submission_id: c.id,
+          flow_run_id: c.flow_run_id,
+          meta_lead_id: c.meta_lead_id,
+        });
+      if (!singleErr) {
+        out.enqueued += 1;
+      } else if (isUniqueViolation(singleErr)) {
+        out.alreadyQueued += 1;
+      } else {
+        out.failed += 1;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Manual historical import for ONE table: classify + enqueue that
+ * form's processed submissions (all, or an inclusive submission-day
+ * range), resetting already-mapped rows to queued so the drain
+ * refreshes them in place. Matching is always by stable Meta Lead
+ * ID downstream, so re-imports update instead of duplicating;
+ * Workspace rows are only read, never written. Only callers'
+ * (account, form) scope is touched - every query below carries
+ * both. Classification and enqueue run as bulk operations (a
+ * handful of queries for up to 2000 leads); bulk failures throw
+ * (callers surface them) while per-row insert fallbacks are
+ * counted, never thrown.
+ */
+export async function importTableLeads(
+  db: SupabaseClient,
+  accountId: string,
+  formId: string,
+  range: TableImportRange | null,
+  limit = TABLE_IMPORT_LIMIT
+): Promise<TableImportResult> {
+  const scope = await planImportScope(db, accountId, formId, range, limit);
+  const { failed } = await enqueueImportCandidates(db, accountId, scope.candidates);
+  return {
+    total: scope.total,
+    imported: scope.imported,
+    updated: scope.updated,
+    skipped: scope.skipped,
+    failed,
+    truncated: scope.truncated,
+  };
 }
 
 export interface DrainResult {

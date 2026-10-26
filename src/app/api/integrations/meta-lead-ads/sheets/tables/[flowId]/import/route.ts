@@ -13,23 +13,33 @@
 // same-account form); every query below carries (account, form),
 // so no other table or account can be imported. Source of truth is
 // the existing Workspace lead records (read-only — Workspace rows
-// are never written). Matching downstream is by stable Meta Lead
-// ID: already-mapped rows are refreshed in place, never appended
-// twice. This path only enqueues + drains due rows for the form —
-// it never changes auto_sync or any other configuration.
+// are never written).
 //
-// Response: { ok, import: { total, imported, updated, skipped,
-// failed, truncated }, drain: { sent, failed } }.
+// Durable background processing: the request classifies (bulk,
+// DB-local), enqueues idempotently, persists one import job, runs
+// a single bounded worker pass, and returns promptly with the job
+// — it never holds the connection open for the whole import.
+// Matching downstream is by stable Meta Lead ID: already-mapped
+// rows refresh in place, never appended twice. Only one active
+// import per table (409 with the running job otherwise). Progress
+// polling (GET jobs/[jobId]) is a pure read and never restarts
+// work; the cron keeps pumping active jobs in the background.
+//
+// Response: { ok, job: { id, status, total, processed, sent,
+// failed, retrying, pending, inserted, updated, skipped,
+// truncated, ... } }.
 
 import { NextResponse } from 'next/server';
 
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import {
-  drainSheetsQueue,
-  importTableLeads,
-  type TableImportRange,
-} from '@/lib/meta-lead-sheets/queue';
+  ActiveImportJobError,
+  createImportJob,
+  pumpImportJob,
+  serializeImportJob,
+} from '@/lib/meta-lead-sheets/import-jobs';
+import type { TableImportRange } from '@/lib/meta-lead-sheets/queue';
 import { resolveTableForm } from '@/lib/meta-lead-sheets/tables';
 import { scheduleSheetsDrainSoon } from '@/lib/meta-lead-sheets/trigger';
 
@@ -86,7 +96,7 @@ export async function POST(request: Request, { params }: Ctx) {
     }
 
     // The table must have a saved sheet target: without one the
-    // drain would only park rows, and the counts would mislead.
+    // worker would only park rows, and the counts would mislead.
     const { data: config } = await admin
       .from('meta_lead_sheets_configs')
       .select('spreadsheet_id')
@@ -100,24 +110,44 @@ export async function POST(request: Request, { params }: Ctx) {
       );
     }
 
-    const summary = await importTableLeads(admin, ctx.accountId, table.formId, range);
-    // Best-effort immediate drain so rows land without waiting for
-    // the cron; anything left stays queued for retry. Failures stay
-    // visible in the returned counts — never silent.
-    const drained = await drainSheetsQueue(admin, {
-      onlyAccountId: ctx.accountId,
-      onlyFormId: table.formId,
-      force: true,
-      limit: 100,
-    });
+    let jobId: string;
+    try {
+      const job = await createImportJob(admin, {
+        accountId: ctx.accountId,
+        formId: table.formId,
+        flowId: table.flowId,
+        mode,
+        range,
+        createdBy: ctx.userId,
+      });
+      jobId = job.id;
+    } catch (err) {
+      if (err instanceof ActiveImportJobError) {
+        return NextResponse.json(
+          {
+            error:
+              'An import is already running for this table. Resume it below instead of starting a new one.',
+            jobId: err.jobId || undefined,
+          },
+          { status: 409 }
+        );
+      }
+      throw err;
+    }
+
+    // One bounded worker pass inline so the first rows land
+    // without waiting for the cron; anything left stays queued
+    // and completes via the cron + prompt drains.
+    const { progress } = await pumpImportJob(admin, jobId);
+    if (!progress) throw new Error('Import job disappeared after creation.');
     // Prompt post-response drain for anything left over; the cron
     // remains the fallback. Tracked `after()`, never detached.
-    scheduleSheetsDrainSoon({ accountId: ctx.accountId });
-    return NextResponse.json({
-      ok: true,
-      import: summary,
-      drain: { sent: drained.sent, failed: drained.failed },
-    });
+    try {
+      scheduleSheetsDrainSoon({ accountId: ctx.accountId });
+    } catch {
+      // Best-effort only.
+    }
+    return NextResponse.json({ ok: true, job: serializeImportJob(progress) });
   } catch (err) {
     return toErrorResponse(err);
   }

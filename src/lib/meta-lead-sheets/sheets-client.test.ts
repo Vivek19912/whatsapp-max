@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createSheetsSpreadsheet,
   deleteSheetRows,
   deleteWorksheetTab,
   ensureSheetsHeader,
@@ -18,6 +19,7 @@ import {
   rewriteSheetRows,
   setSheetColumnHidden,
   SheetsApiError,
+  sheetsUserError,
   updateSheetsRow,
   validateWorksheetTabName,
 } from "./sheets-client";
@@ -136,6 +138,108 @@ describe("sheets error taxonomy", () => {
     expect(apiErr.message).toContain("rateLimitExceeded");
     expect(isQuotaSheetsError(apiErr)).toBe(true);
     expect(isAuthSheetsError(apiErr)).toBe(false);
+  });
+});
+
+describe("sheetsUserError — actionable mapping, never a bare 502", () => {
+  it("maps quota to 429 with a wait-and-retry message", () => {
+    const mapped = sheetsUserError(new SheetsApiError("q", 429), "spreadsheet creation");
+    expect(mapped.status).toBe(429);
+    expect(mapped.error).toContain("rate-limiting");
+    expect(mapped.error).toContain("Wait a minute");
+    const withRetry = sheetsUserError(
+      new SheetsApiError("q", 429, { retryAfterMs: 120_000 }),
+      "spreadsheet creation"
+    );
+    expect(withRetry.status).toBe(429);
+    expect(withRetry.error).toContain("120 seconds");
+    expect(withRetry.retryAfterMs).toBe(120_000);
+  });
+
+  it("maps 403 rateLimitExceeded to 429, never to reconnect", () => {
+    const mapped = sheetsUserError(
+      new SheetsApiError("x", 403, { reason: "rateLimitExceeded" }),
+      "loading worksheet tabs"
+    );
+    expect(mapped.status).toBe(429);
+    expect(mapped.error).toContain("rate-limiting");
+  });
+
+  it("maps revoked credentials to a reconnect prompt", () => {
+    const mapped = sheetsUserError(new SheetsApiError("x", 401), "spreadsheet creation");
+    expect(mapped.status).toBe(409);
+    expect(mapped.error).toContain("Reconnect");
+  });
+
+  it("maps permission denials to the sharing fix", () => {
+    const mapped = sheetsUserError(new SheetsApiError("x", 403), "spreadsheet validation");
+    expect(mapped.status).toBe(502);
+    expect(mapped.error).toContain("Editor");
+  });
+
+  it("maps outages and network failures distinctly", () => {
+    const down = sheetsUserError(new SheetsApiError("x", 500), "worksheet tab creation");
+    expect(down.status).toBe(502);
+    expect(down.error).toContain("temporary problem");
+    const net = sheetsUserError(new TypeError("fetch failed"), "spreadsheet creation");
+    expect(net.status).toBe(502);
+    expect(net.error).toContain("reach Google");
+  });
+});
+
+describe("createSheetsSpreadsheet — realistic Google responses", () => {
+  function googleCreateFetch(body: unknown): typeof fetch {
+    return (async () =>
+      ({
+        ok: true,
+        json: async () => body,
+        text: async () => "",
+      }) as unknown as Response) as typeof fetch;
+  }
+
+  it("parses a full create response (id, url, title, existing tabs)", async () => {
+    const created = await createSheetsSpreadsheet(
+      "tok",
+      "Meta Leads - Video Form",
+      "Sheet1",
+      googleCreateFetch({
+        spreadsheetId: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        properties: { title: "Meta Leads - Video Form" },
+        sheets: [
+          { properties: { sheetId: 0, title: "Sheet1", index: 0 } },
+        ],
+        spreadsheetUrl:
+          "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit?gid=0",
+      })
+    );
+    expect(created.spreadsheetId).toBe("1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms");
+    expect(created.url).toContain("/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms");
+    expect(created.title).toBe("Meta Leads - Video Form");
+    expect(created.tabs).toEqual(["Sheet1"]);
+  });
+
+  it("surfaces Google failures with status for the route classifier", async () => {
+    const failing = (async () =>
+      ({
+        ok: false,
+        status: 403,
+        headers: new Headers(),
+        text: async () =>
+          JSON.stringify({
+            error: {
+              message: "The caller does not have permission",
+              errors: [{ reason: "forbidden", message: "see above" }],
+            },
+          }),
+      }) as unknown as Response) as typeof fetch;
+    const err = await createSheetsSpreadsheet("tok", "T", "Sheet1", failing).catch(
+      (e: unknown) => e
+    );
+    expect(err).toBeInstanceOf(SheetsApiError);
+    expect((err as SheetsApiError).status).toBe(403);
+    const mapped = sheetsUserError(err, "spreadsheet creation");
+    expect(mapped.status).toBe(502);
+    expect(mapped.error).toContain("Editor");
   });
 });
 

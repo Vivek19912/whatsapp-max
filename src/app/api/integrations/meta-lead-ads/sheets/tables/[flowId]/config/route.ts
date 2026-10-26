@@ -50,7 +50,9 @@ import {
   createWorksheetTab,
   ensureSheetsHeader,
   getSheetsSpreadsheet,
+  isQuotaSheetsError,
   parseSheetsSpreadsheetId,
+  sheetsUserError,
 } from '@/lib/meta-lead-sheets/sheets-client';
 import {
   resolveTableForm,
@@ -203,18 +205,48 @@ export async function PUT(request: Request, { params }: Ctx) {
           { status: 409 }
         );
       }
+      if (isQuotaSheetsError(err)) {
+        const mapped = sheetsUserError(err, 'spreadsheet validation');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       throw err;
     }
     let meta;
     try {
       meta = await getSheetsSpreadsheet(accessToken, spreadsheetId);
-    } catch {
+    } catch (err) {
+      // Classify instead of a single generic message: revoked
+      // credentials ask for a reconnect, throttling asks for a
+      // wait + retry, and permission problems name the fix.
+      const mapped = sheetsUserError(err, 'spreadsheet validation');
       return NextResponse.json(
+        { error: mapped.error },
         {
-          error:
-            'Could not access that spreadsheet with the connected Google account. Share it with that account (Editor) or check the URL.',
-        },
-        { status: 502 }
+          status: mapped.status,
+          ...(mapped.retryAfterMs !== null
+            ? {
+                headers: {
+                  'retry-after': String(
+                    Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                  ),
+                },
+              }
+            : {}),
+        }
       );
     }
 
@@ -256,13 +288,22 @@ export async function PUT(request: Request, { params }: Ctx) {
     if (choice.needsCreate) {
       try {
         await createWorksheetTab(accessToken, spreadsheetId, tab);
-      } catch {
+      } catch (err) {
+        const mapped = sheetsUserError(err, 'worksheet tab creation');
         return NextResponse.json(
+          { error: mapped.error },
           {
-            error:
-              'Could not create that worksheet tab. Check the name and try again.',
-          },
-          { status: 502 }
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
         );
       }
     }
@@ -427,12 +468,21 @@ export async function PUT(request: Request, { params }: Ctx) {
         );
       }
     } catch (err) {
+      const mapped = sheetsUserError(err, 'worksheet preparation');
       return NextResponse.json(
+        { error: mapped.error },
         {
-          error:
-            'Spreadsheet is reachable but the worksheet could not be prepared. Saved settings resume automatically.',
-        },
-        { status: 502 }
+          status: mapped.status,
+          ...(mapped.retryAfterMs !== null
+            ? {
+                headers: {
+                  'retry-after': String(
+                    Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                  ),
+                },
+              }
+            : {}),
+        }
       );
     }
 

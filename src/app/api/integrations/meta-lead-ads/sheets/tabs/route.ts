@@ -37,7 +37,9 @@ import {
   createWorksheetTab,
   deleteWorksheetTab,
   getSheetsSpreadsheet,
+  isQuotaSheetsError,
   parseSheetsSpreadsheetId,
+  sheetsUserError,
   validateWorksheetTabName,
 } from '@/lib/meta-lead-sheets/sheets-client';
 import { resolveTableForm } from '@/lib/meta-lead-sheets/tables';
@@ -63,9 +65,36 @@ export async function GET(request: Request) {
           { status: 409 }
         );
       }
+      if (isQuotaSheetsError(err)) {
+        const mapped = sheetsUserError(err, 'loading worksheet tabs');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       throw err;
     }
-    const meta = await getSheetsSpreadsheet(accessToken, spreadsheetId);
+    let meta;
+    try {
+      meta = await getSheetsSpreadsheet(accessToken, spreadsheetId);
+    } catch (err) {
+      const mapped = sheetsUserError(err, 'loading worksheet tabs');
+      return NextResponse.json(
+        { error: mapped.error },
+        { status: mapped.status }
+      );
+    }
     return NextResponse.json({
       spreadsheet_id: meta.spreadsheetId,
       title: meta.title,
@@ -152,6 +181,24 @@ export async function POST(request: Request) {
           { status: 409 }
         );
       }
+      if (isQuotaSheetsError(err)) {
+        const mapped = sheetsUserError(err, 'worksheet tab creation');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       throw err;
     }
 
@@ -182,7 +229,25 @@ export async function POST(request: Request) {
 
     try {
       await createWorksheetTab(accessToken, sheet.spreadsheetId, name.tab);
-    } catch {
+    } catch (err) {
+      if (isQuotaSheetsError(err)) {
+        const mapped = sheetsUserError(err, 'worksheet tab creation');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       // Re-read: a concurrent creation (or a case-variant race)
       // surfaces as a duplicate instead of a generic failure.
       const again = await readSpreadsheet(accessToken, rawInput);
@@ -196,12 +261,10 @@ export async function POST(request: Request) {
           { status: 409 }
         );
       }
+      const mapped = sheetsUserError(err, 'worksheet tab creation');
       return NextResponse.json(
-        {
-          error:
-            'Could not create that worksheet tab. Check the name and try again.',
-        },
-        { status: 502 }
+        { error: mapped.error },
+        { status: mapped.status }
       );
     }
 
@@ -253,6 +316,24 @@ export async function DELETE(request: Request) {
           { status: 409 }
         );
       }
+      if (isQuotaSheetsError(err)) {
+        const mapped = sheetsUserError(err, 'worksheet tab deletion');
+        return NextResponse.json(
+          { error: mapped.error },
+          {
+            status: mapped.status,
+            ...(mapped.retryAfterMs !== null
+              ? {
+                  headers: {
+                    'retry-after': String(
+                      Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                    ),
+                  },
+                }
+              : {}),
+          }
+        );
+      }
       throw err;
     }
 
@@ -276,12 +357,22 @@ export async function DELETE(request: Request) {
 
     try {
       await deleteWorksheetTab(accessToken, sheet.spreadsheetId, tab);
-    } catch {
+    } catch (err) {
+      const mapped = sheetsUserError(err, 'worksheet tab deletion');
       return NextResponse.json(
+        { error: mapped.error },
         {
-          error: `Could not delete worksheet "${tab}". Try again.`,
-        },
-        { status: 502 }
+          status: mapped.status,
+          ...(mapped.retryAfterMs !== null
+            ? {
+                headers: {
+                  'retry-after': String(
+                    Math.max(1, Math.round(mapped.retryAfterMs / 1000))
+                  ),
+                },
+              }
+            : {}),
+        }
       );
     }
 

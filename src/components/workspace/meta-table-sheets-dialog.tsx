@@ -49,12 +49,25 @@ interface SheetsColumn {
   label: string;
 }
 
-interface ImportSummary {
-  imported: number;
+interface ImportJob {
+  id: string;
+  status: string;
+  mode: string;
+  range_from: string | null;
+  range_to: string | null;
+  total: number;
+  processed: number;
+  sent: number;
+  failed: number;
+  retrying: number;
+  pending: number;
+  inserted: number;
   updated: number;
   skipped: number;
-  failed: number;
-  sent: number;
+  truncated: boolean;
+  done: boolean;
+  finished_at: string | null;
+  last_error: string | null;
 }
 
 interface TableSheetsStatus {
@@ -238,8 +251,9 @@ export function MetaTableSheetsDialog({
   const [importMode, setImportMode] = useState<'all' | 'range'>('all');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
-  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
+  const [importJob, setImportJob] = useState<ImportJob | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importPolling, setImportPolling] = useState(false);
   // Workspace-derived available headers: exact human-readable labels
   // displayed in the currently selected Workspace table, in Workspace
   // display order. Built from the existing Workspace table data source
@@ -415,8 +429,9 @@ export function MetaTableSheetsDialog({
       setImportMode('all');
       setDateFrom('');
       setDateTo('');
-      setImportResult(null);
+      setImportJob(null);
       setImportError(null);
+      setImportPolling(false);
       void load();
     }
   }, [open, load]);
@@ -467,17 +482,34 @@ export function MetaTableSheetsDialog({
         tabs: string[];
       };
       // Populate the URL field from the response (fall back to the
-      // bare id when Google omits the URL).
-      setSpreadsheet(json.url || json.spreadsheet_id);
-      setTabs(json.tabs);
-      if (json.tabs.length > 0) {
-        setTab(json.tabs[0] as string);
+      // bare id when Google omits the URL). Coerce defensively: a
+      // malformed success payload must never blank the field into
+      // an uncontrolled input or crash the tab selector below.
+      const createdUrl =
+        typeof json.url === 'string' && json.url.trim() !== ''
+          ? json.url
+          : typeof json.spreadsheet_id === 'string'
+            ? json.spreadsheet_id
+            : '';
+      const createdTabs = Array.isArray(json.tabs)
+        ? (json.tabs as unknown[]).filter(
+            (t): t is string => typeof t === 'string' && t !== ''
+          )
+        : [];
+      const createdTitle =
+        typeof json.title === 'string' && json.title.trim() !== ''
+          ? json.title
+          : 'Spreadsheet';
+      setSpreadsheet(createdUrl);
+      setTabs(createdTabs);
+      if (createdTabs.length > 0) {
+        setTab(createdTabs[0] as string);
         setTabTouched(true);
       } else {
         setTab('');
         setTabTouched(false);
       }
-      toast.success(`Spreadsheet "${json.title}" created — review and save.`);
+      toast.success(`Spreadsheet "${createdTitle}" created — review and save.`);
     });
   }
 
@@ -679,10 +711,12 @@ export function MetaTableSheetsDialog({
   /**
    * Manual historical import for this table only (separate from
    * automatic sync, which only handles new + updated leads). The
-   * server enqueues this table's existing leads (all, or an
-   * inclusive submission-day range) and drains them into the
-   * configured sheet, matching by stable Meta Lead ID so existing
-   * rows update instead of duplicating.
+   * server starts a durable import job and runs a single bounded
+   * worker pass, then returns immediately with the job — long
+   * imports complete in the background (prompt drain + cron) while
+   * the dialog polls job status. Matching downstream is by stable
+   * Meta Lead ID, so existing rows update instead of duplicating
+   * and resuming never re-appends synced rows.
    */
   function startImport() {
     if (importMode === 'range' && (!dateFrom || !dateTo)) {
@@ -695,42 +729,175 @@ export function MetaTableSheetsDialog({
     }
     void act('import', async () => {
       try {
-        const json = (await readJson(
-          await fetch(
-            `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import`,
-            {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(
-                importMode === 'range'
-                  ? { mode: 'range', from: dateFrom, to: dateTo }
-                  : { mode: 'all' }
-              ),
-            }
-          )
-        )) as {
-          ok: boolean;
-          import: {
-            imported: number;
-            updated: number;
-            skipped: number;
-            failed: number;
-          };
-          drain?: { sent: number; failed: number } | null;
-        };
+        setImportJob(null);
         setImportError(null);
-        setImportResult({
-          imported: json.import.imported,
-          updated: json.import.updated,
-          skipped: json.import.skipped,
-          failed: json.import.failed + (json.drain?.failed ?? 0),
-          sent: json.drain?.sent ?? 0,
-        });
+        const res = await fetch(
+          `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(
+              importMode === 'range'
+                ? { mode: 'range', from: dateFrom, to: dateTo }
+                : { mode: 'all' }
+            ),
+          }
+        );
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          job?: ImportJob;
+          jobId?: string;
+          error?: string;
+        };
+        if (!res.ok) {
+          // An already-running import is adopted, not an error: pick
+          // up its live progress instead of starting a duplicate.
+          if (res.status === 409 && typeof json.jobId === 'string' && json.jobId !== '') {
+            toast('An import is already running for this table — showing its progress.');
+            await refreshImportJob(json.jobId);
+            return;
+          }
+          throw new Error(
+            typeof json.error === 'string' ? json.error : `Request failed (${res.status})`
+          );
+        }
+        if (!json.job) throw new Error('Import did not return a job.');
+        setImportJob(json.job);
+        toast.success(
+          json.job.total > 0
+            ? `Import started: ${json.job.total} lead${json.job.total === 1 ? '' : 's'} queued.`
+            : 'Import started: nothing new to import.'
+        );
         await load();
       } catch (err) {
+        // A failed start shows here (not the generic toast path
+        // alone) so the user can fix the cause and retry.
+        setImportError(err instanceof Error ? err.message : 'Import failed.');
+        throw err;
+      }
+    });
+  }
+
+  /** Fetch one job's status (pure read — never restarts work). */
+  async function refreshImportJob(jobId: string): Promise<boolean> {
+    try {
+      const res = await fetch(
+        `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import/jobs/${encodeURIComponent(jobId)}`,
+        { cache: 'no-store' }
+      );
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        job?: ImportJob;
+        error?: string;
+      };
+      if (!res.ok) {
         setImportError(
-          err instanceof Error ? err.message : 'Import failed.'
+          typeof json.error === 'string' ? json.error : `Request failed (${res.status})`
         );
+        return true;
+      }
+      if (!json.job) return true;
+      setImportJob(json.job);
+      if (json.job.last_error) setImportError(json.job.last_error);
+      return json.job.done;
+    } catch {
+      // Polling blips (offline, restart) must never kill the job
+      // view: the next tick retries.
+      return false;
+    }
+  }
+
+  // Poll an active job's progress until it completes. The GET is a
+  // pure read — polls can never duplicate work or restart the job.
+  const activeImportJobId = importJob && !importJob.done ? importJob.id : null;
+  useEffect(() => {
+    if (!open || !activeImportJobId) {
+      setImportPolling(false);
+      return;
+    }
+    let cancelled = false;
+    setImportPolling(true);
+    const tick = async () => {
+      const done = await refreshImportJob(activeImportJobId);
+      if (!cancelled && done) setImportPolling(false);
+    };
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // refreshImportJob is stable (no state captured except setters).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeImportJobId, flowId]);
+
+  /** Resume a stalled job with one bounded worker pass (no duplicates). */
+  function resumeImport(reviveFailures: boolean) {
+    if (!importJob) return;
+    const jobId = importJob.id;
+    void act('import-resume', async () => {
+      try {
+        const res = await fetch(
+          `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import/jobs/${encodeURIComponent(jobId)}/resume`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ revive_failures: reviveFailures }),
+          }
+        );
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          claimed?: boolean;
+          revived?: number;
+          job?: ImportJob;
+          error?: string;
+        };
+        if (!res.ok || !json.job) {
+          throw new Error(
+            typeof json.error === 'string' ? json.error : `Request failed (${res.status})`
+          );
+        }
+        setImportError(null);
+        setImportJob(json.job);
+        toast.success(
+          (json.revived ?? 0) > 0
+            ? `Retrying ${json.revived} failed lead${json.revived === 1 ? '' : 's'}.`
+            : 'Import resumed.'
+        );
+        await load();
+      } catch (err) {
+        setImportError(err instanceof Error ? err.message : 'Resume failed.');
+        throw err;
+      }
+    });
+  }
+
+  function cancelImport() {
+    if (!importJob) return;
+    const jobId = importJob.id;
+    void act('import-cancel', async () => {
+      try {
+        const res = await fetch(
+          `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/import/jobs/${encodeURIComponent(jobId)}/cancel`,
+          { method: 'POST' }
+        );
+        const json = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          job?: ImportJob;
+          error?: string;
+        };
+        if (!res.ok || !json.job) {
+          throw new Error(
+            typeof json.error === 'string' ? json.error : `Request failed (${res.status})`
+          );
+        }
+        setImportJob(json.job);
+        toast('Import cancelled.');
+        await load();
+      } catch (err) {
+        setImportError(err instanceof Error ? err.message : 'Cancel failed.');
         throw err;
       }
     });
@@ -1284,7 +1451,7 @@ export function MetaTableSheetsDialog({
               <Button
                 variant="outline"
                 onClick={() => {
-                  setImportResult(null);
+                  setImportJob(null);
                   setImportError(null);
                   setImportOpen((v) => !v);
                 }}
@@ -1357,7 +1524,7 @@ export function MetaTableSheetsDialog({
                     </div>
                   ) : null}
                 </div>
-                {busy === 'import' ? (
+                {busy === 'import' && !importJob ? (
                   <p
                     className="text-muted-foreground mt-2 flex items-center gap-2 text-sm"
                     role="status"
@@ -1366,39 +1533,114 @@ export function MetaTableSheetsDialog({
                     Importing leads…
                   </p>
                 ) : null}
-                {importError ? (
+                {importJob && !importJob.done ? (
+                  <div className="mt-2 space-y-1.5" role="status" aria-label="Import progress">
+                    <p className="flex items-center gap-2 text-sm text-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      Importing leads… {importJob.processed} of {importJob.total}
+                    </p>
+                    <div
+                      className="bg-muted h-2 w-full overflow-hidden rounded-full"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={Math.max(importJob.total, 1)}
+                      aria-valuenow={importJob.processed}
+                    >
+                      <div
+                        className="bg-primary h-full transition-all"
+                        style={{
+                          width: `${importJob.total > 0 ? Math.round((importJob.processed / importJob.total) * 100) : 0}%`,
+                        }}
+                      />
+                    </div>
+                    <p className="text-muted-foreground text-xs">
+                      {importJob.sent} synced
+                      {importJob.retrying > 0 ? ` · ${importJob.retrying} retrying` : ''}
+                      {importJob.pending > 0 ? ` · ${importJob.pending} pending` : ''}
+                      {importPolling ? ' · updating…' : ''}
+                    </p>
+                  </div>
+                ) : null}
+                {importError && (!importJob || importJob.done) ? (
                   <p className="text-destructive mt-2 text-xs" role="alert">
                     {importError}
                   </p>
                 ) : null}
-                {importResult ? (
-                  <p className="mt-2 text-xs text-green-600" role="status">
-                    Import finished: {importResult.imported} imported,{' '}
-                    {importResult.updated} updated, {importResult.skipped}{' '}
-                    skipped, {importResult.failed} failed
-                    {importResult.sent > 0
-                      ? ` (${importResult.sent} sent to the sheet).`
-                      : '.'}
-                  </p>
+                {importJob?.done ? (
+                  <div className="mt-2 space-y-1.5" role="status">
+                    <p className="text-xs text-green-600">
+                      Import finished: {importJob.inserted} imported,{' '}
+                      {importJob.updated} updated, {importJob.skipped}{' '}
+                      skipped, {importJob.failed} failed
+                      {importJob.truncated ? ' (list truncated — repeat for the rest)' : '.'}
+                    </p>
+                    {importJob.retrying > 0 ? (
+                      <p className="text-muted-foreground text-xs">
+                        {importJob.retrying} still retrying automatically.
+                      </p>
+                    ) : null}
+                    {importJob.failed > 0 || importJob.last_error ? (
+                      <p className="text-destructive text-xs">
+                        {importJob.failed > 0
+                          ? `${importJob.failed} lead${importJob.failed === 1 ? '' : 's'} could not be synced. `
+                          : ''}
+                        {importJob.last_error ?? ''}
+                      </p>
+                    ) : null}
+                  </div>
                 ) : null}
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Button
-                    onClick={startImport}
-                    disabled={busy === 'import'}
-                    size="sm"
-                  >
-                    {busy === 'import' ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : null}
-                    Start Import
-                  </Button>
+                  {!importJob || importJob.done ? (
+                    <Button
+                      onClick={startImport}
+                      disabled={busy === 'import'}
+                      size="sm"
+                    >
+                      {busy === 'import' ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : null}
+                      Start Import
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        onClick={() => resumeImport(false)}
+                        disabled={busy === 'import-resume'}
+                        size="sm"
+                      >
+                        {busy === 'import-resume' ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : null}
+                        Resume
+                      </Button>
+                      {(importJob.failed > 0 || importJob.retrying > 0) ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => resumeImport(true)}
+                          disabled={busy === 'import-resume'}
+                          size="sm"
+                          title="Reset failed rows and retry them (synced rows are never duplicated)"
+                        >
+                          Retry failed
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={cancelImport}
+                        disabled={busy === 'import-cancel'}
+                      >
+                        Cancel import
+                      </Button>
+                    </>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => setImportOpen(false)}
                     disabled={busy === 'import'}
                   >
-                    Cancel
+                    Close
                   </Button>
                 </div>
               </div>

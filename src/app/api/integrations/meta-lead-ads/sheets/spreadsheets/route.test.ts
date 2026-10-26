@@ -10,7 +10,9 @@ const h = vi.hoisted(() => ({
   accountId: "acct-1",
   userId: "owner-1",
   createShouldFail: false,
+  createFailure: null as { status: number; reason?: string; retryAfterMs?: number | null } | null,
   createdWith: null as { title: string; tab: string } | null,
+  tokenError: null as { name: string; status?: number; retryAfterMs?: number | null } | null,
   flows: [
     {
       id: "flow-1",
@@ -69,7 +71,20 @@ vi.mock("@/lib/auth/account", () => ({
 }));
 
 vi.mock("@/lib/meta-lead-sheets/oauth", () => ({
-  getSheetsAccessToken: async () => "token-1",
+  getSheetsAccessToken: async () => {
+    if (h.tokenError) {
+      const err = new Error("token endpoint unavailable") as Error & {
+        name: string;
+        status?: number;
+        retryAfterMs?: number | null;
+      };
+      err.name = h.tokenError.name;
+      if (h.tokenError.status !== undefined) err.status = h.tokenError.status;
+      err.retryAfterMs = h.tokenError.retryAfterMs ?? null;
+      throw err;
+    }
+    return "token-1";
+  },
   SheetsAuthError: class SheetsAuthError extends Error {},
 }));
 
@@ -80,6 +95,16 @@ vi.mock("@/lib/meta-lead-sheets/sheets-client", async (importOriginal) => {
     createSheetsSpreadsheet: async (_token: string, title: string, tab: string) => {
       if (h.createShouldFail) {
         throw new actual.SheetsApiError("Google Sheets create failed (500)", 500);
+      }
+      if (h.createFailure) {
+        throw new actual.SheetsApiError(
+          `Google Sheets create failed (${h.createFailure.status})${h.createFailure.reason ? ` [${h.createFailure.reason}]` : ""}`,
+          h.createFailure.status,
+          {
+            reason: h.createFailure.reason ?? null,
+            retryAfterMs: h.createFailure.retryAfterMs ?? null,
+          }
+        );
       }
       h.createdWith = { title, tab };
       return {
@@ -144,6 +169,8 @@ beforeEach(() => {
   h.role = "owner";
   h.accountId = "acct-1";
   h.createShouldFail = false;
+  h.createFailure = null;
+  h.tokenError = null;
   h.createdWith = null;
 });
 
@@ -189,6 +216,42 @@ describe("POST /sheets/spreadsheets", () => {
     h.createShouldFail = true;
     const res = await route.POST(post({ flow_id: "flow-1" }));
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: string }).error).toMatch(/permissions|Could not create/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/temporary problem|permissions/);
+  });
+
+  it("distinguishes permission, revoked-credential, and quota failures", async () => {
+    // 403 without a quota reason: the sharing fix, not a reconnect.
+    h.createFailure = { status: 403 };
+    const denied = await route.POST(post({ flow_id: "flow-1" }));
+    expect(denied.status).toBe(502);
+    expect(((await denied.json()) as { error: string }).error).toMatch(/Editor/);
+
+    // 401: revoked credentials → reconnect prompt.
+    h.createFailure = { status: 401 };
+    const revoked = await route.POST(post({ flow_id: "flow-1" }));
+    expect(revoked.status).toBe(409);
+    expect(((await revoked.json()) as { error: string }).error).toMatch(/Reconnect/);
+
+    // 429 with Retry-After: wait-and-retry, with a retry-after hint.
+    h.createFailure = { status: 429, reason: "rateLimitExceeded", retryAfterMs: 45_000 };
+    const throttled = await route.POST(post({ flow_id: "flow-1" }));
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("retry-after")).toBe("45");
+    expect(((await throttled.json()) as { error: string }).error).toMatch(/rate-limiting/);
+
+    // 403 rateLimitExceeded is quota, not a permission problem.
+    h.createFailure = { status: 403, reason: "rateLimitExceeded" };
+    const quota403 = await route.POST(post({ flow_id: "flow-1" }));
+    expect(quota403.status).toBe(429);
+    expect(((await quota403.json()) as { error: string }).error).toMatch(/rate-limiting/);
+  });
+
+  it("treats a throttled token endpoint as retryable, never a reconnect", async () => {
+    h.tokenError = { name: "SheetsQuotaError", status: 429, retryAfterMs: 30_000 };
+    const res = await route.POST(post({ flow_id: "flow-1" }));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("30");
+    expect(((await res.json()) as { error: string }).error).toMatch(/rate-limiting/);
+    expect(h.createdWith).toBeNull();
   });
 });

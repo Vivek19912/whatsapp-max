@@ -14,6 +14,7 @@ import { metaLeadAdsConfig } from '@/lib/meta-lead-ads/config';
 import { drainMetaLeadNotifications } from '@/lib/meta-lead-ads/notify';
 import { runDueRetries } from '@/lib/meta-lead-ads/process-lead';
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from '@/lib/meta-lead-ads/sync';
+import { pumpActiveImportJobs } from '@/lib/meta-lead-sheets/import-jobs';
 import { drainSheetsQueue } from '@/lib/meta-lead-sheets/queue';
 import { drainWhatsappQueue } from '@/lib/meta-lead-whatsapp/queue';
 
@@ -132,12 +133,28 @@ export async function GET(request: Request) {
       );
     }
 
+    // ADDITIVE manual-import job pump. Same 5-minute sweep, no
+    // new scheduler: each active job gets one bounded worker pass
+    // so imports complete in the background after POST returns.
+    // Per-job failures are isolated and never affect polling,
+    // notifications, or the live-sync drain.
+    let imports = { jobs: 0, pumped: 0 };
+    try {
+      imports = await pumpActiveImportJobs(db);
+    } catch (error) {
+      console.error(
+        '[meta-lead-ads-cron] import-job pump failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+
     return NextResponse.json({
       ...retries,
       sync,
       notifications,
       sheets,
       whatsapp,
+      imports,
       ...(retryError ? { retryError } : {}),
     });
   } catch (error) {
