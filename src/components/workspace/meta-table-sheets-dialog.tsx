@@ -11,6 +11,7 @@ import {
   Loader2,
   Minus,
   Plus,
+  RotateCcw,
   Table2,
   Trash2,
   XCircle,
@@ -70,6 +71,8 @@ interface TableSheetsStatus {
   lastError: string | null;
   pending: number;
   failed: number;
+  /** Failures scheduled for automatic retry (quota/transient backoff). */
+  retrying?: number;
   columns: SheetsColumn[] | null;
   remapPending: boolean;
   cleanupPreview: { managedRows: number };
@@ -733,6 +736,45 @@ export function MetaTableSheetsDialog({
     });
   }
 
+  /**
+   * Safe retry for this table's failed syncs: revives every failed
+   * queue row (fresh attempt budget, due immediately) and drains.
+   * Already-synced rows are never touched server-side, so this
+   * cannot duplicate spreadsheet rows.
+   */
+  function retryFailed() {
+    void act('retry-failed', async () => {
+      try {
+        const json = (await readJson(
+          await fetch(
+            `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/retry`,
+            {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ revive_failed: true }),
+            }
+          )
+        )) as {
+          ok: boolean;
+          revived?: number;
+          sent?: number;
+          failed?: number;
+          retrying?: number;
+        };
+        const parts: string[] = [];
+        if ((json.revived ?? 0) > 0) parts.push(`requeued ${json.revived}`);
+        parts.push(
+          `${json.sent ?? 0} synced${(json.retrying ?? 0) > 0 ? `, ${json.retrying} still retrying` : ''}${(json.failed ?? 0) > 0 ? `, ${json.failed} failed` : ''}`
+        );
+        toast.success(`Retry queued (${parts.join('; ')}).`);
+        await load();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Retry failed.');
+        throw err;
+      }
+    });
+  }
+
   function cleanupTable() {
     const n = payload?.status.cleanupPreview.managedRows ?? 0;
     if (n === 0) {
@@ -834,8 +876,28 @@ export function MetaTableSheetsDialog({
               ) : null}
               <span className="text-muted-foreground">
                 Last success: {fmt(status?.lastSuccessAt ?? null)} · Pending:{' '}
-                {status?.pending ?? 0} · Failed: {status?.failed ?? 0}
+                {status?.pending ?? 0}
+                {(status?.retrying ?? 0) > 0 ? (
+                  <> · Retrying: {status?.retrying ?? 0}</>
+                ) : null}{' '}
+                · Failed: {status?.failed ?? 0}
               </span>
+              {(status?.failed ?? 0) > 0 || (status?.retrying ?? 0) > 0 ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={retryFailed}
+                  disabled={busy === 'retry-failed'}
+                  title="Requeue failed syncs for this table (already-synced rows are never duplicated)"
+                >
+                  {busy === 'retry-failed' ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="size-3.5" />
+                  )}
+                  Retry failed
+                </Button>
+              ) : null}
             </div>
             {status?.lastError ? (
               <p className="text-destructive flex items-start gap-2 text-xs">

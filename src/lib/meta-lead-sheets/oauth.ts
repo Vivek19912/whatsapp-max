@@ -32,6 +32,7 @@ import crypto from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
+import { parseRetryAfterMs } from "./throttle";
 
 export const META_SHEETS_GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/spreadsheets",
@@ -218,6 +219,33 @@ export class SheetsAuthError extends Error {
 }
 
 /**
+ * Throttled Google endpoint (token refresh or Sheets API) — the
+ * drain backs off and retries; never a re-auth signal. Carries
+ * the server's Retry-After when provided.
+ */
+export class SheetsQuotaError extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number | null;
+  constructor(
+    message: string,
+    opts: { status?: number; retryAfterMs?: number | null } = {},
+  ) {
+    super(message);
+    this.name = "SheetsQuotaError";
+    this.status = opts.status ?? 429;
+    this.retryAfterMs = opts.retryAfterMs ?? null;
+  }
+}
+
+function safeHeader(res: Response, name: string): string | null {
+  try {
+    return res.headers?.get(name) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Valid access token for the account's Meta Sheets connection.
  * Refreshes + persists when expired. Throws SheetsAuthError when
  * there is no connection or the refresh fails (expired/revoked).
@@ -258,6 +286,16 @@ export async function getSheetsAccessToken(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    // A throttled/failing token endpoint is NOT a revoked grant:
+    // surface it as a quota-style retryable error and leave the
+    // stored connection (and its last_error) untouched so the UI
+    // never asks for a reconnect over a 429/5xx.
+    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+      throw new SheetsQuotaError(
+        `Google token endpoint throttled (${res.status}); retrying with backoff.`,
+        { status: res.status, retryAfterMs: parseRetryAfterMs(safeHeader(res, "retry-after")) },
+      );
+    }
     await db
       .from("meta_lead_sheets_connections")
       .update({

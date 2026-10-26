@@ -10,6 +10,7 @@ import {
   ensureSheetsHeader,
   findSheetsRowsByLeadId,
   isAuthSheetsError,
+  isQuotaSheetsError,
   isTransientSheetsError,
   parseSheetsSpreadsheetId,
   quoteTabTitle,
@@ -81,6 +82,60 @@ describe("sheets error taxonomy", () => {
     expect(isAuthSheetsError(new SheetsApiError("x", 403))).toBe(true);
     expect(isAuthSheetsError(new SheetsApiError("x", 429))).toBe(false);
     expect(isTransientSheetsError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("classifies quota errors (429, 403 rateLimitExceeded, RESOURCE_EXHAUSTED)", () => {
+    expect(isQuotaSheetsError(new SheetsApiError("x", 429))).toBe(true);
+    expect(
+      isQuotaSheetsError(
+        new SheetsApiError("x", 403, { reason: "rateLimitExceeded" })
+      )
+    ).toBe(true);
+    expect(
+      isQuotaSheetsError(
+        new SheetsApiError("x", 403, { reason: "quotaExceeded" })
+      )
+    ).toBe(true);
+    expect(isQuotaSheetsError(new SheetsApiError("x", 400))).toBe(false);
+    expect(isQuotaSheetsError(new SheetsApiError("x", 500))).toBe(false);
+    // Quota rejections are never auth errors, even at 403.
+    expect(
+      isAuthSheetsError(
+        new SheetsApiError("x", 403, { reason: "rateLimitExceeded" })
+      )
+    ).toBe(false);
+    expect(isAuthSheetsError(new SheetsApiError("x", 403))).toBe(true);
+  });
+
+  it("parses the Google reason and Retry-After off error responses", async () => {
+    const fetchImpl = (async () =>
+      ({
+        ok: false,
+        status: 429,
+        headers: new Headers({ "retry-after": "120" }),
+        text: async () =>
+          JSON.stringify({
+            error: {
+              message: "Quota exceeded for quota metric 'Write requests'",
+              errors: [{ reason: "rateLimitExceeded", message: "see above" }],
+            },
+          }),
+      }) as unknown as Response) as typeof fetch;
+    const err = await findSheetsRowsByLeadId(
+      "tok",
+      "sheet-1",
+      "Meta Leads",
+      ["lead-1"],
+      fetchImpl
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SheetsApiError);
+    const apiErr = err as SheetsApiError;
+    expect(apiErr.status).toBe(429);
+    expect(apiErr.reason).toBe("rateLimitExceeded");
+    expect(apiErr.retryAfterMs).toBe(120_000);
+    expect(apiErr.message).toContain("rateLimitExceeded");
+    expect(isQuotaSheetsError(apiErr)).toBe(true);
+    expect(isAuthSheetsError(apiErr)).toBe(false);
   });
 });
 

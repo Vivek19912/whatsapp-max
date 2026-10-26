@@ -13,6 +13,7 @@
 // ============================================================
 
 import { META_SHEETS_HEADERS, META_SHEETS_LEAD_ID_COL } from './constants';
+import { isQuotaReason, parseRetryAfterMs } from './throttle';
 
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
@@ -25,10 +26,56 @@ export interface SheetsMeta {
 
 export class SheetsApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** Google `errors[0].reason` when the body carried one. */
+  readonly reason: string | null;
+  /** Parsed Retry-After delay (ms) when the response carried one. */
+  readonly retryAfterMs: number | null;
+  constructor(
+    message: string,
+    status: number,
+    opts: { reason?: string | null; retryAfterMs?: number | null } = {}
+  ) {
     super(message);
     this.name = 'SheetsApiError';
     this.status = status;
+    this.reason = opts.reason ?? null;
+    this.retryAfterMs = opts.retryAfterMs ?? null;
+  }
+}
+
+interface SheetsErrorBody {
+  error?: {
+    message?: string;
+    errors?: Array<{ reason?: string; message?: string }>;
+  };
+}
+
+function parseErrorBody(text: string): {
+  message: string | null;
+  reason: string | null;
+} {
+  try {
+    const data = JSON.parse(text) as SheetsErrorBody;
+    const err = data?.error;
+    if (!err || typeof err !== 'object') return { message: null, reason: null };
+    const reason =
+      Array.isArray(err.errors) && typeof err.errors[0]?.reason === 'string'
+        ? (err.errors[0]?.reason as string)
+        : null;
+    return {
+      message: typeof err.message === 'string' ? err.message : null,
+      reason,
+    };
+  } catch {
+    return { message: null, reason: null };
+  }
+}
+
+function retryAfterFromHeaders(res: Response): number | null {
+  try {
+    return parseRetryAfterMs(res.headers?.get('retry-after'));
+  } catch {
+    return null;
   }
 }
 
@@ -37,10 +84,39 @@ async function throwForResponse(
   context: string
 ): Promise<never> {
   const text = await res.text().catch(() => '');
+  const parsed = parseErrorBody(text);
+  const detail = parsed.message ?? text;
+  const reasonSuffix = parsed.reason ? ` [${parsed.reason}]` : '';
   throw new SheetsApiError(
-    `${context} (${res.status}): ${text.slice(0, 500)}`,
-    res.status
+    `${context} (${res.status})${reasonSuffix}: ${detail.slice(0, 400)}`,
+    res.status,
+    { reason: parsed.reason, retryAfterMs: retryAfterFromHeaders(res) }
   );
+}
+
+/**
+ * True for quota errors that must back off, never re-auth: HTTP
+ * 429, or a quota reason code (notably 403 rateLimitExceeded,
+ * which Google reports as 403, plus RESOURCE_EXHAUSTED text).
+ */
+export function isQuotaSheetsError(err: unknown): boolean {
+  // Name-based match first: the token-refresh path throws a
+  // SheetsQuotaError (defined in ./oauth), and duck-typing keeps
+  // this check working wherever that class cannot be imported
+  // (including unit-test doubles).
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'SheetsQuotaError'
+  ) {
+    return true;
+  }
+  if (err instanceof SheetsApiError) {
+    if (err.status === 429) return true;
+    if (isQuotaReason(err.reason)) return true;
+    if (err.status === 403 && isQuotaReason(err.message)) return true;
+  }
+  return false;
 }
 
 /** True for transient errors worth retrying (429 / 5xx). */
@@ -52,9 +128,14 @@ export function isTransientSheetsError(err: unknown): boolean {
   return err instanceof TypeError;
 }
 
-/** True when Google rejected the credential (expired/revoked/insufficient). */
+/**
+ * True when Google rejected the credential (expired/revoked/
+ * insufficient). Quota rejections are NOT auth errors — check
+ * isQuotaSheetsError first.
+ */
 export function isAuthSheetsError(err: unknown): boolean {
   if (err instanceof SheetsApiError) {
+    if (isQuotaSheetsError(err)) return false;
     return err.status === 401 || err.status === 403;
   }
   return false;

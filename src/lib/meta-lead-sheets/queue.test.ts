@@ -13,6 +13,7 @@ const h = vi.hoisted(() => {
     SheetsAuthError,
     accessTokenFor: new Map<string, string>(),
     authFailsFor: new Set<string>(),
+    quotaRefreshFor: new Set<string>(),
     missingTabs: new Set<string>(),
     tabsChecked: [] as Array<{ spreadsheetId: string; tab: string }>,
     tabsCreated: [] as Array<{ spreadsheetId: string; tab: string }>,
@@ -56,13 +57,36 @@ const h = vi.hoisted(() => {
       leadIds: string[];
       idColumnIndex?: number;
     }>,
-    failAppendWith: null as { status: number } | null,
+    failAppendWith: null as {
+      status: number;
+      reason?: string;
+      retryAfterMs?: number | null;
+    } | null,
+    failFindWith: null as {
+      status: number;
+      reason?: string;
+      retryAfterMs?: number | null;
+    } | null,
+    failFindOnCall: null as number | null,
+    findCallCount: 0,
   };
 });
 
 vi.mock('./oauth', () => ({
   SheetsAuthError: h.SheetsAuthError,
   getSheetsAccessToken: async (_db: unknown, accountId: string) => {
+    if (h.quotaRefreshFor.has(accountId)) {
+      // Mock-safe quota signal: the drain detects this by name, the
+      // same way it detects the real SheetsQuotaError.
+      throw Object.assign(
+        new Error('Google token endpoint throttled (429)'),
+        {
+          name: 'SheetsQuotaError',
+          status: 429,
+          retryAfterMs: 45_000,
+        }
+      );
+    }
     if (h.authFailsFor.has(accountId)) {
       throw new h.SheetsAuthError('expired');
     }
@@ -114,7 +138,14 @@ vi.mock('./sheets-client', async (importOriginal) => {
       rows: string[][]
     ) => {
       if (h.failAppendWith) {
-        throw new actual.SheetsApiError('quota', h.failAppendWith.status);
+        throw new actual.SheetsApiError(
+          `quota${h.failAppendWith.reason ? ` [${h.failAppendWith.reason}]` : ''}`,
+          h.failAppendWith.status,
+          {
+            reason: h.failAppendWith.reason ?? null,
+            retryAfterMs: h.failAppendWith.retryAfterMs ?? null,
+          }
+        );
       }
       h.appended.push({ spreadsheetId, tab, rows });
       // Simulate Sheets storing the lead id in column A.
@@ -176,6 +207,20 @@ vi.mock('./sheets-client', async (importOriginal) => {
       _fetchImpl?: typeof fetch,
       idColumnIndex?: number
     ) => {
+      const findCallNo = h.findCallCount++;
+      if (
+        h.failFindWith &&
+        (h.failFindOnCall === null || h.failFindOnCall === findCallNo)
+      ) {
+        throw new actual.SheetsApiError(
+          `quota${h.failFindWith.reason ? ` [${h.failFindWith.reason}]` : ''}`,
+          h.failFindWith.status,
+          {
+            reason: h.failFindWith.reason ?? null,
+            retryAfterMs: h.failFindWith.retryAfterMs ?? null,
+          }
+        );
+      }
       h.findCalls.push({ spreadsheetId, tab, leadIds, idColumnIndex });
       const key = `${spreadsheetId}::${tab}`;
       const cells = h.columnValues.get(key) ?? [];
@@ -199,6 +244,7 @@ import {
   maybeEnqueueSheetsSync,
   remapLayoutChunk,
   resolveImportSubmittedAt,
+  reviveTableFailedRows,
 } from './queue';
 
 type Row = Record<string, unknown>;
@@ -333,8 +379,12 @@ function makeDb(initial: Record<string, Row[]>) {
       }) as never,
       then: ((res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
         if (op === 'update') {
-          for (const row of matched()) Object.assign(row, patch);
-          return Promise.resolve({ data: null, error: null }).then(res, rej);
+          // Capture targets BEFORE patching (mirrors maybeSingle
+          // above): real Supabase returns the updated rows even when
+          // the patch moves them out of the filter.
+          const targets = matched();
+          for (const row of targets) Object.assign(row, patch);
+          return Promise.resolve({ data: targets, error: null }).then(res, rej);
         }
         if (op === 'delete') {
           data[table] = (data[table] ?? []).filter((r) => !matches(r, filters));
@@ -400,6 +450,10 @@ beforeEach(() => {
   h.columnValues = new Map();
   h.findCalls = [];
   h.failAppendWith = null;
+  h.failFindWith = null;
+  h.failFindOnCall = null;
+  h.findCallCount = 0;
+  h.quotaRefreshFor = new Set();
 });
 
 describe('maybeEnqueueSheetsSync', () => {
@@ -573,9 +627,21 @@ describe('drainSheetsQueue', () => {
       force: true,
     });
     expect(result.sent).toBe(0);
-    expect(result.failed).toBe(1);
+    // Quota failures are scheduled for retry — never reported as
+    // permanently failed.
+    expect(result.failed).toBe(0);
+    expect(result.retrying).toBe(1);
     expect(data.meta_lead_sheets_queue[0].status).toBe('failed');
     expect(data.meta_lead_sheets_queue[0].attempts as number).toBe(1);
+    // Jittered quota backoff (attempt 1: 30–60s), not the generic delay.
+    const retryAt = Date.parse(
+      data.meta_lead_sheets_queue[0].next_retry_at as string
+    );
+    expect(retryAt).toBeGreaterThan(Date.now() + 20_000);
+    expect(retryAt).toBeLessThan(Date.now() + 5 * 60_000);
+    expect(String(data.meta_lead_sheets_queue[0].last_error)).toContain(
+      'quota'
+    );
   });
 
   it('reports expired credentials without losing the row', async () => {
@@ -669,7 +735,8 @@ describe('drainSheetsQueue', () => {
       force: true,
     });
     expect(first.sent).toBe(0);
-    expect(first.failed).toBe(1);
+    expect(first.failed).toBe(0);
+    expect(first.retrying).toBe(1);
     expect(data.meta_lead_sheets_queue[0].status).toBe('failed');
     expect(h.appended).toHaveLength(0);
 
@@ -1570,7 +1637,7 @@ describe('missing worksheet tab - explicit error, never silent writes', () => {
     };
   }
 
-  it('parks the row with a 24h backoff and surfaces which tabs exist', async () => {
+  it('fails a missing tab terminally and surfaces which tabs exist', async () => {
     h.accessTokenFor.set('acct-1', 'token-1');
     h.missingTabs.add('sheet-1::Meta Leads');
     const { db, data } = makeDb(tabTables());
@@ -1578,16 +1645,19 @@ describe('missing worksheet tab - explicit error, never silent writes', () => {
       onlyAccountId: 'acct-1',
       force: true,
     });
-    expect(result).toMatchObject({ sent: 0, failed: 1 });
+    expect(result).toMatchObject({ sent: 0, failed: 1, retrying: 0 });
     expect(h.appended).toHaveLength(0);
     expect(h.updated).toHaveLength(0);
     const row = data.meta_lead_sheets_queue[0];
     expect(row.status).toBe('failed');
-    expect(row.attempts).toBe(1);
+    // Terminal: budget spent at once so the row stops consuming
+    // quota until a manual retry revives it.
+    expect(row.attempts).toBe(row.max_attempts);
     expect(String(row.last_error)).toContain('Meta Leads');
-    // Long backoff (parked, not hammered): more than an hour out.
+    expect(String(row.last_error)).toContain('retry limit reached');
+    // Parked far out (30 days), not hammered daily.
     expect(Date.parse(row.next_retry_at as string)).toBeGreaterThan(
-      Date.now() + 60 * 60_1000
+      Date.now() + 29 * 24 * 60 * 60_000
     );
     // The table's config carries the actionable error (with tab list).
     expect(String(data.meta_lead_sheets_configs[0].last_error)).toContain(
@@ -1697,6 +1767,7 @@ describe('getTableSheetsStatus - per-table counts and connection', () => {
     expect(sg.spreadsheetId).toBe('sheet-1');
     expect(sg.pending).toBe(1);
     expect(sg.failed).toBe(0);
+    expect(sg.retrying).toBe(0);
     expect(sg.cleanupPreview).toEqual({ managedRows: 1 });
     expect(sg.columns).toEqual([{ key: 'name', label: 'Name' }]);
     const raw = JSON.stringify(sg);
@@ -1704,7 +1775,9 @@ describe('getTableSheetsStatus - per-table counts and connection', () => {
 
     const other = await getTableSheetsStatus(db, 'acct-1', 'form-other');
     expect(other.pending).toBe(0);
-    expect(other.failed).toBe(1);
+    // q-3 failed but retains budget: scheduled for retry, not dead.
+    expect(other.failed).toBe(0);
+    expect(other.retrying).toBe(1);
     expect(other.cleanupPreview).toEqual({ managedRows: 0 });
     expect(other.spreadsheetId).toBeNull();
     expect(other.columns).toBeNull();
@@ -1923,5 +1996,398 @@ describe('import range helpers', () => {
     expect(isWithinImportRange('2026-04-01T00:00:00.000Z', '2026-03-01', '2026-03-31')).toBe(false);
     expect(isWithinImportRange(null, '2026-03-01', '2026-03-31')).toBe(false);
     expect(isWithinImportRange('2026-03-10T00:00:00.000Z', 'not-a-day', '2026-03-31')).toBe(false);
+  });
+});
+
+describe('drainSheetsQueue — quota, batching, and safe retry', () => {
+  const FSG = 'form-sg';
+  const FOTHER = 'form-other';
+  const CONN = (over: Row = {}) => ({
+    account_id: 'acct-1',
+    access_token: 'x',
+    refresh_token: 'y',
+    token_expiry: new Date(Date.now() + 3600_000).toISOString(),
+    last_error: null,
+    ...over,
+  });
+  const QR = (
+    id: string,
+    submissionId: string,
+    metaLeadId: string,
+    over: Row = {}
+  ) => ({
+    id,
+    account_id: 'acct-1',
+    submission_id: submissionId,
+    flow_run_id: `run-${submissionId}`,
+    meta_lead_id: metaLeadId,
+    status: 'queued',
+    attempts: 0,
+    max_attempts: 8,
+    sheet_row_number: null,
+    next_retry_at: new Date(0).toISOString(),
+    ...over,
+  });
+  const SUBQ = (id: string, formId: string, metaLeadId: string) => ({
+    id,
+    account_id: 'acct-1',
+    meta_lead_id: metaLeadId,
+    flow_run_id: `run-${id}`,
+    form_id: formId,
+    form_name: 'Form',
+    campaign_name: 'Camp',
+    ad_name: 'Ad',
+    source: 'facebook',
+    answers: { full_name: 'Asha' },
+    meta_created_time: '2026-03-01T10:00:00.000Z',
+    created_at: '2026-03-01T10:00:00.000Z',
+    status: 'processed',
+  });
+  const CFGQ = (formId: string, spreadsheetId = 'sheet-1', tab = 'Meta Leads') => ({
+    account_id: 'acct-1',
+    form_id: formId,
+    spreadsheet_id: spreadsheetId,
+    spreadsheet_url: null,
+    spreadsheet_title: null,
+    sheet_tab: tab,
+    auto_sync: true,
+  });
+  function quotaTables(queueRows: Row[], submissions: Row[], configs: Row[]) {
+    return {
+      meta_lead_sheets_configs: configs,
+      meta_lead_sheets_connections: [CONN()],
+      meta_lead_submissions: submissions,
+      meta_lead_sheets_queue: queueRows,
+      flow_runs: submissions.map((s) => ({
+        id: s.flow_run_id,
+        account_id: 'acct-1',
+        flow_id: 'flow-1',
+      })),
+      workspace_fields: [],
+      workspace_values: [],
+      profiles: [],
+    };
+  }
+
+  it('honors Retry-After on 429 and parks with a matching delay', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.failAppendWith = {
+      status: 429,
+      reason: 'rateLimitExceeded',
+      retryAfterMs: 120_000,
+    };
+    const { db, data } = makeDb(
+      quotaTables(
+        [QR('q-1', 'sub-1', 'lead-1')],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      )
+    );
+    const before = Date.now();
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result).toMatchObject({ sent: 0, failed: 0, retrying: 1 });
+    const row = data.meta_lead_sheets_queue[0];
+    expect(row.status).toBe('failed');
+    expect(row.attempts).toBe(1);
+    expect(String(row.last_error)).toContain('quota');
+    // Retry-After (120s) wins over the jittered base (30–60s).
+    const retryAt = Date.parse(row.next_retry_at as string);
+    expect(retryAt).toBeGreaterThanOrEqual(before + 119_000);
+    expect(retryAt).toBeLessThanOrEqual(Date.now() + 125_000);
+  });
+
+  it('treats 403 rateLimitExceeded as quota, never as reauth', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.failAppendWith = { status: 403, reason: 'rateLimitExceeded' };
+    const { db, data } = makeDb(
+      quotaTables(
+        [QR('q-1', 'sub-1', 'lead-1')],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      )
+    );
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.needsReauth).toBe(0);
+    expect(result).toMatchObject({ sent: 0, failed: 0, retrying: 1 });
+    expect(data.meta_lead_sheets_queue[0].status).toBe('failed');
+    expect(data.meta_lead_sheets_queue[0].attempts).toBe(1);
+  });
+
+  it('treats a throttled token refresh as quota without poisoning reauth', async () => {
+    h.quotaRefreshFor.add('acct-1');
+    const { db, data } = makeDb({
+      ...quotaTables(
+        [QR('q-1', 'sub-1', 'lead-1')],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      ),
+      meta_lead_sheets_connections: [
+        CONN({ token_expiry: new Date(0).toISOString(), last_error: null }),
+      ],
+    });
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.needsReauth).toBe(0);
+    expect(result).toMatchObject({ sent: 0, failed: 0, retrying: 1 });
+    // Parked untouched: no attempt burned, still queued, due later.
+    const row = data.meta_lead_sheets_queue[0];
+    expect(row.status).toBe('queued');
+    expect(row.attempts).toBe(0);
+    expect(Date.parse(row.next_retry_at as string)).toBeGreaterThan(Date.now());
+    // The connection is not flagged for reconnect over a 429.
+    expect(data.meta_lead_sheets_connections[0].last_error).toBeNull();
+  });
+
+  it('fails a permanent 400 terminally with a final error and long park', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.failAppendWith = { status: 400 };
+    const { db, data } = makeDb(
+      quotaTables(
+        [QR('q-1', 'sub-1', 'lead-1')],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      )
+    );
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result).toMatchObject({ sent: 0, failed: 1, retrying: 0 });
+    const row = data.meta_lead_sheets_queue[0];
+    expect(row.status).toBe('failed');
+    expect(row.attempts).toBe(row.max_attempts);
+    expect(String(row.last_error)).toContain('retry limit reached');
+    expect(Date.parse(row.next_retry_at as string)).toBeGreaterThan(
+      Date.now() + 29 * 24 * 60 * 60_000
+    );
+  });
+
+  it('batches new rows: one append + one re-scan per spreadsheet', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-a', 'sub-a', 'lead-a'),
+          QR('q-b', 'sub-b', 'lead-b'),
+        ],
+        [SUBQ('sub-a', FSG, 'lead-a'), SUBQ('sub-b', FSG, 'lead-b')],
+        [CFGQ(FSG)]
+      )
+    );
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result).toMatchObject({ sent: 2, failed: 0, retrying: 0 });
+    // One batched append carrying both rows (was: one per row).
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0].rows).toHaveLength(2);
+    expect(h.appended[0].rows.map((r) => r[0]).sort()).toEqual([
+      'lead-a',
+      'lead-b',
+    ]);
+    // One group ID scan + one re-scan (was: two scans + two re-scans).
+    expect(h.findCalls).toHaveLength(2);
+    expect(h.findCalls[0].leadIds.sort()).toEqual(['lead-a', 'lead-b']);
+    expect(h.findCalls[1].leadIds.sort()).toEqual(['lead-a', 'lead-b']);
+    // One tab check + one header ensure per spreadsheet (was: per row).
+    expect(h.tabsChecked).toEqual([{ spreadsheetId: 'sheet-1', tab: 'Meta Leads' }]);
+    for (const row of data.meta_lead_sheets_queue as Row[]) {
+      expect(row.status).toBe('sent');
+    }
+  });
+
+  it('handles mixed update + create rows in one group without duplicating', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.columnValues.set('sheet-1::Meta Leads', ['lead-a']);
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-a', 'sub-a', 'lead-a'),
+          QR('q-b', 'sub-b', 'lead-b'),
+        ],
+        [SUBQ('sub-a', FSG, 'lead-a'), SUBQ('sub-b', FSG, 'lead-b')],
+        [CFGQ(FSG)]
+      )
+    );
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    // Existing row updated in place; only the new lead appended.
+    expect(h.updated).toHaveLength(1);
+    expect(h.updated[0]).toMatchObject({ row: 2 });
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0].rows).toHaveLength(1);
+    expect(h.appended[0].rows[0][0]).toBe('lead-b');
+    const byId = Object.fromEntries(
+      (data.meta_lead_sheets_queue as Row[]).map((r) => [r.id, r])
+    );
+    expect(byId['q-a'].sheet_row_number).toBe(2);
+    expect(byId['q-b'].sheet_row_number).toBe(3);
+  });
+
+  it('quota trip parks later groups without burning attempts (cross-worker backoff)', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    h.failAppendWith = { status: 429, reason: 'rateLimitExceeded' };
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-a', 'sub-a', 'lead-a'),
+          { ...QR('q-b', 'sub-b', 'lead-b'), form_id: undefined },
+        ],
+        [SUBQ('sub-a', FSG, 'lead-a'), SUBQ('sub-b', FOTHER, 'lead-b')],
+        [CFGQ(FSG, 'sheet-1', 'Meta Leads'), CFGQ(FOTHER, 'sheet-2', 'Tab B')]
+      )
+    );
+    // form_id on the queue row is informational only; routing uses
+    // the submission. Point the second row's submission at form-other.
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.attempted).toBe(2);
+    expect(result).toMatchObject({ sent: 0, failed: 0, retrying: 2 });
+    const byId = Object.fromEntries(
+      (data.meta_lead_sheets_queue as Row[]).map((r) => [r.id, r])
+    );
+    // First group burned one attempt on the 429 and backs off.
+    expect(byId['q-a'].status).toBe('failed');
+    expect(byId['q-a'].attempts).toBe(1);
+    // Second spreadsheet never touched: no attempt burned, claim restored.
+    expect(byId['q-b'].status).toBe('queued');
+    expect(byId['q-b'].attempts).toBe(0);
+    expect(Date.parse(byId['q-b'].next_retry_at as string)).toBeGreaterThan(
+      Date.now()
+    );
+    expect(h.tabsChecked).toEqual([
+      { spreadsheetId: 'sheet-1', tab: 'Meta Leads' },
+    ]);
+
+    // A concurrent worker's drain immediately after picks up nothing:
+    // every row's next_retry_at is in the future (shared DB backoff).
+    h.failAppendWith = null;
+    const second = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(second.attempted).toBe(0);
+    expect(second.sent).toBe(0);
+  });
+
+  it('skips exhausted rows without touching them or the API', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-dead', 'sub-1', 'lead-1', {
+            status: 'failed',
+            attempts: 8,
+            max_attempts: 8,
+          }),
+        ],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      )
+    );
+    const result = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(result.attempted).toBe(0);
+    expect(result).toMatchObject({ sent: 0, failed: 0, retrying: 0 });
+    expect(h.tabsChecked).toEqual([]);
+    expect(h.appended).toHaveLength(0);
+    // Untouched: the row waits for manual revive, not another loop.
+    expect(data.meta_lead_sheets_queue[0].status).toBe('failed');
+    expect(data.meta_lead_sheets_queue[0].attempts).toBe(8);
+  });
+
+  it('recovers a throttled re-scan by updating instead of re-appending', async () => {
+    h.accessTokenFor.set('acct-1', 'token-1');
+    // Fail only the second ID-column read (the post-append re-scan).
+    h.failFindWith = { status: 429, reason: 'rateLimitExceeded' };
+    h.failFindOnCall = 1;
+    const { db, data } = makeDb(
+      quotaTables(
+        [QR('q-1', 'sub-1', 'lead-1')],
+        [SUBQ('sub-1', FSG, 'lead-1')],
+        [CFGQ(FSG)]
+      )
+    );
+    const first = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(first).toMatchObject({ sent: 0, failed: 0, retrying: 1 });
+    expect(h.appended).toHaveLength(1);
+    expect(data.meta_lead_sheets_queue[0].status).toBe('failed');
+
+    // The append already landed; the retry matches by lead ID and
+    // updates in place — never a second row.
+    h.failFindWith = null;
+    h.failFindOnCall = null;
+    data.meta_lead_sheets_queue[0].next_retry_at = new Date(0).toISOString();
+    const second = await drainSheetsQueue(db, {
+      onlyAccountId: 'acct-1',
+      force: true,
+    });
+    expect(second.sent).toBe(1);
+    expect(h.appended).toHaveLength(1);
+    expect(h.updated).toHaveLength(1);
+    expect(h.columnValues.get('sheet-1::Meta Leads')).toEqual(['lead-1']);
+    expect(data.meta_lead_sheets_queue[0].status).toBe('sent');
+  });
+
+  it('reviveTableFailedRows revives one table only and never sent rows', async () => {
+    const { db, data } = makeDb(
+      quotaTables(
+        [
+          QR('q-exhausted', 'sub-a', 'lead-a', {
+            status: 'failed',
+            attempts: 8,
+          }),
+          QR('q-retry', 'sub-a', 'lead-a', {
+            id: 'q-retry',
+            status: 'failed',
+            attempts: 3,
+          }),
+          QR('q-sent', 'sub-a', 'lead-a', {
+            id: 'q-sent',
+            status: 'sent',
+            attempts: 1,
+          }),
+          QR('q-other', 'sub-b', 'lead-b', { id: 'q-other', status: 'failed' }),
+        ],
+        [SUBQ('sub-a', FSG, 'lead-a'), SUBQ('sub-b', FOTHER, 'lead-b')],
+        [CFGQ(FSG), CFGQ(FOTHER)]
+      )
+    );
+    const { revived } = await reviveTableFailedRows(db, 'acct-1', FSG);
+    expect(revived).toBe(2);
+    const byId = Object.fromEntries(
+      (data.meta_lead_sheets_queue as Row[]).map((r) => [r.id, r])
+    );
+    for (const id of ['q-exhausted', 'q-retry']) {
+      expect(byId[id].status).toBe('queued');
+      expect(byId[id].attempts).toBe(0);
+      expect(byId[id].last_error).toBeNull();
+      expect(Date.parse(byId[id].next_retry_at as string)).toBeLessThanOrEqual(
+        Date.now() + 5_000
+      );
+    }
+    // Untouched: synced rows, other tables' rows.
+    expect(byId['q-sent'].status).toBe('sent');
+    expect(byId['q-other'].status).toBe('failed');
+    expect(byId['q-other'].attempts).toBe(0);
   });
 });

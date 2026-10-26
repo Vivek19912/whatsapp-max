@@ -127,7 +127,10 @@ describe('workspace dialog — per-table sheets configuration', () => {
     const src = dialog();
     expect(src).not.toContain('Sync now');
     expect(src).not.toContain('syncNow');
-    expect(src).not.toContain('/sheets/tables/${encodeURIComponent(flowId)}/retry');
+    // The table retry endpoint is used ONLY to revive failed rows
+    // (revive_failed), never as a sync-now trigger.
+    expect(src).toContain('revive_failed');
+    expect(src).toContain('Retry failed');
     // Import entry point beside Save Configuration.
     expect(src).toContain('Import Leads');
     expect(src).toContain('startImport');

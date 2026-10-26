@@ -66,7 +66,7 @@ import {
   deleteSheetRows,
   ensureSheetsHeader,
   findSheetsRowsByLeadId,
-  isAuthSheetsError,
+  isQuotaSheetsError,
   isTransientSheetsError,
   rewriteSheetRows,
   setSheetColumnHidden,
@@ -74,6 +74,12 @@ import {
   TabMissingError,
   updateSheetsRow,
 } from './sheets-client';
+import {
+  EXHAUSTED_PARK_MS,
+  exhaustedSuffix,
+  sheetsQuotaDelayMs,
+  withSheetsThrottle,
+} from './throttle';
 
 const STALE_CLAIM_MS = 5 * 60_000;
 
@@ -529,7 +535,18 @@ export async function importTableLeads(
 export interface DrainResult {
   attempted: number;
   sent: number;
+  /**
+   * Terminal failures only (retry budget spent or permanent
+   * error). Rows that will retry automatically are counted in
+   * `retrying`, never here.
+   */
   failed: number;
+  /**
+   * Rows that failed but are scheduled for automatic retry
+   * (quota/transient backoff, or quota-parked without burning an
+   * attempt). Never reported as permanently failed.
+   */
+  retrying: number;
   skippedDisabled: number;
   /** Rows parked because their form has no table config (resume on configure). */
   skippedNoConfig: number;
@@ -837,38 +854,41 @@ async function buildRowValues(
   return projectRowValues(fieldMap, columns);
 }
 
+/**
+ * Record a row failure. Returns true when the row will retry
+ * automatically (bounded backoff), false when the budget is spent
+ * (terminal: parked for 30 days with a final error, revived only
+ * by manual retry). Never throws for DB failures — callers treat
+ * a throw as "leave the claim", so this swallows nothing and lets
+ * the stale-claim reaper recover the row.
+ */
 async function markRowFailed(
   db: SupabaseClient,
   row: QueueRow,
   message: string,
-  retryInMs: number | null
-): Promise<void> {
-  const attempt = row.attempts + 1;
-  const willRetry = attempt < row.max_attempts && retryInMs !== null;
+  retry: number | 'terminal' | null
+): Promise<boolean> {
+  const terminal = retry === 'terminal' || retry === null;
+  const attempt = terminal ? row.max_attempts : row.attempts + 1;
+  const willRetry = !terminal && attempt < row.max_attempts;
+  const finalMessage = willRetry
+    ? message
+    : `${message}${exhaustedSuffix(attempt, row.max_attempts)}`;
   await db
     .from('meta_lead_sheets_queue')
     .update({
-      status: willRetry ? 'failed' : 'failed',
+      status: 'failed',
       attempts: attempt,
-      last_error: message.slice(0, 500),
+      last_error: finalMessage.slice(0, 500),
       next_retry_at:
-        willRetry && retryInMs !== null
-          ? new Date(Date.now() + retryInMs).toISOString()
-          : new Date(Date.now() + sheetsRetryDelayMs(attempt)).toISOString(),
+        willRetry && typeof retry === 'number'
+          ? new Date(Date.now() + retry).toISOString()
+          : new Date(Date.now() + EXHAUSTED_PARK_MS).toISOString(),
       claimed_at: null,
       updated_at: new Date().toISOString(),
     })
     .eq('id', row.id);
-  // Terminal failures keep next_retry_at far out so the cron stops
-  // hammering but the row stays visible for manual retry.
-  if (!willRetry) {
-    await db
-      .from('meta_lead_sheets_queue')
-      .update({
-        next_retry_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
-      })
-      .eq('id', row.id);
-  }
+  return willRetry;
 }
 
 /** Rows rewritten per layout-remap chunk (bounded Google + DB work). */
@@ -1233,6 +1253,31 @@ export async function cleanupTableRows(
  * re-scan the ID column before appending, so retries never
  * duplicate.
  */
+interface ReadyRow {
+  row: QueueRow;
+  /** Status before this drain claimed it (restored on quota park). */
+  originalStatus: string;
+  submission: SubmissionRow;
+  config: ConfigRow;
+}
+
+interface GroupWork {
+  key: string;
+  accountId: string;
+  config: ConfigRow;
+  columns: SheetsColumnDef[];
+  layout: ReturnType<typeof computeManagedLayout>;
+  items: Array<{
+    row: QueueRow;
+    originalStatus: string;
+    submission: SubmissionRow;
+    values: string[];
+    targetRow?: number | null;
+    /** Per-row fallback append failed (excluded from the re-scan). */
+    appendFailed?: boolean;
+  }>;
+}
+
 export async function drainSheetsQueue(
   db: SupabaseClient,
   opts: {
@@ -1244,7 +1289,7 @@ export async function drainSheetsQueue(
     fetchImpl?: typeof fetch;
   } = {}
 ): Promise<DrainResult> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
+  const fetchImpl = withSheetsThrottle(opts.fetchImpl ?? fetch);
   const limit = Math.max(
     1,
     Math.min(opts.limit ?? META_SHEETS_SWEEP_LIMIT, 100)
@@ -1253,6 +1298,7 @@ export async function drainSheetsQueue(
     attempted: 0,
     sent: 0,
     failed: 0,
+    retrying: 0,
     skippedDisabled: 0,
     skippedNoConfig: 0,
     needsReauth: 0,
@@ -1288,11 +1334,86 @@ export async function drainSheetsQueue(
     console.error('[meta-sheets] due-jobs scan failed:', error.message);
     return result;
   }
-  const rows = (due ?? []) as QueueRow[];
+  const rows = ((due ?? []) as QueueRow[]).filter(
+    // Exhausted rows never auto-retry (they would loop forever on
+    // permanent errors and burn quota re-probing them). They stay
+    // visible as failed until a manual retry revives them.
+    (r) => (r.attempts ?? 0) < (r.max_attempts ?? META_SHEETS_MAX_ATTEMPTS)
+  );
   const ensuredHeaders = new Set<string>();
+  const tokens = new Map<string, string>();
 
+  /** Record one row outcome + attribute it to its own table only. */
+  const recordFailure = async (
+    row: QueueRow,
+    config: ConfigRow | null,
+    message: string,
+    retry: number | 'terminal' | null
+  ): Promise<void> => {
+    const willRetry = await markRowFailed(db, row, message, retry);
+    if (config) {
+      await db
+        .from('meta_lead_sheets_configs')
+        .update({ last_error: message.slice(0, 500), updated_at: nowIso })
+        .eq('account_id', row.account_id)
+        .eq('form_id', config.form_id);
+    }
+    if (willRetry) result.retrying += 1;
+    else result.failed += 1;
+    console.error(
+      `[meta-sheets] job ${row.id} failed (attempt ${row.attempts + 1}): ${message.slice(0, 200)}`
+    );
+  };
+
+  /** Release a claim without burning an attempt (pause/config paths). */
+  const releaseClaim = async (rowId: string, status: string): Promise<void> => {
+    await db
+      .from('meta_lead_sheets_queue')
+      .update({ status, claimed_at: null, updated_at: nowIso })
+      .eq('id', rowId);
+  };
+
+  /** Quota trip state: once any Google call is throttled, the rest
+   *  of this drain parks without touching the API. Shared with
+   *  every worker through next_retry_at (see parkForQuota). */
+  let tripDelayMs: number | null = null;
+
+  /** Park claimed rows with a future retry: no attempt is burned,
+   *  and every concurrent worker's due-scan skips them until the
+   *  backoff elapses. This is the cross-worker coordination. */
+  const parkForQuota = async (
+    items: Array<{ row: QueueRow; originalStatus: string }>,
+    delayMs: number
+  ): Promise<void> => {
+    if (items.length === 0) return;
+    const retryAt = new Date(Date.now() + delayMs).toISOString();
+    console.error(
+      `[meta-sheets] quota trip: parking ${items.length} row(s) for ${Math.round(delayMs / 1000)}s`
+    );
+    for (const item of items) {
+      await db
+        .from('meta_lead_sheets_queue')
+        .update({
+          status: item.originalStatus,
+          next_retry_at: retryAt,
+          claimed_at: null,
+          updated_at: nowIso,
+        })
+        .eq('id', item.row.id);
+      result.retrying += 1;
+    }
+  };
+
+  const quotaDelayFor = (err: unknown, attempt: number): number =>
+    sheetsQuotaDelayMs(attempt, quotaRetryAfterMs(err));
+
+  // ---------- Phase 1: claim + DB-only prelim (no Google calls) --
+  const ready: ReadyRow[] = [];
   for (const row of rows) {
     result.attempted += 1;
+    // Pre-claim status (restored if a quota trip parks the row).
+    // Read BEFORE claiming: the claim itself moves the row on.
+    const originalStatus = row.status;
     // Claim.
     const { data: claimed } = await db
       .from('meta_lead_sheets_queue')
@@ -1303,95 +1424,155 @@ export async function drainSheetsQueue(
       .maybeSingle();
     if (!claimed) continue;
 
-    // Hoisted for the catch block: a per-row Google failure is
-    // recorded against this table's config (never a sibling table's).
-    let config: ConfigRow | null = null;
-    try {
-      const submission = await loadSubmission(
-        db,
-        row.account_id,
-        row.submission_id
+    const submission = await loadSubmission(
+      db,
+      row.account_id,
+      row.submission_id
+    ).catch((err) => {
+      console.error('[meta-sheets] submission load failed:', err);
+      return undefined;
+    });
+    if (submission === undefined) {
+      // Load threw (DB down): leave the claim for the stale-claim
+      // reaper rather than burning an attempt or dropping the row.
+      continue;
+    }
+    if (!submission) {
+      // Submission deleted — drop the queue row (nothing to sync).
+      await db.from('meta_lead_sheets_queue').delete().eq('id', row.id);
+      continue;
+    }
+    if (opts.onlyFormId && submission.form_id !== opts.onlyFormId) {
+      await releaseClaim(row.id, 'queued');
+      continue;
+    }
+    // One table's config per row: a form with no table config never
+    // writes. The claim is released untouched so configuring the
+    // table later resumes instantly.
+    if (!submission.form_id) {
+      await recordFailure(
+        row,
+        null,
+        'Lead has no form reference; cannot route to a table.',
+        'terminal'
       );
-      if (!submission) {
-        // Submission deleted — drop the queue row (nothing to sync).
-        await db.from('meta_lead_sheets_queue').delete().eq('id', row.id);
-        continue;
-      }
-      if (opts.onlyFormId && submission.form_id !== opts.onlyFormId) {
-        await db
-          .from('meta_lead_sheets_queue')
-          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
-          .eq('id', row.id);
-        continue;
-      }
-      // One table's config per row: a form with no table config never
-      // writes. The claim is released untouched so configuring the
-      // table later resumes instantly.
-      if (!submission.form_id) {
-        await markRowFailed(
-          db,
-          row,
-          'Lead has no form reference; cannot route to a table.',
-          null
-        );
-        result.failed += 1;
-        continue;
-      }
-      config = await loadTableConfig(db, row.account_id, submission.form_id);
-      if (!config) {
-        await db
-          .from('meta_lead_sheets_queue')
-          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
-          .eq('id', row.id);
-        result.skippedNoConfig += 1;
-        continue;
-      }
-      if (!config.auto_sync && !opts.force) {
-        await db
-          .from('meta_lead_sheets_queue')
-          .update({ status: 'queued', claimed_at: null, updated_at: nowIso })
-          .eq('id', row.id);
-        result.skippedDisabled += 1;
-        continue;
-      }
+      continue;
+    }
+    const config = await loadTableConfig(
+      db,
+      row.account_id,
+      submission.form_id
+    ).catch(() => null);
+    if (!config) {
+      await releaseClaim(row.id, 'queued');
+      result.skippedNoConfig += 1;
+      continue;
+    }
+    if (!config.auto_sync && !opts.force) {
+      await releaseClaim(row.id, 'queued');
+      result.skippedDisabled += 1;
+      continue;
+    }
+    ready.push({ row, originalStatus, submission, config });
+  }
 
-      let accessToken: string;
-      try {
-        accessToken = await getSheetsAccessToken(db, row.account_id, fetchImpl);
-      } catch (authErr) {
-        const message =
-          authErr instanceof SheetsAuthError
-            ? 'Google authorization expired or was revoked. Reconnect Google Sheets.'
-            : authErr instanceof Error
-              ? authErr.message
-              : String(authErr);
+  // ---------- Phase 2: batched Google writes per spreadsheet -----
+  // Rows bound for the same (account, spreadsheet, tab) share one
+  // tab check, one header ensure, one ID-column scan, and one
+  // append — instead of ~5 API calls per row. Within a group,
+  // rows keep due order, so a lead's update-vs-append decision is
+  // still made against a single consistent scan.
+  const groups = new Map<string, GroupWork>();
+  for (const item of ready) {
+    const key = `${item.row.account_id}::${item.config.spreadsheet_id}::${item.config.sheet_tab}`;
+    let group = groups.get(key);
+    if (!group) {
+      const columns = resolveEffectiveColumns(item.config.column_config);
+      group = {
+        key,
+        accountId: item.row.account_id,
+        config: item.config,
+        columns,
+        layout: computeManagedLayout(columns),
+        items: [],
+      };
+      groups.set(key, group);
+    }
+    group.items.push({ ...item, values: [] });
+  }
+
+  for (const group of groups.values()) {
+    if (tripDelayMs !== null) {
+      // A previous group tripped quota: park this whole group
+      // without touching the API.
+      await parkForQuota(group.items, tripDelayMs);
+      continue;
+    }
+    await processGroup(group);
+  }
+  return result;
+
+  /** Resolve (and cache per drain) one account's access token. */
+  async function tokenFor(accountId: string): Promise<string> {
+    const cached = tokens.get(accountId);
+    if (cached) return cached;
+    const token = await getSheetsAccessToken(db, accountId, fetchImpl);
+    tokens.set(accountId, token);
+    return token;
+  }
+
+  /** Handle one spreadsheet group end-to-end. */
+  async function processGroup(group: GroupWork): Promise<void> {
+    const { config, columns, layout } = group;
+    const remaining = [...group.items];
+
+    let accessToken: string;
+    try {
+      accessToken = await tokenFor(group.accountId);
+    } catch (authErr) {
+      if (isQuotaSheetsError(authErr)) {
+        // Token endpoint throttled: nothing was consumed, park the
+        // whole group untouched for a quota backoff.
+        const delayMs = quotaDelayFor(authErr, 1);
+        tripDelayMs = delayMs;
+        await parkForQuota(remaining, delayMs);
+        return;
+      }
+      // Genuinely unauthorized: existing reauth path per row (rows
+      // stay queued with an hourly backoff; config surfaces
+      // needs_reauth). Attempts are NOT burned for credential
+      // problems that a retry cannot fix.
+      const message =
+        authErr instanceof SheetsAuthError
+          ? 'Google authorization expired or was revoked. Reconnect Google Sheets.'
+          : authErr instanceof Error
+            ? authErr.message
+            : String(authErr);
+      for (const item of remaining) {
         await db
           .from('meta_lead_sheets_queue')
           .update({
             status: 'queued',
-            attempts: row.attempts + 1,
             last_error: message.slice(0, 500),
             next_retry_at: new Date(Date.now() + 60 * 60_000).toISOString(),
             claimed_at: null,
             updated_at: nowIso,
           })
-          .eq('id', row.id);
+          .eq('id', item.row.id);
         await db
           .from('meta_lead_sheets_configs')
           .update({ last_error: message.slice(0, 500), updated_at: nowIso })
-          .eq('account_id', row.account_id)
+          .eq('account_id', item.row.account_id)
           .eq('form_id', config.form_id);
         result.needsReauth += 1;
-        result.failed += 1;
-        continue;
       }
+      return;
+    }
 
-      const columns = resolveEffectiveColumns(config.column_config);
-      const layout = computeManagedLayout(columns);
-
-      // The tab must exist — never auto-create, never fall back to
-      // another tab. A renamed/deleted tab surfaces as an explicit,
-      // actionable error instead of a silent write elsewhere.
+    // The tab must exist — never auto-create, never fall back to
+    // another tab. A renamed/deleted tab surfaces as an explicit,
+    // actionable error instead of a silent write elsewhere.
+    try {
       await assertWorksheetTabExists(
         accessToken,
         config.spreadsheet_id,
@@ -1409,57 +1590,259 @@ export async function drainSheetsQueue(
         );
         ensuredHeaders.add(headerKey);
       }
-
-      const values = await buildRowValues(
-        db,
-        row.account_id,
-        submission,
-        columns
-      );
-
-      let targetRow = row.sheet_row_number;
-      if (!targetRow) {
-        const found = await findSheetsRowsByLeadId(
-          accessToken,
-          config.spreadsheet_id,
-          config.sheet_tab,
-          [submission.meta_lead_id],
-          fetchImpl,
-          layout.idColumnIndex
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isQuotaSheetsError(err)) {
+        const delayMs = quotaDelayFor(
+          err,
+          minAttempts(remaining) + 1
         );
-        targetRow = found.get(submission.meta_lead_id) ?? null;
+        tripDelayMs = delayMs;
+        await parkForQuota(remaining, delayMs);
+        return;
       }
-      if (targetRow) {
+      for (const item of remaining) {
+        if (err instanceof TabMissingError) {
+          // Configuration error (renamed/deleted tab): terminal.
+          // Never writes elsewhere, never drops the row.
+          await recordFailure(
+            item.row,
+            config,
+            `Worksheet "${err.tab}" was not found. Select a replacement tab in this table's Google Sheets settings.`,
+            'terminal'
+          );
+        } else {
+          await recordFailure(
+            item.row,
+            config,
+            message,
+            retryDelayFor(err, item.row.attempts + 1)
+          );
+        }
+      }
+      return;
+    }
+
+    // Row values are DB-only: build each row independently so one
+    // bad row never poisons its group.
+    const withValues: Array<(typeof remaining)[number]> = [];
+    for (const item of remaining) {
+      try {
+        item.values = await buildRowValues(
+          db,
+          item.row.account_id,
+          item.submission,
+          columns
+        );
+        withValues.push(item);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await recordFailure(
+          item.row,
+          config,
+          message,
+          sheetsRetryDelayMs(item.row.attempts + 1)
+        );
+      }
+    }
+    if (withValues.length === 0) return;
+
+    // One ID-column scan for the whole group (was: one per row,
+    // plus a second scan per append).
+    let found: Map<string, number>;
+    try {
+      found = await findSheetsRowsByLeadId(
+        accessToken,
+        config.spreadsheet_id,
+        config.sheet_tab,
+        withValues.map((w) => w.submission.meta_lead_id),
+        fetchImpl,
+        layout.idColumnIndex
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isQuotaSheetsError(err)) {
+        const delayMs = quotaDelayFor(err, minAttempts(withValues) + 1);
+        tripDelayMs = delayMs;
+        await parkForQuota(withValues, delayMs);
+        return;
+      }
+      for (const item of withValues) {
+        await recordFailure(
+          item.row,
+          config,
+          message,
+          retryDelayFor(err, item.row.attempts + 1)
+        );
+      }
+      return;
+    }
+
+    const updates: typeof withValues = [];
+    const creates: typeof withValues = [];
+    for (const item of withValues) {
+      const target =
+        item.row.sheet_row_number ??
+        found.get(item.submission.meta_lead_id) ??
+        null;
+      if (target) {
+        item.targetRow = target;
+        updates.push(item);
+      } else {
+        creates.push(item);
+      }
+    }
+
+    // Updates stay per-row PUTs (idempotent overwrites by row
+    // number); a quota error trips the drain and parks the rest.
+    for (let i = 0; i < updates.length; i++) {
+      const item = updates[i];
+      if (tripDelayMs !== null) {
+        await parkForQuota(
+          [...updates.slice(i), ...creates],
+          tripDelayMs
+        );
+        return;
+      }
+      try {
         await updateSheetsRow(
           accessToken,
           config.spreadsheet_id,
           config.sheet_tab,
-          targetRow,
-          values,
+          item.targetRow as number,
+          item.values,
           fetchImpl
         );
-      } else {
+        await markSent(item, item.targetRow as number);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isQuotaSheetsError(err)) {
+          const delayMs = quotaDelayFor(err, item.row.attempts + 1);
+          tripDelayMs = delayMs;
+          await recordFailure(item.row, config, quotaMessage(message), delayMs);
+          await parkForQuota([...updates.slice(i + 1), ...creates], delayMs);
+          return;
+        }
+        await recordFailure(
+          item.row,
+          config,
+          message,
+          retryDelayFor(err, item.row.attempts + 1)
+        );
+      }
+    }
+
+    // One append for all new rows, then one re-scan to resolve the
+    // appended row numbers (was: append + re-scan per row).
+    if (creates.length > 0) {
+      if (tripDelayMs !== null) {
+        await parkForQuota(creates, tripDelayMs);
+        return;
+      }
+      try {
         await appendSheetsRows(
           accessToken,
           config.spreadsheet_id,
           config.sheet_tab,
-          [values],
+          creates.map((c) => c.values),
           fetchImpl
         );
-        // Resolve the appended row number by re-scanning the ID
-        // column. (Sheets append has no row-number response; a
-        // second read is the documented way to learn it.)
-        const found = await findSheetsRowsByLeadId(
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isQuotaSheetsError(err)) {
+          const delayMs = quotaDelayFor(err, minAttempts(creates) + 1);
+          tripDelayMs = delayMs;
+          for (const item of creates) {
+            await recordFailure(item.row, config, quotaMessage(message), delayMs);
+          }
+          return;
+        }
+        // Non-quota batch failure: fall back to per-row appends so
+        // one bad row cannot hold the whole group hostage.
+        for (let i = 0; i < creates.length; i++) {
+          const item = creates[i];
+          if (tripDelayMs !== null) {
+            await parkForQuota(creates.slice(i), tripDelayMs);
+            return;
+          }
+          try {
+            await appendSheetsRows(
+              accessToken,
+              config.spreadsheet_id,
+              config.sheet_tab,
+              [item.values],
+              fetchImpl
+            );
+            item.appendFailed = false;
+          } catch (singleErr) {
+            const singleMessage =
+              singleErr instanceof Error ? singleErr.message : String(singleErr);
+            if (isQuotaSheetsError(singleErr)) {
+              const delayMs = quotaDelayFor(singleErr, item.row.attempts + 1);
+              tripDelayMs = delayMs;
+              await recordFailure(
+                item.row,
+                config,
+                quotaMessage(singleMessage),
+                delayMs
+              );
+              await parkForQuota(creates.slice(i + 1), delayMs);
+              return;
+            }
+            await recordFailure(
+              item.row,
+              config,
+              singleMessage,
+              retryDelayFor(singleErr, item.row.attempts + 1)
+            );
+            item.appendFailed = true;
+          }
+        }
+      }
+      const appended = creates.filter((c) => !c.appendFailed);
+      // Resolve appended row numbers with a single re-scan. (Sheets
+      // append has no row-number response; a second read is the
+      // documented way to learn it.)
+      try {
+        const resolved = await findSheetsRowsByLeadId(
           accessToken,
           config.spreadsheet_id,
           config.sheet_tab,
-          [submission.meta_lead_id],
+          appended.map((c) => c.submission.meta_lead_id),
           fetchImpl,
           layout.idColumnIndex
         );
-        targetRow = found.get(submission.meta_lead_id) ?? null;
+        for (const item of appended) {
+          await markSent(
+            item,
+            resolved.get(item.submission.meta_lead_id) ?? null
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isQuotaSheetsError(err)) {
+          const delayMs = quotaDelayFor(err, minAttempts(appended) + 1);
+          tripDelayMs = delayMs;
+          for (const item of appended) {
+            await recordFailure(item.row, config, quotaMessage(message), delayMs);
+          }
+          return;
+        }
+        for (const item of appended) {
+          await recordFailure(
+            item.row,
+            config,
+            message,
+            retryDelayFor(err, item.row.attempts + 1)
+          );
+        }
       }
-
+    }
+    /** Persist one successful write (row mapping + table success). */
+    async function markSent(
+      item: (typeof withValues)[number],
+      targetRow: number | null
+    ): Promise<void> {
       await db
         .from('meta_lead_sheets_queue')
         .update({
@@ -1470,99 +1853,105 @@ export async function drainSheetsQueue(
           sheet_row_number: targetRow,
           updated_at: nowIso,
         })
-        .eq('id', row.id);
-      await db
-        .from('meta_lead_sheets_configs')
-        .update({
-          last_success_at: nowIso,
-          last_error: null,
-          updated_at: nowIso,
-        })
-        .eq('account_id', row.account_id)
-        .eq('form_id', config.form_id);
+        .eq('id', item.row.id);
       result.sent += 1;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // Config writes below are scoped to THIS table only. config can
-      // only be null when its own load threw (DB down) — then there is
-      // no table to attribute, so skip the config write but still
-      // record the row outcome.
-      const markTableConfig = async (patch: Record<string, unknown>) => {
-        if (!config) return;
-        await db
-          .from('meta_lead_sheets_configs')
-          .update({ ...patch, updated_at: nowIso })
-          .eq('account_id', row.account_id)
-          .eq('form_id', config.form_id);
-      };
-      if (err instanceof TabMissingError) {
-        // The worksheet was renamed or deleted: park the row with a
-        // long backoff and an actionable error. Never write to
-        // another tab, never drop the row.
-        await db
-          .from('meta_lead_sheets_queue')
-          .update({
-            status: 'failed',
-            attempts: row.attempts + 1,
-            last_error:
-              `Worksheet "${err.tab}" was not found. Select a replacement tab in this table's Google Sheets settings.`.slice(
-                0,
-                500
-              ),
-            next_retry_at: new Date(
-              Date.now() + 24 * 60 * 60_000
-            ).toISOString(),
-            claimed_at: null,
-            updated_at: nowIso,
-          })
-          .eq('id', row.id);
-        await markTableConfig({ last_error: message.slice(0, 500) });
-        result.failed += 1;
-      } else if (isAuthSheetsError(err)) {
-        await db
-          .from('meta_lead_sheets_queue')
-          .update({
-            status: 'queued',
-            attempts: row.attempts + 1,
-            last_error:
-              'Google rejected the request (check sharing + reconnect).'.slice(
-                0,
-                500
-              ),
-            next_retry_at: new Date(Date.now() + 60 * 60_000).toISOString(),
-            claimed_at: null,
-            updated_at: nowIso,
-          })
-          .eq('id', row.id);
-        await markTableConfig({ last_error: message.slice(0, 500) });
-        result.needsReauth += 1;
-        result.failed += 1;
-      } else if (isTransientSheetsError(err) || err instanceof SheetsApiError) {
-        const attempt = row.attempts + 1;
-        const retryIn = sheetsRetryDelayMs(attempt);
-        await markRowFailed(
-          db,
-          { ...row, attempts: row.attempts },
-          message,
-          retryIn
-        );
-        await markTableConfig({ last_error: message.slice(0, 500) });
-        result.failed += 1;
-      } else {
-        await markRowFailed(
-          db,
-          row,
-          message,
-          sheetsRetryDelayMs(row.attempts + 1)
-        );
-        result.failed += 1;
-      }
-      console.error(
-        `[meta-sheets] job ${row.id} failed (attempt ${row.attempts + 1}): ${message.slice(0, 200)}`
-      );
     }
+
+    // One success stamp per spreadsheet per drain (was: per row).
+    await db
+      .from('meta_lead_sheets_configs')
+      .update({
+        last_success_at: nowIso,
+        last_error: null,
+        updated_at: nowIso,
+      })
+      .eq('account_id', group.accountId)
+      .eq('form_id', config.form_id);
   }
-  return result;
+
+  /** Smallest attempts in a set (quota delay must cover the freshest row). */
+  function minAttempts(
+    items: Array<{ row: QueueRow }>
+  ): number {
+    let min = Number.POSITIVE_INFINITY;
+    for (const item of items) {
+      min = Math.min(min, item.row.attempts ?? 0);
+    }
+    return min === Number.POSITIVE_INFINITY ? 0 : min;
+  }
+
+  /** Classify a Google failure: quota/transient backoff or terminal. */
+  function retryDelayFor(err: unknown, attempt: number): number | 'terminal' {
+    if (isQuotaSheetsError(err)) {
+      return sheetsQuotaDelayMs(attempt, quotaRetryAfterMs(err));
+    }
+    if (isTransientSheetsError(err)) return sheetsRetryDelayMs(attempt);
+    if (err instanceof SheetsApiError) {
+      // Remaining 4xx (validation, permission, not-found): retrying
+      // cannot fix them — terminal with a clear error.
+      return 'terminal';
+    }
+    // Unknown/DB-adjacent failures: retryable with normal backoff.
+    return sheetsRetryDelayMs(attempt);
+  }
+
+  function quotaMessage(message: string): string {
+    return `Google Sheets API quota exceeded — backing off and retrying automatically: ${message.slice(0, 300)}`;
+  }
+
+  function quotaRetryAfterMs(err: unknown): number | null {
+    if (err instanceof SheetsApiError) return err.retryAfterMs;
+    const rec = (err ?? {}) as { retryAfterMs?: unknown };
+    return typeof rec.retryAfterMs === 'number' ? rec.retryAfterMs : null;
+  }
+}
+
+/**
+ * Revive one table's failed rows for manual retry (the "61 failed
+ * records" path): every `failed` row of THIS table (account +
+ * form) returns to `queued` with a fresh attempt budget, due
+ * immediately. Rows already `sent` are never matched, so synced
+ * spreadsheet rows cannot duplicate; rows whose submission was
+ * deleted are dropped by the drain instead of synced. Returns the
+ * number of revived rows. Never throws for empty sets.
+ */
+export async function reviveTableFailedRows(
+  db: SupabaseClient,
+  accountId: string,
+  formId: string
+): Promise<{ revived: number }> {
+  const nowIso = new Date().toISOString();
+  // The queue carries no form_id: scope through this table's
+  // submissions (bounded; per-table queues are small). Sent rows
+  // are excluded by the status filter, so synced spreadsheet rows
+  // can never duplicate.
+  const { data: submissionRows, error: subError } = await db
+    .from('meta_lead_submissions')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('form_id', formId)
+    .limit(5000);
+  if (subError) throw subError;
+  const submissionIds = (
+    (submissionRows ?? []) as Array<{ id: string }>
+  ).map((s) => s.id);
+  if (submissionIds.length === 0) return { revived: 0 };
+  const { data, error } = await db
+    .from('meta_lead_sheets_queue')
+    .update({
+      status: 'queued',
+      attempts: 0,
+      last_error: null,
+      next_retry_at: nowIso,
+      claimed_at: null,
+      updated_at: nowIso,
+    })
+    .eq('account_id', accountId)
+    .in('submission_id', submissionIds)
+    .eq('status', 'failed')
+    .select('id');
+  if (error) throw error;
+  return { revived: ((data ?? []) as unknown[]).length };
 }
 
 export interface SheetsSyncStatus {
@@ -1578,7 +1967,10 @@ export interface SheetsSyncStatus {
   lastSuccessAt: string | null;
   lastError: string | null;
   pending: number;
+  /** Terminal failures (budget spent or permanent error). */
   failed: number;
+  /** Failures scheduled for automatic retry (quota/transient backoff). */
+  retrying: number;
   columns: SheetsColumnDef[] | null;
   remapPending: boolean;
   cleanupPreview: { managedRows: number };
@@ -1620,22 +2012,31 @@ export async function getTableSheetsStatus(
   );
   let pending = 0;
   let failed = 0;
+  let retrying = 0;
   let managed = 0;
   if (submissionIds.size > 0) {
     const { data: queueRows } = await db
       .from('meta_lead_sheets_queue')
-      .select('submission_id, status, sheet_row_number')
+      .select('submission_id, status, attempts, max_attempts, sheet_row_number')
       .eq('account_id', accountId)
       .limit(5000);
     for (const qr of (queueRows ?? []) as Array<{
       submission_id: string;
       status: string;
+      attempts: number | null;
+      max_attempts: number | null;
       sheet_row_number: number | null;
     }>) {
       if (!submissionIds.has(qr.submission_id)) continue;
       if (qr.status === 'queued' || qr.status === 'sending') pending += 1;
-      else if (qr.status === 'failed') failed += 1;
-      else if (qr.status === 'sent' && typeof qr.sheet_row_number === 'number')
+      else if (qr.status === 'failed') {
+        // Scheduled for automatic retry vs terminally failed.
+        if ((qr.attempts ?? 0) < (qr.max_attempts ?? META_SHEETS_MAX_ATTEMPTS)) {
+          retrying += 1;
+        } else {
+          failed += 1;
+        }
+      } else if (qr.status === 'sent' && typeof qr.sheet_row_number === 'number')
         managed += 1;
     }
   }
@@ -1655,6 +2056,7 @@ export async function getTableSheetsStatus(
     lastError,
     pending,
     failed,
+    retrying,
     columns: config ? resolveEffectiveColumns(config.column_config) : null,
     remapPending: config?.pending_remap === true,
     cleanupPreview: { managedRows: managed },
