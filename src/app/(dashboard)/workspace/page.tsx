@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { ExternalLink, Inbox, MessageCircle, Plus, Search, Table2 } from 'lucide-react';
+import { ExternalLink, Inbox, MessageCircle, Plus, Search, Table2, UserPlus } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -85,6 +85,7 @@ import {
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { MetaTableWhatsappDialog } from '@/components/workspace/meta-table-whatsapp-dialog';
+import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { resolveSpreadsheetOpenUrl } from '@/lib/meta-lead-sheets/sheets-client';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
@@ -361,6 +362,7 @@ export default function WorkspacePage() {
   // Per-table Google Sheets configuration dialog (Meta Lead Ads
   // tables only; Flow Tables never see it).
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
+  const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false);
   // Per-table WhatsApp auto-send dialog (Meta Lead Ads tables
   // only; Flow Tables never see it).
   const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
@@ -1620,6 +1622,14 @@ export default function WorkspacePage() {
                     <MessageCircle className="mr-1.5 size-4" />
                     Auto-send WhatsApp
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setAssignmentDialogOpen(true)}
+                  >
+                    <UserPlus className="mr-1.5 size-4" />
+                    Assignment
+                  </Button>
                   {/* This table's own saved spreadsheet only — the
                       URL is refetched per selected table above, and
                       the button renders solely with a valid URL.
@@ -1637,6 +1647,22 @@ export default function WorkspacePage() {
                       Open Sheet
                     </Button>
                   ) : null}
+                </div>
+              ) : null}
+              {/* Flow Tables get their own per-table Assignment
+                  action here. Owner-only (the APIs enforce the same
+                  rule server-side); Flow Tables never see the
+                  Meta-only sheet actions above. */}
+              {!isMetaTable && isOwner && flowId ? (
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setAssignmentDialogOpen(true)}
+                  >
+                    <UserPlus className="mr-1.5 size-4" />
+                    Assignment
+                  </Button>
                 </div>
               ) : null}
               {/* Meta Lead Ads tables show one unified table (view=all),
@@ -2226,6 +2252,20 @@ export default function WorkspacePage() {
           flowId={flowId}
           open={whatsappDialogOpen}
           onOpenChange={setWhatsappDialogOpen}
+        />
+      ) : null}
+
+      {/* Per-table Lead Assignment (Meta tables AND Flow tables).
+          Keyed by flow so switching tables loads that table's own
+          settings; Flow tables never touch the Sheets sync system. */}
+      {flowId ? (
+        <TableAssignmentDialog
+          key={`assign-${flowId}`}
+          flowId={flowId}
+          flowName={flowDisplayName(activeFlowName)}
+          tableKind={payload?.meta?.kind}
+          open={assignmentDialogOpen}
+          onOpenChange={setAssignmentDialogOpen}
         />
       ) : null}
 

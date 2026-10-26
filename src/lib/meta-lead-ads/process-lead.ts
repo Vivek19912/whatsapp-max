@@ -46,6 +46,7 @@ import { maybeEnqueueWhatsappAutoreplies } from "@/lib/meta-lead-whatsapp/queue"
 import { scheduleWhatsappDrainSoon } from "@/lib/meta-lead-whatsapp/trigger";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
 import { maybeAutoAssignLead } from "@/lib/lead-assignment/service";
+import { maybeAutoAssignTableLead } from "@/lib/lead-assignment/table-assignment";
 
 export const MAX_LEAD_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 5 * 60_000;
@@ -401,25 +402,44 @@ export async function processSubmissionById(
       },
     });
 
-    // ADDITIVE Lead Assignment hook — automatically assign the new
-    // lead per the account's active rule for this Meta table (or
-    // leave it unassigned when no rule applies). Best-effort and
-    // fully isolated: assignment can never fail lead processing,
-    // and duplicates/updates never reassign (ownership is only
-    // written when the Assigned To cell is still empty).
-    const assignment = await maybeAutoAssignLead(db, {
+    // ADDITIVE Lead Assignment hook — this table's own assignment
+    // settings win when present and enabled; otherwise the legacy
+    // global rules engine runs (unchanged behavior). Best-effort
+    // and fully isolated: assignment can never fail lead
+    // processing, and duplicates/updates never reassign (ownership
+    // is only written when the Assigned To cell is still empty).
+    // The per-table engine reports notifyHandled so the legacy
+    // notification below never double-sends its alerts.
+    const tableAssignment = await maybeAutoAssignTableLead(db, {
       accountId: submission.account_id,
       flowId,
       runId: (run as { id: string }).id,
       formId: formRow.id,
     });
+    const assignment =
+      tableAssignment && tableAssignment.outcome !== "no-config"
+        ? tableAssignment
+        : await maybeAutoAssignLead(db, {
+            accountId: submission.account_id,
+            flowId,
+            runId: (run as { id: string }).id,
+            formId: formRow.id,
+          });
 
     // ADDITIVE new-lead email notification — enqueue only when the
-    // lead now has an owner. Unassigned leads stay pending: a later
-    // manual or retry assignment enqueues then. Best-effort and
-    // fully isolated: enqueue never throws into lead processing, and
-    // UNIQUE(account_id, submission_id) makes duplicates a no-op.
-    if (assignment?.outcome === "assigned" && assignment.userId) {
+    // lead now has an owner AND the per-table engine did not
+    // already handle notifications. Unassigned leads stay pending:
+    // a later manual or retry assignment enqueues then.
+    // Best-effort and fully isolated: enqueue never throws into
+    // lead processing, and UNIQUE(account_id, submission_id) makes
+    // duplicates a no-op.
+    const handledByTable =
+      !!tableAssignment && tableAssignment.notifyHandled;
+    if (
+      !handledByTable &&
+      assignment?.outcome === "assigned" &&
+      assignment.userId
+    ) {
       await maybeEnqueueLeadNotification(db, {
         accountId: submission.account_id,
         submissionId,

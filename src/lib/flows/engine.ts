@@ -56,6 +56,7 @@ import {
   getAssignForFlowRun,
 } from "@/lib/automations/assignment";
 import { completedAnswerOffset } from "./sheet-layout";
+import { maybeAutoAssignTableLead } from "@/lib/lead-assignment/table-assignment";
 import {
   buildCompletedHeader,
   buildCompletedRow,
@@ -1537,6 +1538,21 @@ async function startNewRun(
     flow_id: flow.id,
     trigger_type: flow.trigger_type,
     meta_message_id: input.message.meta_message_id,
+  });
+  // ADDITIVE per-table Lead Assignment — automatically assign the
+  // new Flow-table run per this table's own assignment settings
+  // (no-op when none are saved or disabled). Strictly Meta-free:
+  // this engine path never touches the Sheets sync system.
+  // Best-effort and fully isolated: assignment can never fail run
+  // creation, duplicates never reassign, and config changes never
+  // rewrite historical ownership.
+  await maybeAutoAssignTableLead(db, {
+    accountId: flow.account_id,
+    flowId: flow.id,
+    runId: run.id,
+    formId: null,
+  }).catch((err) => {
+    console.error("[flows] table auto-assign failed (run unaffected):", err);
   });
   // Bump the flow's execution counter — used by the builder UI to
   // surface "X runs since activation" on the flow card.

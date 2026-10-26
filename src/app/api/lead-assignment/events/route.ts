@@ -5,8 +5,9 @@ import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
 /**
  * GET /api/lead-assignment/events — assignment audit history.
  * Any member may read (account-scoped). Optional filters:
- * ?rule_id= (that rule's decisions) or ?run_id= (one lead's trail).
- * Newest first, capped at 100 rows.
+ * ?rule_id= (legacy rule decisions), ?run_id= (one lead's trail),
+ * ?flow_id= (one table's trail, both engines), ?config_id= (one
+ * per-table config's decisions). Newest first, capped at 100 rows.
  */
 export async function GET(request: Request) {
   try {
@@ -14,14 +15,18 @@ export async function GET(request: Request) {
     const params = new URL(request.url).searchParams;
     const ruleId = params.get("rule_id");
     const runId = params.get("run_id");
+    const flowId = params.get("flow_id");
+    const configId = params.get("config_id");
     let query = supabase
       .from("lead_assignment_events")
       .select(
-        "id, rule_id, flow_id, flow_run_id, form_id, assigned_user_id, previous_user_id, kind, reason, created_by, created_at",
+        "id, rule_id, table_config_id, table_assignee_id, flow_id, flow_run_id, form_id, assigned_user_id, previous_user_id, kind, reason, created_by, created_at, meta",
       )
       .eq("account_id", accountId);
     if (ruleId) query = query.eq("rule_id", ruleId);
     if (runId) query = query.eq("flow_run_id", runId);
+    if (flowId) query = query.eq("flow_id", flowId);
+    if (configId) query = query.eq("table_config_id", configId);
     const { data, error } = await query
       .order("created_at", { ascending: false })
       .limit(100);

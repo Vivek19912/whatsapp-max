@@ -233,6 +233,8 @@ describe("Flow Tables and shared paths stay untouched", () => {
   it("ingestion only adds a best-effort hook after persistence", () => {
     const proc = src("lib/meta-lead-ads/process-lead.ts");
     expect(proc).toContain("maybeAutoAssignLead");
+    // Per-table config is tried first, legacy global rules second.
+    expect(proc).toContain("maybeAutoAssignTableLead(db, {");
     // Post-persistence additive hooks (assignment, Sheets sync,
     // WhatsApp auto-send) all run after the lead + ledger writes,
     // each guarded so it can never fail processing. The window
@@ -240,14 +242,15 @@ describe("Flow Tables and shared paths stay untouched", () => {
     // blocks, not an exact char count).
     const doneIdx = proc.indexOf("return { outcome: \"processed\" };");
     for (const hook of [
+      "maybeAutoAssignTableLead(db, {",
       "maybeAutoAssignLead(db, {",
       "maybeEnqueueSheetsSync(db, {",
       "maybeEnqueueWhatsappAutoreplies(",
     ]) {
       const hookIdx = proc.indexOf(hook);
       expect(hookIdx).toBeGreaterThan(0);
-      expect(hookIdx).toBeGreaterThan(doneIdx - 4500);
-      expect(proc.slice(hookIdx - 800, hookIdx)).toContain("ADDITIVE");
+      expect(hookIdx).toBeGreaterThan(doneIdx - 5500);
+      expect(proc.slice(hookIdx - 1000, hookIdx)).toContain("ADDITIVE");
     }
   });
 });

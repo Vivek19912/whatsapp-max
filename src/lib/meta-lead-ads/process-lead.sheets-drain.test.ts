@@ -60,6 +60,16 @@ vi.mock("@/lib/lead-assignment/service", () => ({
   maybeAutoAssignLead: async () => ({ outcome: "no-rule", userId: null, ruleId: null }),
 }));
 
+vi.mock("@/lib/lead-assignment/table-assignment", () => ({
+  maybeAutoAssignTableLead: async () => ({
+    outcome: "no-config",
+    userId: null,
+    assigneeId: null,
+    configId: null,
+    notifyHandled: false,
+  }),
+}));
+
 vi.mock("@/lib/meta-lead-sheets/queue", () => ({
   maybeEnqueueSheetsSync: async (
     _db: unknown,

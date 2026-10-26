@@ -15,6 +15,7 @@ import { drainMetaLeadNotifications } from '@/lib/meta-lead-ads/notify';
 import { runDueRetries } from '@/lib/meta-lead-ads/process-lead';
 import { POLL_DEFAULT_LIMIT, runLeadPolls } from '@/lib/meta-lead-ads/sync';
 import { pumpActiveImportJobs } from '@/lib/meta-lead-sheets/import-jobs';
+import { drainTableAssignmentNotifications } from '@/lib/lead-assignment/table-notify';
 import { purgeExpiredSheetsOAuthStates } from '@/lib/meta-lead-sheets/oauth';
 import { drainSheetsQueue } from '@/lib/meta-lead-sheets/queue';
 import { drainWhatsappQueue } from '@/lib/meta-lead-whatsapp/queue';
@@ -149,6 +150,21 @@ export async function GET(request: Request) {
       );
     }
 
+    // ADDITIVE per-table assignment alerts. Same sweep: assignee
+    // email/WhatsApp notifications (external recipients,
+    // Flow-table leads, assignee WhatsApp) drain here with bounded
+    // work. Failures are isolated per row and never affect polling,
+    // notifications, sync, or imports.
+    let tableAssignmentNotifications = { sent: 0, failed: 0, skippedNoConfig: 0 };
+    try {
+      tableAssignmentNotifications = await drainTableAssignmentNotifications(db);
+    } catch (error) {
+      console.error(
+        '[meta-lead-ads-cron] table-assignment notification drain failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+
     // ADDITIVE OAuth-state retention. Same sweep: consumed/expired
     // one-time states are purged (safe retention — active states
     // are untouched). Failures are isolated and never affect
@@ -170,6 +186,7 @@ export async function GET(request: Request) {
       sheets,
       whatsapp,
       imports,
+      tableAssignmentNotifications,
       oauthStatesPurged,
       ...(retryError ? { retryError } : {}),
     });

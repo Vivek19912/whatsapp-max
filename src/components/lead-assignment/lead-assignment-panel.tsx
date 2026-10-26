@@ -538,6 +538,21 @@ export function LeadAssignmentPanel() {
         }
       />
 
+      <Card className="mb-4 border-dashed">
+        <CardContent className="flex flex-col gap-1 py-4">
+          <p className="text-sm font-medium">New: per-table assignment settings</p>
+          <p className="text-sm text-muted-foreground">
+            Each Meta Lead Ads table and Flow table now has its own Assignment settings —
+            including custom (non-login) recipients, temporary pauses, and per-channel
+            notifications. Open any table in Workspace and choose{" "}
+            <span className="font-medium text-foreground">Assignment</span> next to the
+            table selector. Existing global rules below keep working unchanged; move a
+            table to its own settings when you are ready — nothing is migrated
+            automatically.
+          </p>
+        </CardContent>
+      </Card>
+
       <div className="mb-4 flex items-center gap-2">
         <div className="relative w-full sm:max-w-sm">
           <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
