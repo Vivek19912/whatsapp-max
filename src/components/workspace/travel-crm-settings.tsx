@@ -78,11 +78,33 @@ export function isEmptyItineraryRow(row: ItineraryEditRow): boolean {
 export function TravelCrmSettings({
   flowId,
   flowName,
+  open: controlledOpen,
+  onOpenChange,
+  viewMode = false,
 }: {
   flowId: string | null;
   flowName: string;
+  /**
+   * Controlled open state (used by the Workspace actions menu for
+   * separate View / Edit entries). When omitted the component
+   * keeps its own trigger button + open state, exactly as before.
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /**
+   * Read-only inspection: checkboxes, selects, and inputs are
+   * disabled, add/remove buttons are hidden, the footer offers
+   * Close only, and save refuses to run. Saved defaults still
+   * render exactly as stored.
+   */
+  viewMode?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
+  // View mode renders the same saved state with every mutation
+  // path closed (see viewMode doc above).
+  const readOnly = viewMode === true;
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,6 +190,7 @@ export function TravelCrmSettings({
   }, [open, flowId]);
 
   function toggle(label: string) {
+    if (readOnly) return;
     // Compare through the display resolver so a retired stored
     // label ("Vehicle (disposal)") still matches its successor
     // ("Vehicle"): unchecking clears every spelling, checking
@@ -182,15 +205,17 @@ export function TravelCrmSettings({
   }
 
   function setDestination(index: number, value: string) {
+    if (readOnly) return;
     setRows((prev) => updateItineraryDestination(prev, index, value));
   }
 
   function setNights(index: number, value: string) {
+    if (readOnly) return;
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, nights: value } : r)));
   }
 
   async function save() {
-    if (!flowId) return;
+    if (readOnly || !flowId) return;
     // Validate destination + nights for non-empty rows before sending.
     for (const row of rows) {
       if (isEmptyItineraryRow(row)) continue;
@@ -239,6 +264,7 @@ export function TravelCrmSettings({
 
   return (
     <>
+      {controlledOpen === undefined ? (
       <Button
         type="button"
         variant="outline"
@@ -250,6 +276,7 @@ export function TravelCrmSettings({
         <Settings2 className="h-4 w-4" aria-hidden />
         Travel CRM Settings
       </Button>
+      ) : null}
       <ConfigDialog
         open={open}
         onOpenChange={(v) => !v && setOpen(false)}
@@ -257,18 +284,28 @@ export function TravelCrmSettings({
         icon={<Settings2 aria-hidden />}
         title="Travel CRM Settings"
         tableLine={`Flow: ${flowName}`}
-        description="Defaults apply to this flow only. Saving never changes existing leads."
+        description={
+          readOnly
+            ? "Defaults apply to this flow only. Viewing — switch to Edit to make changes."
+            : "Defaults apply to this flow only. Saving never changes existing leads."
+        }
         loading={loading || lookupsLoading}
         loadingText="Loading settings…"
         error={error}
         footer={
-          <ConfigFooterActions
-            onClose={() => setOpen(false)}
-            onSave={save}
-            saveLabel="Save"
-            saving={busy}
-            saveDisabled={busy || loading}
-          />
+          readOnly ? (
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              Close
+            </Button>
+          ) : (
+            <ConfigFooterActions
+              onClose={() => setOpen(false)}
+              onSave={save}
+              saveLabel="Save"
+              saving={busy}
+              saveDisabled={busy || loading}
+            />
+          )
         }
       >
         <div className="flex flex-col gap-5">
@@ -301,6 +338,7 @@ export function TravelCrmSettings({
                       <Checkbox
                         checked={checked}
                         onCheckedChange={() => toggle(label)}
+                        disabled={readOnly}
                         aria-label={label}
                       />
                       <span className="truncate">{label}</span>
@@ -336,6 +374,7 @@ export function TravelCrmSettings({
                     <p className="text-muted-foreground text-xs">
                       No itinerary defaults — leads start with an empty itinerary.
                     </p>
+                    {readOnly ? null : (
                     <Button
                       type="button"
                       variant="outline"
@@ -346,6 +385,7 @@ export function TravelCrmSettings({
                       <Plus className="h-4 w-4" aria-hidden />
                       Add itinerary
                     </Button>
+                    )}
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2">
@@ -373,12 +413,13 @@ export function TravelCrmSettings({
                             >
                               Destination
                             </label>
-                            <ItineraryDestinationSelect
-                              value={destinationValue}
-                              options={destinations}
-                              inputId={`itin-dest-${i}`}
-                              onChange={(v) => setDestination(i, v ?? "")}
-                            />
+                          <ItineraryDestinationSelect
+                            value={destinationValue}
+                            options={destinations}
+                            inputId={`itin-dest-${i}`}
+                            onChange={(v) => setDestination(i, v ?? "")}
+                            disabled={readOnly}
+                          />
                           </div>
                           <div className="grid gap-1">
                             <label
@@ -387,17 +428,19 @@ export function TravelCrmSettings({
                             >
                               Nights
                             </label>
-                            <Input
-                              id={`itin-nights-${i}`}
-                              aria-label="Nights"
-                              type="number"
-                              min={1}
-                              className="h-8"
-                              value={row.nights}
-                              onChange={(e) => setNights(i, e.target.value)}
-                              placeholder="4"
-                            />
+                          <Input
+                            id={`itin-nights-${i}`}
+                            aria-label="Nights"
+                            type="number"
+                            min={1}
+                            className="h-8"
+                            value={row.nights}
+                            onChange={(e) => setNights(i, e.target.value)}
+                            disabled={readOnly}
+                            placeholder="4"
+                          />
                           </div>
+                          {readOnly ? null : (
                           <Button
                             type="button"
                             variant="ghost"
@@ -409,9 +452,11 @@ export function TravelCrmSettings({
                             <Trash2 className="h-4 w-4" aria-hidden />
                             <span className="sm:hidden">Remove</span>
                           </Button>
+                          )}
                         </div>
                       );
                     })}
+                    {readOnly ? null : (
                     <div>
                       <Button
                         type="button"
@@ -423,6 +468,7 @@ export function TravelCrmSettings({
                         Add More
                       </Button>
                     </div>
+                    )}
                   </div>
                 )}
               </ConfigSection>

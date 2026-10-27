@@ -25,14 +25,16 @@ describe("assignment entry points in the workspace actions menu", () => {
   const page = src("src/app/(dashboard)/workspace/page.tsx");
   const menu = src("src/components/workspace/workspace-actions-menu.tsx");
 
-  it("shows Assignment in the Automation group next to Auto-send WhatsApp (owner only, no sheet actions)", () => {
-    // The page wires the existing dialog opener into the single
-    // menu; the visible labels live in the menu component.
+  it("shows Assignment with View and Edit in the Automation group (owner only, no sheet actions)", () => {
+    // The page wires view/edit openers into the single menu; the
+    // visible labels live in the menu component.
     expect(page).toContain("WorkspaceActionsMenu");
     expect(page).toContain("showAssignment={isOwner}");
-    expect(page).toContain("onOpenAssignment={() => setAssignmentDialogOpen(true)}");
+    expect(page).toContain("onOpenAssignment={(mode) => {");
     expect(page).toContain("showAutoSend={isMetaTable && isOwner}");
     expect(page).toContain("setAssignmentDialogOpen(true)");
+    expect(page).toContain("setAssignmentViewMode(mode === 'view')");
+    expect(page).toContain("viewMode={assignmentViewMode}");
     expect(page).not.toContain("label: 'Configure Sheet'");
     expect(page).not.toContain("label: 'Open Sheet'");
     expect(page).not.toContain("key: 'assignment'");
@@ -41,6 +43,11 @@ describe("assignment entry points in the workspace actions menu", () => {
     expect(menu).toContain("Assignment");
     expect(menu).toContain("Auto-send WhatsApp");
     expect(menu).toContain("Automation");
+    // View/Edit render through one shared row component, so the
+    // accessible labels are template expressions over the label.
+    expect(menu).toContain("aria-label={`View ${label}`}");
+    expect(menu).toContain("aria-label={`Edit ${label}`}");
+    expect(menu).toContain("Travel CRM Settings");
     expect(menu).not.toContain("Configure Sheet");
     expect(menu).not.toContain("Open Sheet");
     expect(menu).not.toContain("More actions");
@@ -115,6 +122,52 @@ describe("assignment dialog is a single panel", () => {
   });
 });
 
+describe("assignment dialog view mode (read-only inspection)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("accepts a viewMode flag and derives a read-only gate from it", () => {
+    expect(dialog).toContain("viewMode = false");
+    expect(dialog).toContain("const readOnly = viewMode === true");
+    expect(dialog).toContain("Viewing — switch to Edit to make changes.");
+  });
+
+  it("disables every editable control in view mode", () => {
+    // Master switch, radio cards, template selector, and share
+    // inputs render disabled — values stay readable, nothing is
+    // focusable or changeable. (Template language lives only in
+    // state; it has no visible field at all.)
+    const hits = dialog.split("disabled={readOnly}").length - 1;
+    expect(hits).toBeGreaterThanOrEqual(4);
+    expect(dialog).toContain('aria-label="Automatic assignment"');
+    expect(dialog).toContain('id="assign-mode-rr"');
+    expect(dialog).toContain("Share percentage for");
+    expect(dialog).toContain('ariaLabel="WhatsApp template (optional)"');
+    expect(dialog).not.toContain("Template language");
+  });
+
+  it("hides every mutating action in view mode and keeps the saved readouts", () => {
+    // Add/Edit/Deactivate/Remove/Pause controls and the editor
+    // cards render only outside view mode...
+    expect(dialog).toContain("{readOnly ? null : <TableHead className=\"text-right\">Actions</TableHead>}");
+    expect(dialog).toContain("!readOnly && (editingKey || pauseFor)");
+    // ...while names, contact channels, notify flags, badges, and
+    // the paused-until line stay visible.
+    expect(dialog).toContain("notify_email ? \"Email on\" : \"Email off\"");
+    expect(dialog).toContain("until {formatPausedUntilFull(saved.paused_until)}");
+    expect(dialog).toContain("saved.available ? \"Available\" : saved.status_label");
+  });
+
+  it("swaps the footer to Close-only and blocks the mutating submitters", () => {
+    expect(dialog).toContain("if (readOnly || busy !== null) return;");
+    expect(dialog).toContain("if (readOnly || !pauseFor) return;");
+    expect(dialog).toContain("if (readOnly) return;");
+    // Close-only footer in view mode; the Save pair stays for edit.
+    expect(dialog).toContain("readOnly ? (");
+    expect(dialog).toContain("onClick={() => onOpenChange(false)}");
+    expect(dialog).toContain('saveLabel="Save Assignment Settings"');
+  });
+});
+
 describe("assignment dialog assignee lookups (Add-crash regression)", () => {
   const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
@@ -148,9 +201,10 @@ describe("assignment dialog assignee lookups (Add-crash regression)", () => {
   });
 
   it("guards the save against duplicate submissions and keeps drafts on failure", () => {
-    // Re-entrancy guard: the footer Save is disabled while saving,
-    // and the handler itself bails when a save is in flight.
-    expect(dialog).toContain("if (busy !== null) return;");
+    // Re-entrancy guard (also view-mode blocked): the footer Save
+    // is disabled while saving, and the handler itself bails when
+    // a save is in flight.
+    expect(dialog).toContain("if (readOnly || busy !== null) return;");
     expect(dialog).toContain("saving={busy === ");
     // Drafts are rebuilt from the server only after a successful
     // save; the catch path only surfaces the error, so the form

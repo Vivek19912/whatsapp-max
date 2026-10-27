@@ -33,7 +33,7 @@ describe("Workspace page wiring", () => {
     expect(page).toContain("TravelCrmSettings");
     expect(page).toContain("flowName={flowDisplayName(activeFlowName)}");
     // Remount per flow so switching flows reloads configuration.
-    expect(page).toContain("key={flowId ?? 'no-flow'}");
+    expect(page).toContain("key={`travel-${flowId}`}");
   });
 });
 
@@ -60,6 +60,54 @@ describe("Services Vehicle rename (Travel CRM Settings modal)", () => {
   it("keeps retired selections checked and clears every spelling on toggle", () => {
     // Toggle matcher and checkbox state both resolve retired labels.
     expect(src.split("resolveDisplayServiceLabel(s)").length - 1).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("TravelCrmSettings view mode (read-only inspection)", () => {
+  const src = readFileSync(
+    `${process.cwd()}/src/components/workspace/travel-crm-settings.tsx`,
+    "utf8",
+  );
+
+  it("accepts controlled open state plus a viewMode flag", () => {
+    expect(src).toContain("controlledOpen");
+    expect(src).toContain("onOpenChange?: (open: boolean) => void");
+    expect(src).toContain("viewMode = false");
+    expect(src).toContain("const readOnly = viewMode === true");
+  });
+
+  it("keeps the standalone trigger only when uncontrolled", () => {
+    // Menu-driven (controlled) usage shows no extra trigger;
+    // standalone usage keeps the exact previous button.
+    expect(src).toContain("controlledOpen === undefined");
+    expect(src).toContain("Travel CRM Settings");
+    expect(src).toContain("disabled={!flowId}");
+  });
+
+  it("disables every editable control in view mode", () => {
+    // Service checkboxes, destination selectors, and nights
+    // inputs stay visible with saved values but never open.
+    const hits = src.split("disabled={readOnly}").length - 1;
+    expect(hits).toBeGreaterThanOrEqual(3);
+    expect(src).toContain("onCheckedChange={() => toggle(label)}");
+    expect(src).toContain("<ItineraryDestinationSelect");
+  });
+
+  it("hides every mutating action in view mode and keeps the saved readout", () => {
+    expect(src).toContain("Add itinerary");
+    expect(src).toContain("Add More");
+    expect(src).toContain('aria-label="Remove itinerary row"');
+    // Saved services and rows still render; the empty state keeps
+    // its text without the add button.
+    expect(src).toContain("TRAVEL_CRM_SERVICE_LABELS.map((label)");
+    expect(src).toContain("No itinerary defaults");
+  });
+
+  it("swaps the footer to Close-only and blocks the save path", () => {
+    expect(src).toContain("async function save() {");
+    expect(src).toContain("if (readOnly || !flowId) return;");
+    expect(src).toContain("onClick={() => setOpen(false)}");
+    expect(src).toContain('saveLabel="Save"');
   });
 });
 

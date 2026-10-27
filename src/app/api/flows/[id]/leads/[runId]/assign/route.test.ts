@@ -30,6 +30,22 @@ const h = vi.hoisted(() => ({
   states: [] as Array<Record<string, unknown>>,
   seq: 0,
   enqueued: [] as Array<Record<string, unknown>>,
+  tableNotifyCalls: [] as Array<Record<string, unknown>>,
+  assigneeEnqueueCalls: [] as Array<Record<string, unknown>>,
+  drainScheduled: [] as Array<Record<string, unknown>>,
+  configs: [] as Array<Record<string, unknown>>,
+  assignees: [] as Array<Record<string, unknown>>,
+  submissions: [] as Array<Record<string, unknown>>,
+  handoffCalls: [] as Array<Record<string, unknown>>,
+  reconcileCalls: [] as Array<Record<string, unknown>>,
+  reconcileResult: { cancelled: 0, sent: 0, sending: 0 } as Record<string, unknown>,
+  handoffResult: {
+    submissionId: "sub-1",
+    decision: "start-assignee",
+    reason: "no-global-rows",
+    cancelled: 0,
+    sent: 0,
+  } as Record<string, unknown>,
 }));
 
 function uid(prefix: string) {
@@ -78,6 +94,34 @@ vi.mock("@/lib/meta-lead-ads/notify", () => ({
   },
 }));
 
+vi.mock("@/lib/lead-assignment/table-notify", () => ({
+  enqueueTableAssignmentNotifications: async (_db: unknown, args: Record<string, unknown>) => {
+    h.tableNotifyCalls.push(args);
+    return { email: { enqueued: true, reason: "enqueued" }, whatsapp: { enqueued: true, reason: "enqueued" } };
+  },
+}));
+
+vi.mock("@/lib/meta-lead-whatsapp/queue", () => ({
+  maybeEnqueueAssigneeSequence: async (_db: unknown, args: Record<string, unknown>) => {
+    h.assigneeEnqueueCalls.push(args);
+    return { enqueued: 1, alreadyQueued: 0, skipped: false };
+  },
+  prepareManualAssigneeHandoff: async (_db: unknown, args: Record<string, unknown>) => {
+    h.handoffCalls.push(args);
+    return { ...h.handoffResult };
+  },
+  cancelLateGlobalRows: async (_db: unknown, args: Record<string, unknown>) => {
+    h.reconcileCalls.push(args);
+    return { ...h.reconcileResult };
+  },
+}));
+
+vi.mock("@/lib/meta-lead-whatsapp/trigger", () => ({
+  scheduleWhatsappDrainSoon: (args: Record<string, unknown>) => {
+    h.drainScheduled.push(args ?? {});
+  },
+}));
+
 type Filter = { col: string; op: string; val: unknown };
 
 function fakeSupabase() {
@@ -98,6 +142,9 @@ function fakeSupabase() {
       case "workspace_values": return h.values;
       case "profiles": return h.profiles;
       case "lead_assignment_events": return h.events;
+      case "lead_assignment_table_configs": return h.configs;
+      case "lead_assignment_table_assignees": return h.assignees;
+      case "meta_lead_submissions": return h.submissions;
       case "lead_assignment_rules": return h.rules;
       case "lead_assignment_rule_tables": return h.ruleTables;
       case "lead_assignment_rule_members": return h.ruleMembers;
@@ -108,13 +155,21 @@ function fakeSupabase() {
   const matched = () =>
     rows().filter((r) =>
       state.filters.every((f) =>
-        f.op === "eq" ? r[f.col] === f.val : (f.val as unknown[]).includes(r[f.col]),
+        f.op === "eq"
+          ? r[f.col] === f.val
+          : f.op === "is-null"
+            ? r[f.col] == null
+            : (f.val as unknown[]).includes(r[f.col]),
       ),
     );
   const api: Record<string, unknown> = {
     select: () => api,
     eq: (col: string, val: unknown) => {
       state.filters.push({ col, op: "eq", val });
+      return api;
+    },
+    is: (col: string, val: unknown) => {
+      state.filters.push({ col, op: val === null ? "is-null" : "eq", val });
       return api;
     },
     in: (col: string, vals: unknown[]) => {
@@ -266,6 +321,22 @@ beforeEach(() => {
   h.states = [];
   h.seq = 0;
   h.enqueued = [];
+  h.tableNotifyCalls = [];
+  h.assigneeEnqueueCalls = [];
+  h.drainScheduled = [];
+  h.configs = [];
+  h.assignees = [];
+  h.submissions = [];
+  h.handoffCalls = [];
+  h.reconcileCalls = [];
+  h.reconcileResult = { cancelled: 0, sent: 0, sending: 0 };
+  h.handoffResult = {
+    submissionId: "sub-1",
+    decision: "start-assignee",
+    reason: "no-global-rows",
+    cancelled: 0,
+    sent: 0,
+  };
 });
 
 describe("POST assign (manual)", () => {
@@ -274,6 +345,7 @@ describe("POST assign (manual)", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       assignment: { previous: null, current: "u-mohan" },
+      customer_sequence: { started: true, reason: "no-global-rows", cancelled_global: 0 },
     });
     expect(h.values).toMatchObject([{ value_text: "u-mohan" }]);
     expect(h.events[0]).toMatchObject({
@@ -320,6 +392,216 @@ describe("POST assign (manual)", () => {
     const cleared = await assignPOST(assignBody({ user_id: null }), ASSIGN_PARAMS);
     expect(cleared.status).toBe(200);
     expect(h.enqueued).toHaveLength(1);
+  });
+
+  it("notifies the new assignee through the per-table outbox on initial manual assignment", async () => {
+    h.configs.push({
+      id: "cfg-1", account_id: "acct-1", flow_id: "flow-1",
+      enabled: true, mode: "round_robin", timezone: "Asia/Kolkata",
+    });
+    h.assignees.push({
+      id: "a-1", config_id: "cfg-1", user_id: "u-mohan", display_name: "Mohan",
+      email: null, phone: "+15550001111", position: 0, weight: 0,
+      is_active: true, notify_email: true, notify_whatsapp: true,
+    });
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    // Legacy email still fires for the genuine initial assignment…
+    expect(h.enqueued).toHaveLength(1);
+    // …so the per-table email is skipped, but WhatsApp is queued.
+    expect(h.tableNotifyCalls).toHaveLength(1);
+    expect(h.tableNotifyCalls[0]).toMatchObject({
+      accountId: "acct-1",
+      runId: "run-1",
+      skipEmail: true,
+      assignee: expect.objectContaining({ user_id: "u-mohan" }),
+    });
+    // And the new owner's salesperson sequence starts.
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    expect(h.assigneeEnqueueCalls[0]).toMatchObject({
+      accountId: "acct-1",
+      formId: "form-1",
+      flowRunId: "run-1",
+      assigneeKey: "user:u-mohan",
+    });
+    expect(h.drainScheduled).toEqual([{ accountId: "acct-1" }]);
+  });
+
+  it("notifies the new assignee on reassign without starting customer templates", async () => {
+    h.configs.push({
+      id: "cfg-1", account_id: "acct-1", flow_id: "flow-1",
+      enabled: true, mode: "round_robin", timezone: "Asia/Kolkata",
+    });
+    h.assignees.push({
+      id: "a-1", config_id: "cfg-1", user_id: "u-mohan", display_name: "Mohan",
+      email: null, phone: "+15550001111", position: 0, weight: 0,
+      is_active: true, notify_email: true, notify_whatsapp: true,
+    });
+    h.assignees.push({
+      id: "a-2", config_id: "cfg-1", user_id: "u-sohan", display_name: "Sohan",
+      email: null, phone: "+15550002222", position: 1, weight: 0,
+      is_active: true, notify_email: true, notify_whatsapp: true,
+    });
+    // Prior initial assignment to someone else.
+    h.values.push({
+      id: "wv-0", account_id: "acct-1", field_id: "f-assign",
+      flow_run_id: "run-1", value_text: "u-mohan",
+    });
+    h.events.push({
+      id: "ev-0", account_id: "acct-1", flow_id: "flow-1", flow_run_id: "run-1",
+      kind: "auto", assigned_user_id: "u-mohan", previous_user_id: null,
+    });
+    const res = await assignPOST(assignBody({ user_id: "u-sohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect((await res.json()).assignment).toMatchObject({ previous: "u-mohan", current: "u-sohan" });
+    // New owner is notified through the per-table outbox (both
+    // channels: the legacy queue dedupes reassignments).
+    const reassigned = h.tableNotifyCalls.filter(
+      (c) => (c as { assignee: { user_id: string } }).assignee.user_id === "u-sohan",
+    );
+    expect(reassigned).toHaveLength(1);
+    expect(reassigned[0]).toMatchObject({ runId: "run-1", skipEmail: false });
+    // No customer-facing templates start on reassignment.
+    expect(h.assigneeEnqueueCalls).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+  });
+
+  it("runs the global handoff before starting customer templates on initial manual assignment", async () => {
+    h.handoffResult = {
+      submissionId: "sub-1",
+      decision: "start-assignee",
+      reason: "global-pending-cancelled",
+      cancelled: 2,
+      sent: 0,
+    };
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    // The handoff ran first (scoped to this account + lead)…
+    expect(h.handoffCalls).toEqual([{ accountId: "acct-1", flowRunId: "run-1" }]);
+    // …then the salesperson sequence started and a drain was scheduled.
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    expect(h.drainScheduled).toEqual([{ accountId: "acct-1" }]);
+    expect(await res.json()).toEqual({
+      assignment: { previous: null, current: "u-mohan" },
+      customer_sequence: { started: true, reason: "global-pending-cancelled", cancelled_global: 2 },
+    });
+    // The outcome is recorded on the assignment's own audit event.
+    expect(h.events[0]).toMatchObject({
+      kind: "manual",
+      meta: { customer_sequence: { started: true, cancelled_global: 2 } },
+    });
+  });
+
+  it("reconciles global rows committed after the handoff scan and refills gaps", async () => {
+    h.handoffResult = {
+      submissionId: "sub-1",
+      decision: "start-assignee",
+      reason: "no-global-rows",
+      cancelled: 0,
+      sent: 0,
+    };
+    h.reconcileResult = { cancelled: 1, sent: 0, sending: 0 };
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.reconcileCalls).toEqual([{ accountId: "acct-1", submissionId: "sub-1" }]);
+    // Initial enqueue + idempotent gap-fill after the late cancel.
+    expect(h.assigneeEnqueueCalls).toHaveLength(2);
+    expect(await res.json()).toEqual({
+      assignment: { previous: null, current: "u-mohan" },
+      customer_sequence: { started: true, reason: "no-global-rows", cancelled_global: 1 },
+    });
+  });
+
+  it("reports a raced global send discovered during reconciliation", async () => {
+    h.reconcileResult = { cancelled: 0, sent: 1, sending: 0 };
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    // No gap-fill when nothing was cancelled.
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    expect((await res.json()).customer_sequence).toMatchObject({
+      started: true,
+      reason: "global-send-raced",
+      cancelled_global: 0,
+    });
+  });
+
+  it("does not start a salesperson sequence when a global message already sent", async () => {
+    h.handoffResult = {
+      submissionId: "sub-1",
+      decision: "keep-global",
+      reason: "global-already-sent",
+      cancelled: 0,
+      sent: 1,
+    };
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.handoffCalls).toHaveLength(1);
+    // No customer-facing templates start — but the salesperson is
+    // still notified through the existing channels.
+    expect(h.assigneeEnqueueCalls).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+    expect(h.enqueued).toHaveLength(1);
+    expect(await res.json()).toEqual({
+      assignment: { previous: null, current: "u-mohan" },
+      customer_sequence: { started: false, reason: "global-already-sent", cancelled_global: 0 },
+    });
+    expect(h.events[0]).toMatchObject({
+      meta: { customer_sequence: { started: false, reason: "global-already-sent" } },
+    });
+  });
+
+  it("reassignment never runs the handoff or touches customer sequences", async () => {
+    h.values.push({
+      id: "wv-0", account_id: "acct-1", field_id: "f-assign",
+      flow_run_id: "run-1", value_text: "u-mohan",
+    });
+    h.events.push({
+      id: "ev-0", account_id: "acct-1", flow_id: "flow-1", flow_run_id: "run-1",
+      kind: "auto", assigned_user_id: "u-mohan", previous_user_id: null,
+    });
+    const res = await assignPOST(assignBody({ user_id: "u-sohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.handoffCalls).toHaveLength(0);
+    expect(h.assigneeEnqueueCalls).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+    expect(await res.json()).toEqual({
+      assignment: { previous: "u-mohan", current: "u-sohan" },
+      customer_sequence: { started: false, reason: "reassignment", cancelled_global: 0 },
+    });
+  });
+
+  it("duplicate assignment events do not start duplicate customer sequences", async () => {
+    const first = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(first.status).toBe(200);
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    // The redelivery sees the existing owner: a reassignment by
+    // definition — notify-only, no handoff, no new templates.
+    const second = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(second.status).toBe(200);
+    expect(h.handoffCalls).toHaveLength(1);
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    expect((await second.json()).customer_sequence).toMatchObject({
+      started: false,
+      reason: "reassignment",
+    });
+  });
+
+  it("skips per-table notify when clearing or unconfigured, but still starts customer sequences on initial assign", async () => {
+    const cleared = await assignPOST(assignBody({ user_id: null }), ASSIGN_PARAMS);
+    expect(cleared.status).toBe(200);
+    // Clearing never notifies and never starts customer templates.
+    expect(h.tableNotifyCalls).toHaveLength(0);
+    expect(h.assigneeEnqueueCalls).toHaveLength(0);
+    // No table assignment config: legacy notification only for the
+    // alert, but a genuine initial assignment still starts the
+    // salesperson's customer sequence (form-scoped, independent of
+    // the table assignment config).
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.tableNotifyCalls).toHaveLength(0);
+    expect(h.enqueued).toHaveLength(1);
+    expect(h.assigneeEnqueueCalls).toHaveLength(1);
+    expect(h.assigneeEnqueueCalls[0]).toMatchObject({ formId: "form-1", assigneeKey: "user:u-mohan" });
   });
 });
 

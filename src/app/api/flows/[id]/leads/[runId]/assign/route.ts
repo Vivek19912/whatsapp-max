@@ -2,9 +2,19 @@ import { NextResponse } from "next/server";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { manualAssign } from "@/lib/lead-assignment/service";
+import { hasPriorAssignment } from "@/lib/lead-assignment/table-helpers";
+import { getTableConfig } from "@/lib/lead-assignment/table-config";
+import { enqueueTableAssignmentNotifications } from "@/lib/lead-assignment/table-notify";
+import { salespersonKeyFor } from "@/lib/meta-lead-whatsapp/assignee-sequences";
+import {
+  cancelLateGlobalRows,
+  maybeEnqueueAssigneeSequence,
+  prepareManualAssigneeHandoff,
+} from "@/lib/meta-lead-whatsapp/queue";
 import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
 import { maybeEnqueueForRun } from "@/lib/meta-lead-ads/notify";
 import { scheduleSheetsDrainSoon } from "@/lib/meta-lead-sheets/trigger";
+import { scheduleWhatsappDrainSoon } from "@/lib/meta-lead-whatsapp/trigger";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 /**
@@ -52,6 +62,9 @@ export async function POST(
     const formId = (flow as { meta_form_id: string | null } | null)?.meta_form_id ?? null;
 
     try {
+      // Prior assignment history must be read BEFORE the write
+      // below records this assignment's own event.
+      const wasPreviouslyAssigned = await hasPriorAssignment(supabaseAdmin(), accountId, runId).catch(() => true);
       const result = await manualAssign(supabase, {
         accountId,
         flowId: id,
@@ -60,22 +73,171 @@ export async function POST(
         newUserId: user_id,
         actorUserId: userId,
       });
-      // A lead assigned after insertion is notified now (unless it
+      // A lead assigned after ingestion is notified now (unless it
       // was already notified). Clearing/Unassigning never notifies.
-      // Best-effort: never fails assignment.
+      // `customer_sequence` reports the manual-initial handoff with
+      // the global auto-send (null when cleared).
+      let customerSequence: {
+        started: boolean;
+        reason: string;
+        cancelled_global: number;
+      } | null = null;
       if (result.current && result.current !== ASSIGNED_TO_UNASSIGNED) {
         await maybeEnqueueForRun(supabaseAdmin(), {
           accountId,
           runId,
           assigneeUserId: result.current,
         });
+        // Manual assignments never ran through the per-table
+        // outbox, so a reassigned lead's new owner would otherwise
+        // get nothing: notify them here (WhatsApp + email per the
+        // table's toggles). The legacy queue above dedupes on
+        // reassign, so skip the per-table email channel only when
+        // the legacy path is actually sending (genuine initial
+        // manual assignment of an internal member).
+        // A genuine initial manual assignment additionally starts
+        // the new owner's salesperson sequence, if configured.
+        // Reassignments never touch customer templates.
+        //
+        // Manual-initial handoff with the global auto-send: the lead
+        // may have arrived unassigned with global rows already
+        // queued. Pending global rows are cancelled first so the two
+        // sequences can never mix; when a global message already sent
+        // (or is in flight) the salesperson sequence is NOT started
+        // and the reason is returned + recorded below.
+        try {
+          const isInitial =
+            (result.previous == null || result.previous === ASSIGNED_TO_UNASSIGNED) &&
+            !wasPreviouslyAssigned;
+          const detail = await getTableConfig(supabaseAdmin(), accountId, id);
+          const assignee = detail?.assignees.find((a) => a.user_id === result.current);
+          if (detail && assignee && (assignee.notify_email || assignee.notify_whatsapp)) {
+            await enqueueTableAssignmentNotifications(supabaseAdmin(), {
+              accountId,
+              detail,
+              assignee,
+              runId,
+              formId,
+              skipEmail: isInitial && !!formId,
+            });
+          }
+          if (isInitial && formId) {
+            const key = salespersonKeyFor({ user_id: result.current });
+            if (key) {
+              let handoff: {
+                decision: "start-assignee" | "keep-global";
+                reason: string;
+                cancelled: number;
+                submissionId: string | null;
+              };
+              try {
+                handoff = await prepareManualAssigneeHandoff(supabaseAdmin(), {
+                  accountId,
+                  flowRunId: runId,
+                });
+              } catch {
+                // Fail closed: without reliable queue state we must
+                // not risk a mixed global + salesperson send.
+                handoff = { decision: "keep-global", reason: "handoff-error", cancelled: 0, submissionId: null };
+              }
+              if (handoff.decision === "start-assignee") {
+                const queued = await maybeEnqueueAssigneeSequence(supabaseAdmin(), {
+                  accountId,
+                  formId,
+                  flowRunId: runId,
+                  assigneeKey: key,
+                });
+                // Reconcile late global arrivals: an ingestion worker
+                // may have committed global rows after the handoff
+                // scan above. Delete them (conditional — a started
+                // send always wins), then re-enqueue idempotently to
+                // fill any unique-key gaps they caused. Best-effort;
+                // the assignment above already succeeded.
+                let lateCancelled = 0;
+                let lateRaced = false;
+                try {
+                  if (handoff.submissionId) {
+                    const late = await cancelLateGlobalRows(supabaseAdmin(), {
+                      accountId,
+                      submissionId: handoff.submissionId,
+                    });
+                    lateCancelled = late.cancelled;
+                    lateRaced = late.sent > 0 || late.sending > 0;
+                  }
+                } catch {
+                  // Reconciliation is best-effort.
+                }
+                let fillEnqueued = 0;
+                let fillQueued = 0;
+                if (lateCancelled > 0) {
+                  const fill = await maybeEnqueueAssigneeSequence(supabaseAdmin(), {
+                    accountId,
+                    formId,
+                    flowRunId: runId,
+                    assigneeKey: key,
+                  });
+                  fillEnqueued = fill.enqueued;
+                  fillQueued = fill.alreadyQueued;
+                }
+                const started =
+                  queued.enqueued > 0 ||
+                  queued.alreadyQueued > 0 ||
+                  fillEnqueued > 0 ||
+                  fillQueued > 0;
+                if (queued.enqueued > 0 || fillEnqueued > 0) scheduleWhatsappDrainSoon({ accountId });
+                customerSequence = {
+                  started,
+                  reason: !started
+                    ? "no-sequence"
+                    : lateRaced
+                      ? "global-send-raced"
+                      : queued.enqueued > 0 || fillEnqueued > 0
+                        ? handoff.reason
+                        : "already-queued",
+                  cancelled_global: handoff.cancelled + lateCancelled,
+                };
+              } else {
+                customerSequence = {
+                  started: false,
+                  reason: handoff.reason,
+                  cancelled_global: handoff.cancelled,
+                };
+              }
+              // Best-effort audit: attach the handoff outcome to this
+              // assignment's own event row (meta JSONB).
+              try {
+                let metaUpdate = supabaseAdmin()
+                  .from("lead_assignment_events")
+                  .update({ meta: { customer_sequence: customerSequence } })
+                  .eq("account_id", accountId)
+                  .eq("flow_run_id", runId)
+                  .eq("kind", "manual")
+                  .eq("assigned_user_id", result.current)
+                  .eq("created_by", userId);
+                metaUpdate =
+                  result.previous == null
+                    ? metaUpdate.is("previous_user_id", null)
+                    : metaUpdate.eq("previous_user_id", result.previous);
+                await metaUpdate;
+              } catch {
+                // Audit-only; the assignment above already succeeded.
+              }
+            }
+          } else if (result.current && result.current !== ASSIGNED_TO_UNASSIGNED) {
+            // Reassignment: notify-only by construction — no handoff,
+            // no cancellation, no customer templates.
+            customerSequence = { started: false, reason: "reassignment", cancelled_global: 0 };
+          }
+        } catch {
+          // Best-effort only; the assignment above already succeeded.
+        }
       }
       // ADDITIVE prompt Meta Sheets sync — the service already queued
       // the row update (best-effort, Meta-only); schedule the bounded
       // post-response drain. Tracked `after()`, never detached; the
       // cron remains the fallback. Never fails the assignment.
       scheduleSheetsDrainSoon({ accountId });
-      return NextResponse.json({ assignment: result });
+      return NextResponse.json({ assignment: result, customer_sequence: customerSequence });
     } catch (err) {
       const raw =
         err instanceof Error

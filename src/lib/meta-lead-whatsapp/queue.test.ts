@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   drainWhatsappQueue,
   getTableWhatsappStatus,
+  maybeEnqueueAssigneeSequence,
   maybeEnqueueWhatsappAutoreplies,
   retryTableWhatsappQueue,
   templateSendBlockers,
@@ -39,6 +40,8 @@ function makeDb(initial: Record<string, Row[]>) {
     for (const f of filters) {
       if (f.op === 'eq' && row[f.col] !== f.val) return false;
       if (f.op === 'neq' && row[f.col] === f.val) return false;
+      if (f.op === 'is' && f.val === null && row[f.col] != null) return false;
+      if (f.op === 'is' && f.val !== null && row[f.col] !== f.val) return false;
       if (f.op === 'in' && !(f.val as unknown[]).includes(row[f.col]))
         return false;
       if (f.op === 'lte' && String(row[f.col] ?? '') > String(f.val))
@@ -73,8 +76,12 @@ function makeDb(initial: Record<string, Row[]>) {
             return 0;
           });
 
-    const b: Record<string, (...args: never[]) => unknown> = {
+  const b: Record<string, (...args: never[]) => unknown> = {
       select: (() => b) as never,
+      is: ((col: string, val: unknown) => {
+        filters.push({ op: 'is', col, val });
+        return b;
+      }) as never,
       insert: ((rows: Row | Row[]) => {
         op = 'insert';
         const list = Array.isArray(rows) ? rows : [rows];
@@ -1107,5 +1114,334 @@ describe('templateSendBlockers', () => {
   it('isUniqueViolation treats 23505 as a duplicate enqueue', () => {
     expect(isDup({ code: '23505' })).toBe(true);
     expect(isDup({ code: '42501' })).toBe(false);
+  });
+});
+
+describe('per-salesperson sequences (assignee_key)', () => {
+  const assigneeSeq = (over: Record<string, unknown> = {}) => ({
+    id: 'aseq-1',
+    account_id: 'acct-1',
+    form_id: 'form-1',
+    salesperson_key: 'user:u-asha',
+    delay_seconds: 0,
+    ...over,
+  });
+  const assigneeItem = (
+    name: string,
+    position: number,
+    over: Record<string, unknown> = {}
+  ) => ({
+    id: `ai-${name}-${position}`,
+    sequence_id: 'aseq-1',
+    template_name: name,
+    template_language: 'en_US',
+    position,
+    variable_mappings: {},
+    ...over,
+  });
+  const assigneeRow = (over: Partial<Row> = {}): Row => ({
+    ...queueRow({ template_name: 'welcome', position: 0 }),
+    id: `aq-${Math.random().toString(36).slice(2)}`,
+    assignee_key: 'user:u-asha',
+    ...over,
+  });
+
+  function assigneeCapture() {
+    const calls: Array<{
+      templateName: string;
+      contactId: string;
+      params?: unknown;
+      variableValues?: Record<string, unknown>;
+    }> = [];
+    const sendImpl = (async (
+      _d: unknown,
+      a: {
+        templateName: string;
+        contactId: string;
+        params?: unknown;
+        variableValues?: Record<string, unknown>;
+      }
+    ) => {
+      calls.push({
+        templateName: a.templateName,
+        contactId: a.contactId,
+        params: a.params,
+        variableValues: a.variableValues ?? {},
+      });
+      return {
+        providerMessageId: `wamid-${calls.length}`,
+        conversationId: 'conv-1',
+        inboxMessageId: `msg-${calls.length}`,
+      };
+    }) as never;
+    return { calls, sendImpl };
+  }
+
+  it('enqueues only the assignee sequence with per-salesperson delays', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_assignee_sequences: [assigneeSeq({ delay_seconds: 60 })],
+      meta_lead_assignee_sequence_items: [
+        assigneeItem('offer', 1),
+        assigneeItem('welcome', 0),
+      ],
+    });
+    const out = await maybeEnqueueAssigneeSequence(db as never, {
+      accountId: 'acct-1',
+      formId: 'form-1',
+      submissionId: 'sub-1',
+      assigneeKey: 'user:u-asha',
+    });
+    expect(out).toMatchObject({ enqueued: 2, alreadyQueued: 0 });
+    const rows = data.meta_lead_whatsapp_queue as Row[];
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r.assignee_key).toBe('user:u-asha');
+    const byName = Object.fromEntries(rows.map((r) => [r.template_name as string, r]));
+    expect(byName.welcome.position).toBe(0);
+    expect(byName.offer.position).toBe(1);
+    expect(
+      Date.parse(byName.offer.scheduled_for as string) -
+        Date.parse(byName.welcome.scheduled_for as string)
+    ).toBe(60_000);
+  });
+
+  it('skips without a sequence, without a submission, or for Flow tables', async () => {
+    const { db } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_assignee_sequences: [assigneeSeq()],
+      meta_lead_assignee_sequence_items: [assigneeItem('welcome', 0)],
+    });
+    // Unknown salesperson: no sequence configured.
+    expect(
+      await maybeEnqueueAssigneeSequence(db, {
+        accountId: 'acct-1',
+        formId: 'form-1',
+        submissionId: 'sub-1',
+        assigneeKey: 'user:nobody',
+      })
+    ).toMatchObject({ enqueued: 0, skipped: true });
+    // Missing submission (e.g. Flow-table lead with no Meta row).
+    expect(
+      await maybeEnqueueAssigneeSequence(db, {
+        accountId: 'acct-1',
+        formId: 'form-1',
+        flowRunId: 'missing-run',
+        assigneeKey: 'user:u-asha',
+      })
+    ).toMatchObject({ enqueued: 0, skipped: true });
+    // Flow tables have no form: never enqueue.
+    expect(
+      await maybeEnqueueAssigneeSequence(db, {
+        accountId: 'acct-1',
+        formId: null,
+        flowRunId: 'run-1',
+        assigneeKey: 'user:u-asha',
+      })
+    ).toMatchObject({ enqueued: 0, skipped: true });
+  });
+
+  it('dedupes repeat enqueues for the same lead and template', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_assignee_sequences: [assigneeSeq()],
+      meta_lead_assignee_sequence_items: [assigneeItem('welcome', 0)],
+    });
+    const args = {
+      accountId: 'acct-1',
+      formId: 'form-1',
+      submissionId: 'sub-1',
+      assigneeKey: 'user:u-asha',
+    };
+    expect(await maybeEnqueueAssigneeSequence(db, args)).toMatchObject({
+      enqueued: 1,
+      alreadyQueued: 0,
+    });
+    expect(await maybeEnqueueAssigneeSequence(db, args)).toMatchObject({
+      enqueued: 0,
+      alreadyQueued: 1,
+    });
+    expect(data.meta_lead_whatsapp_queue).toHaveLength(1);
+  });
+
+  it('drains assignee rows through the salesperson sequence, not the table sequence', async () => {
+    // Global sequence knows only "global_tpl"; the salesperson
+    // sequence knows only "personal_tpl" with a mapped variable.
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_whatsapp_configs: [tableConfig()],
+      meta_lead_whatsapp_templates: [templateItem('global_tpl', 0)],
+      meta_lead_assignee_sequences: [assigneeSeq()],
+      meta_lead_assignee_sequence_items: [
+        assigneeItem('personal_tpl', 0, {
+          variable_mappings: { 'body:1': 'name' },
+        }),
+      ],
+      meta_lead_whatsapp_queue: [
+        queueRow({ template_name: 'personal_tpl', position: 0, assignee_key: 'user:u-asha' }),
+      ],
+      message_templates: [
+        approvedTemplate('global_tpl', { body_text: 'Global hello' }),
+        approvedTemplate('personal_tpl', { body_text: 'Hi {{1}}, this is for you!' }),
+      ],
+      meta_lead_forms: [metaForm()],
+      flow_runs: [
+        {
+          id: 'run-1',
+          account_id: 'acct-1',
+          user_id: 'u-asha',
+          flow_id: 'flow-1',
+          vars: { full_name: 'Asha Sharma' },
+          started_at: PAST,
+          contact_id: 'contact-1',
+        },
+      ],
+      contacts: [{ id: 'contact-1', account_id: 'acct-1', name: 'Asha Sharma', phone: '+911234567890' }],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+    });
+    const { calls, sendImpl } = assigneeCapture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out).toMatchObject({ sent: 1, failed: 0 });
+    // Resolved through the salesperson's own mapping, against the
+    // lead's own conversation contact.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].templateName).toBe('personal_tpl');
+    expect(calls[0].contactId).toBe('contact-1');
+    expect(calls[0].params).toEqual({ body: ['Asha Sharma'] });
+    const row = data.meta_lead_whatsapp_queue[0];
+    expect(row.status).toBe('sent');
+    expect(row.provider_message_id).toBe('wamid-1');
+    expect(row.inbox_message_id).toBe('msg-1');
+  });
+
+  it('parks assignee rows when the sequence is removed, and resumes when re-added', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_whatsapp_configs: [tableConfig()],
+      meta_lead_whatsapp_templates: [templateItem('global_tpl', 0)],
+      meta_lead_assignee_sequences: [],
+      meta_lead_assignee_sequence_items: [],
+      meta_lead_whatsapp_queue: [
+        queueRow({ template_name: 'ghost_tpl', position: 0, assignee_key: 'user:u-asha' }),
+      ],
+      message_templates: [approvedTemplate('ghost_tpl')],
+      meta_lead_forms: [metaForm()],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', user_id: 'user-1', flow_id: 'flow-1', vars: {}, started_at: PAST, contact_id: 'contact-1' }],
+      contacts: [{ id: 'contact-1', account_id: 'acct-1', name: 'Asha', phone: '+911234567890' }],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+    });
+    const { calls, sendImpl } = assigneeCapture();
+    const parked = await drainWhatsappQueue(db, { sendImpl });
+    expect(parked).toMatchObject({ skippedNoConfig: 1, sent: 0, failed: 0 });
+    expect(calls).toHaveLength(0);
+    expect(data.meta_lead_whatsapp_queue[0].status).toBe('pending');
+    // Re-adding the sequence resumes the same row.
+    (data.meta_lead_assignee_sequences as Row[]).push(
+      assigneeSeq({ id: 'seq-9', salesperson_key: 'user:u-asha' })
+    );
+    (data.meta_lead_assignee_sequence_items as Row[]).push(
+      assigneeItem('ghost_tpl', 0, { sequence_id: 'seq-9' })
+    );
+    const resumed = await drainWhatsappQueue(db, { sendImpl });
+    expect(resumed.sent).toBe(1);
+    expect(calls.map((c) => c.templateName)).toEqual(['ghost_tpl']);
+  });
+
+  it('scopes ordering per assignee: sequences never block each other', async () => {
+    // Assignee row pos 1 is due but its pos 0 is still pending;
+    // a global row and another assignee's row must still send.
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_whatsapp_configs: [tableConfig()],
+      meta_lead_whatsapp_templates: [templateItem('global_tpl', 0)],
+      meta_lead_assignee_sequences: [assigneeSeq({ id: 'seq-a', salesperson_key: 'user:u-asha' })],
+      meta_lead_assignee_sequence_items: [
+        { ...assigneeItem('a_one', 0), sequence_id: 'seq-a' },
+        { ...assigneeItem('a_two', 1), sequence_id: 'seq-a' },
+      ],
+      meta_lead_whatsapp_queue: [
+        // a_one is claimed moments ago by a concurrent worker: it
+        // stays in flight, so same-sequence a_two must wait while
+        // the unrelated global row still sends.
+        queueRow({ id: 'q-a0', template_name: 'a_one', position: 0, assignee_key: 'user:u-asha', status: 'sending', claimed_at: new Date().toISOString(), updated_at: new Date().toISOString() }),
+        queueRow({ id: 'q-a1', template_name: 'a_two', position: 1, assignee_key: 'user:u-asha' }),
+        queueRow({ id: 'q-g', template_name: 'global_tpl', position: 0 }),
+      ],
+      message_templates: [
+        approvedTemplate('a_one', { body_text: 'One' }),
+        approvedTemplate('a_two', { body_text: 'Two' }),
+        approvedTemplate('global_tpl', { body_text: 'Global' }),
+      ],
+      meta_lead_forms: [metaForm()],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', user_id: 'user-1', flow_id: 'flow-1', vars: {}, started_at: PAST, contact_id: 'contact-1' }],
+      contacts: [{ id: 'contact-1', account_id: 'acct-1', name: 'Asha', phone: '+911234567890' }],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+    });
+    const { calls, sendImpl } = assigneeCapture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    // In-flight pos 0 blocks only same-sequence pos 1; the global
+    // row flows through.
+    expect(calls.map((c) => c.templateName).sort()).toEqual(['global_tpl']);
+    expect(out.skippedOutOfOrder).toBeGreaterThanOrEqual(1);
+    const byId = Object.fromEntries(
+      (data.meta_lead_whatsapp_queue as Row[]).map((r) => [r.id, r])
+    );
+    expect(byId['q-a1'].status).toBe('pending');
+    expect(byId['q-g'].status).toBe('sent');
+  });
+
+  it('does not let a failed table row block an assignee row', async () => {
+    // Global row fails retryably (missing mapping); the assignee
+    // sequence proceeds independently on the same lead.
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_whatsapp_configs: [tableConfig()],
+      meta_lead_whatsapp_templates: [
+        { ...templateItem('needs_name', 0), variable_mappings: { 'body:1': 'missing_field' } },
+      ],
+      meta_lead_assignee_sequences: [assigneeSeq()],
+      meta_lead_assignee_sequence_items: [assigneeItem('personal_tpl', 0)],
+      meta_lead_whatsapp_queue: [
+        queueRow({ id: 'q-g', template_name: 'needs_name', position: 0 }),
+        queueRow({ id: 'q-a', template_name: 'personal_tpl', position: 0, assignee_key: 'user:u-asha' }),
+      ],
+      message_templates: [
+        { id: 'mt-needs_name', account_id: 'acct-1', name: 'needs_name', language: 'en_US', status: 'APPROVED', header_type: null, header_content: null, header_media_url: null, body_text: 'Hi {{1}}', buttons: [] },
+        approvedTemplate('personal_tpl', { body_text: 'Static hello' }),
+      ],
+      meta_lead_forms: [metaForm()],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', user_id: 'user-1', flow_id: 'flow-1', vars: {}, started_at: PAST, contact_id: 'contact-1' }],
+      contacts: [{ id: 'contact-1', account_id: 'acct-1', name: 'Asha', phone: '+911234567890' }],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+    });
+    const { calls, sendImpl } = assigneeCapture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(calls.map((c) => c.templateName)).toEqual(['personal_tpl']);
+    expect(out).toMatchObject({ sent: 1, failed: 1 });
+    const rows = data.meta_lead_whatsapp_queue as Row[];
+    expect(rows.find((r) => r.id === 'q-g')!.status).toBe('failed');
+    expect(rows.find((r) => r.id === 'q-a')!.status).toBe('sent');
+  });
+
+  it('parks assignee rows while the table is paused', async () => {
+    const { db, data } = makeDb({
+      meta_lead_submissions: [submission()],
+      meta_lead_whatsapp_configs: [tableConfig({ paused: true })],
+      meta_lead_whatsapp_templates: [templateItem('global_tpl', 0)],
+      meta_lead_assignee_sequences: [assigneeSeq()],
+      meta_lead_assignee_sequence_items: [assigneeItem('personal_tpl', 0)],
+      meta_lead_whatsapp_queue: [
+        queueRow({ template_name: 'personal_tpl', position: 0, assignee_key: 'user:u-asha' }),
+      ],
+      message_templates: [approvedTemplate('personal_tpl', { body_text: 'Static' })],
+      meta_lead_forms: [metaForm()],
+      flow_runs: [{ id: 'run-1', account_id: 'acct-1', user_id: 'user-1', flow_id: 'flow-1', vars: {}, started_at: PAST, contact_id: 'contact-1' }],
+      contacts: [{ id: 'contact-1', account_id: 'acct-1', name: 'Asha', phone: '+911234567890' }],
+      profiles: [{ user_id: 'user-1', account_id: 'acct-1' }],
+    });
+    const { calls, sendImpl } = assigneeCapture();
+    const out = await drainWhatsappQueue(db, { sendImpl });
+    expect(out).toMatchObject({ skippedPaused: 1, sent: 0 });
+    expect(calls).toHaveLength(0);
+    expect(data.meta_lead_whatsapp_queue[0].status).toBe('pending');
   });
 });

@@ -42,11 +42,17 @@ import { getPageToken, markNeedsReauth } from "./store";
 import { maybeEnqueueLeadNotification } from "./notify";
 import { maybeEnqueueSheetsSync } from "@/lib/meta-lead-sheets/queue";
 import { scheduleSheetsDrainSoon } from "@/lib/meta-lead-sheets/trigger";
-import { maybeEnqueueWhatsappAutoreplies } from "@/lib/meta-lead-whatsapp/queue";
+import { maybeEnqueueWhatsappAutoreplies, prepareManualAssigneeHandoff } from "@/lib/meta-lead-whatsapp/queue";
 import { scheduleWhatsappDrainSoon } from "@/lib/meta-lead-whatsapp/trigger";
 import { ensureVirtualFlow, META_SOURCE_COLUMN_KEY, parseFormQuestions } from "./virtual-flow";
 import { maybeAutoAssignLead } from "@/lib/lead-assignment/service";
 import { maybeAutoAssignTableLead } from "@/lib/lead-assignment/table-assignment";
+import {
+  findAssigneeField,
+  hasPriorAssignment,
+  readAssignment,
+} from "@/lib/lead-assignment/table-helpers";
+import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
 
 export const MAX_LEAD_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 5 * 60_000;
@@ -243,6 +249,18 @@ export async function processSubmissionById(
   db: SupabaseClient,
   config: MetaLeadAdsConfig,
   submissionId: string,
+  opts: {
+    hooks?: {
+      /**
+       * Test-only seam fired at each global-sequence decision
+       * checkpoint (before the pre-enqueue assignment check and
+       * before the post-enqueue compensation check) so concurrent
+       * interleavings can be driven deterministically. Never set in
+       * production.
+       */
+      beforeGlobalSequenceDecision?: () => Promise<void>;
+    };
+  } = {},
 ): Promise<{ outcome: ProcessOutcome }> {
   const staleIso = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
   const { data: claimed } = await db
@@ -473,21 +491,61 @@ export async function processSubmissionById(
       }
     }
 
-    // ADDITIVE WhatsApp auto-send — enqueue this table's configured
-    // templates AFTER the Workspace write succeeded. Durable
-    // idempotent outbox (UNIQUE per submission + template),
-    // Meta-only: Flow Tables never reach this path. Enqueue never
-    // throws into lead processing; a genuinely new enqueue also
-    // schedules a prompt post-response drain, with the five-minute
-    // cron as the fallback.
-    const { enqueued: waEnqueued } = await maybeEnqueueWhatsappAutoreplies(
-      db,
-      {
-        accountId: submission.account_id,
-        submissionId,
-      },
-    );
+    // Salesperson-sequence concurrency gate: a manual assignment may
+    // land mid-ingestion, so re-read persisted assignment state here
+    // instead of trusting only this run's in-memory outcome — else an
+    // ingestion that decided "unassigned" could enqueue globals after
+    // a manual assignment started the salesperson sequence (or vice
+    // versa). Assigned leads get no global fallback; unassigned leads
+    // keep existing behavior; reassignments never reach either
+    // enqueue. See prepareManualAssigneeHandoff/cancelLateGlobalRows.
+    //
+    // Test seam: `hooks.beforeGlobalSequenceDecision` (unit tests only)
+    // fires at each decision checkpoint below for deterministic
+    // interleavings without timing-based sleeps.
+    await opts?.hooks?.beforeGlobalSequenceDecision?.();
+    const inMemoryAssigned =
+      assignment?.outcome === "assigned" ||
+      assignment?.outcome === "assigned-external";
+    const runId = (run as { id: string }).id;
+    const readAssignedNow = async (): Promise<boolean> => {
+      if (await hasPriorAssignment(db, submission.account_id, runId)) return true;
+      const field = await findAssigneeField(db, submission.account_id, flowId);
+      if (!field) return false;
+      const owner = await readAssignment(db, submission.account_id, field.id, runId);
+      return owner !== null && owner !== ASSIGNED_TO_UNASSIGNED;
+    };
+    let assignedNow = inMemoryAssigned;
+    try {
+      assignedNow = inMemoryAssigned || (await readAssignedNow());
+    } catch {
+      assignedNow = inMemoryAssigned;
+    }
+    // ADDITIVE exclusivity gate: assigned leads skip the global
+    // enqueue below; unassigned leads fall through to it.
+    const { enqueued: waEnqueued } = assignedNow
+      ? { enqueued: 0 }
+      : await maybeEnqueueWhatsappAutoreplies(db, {
+          accountId: submission.account_id,
+          submissionId,
+        });
     if (waEnqueued) {
+      // Post-enqueue compensation: an assignment that landed between
+      // the checkpoint and these inserts must win — reconcile through
+      // the handoff rules (a started send is never disturbed).
+      // Best-effort; never fails lead processing.
+      try {
+        await opts?.hooks?.beforeGlobalSequenceDecision?.();
+        if (await readAssignedNow()) {
+          await prepareManualAssigneeHandoff(db, {
+            accountId: submission.account_id,
+            submissionId,
+          });
+        }
+      } catch {
+        // Compensation is best-effort; the committed lead and any
+        // legitimately queued rows are unaffected.
+      }
       try {
         scheduleWhatsappDrainSoon({ accountId: submission.account_id });
       } catch (err) {

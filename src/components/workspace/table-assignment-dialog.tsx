@@ -248,12 +248,20 @@ export function TableAssignmentDialog({
   tableKind,
   open,
   onOpenChange,
+  viewMode = false,
 }: {
   flowId: string;
   flowName?: string | null;
   tableKind?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Read-only inspection: every input is disabled, every
+   * mutating button is hidden, the footer offers Close only, and
+   * the save/pause submitters refuse to run. Saved
+   * configuration still renders exactly as stored.
+   */
+  viewMode?: boolean;
 }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -494,6 +502,7 @@ export function TableAssignmentDialog({
   };
 
   const confirmEdit = () => {
+    if (readOnly) return;
     const name = form.display_name.trim();
     if (!name) {
       toast.error("Give the assignee a display name.");
@@ -537,7 +546,7 @@ export function TableAssignmentDialog({
   };
 
   const save = async () => {
-    if (busy !== null) return;
+    if (readOnly || busy !== null) return;
     if (weightError) {
       toast.error(weightError);
       return;
@@ -591,7 +600,7 @@ export function TableAssignmentDialog({
   };
 
   const submitPause = async () => {
-    if (!pauseFor) return;
+    if (readOnly || !pauseFor) return;
     setBusy("pause");
     try {
       const body: Record<string, unknown> = {
@@ -635,6 +644,11 @@ export function TableAssignmentDialog({
   };
 
   const kindLabel = tableKind === "meta_lead_ads" ? "Meta Lead Ads table" : "Flow table";
+  // View mode renders the same saved state with every mutation
+  // path closed: disabled inputs, hidden action buttons, a
+  // Close-only footer, and guarded submitters (so no keyboard
+  // path can persist anything either).
+  const readOnly = viewMode === true;
 
   return (
     <ConfigDialog
@@ -644,7 +658,11 @@ export function TableAssignmentDialog({
       icon={<UserPlus aria-hidden />}
       title="Assignment"
       tableLine={`${flowName ?? "This table"} · ${kindLabel}`}
-      description="Settings apply to this table only. Saving never rewrites existing lead owners."
+      description={
+        readOnly
+          ? "Settings apply to this table only. Viewing — switch to Edit to make changes."
+          : "Settings apply to this table only. Saving never rewrites existing lead owners."
+      }
       status={
         <ConfigStatusBadge tone={enabled ? "default" : "secondary"}>
           {enabled ? "Automatic" : "Manual"}
@@ -654,14 +672,20 @@ export function TableAssignmentDialog({
       loadingText="Loading assignment settings…"
       error={saveError}
       footer={
-        <ConfigFooterActions
-          onClose={() => onOpenChange(false)}
-          closeLabel="Cancel"
-          onSave={save}
-          saveLabel="Save Assignment Settings"
-          saving={busy === "save"}
-          saveDisabled={loading}
-        />
+        readOnly ? (
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+        ) : (
+          <ConfigFooterActions
+            onClose={() => onOpenChange(false)}
+            closeLabel="Cancel"
+            onSave={save}
+            saveLabel="Save Assignment Settings"
+            saving={busy === "save"}
+            saveDisabled={loading}
+          />
+        )
       }
     >
       {!loading && (
@@ -679,6 +703,7 @@ export function TableAssignmentDialog({
                   checked={enabled}
                   onCheckedChange={setEnabled}
                   aria-label="Automatic assignment"
+                  disabled={readOnly}
                 />
               }
             >
@@ -712,7 +737,7 @@ export function TableAssignmentDialog({
                       : "border-border bg-card hover:bg-muted/50"
                   )}
                 >
-                  <RadioGroupItem value="round_robin" id="assign-mode-rr" className="mt-0.5" />
+                  <RadioGroupItem value="round_robin" id="assign-mode-rr" className="mt-0.5" disabled={readOnly} />
                   <span>
                     <span className="block text-sm font-medium text-foreground">Round robin</span>
                     <span className="block text-xs text-muted-foreground">
@@ -729,7 +754,7 @@ export function TableAssignmentDialog({
                       : "border-border bg-card hover:bg-muted/50"
                   )}
                 >
-                  <RadioGroupItem value="percentage" id="assign-mode-pct" className="mt-0.5" />
+                  <RadioGroupItem value="percentage" id="assign-mode-pct" className="mt-0.5" disabled={readOnly} />
                   <span>
                     <span className="block text-sm font-medium text-foreground">
                       Percentage-based
@@ -774,9 +799,10 @@ export function TableAssignmentDialog({
                                   : "No approved templates found."
                               }
                               ariaLabel="WhatsApp template (optional)"
+                              disabled={readOnly}
                             />
                           </div>
-                          {templateName.trim() !== "" ? (
+                          {templateName.trim() !== "" && !readOnly ? (
                             <Button
                               type="button"
                               variant="ghost"
@@ -841,9 +867,11 @@ export function TableAssignmentDialog({
                   : "Everyone listed takes turns receiving new leads while eligible."
               }
               action={
-                <Button type="button" variant="outline" size="sm" onClick={startAdd}>
-                  <Plus className="mr-1.5 size-4" aria-hidden /> Add assignee
-                </Button>
+                !readOnly ? (
+                  <Button type="button" variant="outline" size="sm" onClick={startAdd}>
+                    <Plus className="mr-1.5 size-4" aria-hidden /> Add assignee
+                  </Button>
+                ) : undefined
               }
             >
               {weightError ? (
@@ -869,7 +897,7 @@ export function TableAssignmentDialog({
                         <TableHead>Contact</TableHead>
                         {mode === "percentage" && <TableHead className="w-20">Share %</TableHead>}
                         <TableHead>Status</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
+                        {readOnly ? null : <TableHead className="text-right">Actions</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -895,15 +923,16 @@ export function TableAssignmentDialog({
                             </TableCell>
                             {mode === "percentage" && (
                               <TableCell>
-                                <Input
-                                  value={d.weight}
-                                  inputMode="numeric"
-                                  className="w-16"
-                                  aria-label={`Share percentage for ${d.display_name}`}
-                                  onChange={(e) =>
-                                    patchDraft(d.key, { weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) })
-                                  }
-                                />
+                              <Input
+                                value={d.weight}
+                                inputMode="numeric"
+                                className="w-16"
+                                aria-label={`Share percentage for ${d.display_name}`}
+                                disabled={readOnly}
+                                onChange={(e) =>
+                                  patchDraft(d.key, { weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) })
+                                }
+                              />
                               </TableCell>
                             )}
                       <TableCell>
@@ -929,6 +958,7 @@ export function TableAssignmentDialog({
                           <Badge variant="outline">Unsaved</Badge>
                         )}
                       </TableCell>
+                            {readOnly ? null : (
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
                                 <Button
@@ -970,6 +1000,7 @@ export function TableAssignmentDialog({
                                 </Button>
                               </div>
                             </TableCell>
+                            )}
                           </TableRow>
                         );
                       })}
@@ -1022,6 +1053,7 @@ export function TableAssignmentDialog({
                                     inputMode="numeric"
                                     className="h-8 w-20"
                                     aria-label={`Share percentage for ${d.display_name}`}
+                                    disabled={readOnly}
                                     onChange={(e) =>
                                       patchDraft(d.key, {
                                         weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3),
@@ -1040,16 +1072,18 @@ export function TableAssignmentDialog({
                               </dd>
                             </div>
                           </dl>
-                          <div className="mt-2 flex flex-wrap gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 px-2 text-xs"
-                              onClick={() => patchDraft(d.key, { is_active: !d.is_active })}
-                            >
-                              {d.is_active ? "Deactivate" : "Activate"}
-                            </Button>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {readOnly ? null : (
+                              <>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() => patchDraft(d.key, { is_active: !d.is_active })}
+                              >
+                                {d.is_active ? "Deactivate" : "Activate"}
+                              </Button>
                             <Button
                               type="button"
                               variant="ghost"
@@ -1080,8 +1114,10 @@ export function TableAssignmentDialog({
                             >
                               <Trash2 className="size-4" aria-hidden /> Remove
                             </Button>
+                              </>
+                              )}
+                            </div>
                           </div>
-                        </div>
                       );
                     })}
                   </div>
@@ -1090,7 +1126,7 @@ export function TableAssignmentDialog({
               </ConfigSection>
             </section>
 
-                {(editingKey || pauseFor) && (
+                {!readOnly && (editingKey || pauseFor) && (
                   <section aria-label="Assignee editor">
                     <ConfigSection
                       title={pauseFor ? "Pause controls" : editingKey === "__new__" ? "Add assignee" : "Edit assignee"}

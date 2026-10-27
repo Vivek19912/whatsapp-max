@@ -72,6 +72,7 @@ export function SearchableSelect({
   triggerClassName,
   contentClassName,
   ariaLabel,
+  disabled = false,
 }: {
   value: string;
   options: SearchableOption[];
@@ -82,6 +83,8 @@ export function SearchableSelect({
   triggerClassName?: string;
   contentClassName?: string;
   ariaLabel?: string;
+  /** Read-only display: the trigger shows the selection but never opens. */
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -161,8 +164,9 @@ export function SearchableSelect({
         aria-label={ariaLabel ?? placeholder}
         aria-haspopup="listbox"
         aria-expanded={open}
+        disabled={disabled}
         className={cn(
-          "border-border bg-card inline-flex h-9 w-full items-center justify-between gap-2 rounded-lg border px-2.5 text-sm font-normal shadow-xs transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+          "border-border bg-card inline-flex h-9 w-full items-center justify-between gap-2 rounded-lg border px-2.5 text-sm font-normal shadow-xs transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60",
           triggerClassName
         )}
       >

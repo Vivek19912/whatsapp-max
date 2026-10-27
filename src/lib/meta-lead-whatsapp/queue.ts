@@ -51,6 +51,7 @@ import {
   whatsappRetryDelayMs,
   type ValidatedAutoSendTemplate,
 } from "./config";
+import { loadAssigneeSequence } from "./assignee-sequences";
 import {
   buildAvailableVariableFields,
   buildVariableSendParams,
@@ -95,6 +96,14 @@ export interface QueueRow {
   scheduled_for: string;
   next_retry_at: string;
   provider_message_id: string | null;
+  /**
+   * Salesperson-sequence discriminator (see
+   * assignee-sequences.ts). NULL = table-wide sequence row
+   * (existing behavior); set = per-salesperson row. Blocking,
+   * ordering, and config resolution scope to the same key so the
+   * two automations never stall each other.
+   */
+  assignee_key: string | null;
 }
 
 interface SubmissionRow {
@@ -232,6 +241,11 @@ export interface EnqueueResult {
  * Pause does NOT skip enqueue: rows are created pending and the
  * drain parks them while paused, so resuming continues the saved
  * sequence without losing leads that arrived mid-pause.
+ *
+ * Callers that assign the lead in the same flow (ingestion) must
+ * skip this when the lead was assigned: the assignee's own sequence
+ * (maybeEnqueueAssigneeSequence) is then the exclusive
+ * customer-facing sequence — see process-lead.ts.
  */
 export async function maybeEnqueueWhatsappAutoreplies(
   db: SupabaseClient,
@@ -241,7 +255,7 @@ export async function maybeEnqueueWhatsappAutoreplies(
   try {
     const submission = await loadSubmission(db, args.accountId, args.submissionId);
     if (!submission) return empty;
-    // Only leads that actually became Workspace rows; failed /
+    // Only leads that actually became Workspace runs; failed /
     // ignored submissions will enqueue when (if) they process.
     if (!submission.flow_run_id || !submission.form_id) return empty;
 
@@ -264,11 +278,7 @@ export async function maybeEnqueueWhatsappAutoreplies(
         template_name: item.template_name,
         template_language: item.template_language,
         position: item.position,
-        scheduled_for: scheduledForForPosition(
-          nowIso,
-          item.position,
-          table.config.delay_seconds,
-        ),
+        scheduled_for: scheduledForForPosition(nowIso, item.position, table.config.delay_seconds),
       });
       if (error) {
         if (isUniqueViolation(error)) {
@@ -287,6 +297,260 @@ export async function maybeEnqueueWhatsappAutoreplies(
     );
     return empty;
   }
+}
+
+/**
+ * Enqueue one salesperson's customer-facing sequence for a single
+ * lead — only callers that already proved a genuine initial
+ * assignment may call this (reassignment must never reach here).
+ * Rows carry the salesperson key so the drain resolves that
+ * salesperson's items (never the table-wide sequence). Never
+ * throws: failures return { skipped } and leave assignment +
+ * notifications untouched.
+ */
+export async function maybeEnqueueAssigneeSequence(
+  db: SupabaseClient,
+  args: {
+    accountId: string;
+    formId: string | null;
+    submissionId?: string | null;
+    flowRunId?: string | null;
+    assigneeKey: string;
+  },
+): Promise<EnqueueResult & { skipReason?: string }> {
+  const empty: EnqueueResult & { skipReason?: string } = {
+    enqueued: 0,
+    alreadyQueued: 0,
+    skipped: true,
+  };
+  try {
+    if (!args.formId || !args.assigneeKey) return { ...empty, skipReason: "no-sequence" };
+    let submissionId = args.submissionId ?? null;
+    if (!submissionId && args.flowRunId) {
+      const { data, error } = await db
+        .from("meta_lead_submissions")
+        .select("id")
+        .eq("account_id", args.accountId)
+        .eq("flow_run_id", args.flowRunId)
+        .maybeSingle();
+      if (error) throw error;
+      submissionId = ((data as { id: string } | null)?.id ?? null) as string | null;
+    }
+    if (!submissionId) return { ...empty, skipReason: "no-submission" };
+    const submission = await loadSubmission(db, args.accountId, submissionId);
+    if (!submission || !submission.flow_run_id || !submission.form_id) {
+      return { ...empty, skipReason: "no-submission" };
+    }
+    const sequence = await loadAssigneeSequence(
+      db,
+      args.accountId,
+      submission.form_id,
+      args.assigneeKey,
+    );
+    if (!sequence || sequence.items.length === 0) {
+      return { ...empty, skipReason: "no-sequence" };
+    }
+    const nowIso = new Date().toISOString();
+    let enqueued = 0;
+    let alreadyQueued = 0;
+    for (const item of sequence.items) {
+      const { error } = await db.from("meta_lead_whatsapp_queue").insert({
+        account_id: args.accountId,
+        submission_id: submission.id,
+        flow_run_id: submission.flow_run_id,
+        form_id: submission.form_id,
+        template_name: item.template_name,
+        template_language: item.template_language,
+        position: item.position,
+        assignee_key: args.assigneeKey,
+        scheduled_for: scheduledForForPosition(nowIso, item.position, sequence.delay_seconds),
+      });
+      if (error) {
+        if (isUniqueViolation(error)) {
+          alreadyQueued += 1;
+          continue;
+        }
+        throw error;
+      }
+      enqueued += 1;
+    }
+    return { enqueued, alreadyQueued, skipped: false };
+  } catch (err) {
+    console.error(
+      "[meta-whatsapp] assignee enqueue failed (assignment unaffected):",
+      err instanceof Error ? err.message : err,
+    );
+    return { ...empty, skipReason: "error" };
+  }
+}
+
+export type ManualHandoffReason =
+  | "no-submission"
+  | "no-global-rows"
+  | "global-pending-cancelled"
+  | "global-already-sent"
+  | "global-in-flight"
+  | "global-send-raced";
+
+export interface ManualHandoffResult {
+  submissionId: string | null;
+  decision: "start-assignee" | "keep-global";
+  reason: ManualHandoffReason;
+  /** Pending/failed global rows deleted to clear the way. */
+  cancelled: number;
+  /** Global rows already sent (evidence for keep-global). */
+  sent: number;
+}
+
+interface GlobalRowState {
+  id: string;
+  status: string;
+}
+
+/** This lead's table-wide (NULL-keyed) auto-send rows, any status. */
+async function fetchGlobalRows(
+  db: SupabaseClient,
+  accountId: string,
+  submissionId: string,
+): Promise<GlobalRowState[]> {
+  const { data, error } = await db
+    .from("meta_lead_whatsapp_queue")
+    .select("id, status")
+    .eq("account_id", accountId)
+    .eq("submission_id", submissionId)
+    .is("assignee_key", null);
+  if (error) throw error;
+  return ((data ?? []) as GlobalRowState[]).slice();
+}
+
+/**
+ * Delete this lead's unsent global rows. Conditional on
+ * status IN (pending, failed) — mirroring the drain's atomic claim —
+ * so a worker that claimed a row concurrently (pending → sending)
+ * spares it from deletion. Sent rows are never matched. Returns the
+ * deleted count.
+ */
+async function deletePendingGlobalRows(
+  db: SupabaseClient,
+  accountId: string,
+  submissionId: string,
+): Promise<number> {
+  const { data, error } = await db
+    .from("meta_lead_whatsapp_queue")
+    .delete()
+    .eq("account_id", accountId)
+    .eq("submission_id", submissionId)
+    .is("assignee_key", null)
+    .in("status", ["pending", "failed"])
+    .select("id");
+  if (error) throw error;
+  return ((data ?? []) as unknown[]).length;
+}
+
+export interface LateGlobalCancelResult {
+  /** Pending/failed global rows deleted. */
+  cancelled: number;
+  /** Global rows already sent (left untouched). */
+  sent: number;
+  /** Global rows claimed/in-flight (left untouched). */
+  sending: number;
+}
+
+/**
+ * Reconcile late global arrivals for one lead: delete pending/failed
+ * table-wide rows (e.g. committed by a concurrent ingestion worker
+ * after a handoff scan), then report what remains. Sent and sending
+ * rows are never touched — a started global send always wins over a
+ * second sequence. Throws on database errors; callers decide whether
+ * to fail open or closed.
+ */
+export async function cancelLateGlobalRows(
+  db: SupabaseClient,
+  args: { accountId: string; submissionId: string },
+): Promise<LateGlobalCancelResult> {
+  const cancelled = await deletePendingGlobalRows(db, args.accountId, args.submissionId);
+  const after = await fetchGlobalRows(db, args.accountId, args.submissionId);
+  return {
+    cancelled,
+    sent: after.filter((r) => r.status === "sent").length,
+    sending: after.filter((r) => r.status === "sending").length,
+  };
+}
+
+/**
+ * Manual-assignment handoff for one Meta lead: decides whether the
+ * new owner's salesperson sequence may start, given the global
+ * auto-send rows that may already exist for the same lead.
+ *
+ * A lead can arrive unassigned (global rows queued or even sent)
+ * and receive its first manual assignment later. Starting the
+ * salesperson sequence on top would mix the two sequences — and the
+ * UNIQUE(account, submission, template, language) ledger would
+ * silently drop overlapping templates, leaving an incomplete mix.
+ *
+ *   * No submission, or no global rows: "start-assignee".
+ *   * Only pending/failed global rows: they are DELETED (unsent —
+ *     never message history) so the salesperson sequence enqueues
+ *     completely, then "start-assignee".
+ *   * Any sent global row, or a row claimed/in-flight (sending):
+ *     "keep-global" — nothing is cancelled, nothing is enqueued.
+ *
+ * Race safety: the delete is conditional on
+ * status IN (pending, failed), mirroring the drain's atomic claim —
+ * a worker that claimed a row concurrently (pending → sending)
+ * spares it from deletion. A re-select after the delete catches
+ * that case (or a send that landed mid-handoff) and keeps the
+ * global sequence instead of starting a second one. Sent rows are
+ * never touched. Throws on database errors: callers must fail
+ * closed (keep-global, no customer sequence) rather than risk a
+ * mixed send.
+ */
+export async function prepareManualAssigneeHandoff(
+  db: SupabaseClient,
+  args: {
+    accountId: string;
+    submissionId?: string | null;
+    flowRunId?: string | null;
+  },
+): Promise<ManualHandoffResult> {
+  let submissionId = args.submissionId ?? null;
+  if (!submissionId && args.flowRunId) {
+    const { data, error } = await db
+      .from("meta_lead_submissions")
+      .select("id")
+      .eq("account_id", args.accountId)
+      .eq("flow_run_id", args.flowRunId)
+      .maybeSingle();
+    if (error) throw error;
+    submissionId = ((data as { id: string } | null)?.id ?? null) as string | null;
+  }
+  if (!submissionId) {
+    return { submissionId: null, decision: "start-assignee", reason: "no-submission", cancelled: 0, sent: 0 };
+  }
+  const scanGlobal = () => fetchGlobalRows(db, args.accountId, submissionId as string);
+  const before = await scanGlobal();
+  if (before.length === 0) {
+    return { submissionId, decision: "start-assignee", reason: "no-global-rows", cancelled: 0, sent: 0 };
+  }
+  const sent = before.filter((r) => r.status === "sent").length;
+  if (sent > 0) {
+    return { submissionId, decision: "keep-global", reason: "global-already-sent", cancelled: 0, sent };
+  }
+  if (before.some((r) => r.status === "sending")) {
+    return { submissionId, decision: "keep-global", reason: "global-in-flight", cancelled: 0, sent: 0 };
+  }
+  // Only pending/failed rows remain: delete them so the overlapping
+  // unique keys are free for the salesperson sequence. Conditional
+  // on status — a concurrent worker claim spares the claimed row.
+  const cancelled = await deletePendingGlobalRows(db, args.accountId, submissionId as string);
+  // A claim (or send) may have slipped between the scan and the
+  // delete: the claimed row survived above and must win.
+  const after = await scanGlobal();
+  const afterSent = after.filter((r) => r.status === "sent").length;
+  if (afterSent > 0 || after.some((r) => r.status === "sending")) {
+    return { submissionId, decision: "keep-global", reason: "global-send-raced", cancelled, sent: afterSent };
+  }
+  return { submissionId, decision: "start-assignee", reason: "global-pending-cancelled", cancelled, sent: 0 };
 }
 
 export interface SendFnArgs {
@@ -513,20 +777,30 @@ async function markRowFailed(
 }
 
 /**
- * True when an earlier item of the same lead still owns the turn:
- * pending, claimed, or retryably failed. Terminal rows
- * (attempts exhausted) unblock later items so one dead template
- * never stalls the rest of the sequence.
+ * True when an earlier item of the same lead *and the same
+ * sequence* still owns the turn: pending, claimed, or retryably
+ * failed. Terminal rows unblock later items so one dead template
+ * never stalls the rest of the sequence. Rows are scoped by
+ * `assignee_key` (NULL matches NULL) so a salesperson sequence
+ * and the table-wide sequence never block each other.
  */
 async function hasBlockingEarlierRow(
   db: SupabaseClient,
   row: QueueRow,
 ): Promise<boolean> {
-  const { data, error } = await db
+  let query = db
     .from("meta_lead_whatsapp_queue")
     .select("id, status, attempts, max_attempts")
     .eq("account_id", row.account_id)
-    .eq("submission_id", row.submission_id)
+    .eq("submission_id", row.submission_id);
+  // postgrest `.eq(col, null)` does not reliably match NULL, so
+  // branch explicitly to keep global rows on the exact same rows
+  // as before (only NULL-keyed rows) and assignee rows on theirs.
+  query =
+    row.assignee_key == null
+      ? query.is("assignee_key", null)
+      : query.eq("assignee_key", row.assignee_key);
+  const { data, error } = await query
     .lt("position", row.position)
     .neq("status", "sent");
   if (error) throw error;
@@ -758,7 +1032,7 @@ export async function drainWhatsappQueue(
   let query = db
     .from("meta_lead_whatsapp_queue")
     .select(
-      "id, account_id, submission_id, flow_run_id, form_id, template_name, template_language, position, status, attempts, max_attempts, scheduled_for, next_retry_at, provider_message_id",
+      "id, account_id, submission_id, flow_run_id, form_id, template_name, template_language, position, status, attempts, max_attempts, scheduled_for, next_retry_at, provider_message_id, assignee_key",
     )
     .in("status", ["pending", "failed"])
     .lte("scheduled_for", nowIso)
@@ -827,9 +1101,45 @@ export async function drainWhatsappQueue(
         row.account_id,
         row.form_id,
       );
-      if (!table || table.items.length === 0) {
-        // Config removed after enqueue: park the row untouched so a
-        // reconfigure resumes it (mirrors the Sheets no-config path).
+      if (!table) {
+        // No config row at all: park the row untouched so a later
+        // configuration resumes it (mirrors the Sheets no-config
+        // path). Applies to global and salesperson rows alike.
+        await db
+          .from("meta_lead_whatsapp_queue")
+          .update({ status: "pending", claimed_at: null, updated_at: nowIso })
+          .eq("id", row.id);
+        result.skippedNoConfig += 1;
+        continue;
+      }
+      // Resolve the effective sequence: the salesperson's own items
+      // when the row carries their key, else the table-wide items.
+      // A removed or emptied salesperson sequence parks its rows
+      // (same resume semantics as a removed global template).
+    let items = table.items;
+    if (row.assignee_key != null) {
+      const sequence = await loadAssigneeSequence(
+          db,
+          row.account_id,
+          row.form_id,
+          row.assignee_key,
+        );
+        if (!sequence || sequence.items.length === 0) {
+          await db
+            .from("meta_lead_whatsapp_queue")
+            .update({ status: "pending", claimed_at: null, updated_at: nowIso })
+            .eq("id", row.id);
+          result.skippedNoConfig += 1;
+          continue;
+        }
+        items = sequence.items.map((t) => ({
+          ...t,
+          id: `assignee:${row.assignee_key}:${t.position}`,
+        }));
+      } else if (table.items.length === 0) {
+        // No configured templates: park the row untouched so a
+        // re-configuration resumes it (mirrors the Sheets
+        // no-config path).
         await db
           .from("meta_lead_whatsapp_queue")
           .update({ status: "pending", claimed_at: null, updated_at: nowIso })
@@ -839,7 +1149,8 @@ export async function drainWhatsappQueue(
       }
       if (table.config.paused) {
         // Paused: release the claim untouched. History, order, and
-        // delay survive; unpausing resumes the same sequence.
+        // delay survive; unpausing resumes the same sequence. The
+        // table-wide pause covers salesperson rows too.
         await db
           .from("meta_lead_whatsapp_queue")
           .update({ status: "pending", claimed_at: null, updated_at: nowIso })
@@ -847,9 +1158,10 @@ export async function drainWhatsappQueue(
         result.skippedPaused += 1;
         continue;
       }
-      // The template may have been removed from the table after
-      // enqueue — park rather than fail so re-adding resumes it.
-      const item = table.items.find(
+      // The template may have been removed from the effective
+      // sequence after enqueue — park rather than fail so
+      // re-adding resumes it.
+      const item = items.find(
         (t) =>
           t.template_name === row.template_name &&
           t.template_language === row.template_language,

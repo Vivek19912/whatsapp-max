@@ -35,9 +35,13 @@ import { ASSIGNABLE_ROLES } from "./members";
  */
 import {
   findAssigneeField,
+  hasPriorAssignment,
   listEligibleUserIds,
   readAssignment,
 } from "./table-helpers";
+import { maybeEnqueueAssigneeSequence } from "@/lib/meta-lead-whatsapp/queue";
+import { salespersonKeyFor } from "@/lib/meta-lead-whatsapp/assignee-sequences";
+import { scheduleWhatsappDrainSoon } from "@/lib/meta-lead-whatsapp/trigger";
 
 export { findAssigneeField, listEligibleUserIds, readAssignment };
 
@@ -273,6 +277,18 @@ export async function assignLead(
   if (existing !== null) {
     return { outcome: "already-owned", userId: null, ruleId: rule.id };
   }
+  // Genuine initial assignment requires no prior assignment event
+  // for this run (a clear-then-reassign leaves the owner empty but
+  // is still a reassignment). Checked BEFORE this assignment
+  // writes its own event below — afterwards every run trivially
+  // "has" a prior event. Best-effort: on read failure we fail
+  // closed (no customer sequence) rather than risk a duplicate.
+  let isInitialAssignment = false;
+  try {
+    isInitialAssignment = !(await hasPriorAssignment(db, accountId, runId));
+  } catch {
+    isInitialAssignment = false;
+  }
 
   // Compute + claim state with compare-and-swap retries. The state
   // advances exactly when a selection is claimed; ownership is
@@ -354,6 +370,26 @@ export async function assignLead(
     reason: rule.mode,
     createdBy: args.createdBy ?? null,
   });
+  // ADDITIVE salesperson customer sequence: only on a genuine
+  // initial assignment (no owner was present AND no prior
+  // assignment event — duplicates and reassignments never start
+  // customer messaging). Best-effort: never fails assignment.
+  if (isInitialAssignment) {
+    try {
+      const key = salespersonKeyFor({ user_id: selected });
+      if (key) {
+        const queued = await maybeEnqueueAssigneeSequence(db, {
+          accountId,
+          formId,
+          flowRunId: runId,
+          assigneeKey: key,
+        });
+        if (queued.enqueued > 0) scheduleWhatsappDrainSoon({ accountId });
+      }
+    } catch {
+      // Best-effort only; assignment already succeeded.
+    }
+  }
   // ADDITIVE Meta Sheets sync — the Assigned To cell changed, so the
   // existing sheet row must update in place. Best-effort: enqueue
   // never throws into assignment. Meta-only (this service never

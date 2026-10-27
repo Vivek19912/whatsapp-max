@@ -34,6 +34,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AssignmentTableState } from "./service";
 import {
   findAssigneeField,
+  hasPriorAssignment,
   listEligibleUserIds,
   readAssignment,
 } from "./table-helpers";
@@ -319,6 +320,18 @@ export async function assignTableLead(
   if (existing !== null) {
     return { outcome: "already-owned", userId: null, assigneeId: null, configId: detail.id, notifyHandled: true };
   }
+  // Genuine initial assignment requires no prior assignment event
+  // for this run (a clear-then-reassign leaves the owner empty but
+  // is still a reassignment). Checked BEFORE this assignment
+  // writes its own event below — afterwards every run trivially
+  // "has" a prior event. Best-effort: on read failure we fail
+  // closed (no customer sequence) rather than risk a duplicate.
+  let isInitialAssignment = false;
+  try {
+    isInitialAssignment = !(await hasPriorAssignment(db, accountId, runId));
+  } catch {
+    isInitialAssignment = false;
+  }
 
   let state = await getOrInitConfigState(db, detail.id);
   let selected: EligibleAssignee | null = null;
@@ -456,6 +469,45 @@ export async function assignTableLead(
     formId,
     skipEmail: !!(selected.user_id && formId),
   });
+
+  // ADDITIVE salesperson customer sequence: only on a genuine
+  // initial assignment (no owner was present AND no prior
+  // assignment event — clear-then-reassign, retries, and duplicate
+  // deliveries never restart customer messaging). Reassignments
+  // notify through the channels above and stop here. Best-effort:
+  // never fails assignment. Dynamically imported so Flow-table
+  // paths keep no static dependency on the WhatsApp send stack.
+  if (selected && formId && isInitialAssignment) {
+    try {
+      const { salespersonKeyFor } = await import(
+        "@/lib/meta-lead-whatsapp/assignee-sequences"
+      );
+      const key = salespersonKeyFor({
+        user_id: selected.user_id,
+        email: selected.email,
+        phone: selected.phone,
+      });
+      if (key) {
+        const { maybeEnqueueAssigneeSequence } = await import(
+          "@/lib/meta-lead-whatsapp/queue"
+        );
+        const queued = await maybeEnqueueAssigneeSequence(db, {
+          accountId,
+          formId,
+          flowRunId: runId,
+          assigneeKey: key,
+        });
+        if (queued.enqueued > 0) {
+          const { scheduleWhatsappDrainSoon } = await import(
+            "@/lib/meta-lead-whatsapp/trigger"
+          );
+          scheduleWhatsappDrainSoon({ accountId });
+        }
+      }
+    } catch {
+      // Best-effort only; assignment already succeeded.
+    }
+  }
 
   return {
     outcome: selected.user_id ? "assigned" : "assigned-external",

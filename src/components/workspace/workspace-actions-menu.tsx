@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
-import { MessageCircle, Plus, SlidersHorizontal, UserPlus } from "lucide-react";
+import { useState, type ComponentType, type ReactNode } from "react";
+import { Eye, MessageCircle, Pencil, Plus, Settings2, SlidersHorizontal, UserPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -19,20 +19,75 @@ export interface WorkspaceActionsMenuProps {
   columns: ReactNode;
   /** Already-wired Hidden-rows trigger + panel; omit when not permitted. */
   hiddenRows?: ReactNode;
-  /** Already-wired Travel CRM Settings trigger + dialog; omit when absent. */
-  travelCrmSettings?: ReactNode;
   /** Mirrors the previous Add Column gate (settings editors only). */
   canAddColumn: boolean;
   /** Existing Add Column handler (opens the column dialog). */
   onAddColumn: () => void;
   /** Mirrors the previous toolbar gate (Meta tables, owner only). */
   showAutoSend: boolean;
-  /** Existing Auto-send WhatsApp handler (opens its dialog). */
-  onOpenAutoSend: () => void;
+  /** Existing Auto-send WhatsApp handler (opens view or edit dialog). */
+  onOpenAutoSend: (mode: "view" | "edit") => void;
   /** Mirrors the previous toolbar gate (owner only). */
   showAssignment: boolean;
-  /** Existing Assignment handler (opens its dialog). */
-  onOpenAssignment: () => void;
+  /** Existing Assignment handler (opens view or edit dialog). */
+  onOpenAssignment: (mode: "view" | "edit") => void;
+  /** Travel CRM row visibility (defaults to visible). */
+  showTravelSettings?: boolean;
+  /** Existing Travel CRM Settings handler (opens view or edit dialog). */
+  onOpenTravelSettings: (mode: "view" | "edit") => void;
+}
+
+/**
+ * One settings row: icon + label on the left, compact View and
+ * Edit actions on the right. View opens the read-only dialog;
+ * Edit opens the full editor. Matches the surrounding menu
+ * button styling.
+ */
+function SettingRow({
+  icon: Icon,
+  label,
+  onView,
+  onEdit,
+}: {
+  icon: ComponentType<{ className?: string }>;
+  label: string;
+  onView: () => void;
+  onEdit: () => void;
+}) {
+  const actionClass =
+    "h-8 shrink-0 gap-1 px-2 text-xs font-medium";
+  return (
+    <div className="flex items-center gap-1">
+      <span className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1 text-sm">
+        <Icon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="truncate text-foreground">{label}</span>
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={actionClass}
+        onClick={onView}
+        aria-label={`View ${label}`}
+        title={`View ${label}`}
+      >
+        <Eye className="h-4 w-4" aria-hidden />
+        View
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={actionClass}
+        onClick={onEdit}
+        aria-label={`Edit ${label}`}
+        title={`Edit ${label}`}
+      >
+        <Pencil className="h-4 w-4" aria-hidden />
+        Edit
+      </Button>
+    </div>
+  );
 }
 
 /**
@@ -45,16 +100,19 @@ export interface WorkspaceActionsMenuProps {
  * Hidden rows, Add Column, Travel CRM Settings) and "Automation
  * & assignment" (Auto-send WhatsApp, Assignment).
  *
- * The Filters / Columns / Hidden-rows / Travel CRM entries reuse
- * the exact components (and handlers, permissions, filter state,
- * and API contracts) the table row rendered before — they are
- * passed in as slots and mounted here, so no business logic is
- * duplicated. Their panels open in separate portals above this
- * menu, so this menu stays open while those panels are in use
- * (closing it would unmount the trigger that owns the panel).
- * Dialog entries (Add Column, Auto-send, Assignment) close the
- * menu first and then run the existing page-level open handler —
- * the dialogs live outside this menu and are unaffected.
+ * The Filters / Columns / Hidden-rows entries reuse the exact
+ * components (and handlers, permissions, filter state, and API
+ * contracts) the table row rendered before — they are passed in
+ * as slots and mounted here, so no business logic is duplicated.
+ * Their panels open in separate portals above this menu, so this
+ * menu stays open while those panels are in use (closing it would
+ * unmount the trigger that owns the panel). Dialog entries (Add
+ * Column) close the menu first and then run the existing
+ * page-level open handler — the dialogs live outside this menu
+ * and are unaffected.
+ *
+ * Assignment, Auto-send WhatsApp, and Travel CRM Settings each
+ * offer View (read-only dialog) and Edit (full editor) actions.
  *
  * Positioning is collision-aware (flips/shifts into view) and
  * the panel scrolls within the viewport on desktop and mobile.
@@ -63,13 +121,14 @@ export function WorkspaceActionsMenu({
   filters,
   columns,
   hiddenRows,
-  travelCrmSettings,
   canAddColumn,
   onAddColumn,
   showAutoSend,
   onOpenAutoSend,
   showAssignment,
   onOpenAssignment,
+  showTravelSettings = true,
+  onOpenTravelSettings,
 }: WorkspaceActionsMenuProps) {
   const [open, setOpen] = useState(false);
 
@@ -78,7 +137,7 @@ export function WorkspaceActionsMenu({
     columns != null ||
     hiddenRows != null ||
     canAddColumn ||
-    travelCrmSettings != null;
+    showTravelSettings;
   const hasAutomation = showAutoSend || showAssignment;
 
   function runAndClose(fn: () => void) {
@@ -126,7 +185,14 @@ export function WorkspaceActionsMenu({
                   Add Column
                 </Button>
               ) : null}
-              {travelCrmSettings}
+              {showTravelSettings ? (
+                <SettingRow
+                  icon={Settings2}
+                  label="Travel CRM Settings"
+                  onView={() => runAndClose(() => onOpenTravelSettings("view"))}
+                  onEdit={() => runAndClose(() => onOpenTravelSettings("edit"))}
+                />
+              ) : null}
             </div>
           </section>
         ) : null}
@@ -140,30 +206,20 @@ export function WorkspaceActionsMenu({
             </p>
             <div className="grid gap-1.5">
               {showAutoSend ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => runAndClose(onOpenAutoSend)}
-                  aria-label="Auto-send WhatsApp"
-                  className={cn(WS_CONTROL_BUTTON, "w-full justify-start")}
-                >
-                  <MessageCircle className="h-4 w-4" aria-hidden />
-                  Auto-send WhatsApp
-                </Button>
+                <SettingRow
+                  icon={MessageCircle}
+                  label="Auto-send WhatsApp"
+                  onView={() => runAndClose(() => onOpenAutoSend("view"))}
+                  onEdit={() => runAndClose(() => onOpenAutoSend("edit"))}
+                />
               ) : null}
               {showAssignment ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => runAndClose(onOpenAssignment)}
-                  aria-label="Assignment"
-                  className={cn(WS_CONTROL_BUTTON, "w-full justify-start")}
-                >
-                  <UserPlus className="h-4 w-4" aria-hidden />
-                  Assignment
-                </Button>
+                <SettingRow
+                  icon={UserPlus}
+                  label="Assignment"
+                  onView={() => runAndClose(() => onOpenAssignment("view"))}
+                  onEdit={() => runAndClose(() => onOpenAssignment("edit"))}
+                />
               ) : null}
             </div>
           </section>

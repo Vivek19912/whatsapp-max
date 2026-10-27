@@ -9,14 +9,23 @@
 //   (paused, delay, ordered items with variable mappings), the
 //   account's APPROVED templates with their variable slots, the
 //   table's available mapping fields, a sample lead's values for
-//   preview, and send-history counts.
+//   preview, and send-history counts, PLUS the per-salesperson
+//   layer: `?assignee_key=` returns that salesperson's own
+//   sequence (`assignee: {delay_seconds, items} | null`), and every
+//   response carries `salespeople` (assignable identities for the
+//   picker) and `configured_keys` (which salespeople have a saved
+//   sequence). The global shape is otherwise unchanged.
 // PUT (owner-only) — replace this table's template sequence
 //   (including per-template variable mappings), delay, and paused
 //   flag. Every template must exist and be APPROVED; templates
 //   with variables require every slot mapped to a known field of
 //   THIS table. Static templates keep working unchanged. Never
 //   touches other tables. Flow Tables resolve to 404 here (same
-//   as unknown tables) — their behavior is unchanged.
+//   as unknown tables) — their behavior is unchanged. With an
+//   `assignee_key` in the body, the same validation applies but
+//   only that salesperson's sequence is replaced (the global
+//   sequence is untouched); an empty template list deletes the
+//   salesperson's sequence.
 
 import { NextResponse } from 'next/server';
 
@@ -34,6 +43,13 @@ import {
 } from '@/lib/meta-lead-whatsapp/queue';
 import { validateAutoSendConfig } from '@/lib/meta-lead-whatsapp/config';
 import {
+  listAssigneeSequenceKeys,
+  loadAssigneeSequence,
+  salespersonKeyFor,
+  saveAssigneeSequence,
+} from '@/lib/meta-lead-whatsapp/assignee-sequences';
+import { getTableConfig } from '@/lib/lead-assignment/table-config';
+import {
   buildAvailableVariableFields,
   getLatestLeadFieldMap,
   getTemplateVariableSlots,
@@ -47,7 +63,116 @@ export const maxDuration = 60;
 
 type Ctx = { params: Promise<{ flowId: string }> };
 
-export async function GET(_request: Request, { params }: Ctx) {
+type ValidatedTemplate = {
+  template_name: string;
+  template_language: string;
+  variable_mappings: Record<string, string>;
+};
+
+/**
+ * Per-template sendability against THIS account's catalog:
+ * existence, APPROVED status, media blockers, and variable
+ * mappings against the table's known fields. Returns the first
+ * human-readable problem, or null when every template can send.
+ * Shared by the table-wide and per-salesperson save paths so
+ * both enforce identical guarantees.
+ */
+async function assertTemplatesSendable(
+  admin: ReturnType<typeof supabaseAdmin>,
+  accountId: string,
+  items: ValidatedTemplate[],
+  availableKeys: Set<string>,
+): Promise<string | null> {
+  for (const item of items) {
+    const { data } = await admin
+      .from('message_templates')
+      .select('*')
+      .eq('account_id', accountId)
+      .eq('name', item.template_name)
+      .eq('language', item.template_language)
+      .maybeSingle();
+    if (!data || !isMessageTemplate(data)) {
+      return `Template "${item.template_name}" (${item.template_language}) was not found. Sync templates from Meta first.`;
+    }
+    const row = data as unknown as Parameters<
+      typeof templateSendBlockers
+    >[0] & { status?: string };
+    if (row.status !== 'APPROVED') {
+      return `Template "${item.template_name}" (${item.template_language}) is ${row.status ?? 'not approved'} — only APPROVED templates can be auto-sent.`;
+    }
+    // Media without a file can never send; variables are fine
+    // once every slot is mapped to one of THIS table's fields.
+    const blockers = templateSendBlockers(row);
+    if (blockers.length > 0) {
+      return `Template "${item.template_name}" cannot be auto-sent: ${blockers.join('; ')}.`;
+    }
+    const slots = getTemplateVariableSlots(row);
+    const mappingProblem = validateVariableMappings(
+      slots,
+      item.variable_mappings,
+      availableKeys
+    );
+    if (mappingProblem) {
+      return `Template "${item.template_name}" (${item.template_language}): ${mappingProblem}`;
+    }
+  }
+  return null;
+}
+
+type CtxAccount = { supabase: Parameters<typeof resolveTableForm>[0]; accountId: string };
+
+/**
+ * Assignable salespeople for the per-salesperson picker: every
+ * account roster member (internal, keyed by user id) plus this
+ * table's external assignees (keyed by email), deduplicated by
+ * key. Read-only; tenant-scoped by the caller's account.
+ */
+async function listSalespeople(
+  ctx: CtxAccount,
+  flowId: string,
+): Promise<Array<{ key: string; label: string; kind: 'member' | 'external' }>> {
+  const out: Array<{ key: string; label: string; kind: 'member' | 'external' }> = [];
+  const seen = new Set<string>();
+  const push = (key: string | null, label: string, kind: 'member' | 'external') => {
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ key, label, kind });
+  };
+  try {
+    const { data } = await ctx.supabase
+      .from('profiles')
+      .select('user_id, full_name, email')
+      .eq('account_id', ctx.accountId);
+    for (const p of (data ?? []) as Array<{
+      user_id?: unknown;
+      full_name?: unknown;
+      email?: unknown;
+    }>) {
+      const key = salespersonKeyFor({ user_id: typeof p.user_id === 'string' ? p.user_id : null });
+      if (!key) continue;
+      const name =
+        (typeof p.full_name === 'string' && p.full_name.trim()) ||
+        (typeof p.email === 'string' && p.email.trim()) ||
+        key;
+      push(key, name, 'member');
+    }
+  } catch {
+    // Roster is best-effort here; assignment externals below still work.
+  }
+  try {
+    const detail = await getTableConfig(ctx.supabase, ctx.accountId, flowId);
+    for (const a of detail?.assignees ?? []) {
+      if (a.user_id) continue;
+      const key = salespersonKeyFor({ email: a.email });
+      push(key, a.display_name || a.email || 'External', 'external');
+    }
+  } catch {
+    // Assignment config is optional; roster entries still work.
+  }
+  return out;
+}
+
+export async function GET(request: Request, { params }: Ctx) {
   try {
     const { flowId } = await params;
     const ctx = await getCurrentAccount();
@@ -55,6 +180,12 @@ export async function GET(_request: Request, { params }: Ctx) {
     if (!table) {
       return NextResponse.json({ error: 'Table not found.' }, { status: 404 });
     }
+
+    const assigneeKeyRaw = new URL(request.url).searchParams.get('assignee_key');
+    const assigneeKey =
+      typeof assigneeKeyRaw === 'string' && assigneeKeyRaw.trim() !== ''
+        ? assigneeKeyRaw.trim().slice(0, 128)
+        : null;
 
     const status = await getTableWhatsappStatus(
       ctx.supabase,
@@ -113,6 +244,48 @@ export async function GET(_request: Request, { params }: Ctx) {
       sample_values = null;
     }
 
+    // Per-salesperson layer (additive — the global shape above is
+    // untouched). `salespeople` offers every assignable identity
+    // for the picker: account roster members plus this table's
+    // external assignees, deduplicated by key. `configured_keys`
+    // lists which salespeople already have a saved sequence.
+    const salespeople = await listSalespeople(ctx, flowId);
+    const configured_keys = await listAssigneeSequenceKeys(
+      ctx.supabase,
+      ctx.accountId,
+      table.formId
+    );
+    let assignee: {
+      key: string;
+      delay_seconds: number;
+      items: Array<{
+        template_name: string;
+        template_language: string;
+        position: number;
+        variable_mappings: Record<string, string>;
+      }>;
+    } | null = null;
+    if (assigneeKey) {
+      const sequence = await loadAssigneeSequence(
+        ctx.supabase,
+        ctx.accountId,
+        table.formId,
+        assigneeKey
+      );
+      assignee = sequence
+        ? {
+            key: assigneeKey,
+            delay_seconds: sequence.delay_seconds,
+            items: sequence.items.map((t) => ({
+              template_name: t.template_name,
+              template_language: t.template_language,
+              position: t.position,
+              variable_mappings: t.variable_mappings,
+            })),
+          }
+        : null;
+    }
+
     return NextResponse.json({
       flow: { id: table.flowId, name: table.flowName },
       form: {
@@ -158,6 +331,9 @@ export async function GET(_request: Request, { params }: Ctx) {
         };
       }),
       counts: status.counts,
+      salespeople,
+      configured_keys,
+      assignee,
     });
   } catch (err) {
     return toErrorResponse(err);
@@ -180,6 +356,11 @@ export async function PUT(request: Request, { params }: Ctx) {
       string,
       unknown
     >;
+    const assigneeKeyRaw = body.assignee_key;
+    const assigneeKey =
+      typeof assigneeKeyRaw === 'string' && assigneeKeyRaw.trim() !== ''
+        ? assigneeKeyRaw.trim().slice(0, 128)
+        : null;
     let validated;
     try {
       validated = validateAutoSendConfig({
@@ -204,60 +385,43 @@ export async function PUT(request: Request, { params }: Ctx) {
 
     // Every template must exist and be APPROVED in THIS account.
     // Service-role read so the check reflects the catalog even
-    // when RLS would hide rows from the caller.
+    // when RLS would hide rows from the caller. Shared by the
+    // table-wide and per-salesperson save paths.
     const admin = supabaseAdmin();
-    for (const item of validated.templates) {
-      const { data } = await admin
-        .from('message_templates')
-        .select('*')
-        .eq('account_id', ctx.accountId)
-        .eq('name', item.template_name)
-        .eq('language', item.template_language)
-        .maybeSingle();
-      if (!data || !isMessageTemplate(data)) {
-        return NextResponse.json(
-          {
-            error: `Template "${item.template_name}" (${item.template_language}) was not found. Sync templates from Meta first.`,
-          },
-          { status: 400 }
-        );
-      }
-      const row = data as unknown as Parameters<
-        typeof templateSendBlockers
-      >[0] & { status?: string };
-      if (row.status !== 'APPROVED') {
-        return NextResponse.json(
-          {
-            error: `Template "${item.template_name}" (${item.template_language}) is ${row.status ?? 'not approved'} — only APPROVED templates can be auto-sent.`,
-          },
-          { status: 400 }
-        );
-      }
-      // Media without a file can never send; variables are fine
-      // once every slot is mapped to one of THIS table's fields.
-      const blockers = templateSendBlockers(row);
-      if (blockers.length > 0) {
-        return NextResponse.json(
-          {
-            error: `Template "${item.template_name}" cannot be auto-sent: ${blockers.join('; ')}.`,
-          },
-          { status: 400 }
-        );
-      }
-      const slots = getTemplateVariableSlots(row);
-      const mappingProblem = validateVariableMappings(
-        slots,
-        item.variable_mappings,
-        availableKeys
-      );
-      if (mappingProblem) {
-        return NextResponse.json(
-          {
-            error: `Template "${item.template_name}" (${item.template_language}): ${mappingProblem}`,
-          },
-          { status: 400 }
-        );
-      }
+    const templateError = await assertTemplatesSendable(
+      admin,
+      ctx.accountId,
+      validated.templates,
+      availableKeys
+    );
+    if (templateError) {
+      return NextResponse.json({ error: templateError }, { status: 400 });
+    }
+
+    if (assigneeKey) {
+      // Per-salesperson sequence only: the table-wide config is
+      // untouched (no pause flag here — the table pause governs all
+      // sequences). An empty template list deletes the sequence.
+      const saved = await saveAssigneeSequence(admin, {
+        accountId: ctx.accountId,
+        formId: table.formId,
+        key: assigneeKey,
+        delay_seconds: validated.delay_seconds,
+        items: validated.templates,
+      });
+      return NextResponse.json({
+        ok: true,
+        assignee: {
+          key: assigneeKey,
+          delay_seconds: saved.delay_seconds,
+          items: saved.items.map((t) => ({
+            template_name: t.template_name,
+            template_language: t.template_language,
+            position: t.position,
+            variable_mappings: t.variable_mappings,
+          })),
+        },
+      });
     }
 
     // Replace the sequence atomically-in-effect: upsert the config,

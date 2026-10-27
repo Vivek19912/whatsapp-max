@@ -113,3 +113,34 @@ export async function readAssignment(
   if (error) throw error;
   return ((data as { value_text: string | null } | null)?.value_text ?? null);
 }
+
+/**
+ * True when this lead was previously assigned to someone: any
+ * prior event that names an owner (assigned or removed), or an
+ * external auto-assignment (which writes no owner). Unassigned /
+ * no-eligible / cleared-empty events do not count. Used to tell a
+ * genuine initial assignment apart from a reassignment (or a
+ * clear-then-reassign): only initial assignments may start a
+ * salesperson's customer-facing sequence. Pure read; never
+ * throws beyond database errors.
+ */
+export async function hasPriorAssignment(
+  db: SupabaseClient,
+  accountId: string,
+  runId: string,
+): Promise<boolean> {
+  const { data, error } = await db
+    .from("lead_assignment_events")
+    .select("kind, assigned_user_id, previous_user_id, reason")
+    .eq("account_id", accountId)
+    .eq("flow_run_id", runId);
+  if (error) throw error;
+  const assigned = (v: unknown): boolean =>
+    typeof v === "string" && v !== "" && v !== "Unassigned";
+  return ((data ?? []) as Array<Record<string, unknown>>).some(
+    (r) =>
+      assigned(r.assigned_user_id) ||
+      assigned(r.previous_user_id) ||
+      (r.kind === "auto" && r.reason === "external-notification"),
+  );
+}

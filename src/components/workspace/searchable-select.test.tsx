@@ -112,6 +112,23 @@ describe("SearchableSelect — trigger rendering (closed state)", () => {
     expect(html).toContain("Alpha");
     expect(html).not.toContain("Pick one</span>");
   });
+
+  it("renders a disabled read-only trigger that shows the selection", () => {
+    const html = renderToStaticMarkup(
+      <SearchableSelect
+        value="a"
+        options={[{ value: "a", label: "Alpha" }]}
+        onChange={() => {
+          throw new Error("must not fire when disabled");
+        }}
+        placeholder="Pick one"
+        ariaLabel="Pick one"
+        disabled
+      />
+    );
+    expect(html).toContain("Alpha");
+    expect(html).toContain("disabled");
+  });
 });
 
 describe("SearchableSelect — popover composition contract (regression)", () => {

@@ -65,6 +65,7 @@ function closedMenu() {
       onOpenAutoSend={() => {}}
       showAssignment
       onOpenAssignment={() => {}}
+      onOpenTravelSettings={() => {}}
     />
   );
 }
@@ -82,6 +83,9 @@ describe('workspace actions menu trigger (single visible control)', () => {
     expect(html).not.toContain('Assignment');
     expect(html).not.toContain('Auto-send WhatsApp');
     expect(html).not.toContain('Add Column');
+    expect(html).not.toContain('Travel CRM');
+    expect(html).not.toContain('>View<');
+    expect(html).not.toContain('>Edit<');
     expect(html).not.toContain('Configure Sheet');
     expect(html).not.toContain('Open Sheet');
   });
@@ -115,19 +119,42 @@ describe('workspace actions menu panel (grouped, bounded, collision-aware)', () 
     expect(src).toContain('Add Column');
     expect(src).toContain('Auto-send WhatsApp');
     expect(src).toContain('Assignment');
+    expect(src).toContain('Travel CRM Settings');
     expect(src).toContain('onAddColumn');
     expect(src).toContain('onOpenAutoSend');
     expect(src).toContain('onOpenAssignment');
+    expect(src).toContain('onOpenTravelSettings');
     expect(src).toContain('setOpen(false)');
     expect(src).toContain('Plus');
     expect(src).toContain('MessageCircle');
     expect(src).toContain('UserPlus');
+    expect(src).toContain('Settings2');
     // Panel tools reuse the caller's wired components (slots) —
     // no duplicated business logic.
     expect(src).toContain('filters');
     expect(src).toContain('columns');
     expect(src).toContain('hiddenRows');
-    expect(src).toContain('travelCrmSettings');
+    expect(src).not.toContain('travelCrmSettings={');
+  });
+
+  it('offers View and Edit for Assignment, Auto-send, and Travel CRM', () => {
+    const src = menuSrc();
+    // One compact row per setting: read-only View plus full Edit,
+    // with accessible per-action labels (no second overflow menu).
+    for (const label of ['Assignment', 'Auto-send WhatsApp', 'Travel CRM Settings']) {
+      expect(src).toContain(label);
+    }
+    expect(src).toContain('aria-label={`View ${label}`}');
+    expect(src).toContain('aria-label={`Edit ${label}`}');
+    expect(src).toContain('Eye');
+    expect(src).toContain('Pencil');
+    // View opens the read-only dialog, Edit the full editor.
+    expect(src).toContain('onOpenAutoSend("view")');
+    expect(src).toContain('onOpenAutoSend("edit")');
+    expect(src).toContain('onOpenAssignment("view")');
+    expect(src).toContain('onOpenAssignment("edit")');
+    expect(src).toContain('onOpenTravelSettings("view")');
+    expect(src).toContain('onOpenTravelSettings("edit")');
   });
 
   it('stays collision-aware and scrolls within the viewport', () => {
@@ -221,15 +248,28 @@ describe('workspace page wires every tool through the single menu', () => {
     expect(src).toContain('<ColumnsMenu');
     expect(src).toContain('hiddenRows={');
     expect(src).toContain('<HiddenRowsMenu');
-    expect(src).toContain('travelCrmSettings={');
+    // Travel CRM is a controlled dialog with separate view/edit
+    // entries (no always-visible trigger button anymore).
     expect(src).toContain('<TravelCrmSettings');
+    expect(src).toContain('open={travelDialogOpen}');
+    expect(src).toContain('viewMode={travelViewMode}');
+    expect(src).not.toContain('travelCrmSettings={');
     // Same gates as the previously visible buttons.
     expect(src).toContain('canAddColumn={canEditSettings}');
     expect(src).toContain('showAutoSend={isMetaTable && isOwner}');
     expect(src).toContain('showAssignment={isOwner}');
+    expect(src).toContain('showTravelSettings={flowId !== null}');
+    // View opens the read-only dialog, Edit the full editor.
+    expect(src).toContain("setWhatsappViewMode(mode === 'view')");
     expect(src).toContain('setWhatsappDialogOpen(true)');
+    expect(src).toContain("setAssignmentViewMode(mode === 'view')");
     expect(src).toContain('setAssignmentDialogOpen(true)');
+    expect(src).toContain("setTravelViewMode(mode === 'view')");
+    expect(src).toContain('setTravelDialogOpen(true)');
     expect(src).toContain('setAddColumnOpen(true)');
+    // The dialogs render in view mode when asked.
+    expect(src).toContain('viewMode={whatsappViewMode}');
+    expect(src).toContain('viewMode={assignmentViewMode}');
   });
 
   it('keeps the selector and search visible with no other toolbar buttons', () => {

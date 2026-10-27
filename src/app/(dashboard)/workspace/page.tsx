@@ -365,9 +365,15 @@ export default function WorkspacePage() {
   // Workspace toolbar entry points were removed.
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
   const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false);
+  const [assignmentViewMode, setAssignmentViewMode] = useState(false);
   // Per-table WhatsApp auto-send dialog (Meta Lead Ads tables
   // only; Flow Tables never see it).
   const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
+  const [whatsappViewMode, setWhatsappViewMode] = useState(false);
+  // Per-table Travel CRM defaults dialog (controlled from the
+  // Workspace actions menu with separate view / edit entries).
+  const [travelDialogOpen, setTravelDialogOpen] = useState(false);
+  const [travelViewMode, setTravelViewMode] = useState(false);
   const [editingField, setEditingField] = useState<WorkspaceField | null>(null);
   // Workspace filters (Date over Submission Time + Assigned To over
   // the live roster). Applied state only — the panel owns its
@@ -1617,22 +1623,26 @@ export default function WorkspacePage() {
                       />
                     ) : undefined
                   }
-                  travelCrmSettings={
-                    <TravelCrmSettings
-                      key={flowId ?? 'no-flow'}
-                      flowId={flowId}
-                      flowName={flowDisplayName(activeFlowName)}
-                    />
-                  }
+                  showTravelSettings={flowId !== null}
+                  onOpenTravelSettings={(mode) => {
+                    setTravelViewMode(mode === 'view');
+                    setTravelDialogOpen(true);
+                  }}
                   canAddColumn={canEditSettings}
                   onAddColumn={() => {
                     setEditingField(null);
                     setAddColumnOpen(true);
                   }}
                   showAutoSend={isMetaTable && isOwner}
-                  onOpenAutoSend={() => setWhatsappDialogOpen(true)}
+                  onOpenAutoSend={(mode) => {
+                    setWhatsappViewMode(mode === 'view');
+                    setWhatsappDialogOpen(true);
+                  }}
                   showAssignment={isOwner}
-                  onOpenAssignment={() => setAssignmentDialogOpen(true)}
+                  onOpenAssignment={(mode) => {
+                    setAssignmentViewMode(mode === 'view');
+                    setAssignmentDialogOpen(true);
+                  }}
                 />
               </div>
             </div>
@@ -2125,6 +2135,7 @@ export default function WorkspacePage() {
           flowId={flowId}
           open={whatsappDialogOpen}
           onOpenChange={setWhatsappDialogOpen}
+          viewMode={whatsappViewMode}
         />
       ) : null}
 
@@ -2139,6 +2150,21 @@ export default function WorkspacePage() {
           tableKind={payload?.meta?.kind}
           open={assignmentDialogOpen}
           onOpenChange={setAssignmentDialogOpen}
+          viewMode={assignmentViewMode}
+        />
+      ) : null}
+
+      {/* Per-table Travel CRM defaults (Meta tables AND Flow tables).
+          Controlled from the Workspace actions menu with separate
+          view and edit entries. */}
+      {flowId ? (
+        <TravelCrmSettings
+          key={`travel-${flowId}`}
+          flowId={flowId}
+          flowName={flowDisplayName(activeFlowName)}
+          open={travelDialogOpen}
+          onOpenChange={setTravelDialogOpen}
+          viewMode={travelViewMode}
         />
       ) : null}
 

@@ -17,8 +17,12 @@ const h = vi.hoisted(() => ({
   accounts: [] as Array<Record<string, unknown>>,
   submissions: [] as Array<Record<string, unknown>>,
   notifications: [] as Array<Record<string, unknown>>,
+  assigneeSeqs: [] as Array<Record<string, unknown>>,
+  assigneeItems: [] as Array<Record<string, unknown>>,
+  queue: [] as Array<Record<string, unknown>>,
   legacyNotifyCalls: [] as Array<Record<string, unknown>>,
   legacyNotifyThrows: false,
+  drainScheduled: [] as Array<Record<string, unknown>>,
   seq: 0,
   bumpVersionOnStateRead: false,
 }));
@@ -28,6 +32,12 @@ vi.mock("@/lib/meta-lead-ads/notify", () => ({
     h.legacyNotifyCalls.push(args);
     if (h.legacyNotifyThrows) throw new Error("smtp down");
     return { enqueued: true, reason: "enqueued" };
+  },
+}));
+
+vi.mock("@/lib/meta-lead-whatsapp/trigger", () => ({
+  scheduleWhatsappDrainSoon: (args: Record<string, unknown>) => {
+    h.drainScheduled.push(args ?? {});
   },
 }));
 
@@ -47,6 +57,9 @@ function tableRows(table: string): Array<Record<string, unknown>> {
     case "accounts": return h.accounts;
     case "meta_lead_submissions": return h.submissions;
     case "lead_assignment_notifications": return h.notifications;
+    case "meta_lead_assignee_sequences": return h.assigneeSeqs;
+    case "meta_lead_assignee_sequence_items": return h.assigneeItems;
+    case "meta_lead_whatsapp_queue": return h.queue;
     default: return [];
   }
 }
@@ -76,6 +89,16 @@ function applyInsert(table: string, obj: Record<string, unknown>) {
         r.flow_run_id === withId.flow_run_id &&
         r.assignee_id === withId.assignee_id &&
         r.channel === withId.channel,
+    );
+    if (dup) return { row: null as never, error: { code: "23505", message: "dup" } };
+  }
+  if (table === "meta_lead_whatsapp_queue") {
+    const dup = h.queue.find(
+      (r) =>
+        r.account_id === withId.account_id &&
+        r.submission_id === withId.submission_id &&
+        r.template_name === withId.template_name &&
+        (r.template_language ?? "en_US") === (withId.template_language ?? "en_US"),
     );
     if (dup) return { row: null as never, error: { code: "23505", message: "dup" } };
   }
@@ -295,7 +318,11 @@ function seedBase() {
   h.accounts = [{ id: "acct-1", owner_user_id: "u-owner" }];
   h.submissions = [];
   h.notifications = [];
+  h.assigneeSeqs = [];
+  h.assigneeItems = [];
+  h.queue = [];
   h.legacyNotifyCalls = [];
+  h.drainScheduled = [];
   h.seq = 0;
   h.bumpVersionOnStateRead = false;
 }
@@ -831,5 +858,231 @@ describe("reliability", () => {
     expect(r.userId).toBe("u-asha");
     const detail = await configLib.getTableConfig(db as never, "acct-1", "flow-plain-1");
     expect(detail!.assignees).toHaveLength(2);
+  });
+});
+
+describe("salesperson customer sequences (initial assignment only)", () => {
+  function seedSequence(key = "user:u-asha", delaySeconds = 60) {
+    h.assigneeSeqs.push({
+      id: "seq-1",
+      account_id: "acct-1",
+      form_id: "formdb-1",
+      salesperson_key: key,
+      delay_seconds: delaySeconds,
+    });
+    h.assigneeItems.push(
+      {
+        id: "seq-1-i0",
+        sequence_id: "seq-1",
+        template_name: "welcome_back",
+        template_language: "en_US",
+        position: 0,
+        variable_mappings: {},
+      },
+      {
+        id: "seq-1-i1",
+        sequence_id: "seq-1",
+        template_name: "offer_update",
+        template_language: "en_US",
+        position: 1,
+        variable_mappings: {},
+      },
+    );
+  }
+
+  function seedSubmission(runId: string, submissionId = "sub-1") {
+    h.submissions.push({
+      id: submissionId,
+      account_id: "acct-1",
+      flow_run_id: runId,
+      form_id: "formdb-1",
+    });
+  }
+
+  it("starts the salesperson's sequence on a genuine initial assignment", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-asha", { display_name: "Asha", notify_whatsapp: true, phone: "+15551234567" })],
+    });
+    seedSequence();
+    run("run-a1", "flow-meta-1");
+    seedSubmission("run-a1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-a1",
+      formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-asha" });
+    // Two customer rows, keyed to the salesperson, staggered by the
+    // per-salesperson delay.
+    const queued = h.queue.filter((q) => q.submission_id === "sub-1");
+    expect(queued).toHaveLength(2);
+    for (const q of queued) expect(q.assignee_key).toBe("user:u-asha");
+    const byTemplate = Object.fromEntries(queued.map((q) => [q.template_name, q]));
+    expect(byTemplate.welcome_back.position).toBe(0);
+    expect(byTemplate.offer_update.position).toBe(1);
+    expect(
+      Date.parse(byTemplate.offer_update.scheduled_for as string) -
+        Date.parse(byTemplate.welcome_back.scheduled_for as string),
+    ).toBe(60_000);
+    // A prompt drain was scheduled for the new customer sends.
+    expect(h.drainScheduled).toEqual([{ accountId: "acct-1" }]);
+    // Assignment notifications still fire (per-table + legacy).
+    expect(
+      h.legacyNotifyCalls.filter((c) => c.assigneeUserId === "u-asha"),
+    ).toHaveLength(1);
+    expect(
+      h.notifications.filter((n) => n.flow_run_id === "run-a1" && n.channel === "whatsapp"),
+    ).toHaveLength(1);
+  });
+
+  it("does not start customer sequences on duplicate deliveries (already owned)", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-asha", { display_name: "Asha" })],
+    });
+    seedSequence("user:u-asha", 0);
+    run("run-a1", "flow-meta-1");
+    seedSubmission("run-a1");
+    const first = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-a1",
+      formId: "formdb-1",
+    });
+    expect(first.outcome).toBe("assigned");
+    expect(h.queue).toHaveLength(2);
+    const drainsBefore = h.drainScheduled.length;
+    // Duplicate webhook / retry for the same lead.
+    const second = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-a1",
+      formId: "formdb-1",
+    });
+    expect(second.outcome).toBe("already-owned");
+    expect(h.queue).toHaveLength(2);
+    expect(h.drainScheduled).toHaveLength(drainsBefore);
+  });
+
+  it("does not start customer sequences after a clear-then-reassign", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha", notify_whatsapp: true, phone: "+15551234567" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+    seedSequence();
+    run("run-a1", "flow-meta-1");
+    seedSubmission("run-a1");
+    // History shows a previous assignment that was cleared — the
+    // lead is unassigned now, but this is NOT an initial assignment.
+    h.events.push({
+      id: "evt-old",
+      account_id: "acct-1",
+      flow_id: "flow-meta-1",
+      flow_run_id: "run-a1",
+      form_id: "formdb-1",
+      kind: "manual",
+      reason: null,
+      assigned_user_id: null,
+      previous_user_id: "u-ravi",
+      created_by: "owner-1",
+    });
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-a1",
+      formId: "formdb-1",
+    });
+    expect(r.outcome).toBe("assigned");
+    // Assignment + notifications proceed, but no customer templates.
+    expect(h.queue).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+    expect(h.notifications.filter((n) => n.flow_run_id === "run-a1")).not.toHaveLength(0);
+  });
+
+  it("sends nothing when the salesperson has no configured sequence", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-ravi", { display_name: "Ravi", notify_whatsapp: true, phone: "+15551234567" })],
+    });
+    run("run-a1", "flow-meta-1");
+    seedSubmission("run-a1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-a1",
+      formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-ravi" });
+    // Notifications still work; no customer-facing sequence exists.
+    expect(h.notifications.filter((n) => n.flow_run_id === "run-a1")).not.toHaveLength(0);
+    expect(h.queue).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+  });
+
+  it("keys external assignees by contact email", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee(null, { display_name: "Ext", email: "Ext@Example.com", phone: "+15550001111", notify_whatsapp: true })],
+    });
+    h.assigneeSeqs.push({
+      id: "seq-ext",
+      account_id: "acct-1",
+      form_id: "formdb-1",
+      salesperson_key: "email:ext@example.com",
+      delay_seconds: 0,
+    });
+    h.assigneeItems.push({
+      id: "seq-ext-i0",
+      sequence_id: "seq-ext",
+      template_name: "welcome_back",
+      template_language: "en_US",
+      position: 0,
+      variable_mappings: {},
+    });
+    run("run-ext", "flow-meta-1");
+    h.submissions.push({ id: "sub-ext", account_id: "acct-1", flow_run_id: "run-ext", form_id: "formdb-1" });
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-ext",
+      formId: "formdb-1",
+    });
+    expect(r.outcome).toBe("assigned-external");
+    expect(h.queue).toHaveLength(1);
+    expect(h.queue[0].assignee_key).toBe("email:ext@example.com");
+  });
+
+  it("never enqueues for Flow tables (no form scope)", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-plain-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-asha", { display_name: "Asha" })],
+    });
+    run("run-f1", "flow-plain-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-plain-1",
+      runId: "run-f1",
+      formId: null,
+    });
+    expect(r.outcome).toBe("assigned");
+    expect(h.queue).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
   });
 });
