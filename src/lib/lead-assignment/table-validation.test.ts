@@ -1,9 +1,11 @@
-// Per-table assignment validation — emails, phones, timezones,
-// pauses, percentage totals. Pure: no mocks, no database.
+// Per-table assignment validation — India-only (Asia/Kolkata).
+// Emails, phones, pause math, percentage totals. Pure: no mocks,
+// no database.
 
 import { describe, expect, it } from "vitest";
 
 import {
+  ASSIGNMENT_TIMEZONE,
   endOfTodayUtc,
   formatPausedUntil,
   isValidAssigneeEmail,
@@ -11,6 +13,7 @@ import {
   normalizeAssigneePhone,
   validatePauseInput,
   validateTableConfig,
+  wallClockInZoneToUtc,
 } from "./table-validation";
 
 describe("assignee contact validation", () => {
@@ -43,6 +46,10 @@ describe("assignee contact validation", () => {
     expect(isValidTimezone("Not/AZone")).toBe(false);
     expect(isValidTimezone("")).toBe(false);
   });
+
+  it("pins assignment to Asia/Kolkata", () => {
+    expect(ASSIGNMENT_TIMEZONE).toBe("Asia/Kolkata");
+  });
 });
 
 describe("pause math and display", () => {
@@ -60,6 +67,19 @@ describe("pause math and display", () => {
     expect(until).toBe("2026-10-26T23:59:59.999Z");
     expect(formatPausedUntil(until, "UTC")).toBe("Paused until 26 October");
   });
+
+  it("converts IST wall readings to UTC without a hardcoded offset", () => {
+    // 14:30 IST wall = 09:00 UTC, resolved through the zone database.
+    expect(new Date(wallClockInZoneToUtc("2026-10-26T14:30", "Asia/Kolkata")).toISOString()).toBe(
+      "2026-10-26T09:00:00.000Z",
+    );
+    // Seconds are honored; garbage is NaN (rejected upstream).
+    expect(new Date(wallClockInZoneToUtc("2026-10-26T14:30:45", "Asia/Kolkata")).toISOString()).toBe(
+      "2026-10-26T09:00:45.000Z",
+    );
+    expect(wallClockInZoneToUtc("not-a-date", "Asia/Kolkata")).toBeNaN();
+    expect(wallClockInZoneToUtc("2026-10-26T14:30", "Mars/Olympus")).toBeNaN();
+  });
 });
 
 describe("validatePauseInput", () => {
@@ -70,17 +90,25 @@ describe("validatePauseInput", () => {
       paused_until: null,
       reason: null,
       scope: "table",
-      timezone: "UTC",
+      timezone: "Asia/Kolkata",
     });
   });
 
-  it("pauses for today in the given zone", () => {
-    const pause = validatePauseInput(
+  it("pauses for today at IST midnight, whatever zone is supplied", () => {
+    // Noon UTC = 17:30 IST: today ends 2026-10-26T23:59:59.999+05:30.
+    for (const input of [
+      { mode: "today" },
       { mode: "today", timezone: "Asia/Kolkata" },
-      now,
-    );
-    expect(pause.paused_until).toBe("2026-10-26T18:29:59.999Z");
-    expect(pause.scope).toBe("table");
+      // Legacy per-table zones normalize to IST instead of rejecting.
+      { mode: "today", timezone: "America/New_York" },
+      { mode: "today", timezone: "UTC" },
+      { mode: "today", timezone: "Mars/Olympus" },
+    ]) {
+      const pause = validatePauseInput(input, now);
+      expect(pause.paused_until).toBe("2026-10-26T18:29:59.999Z");
+      expect(pause.timezone).toBe("Asia/Kolkata");
+      expect(pause.scope).toBe("table");
+    }
   });
 
   it("pauses for N days and keeps a reason", () => {
@@ -91,11 +119,19 @@ describe("validatePauseInput", () => {
     expect(pause.paused_until).toBe("2026-10-29T12:00:00.000Z");
     expect(pause.reason).toBe("On leave");
     expect(pause.scope).toBe("account");
+    expect(pause.timezone).toBe("Asia/Kolkata");
   });
 
   it("pauses until an explicit future instant", () => {
     const pause = validatePauseInput({ mode: "until", until: "2026-11-05T09:00:00Z" }, now);
     expect(pause.paused_until).toBe("2026-11-05T09:00:00.000Z");
+  });
+
+  it("interprets a zone-less wall reading as IST wall time", () => {
+    // 14:30 IST wall = 09:00 UTC — never the server's local midnight math.
+    const pause = validatePauseInput({ mode: "until", until: "2026-11-05T14:30" }, now);
+    expect(pause.paused_until).toBe("2026-11-05T09:00:00.000Z");
+    expect(pause.timezone).toBe("Asia/Kolkata");
   });
 
   it("rejects past dates, bad ranges, and long pauses", () => {
@@ -108,9 +144,6 @@ describe("validatePauseInput", () => {
       validatePauseInput({ mode: "until", until: "not-a-date" }, now),
     ).toThrow(/understood/);
     expect(() => validatePauseInput({ mode: "someday" }, now)).toThrow(/today/);
-    expect(() => validatePauseInput({ mode: "today", timezone: "Mars/Olympus" }, now)).toThrow(
-      /Unknown timezone/,
-    );
   });
 });
 
@@ -130,6 +163,18 @@ describe("validateTableConfig", () => {
     // Round robin ignores weights (stored 0).
     expect(valid.assignees.map((a) => a.weight)).toEqual([0, 0]);
     expect(valid.assignees[1].user_id).toBeNull();
+  });
+
+  it("normalizes any supplied timezone to IST", () => {
+    for (const timezone of [undefined, "UTC", "Asia/Kolkata", "America/New_York"]) {
+      const valid = validateTableConfig({
+        enabled: false,
+        mode: "round_robin",
+        timezone,
+        assignees: [],
+      });
+      expect(valid.timezone).toBe("Asia/Kolkata");
+    }
   });
 
   it("requires exact 100% across ACTIVE percentage members", () => {

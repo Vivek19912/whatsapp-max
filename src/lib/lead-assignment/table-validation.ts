@@ -6,16 +6,26 @@
 // invalid input identically) and the settings dialog (which
 // validates before sending). No I/O, no database.
 //
-// Timezone model: there is no app-configured zone in this
-// codebase (dates are stored as UTC TIMESTAMPTZ; display is
-// viewer-local). Each assignment config therefore stores its own
-// explicit IANA timezone (default "UTC"). "Pause for today" ends
-// at local midnight in THAT zone — never an arbitrary server
-// midnight — and "Paused until <date>" is rendered in the same
-// zone, so the administrator always sees what the engine enforces.
+// Timezone model: assignment is India-only. Every table uses the
+// single IANA zone "Asia/Kolkata" (IST) for pause math and
+// availability display — "Pause for today" ends at IST midnight,
+// and "Paused until <date>" is rendered in IST. Stored pause
+// windows are absolute UTC instants, so normalizing a legacy
+// per-table zone to IST never shifts an active pause; only future
+// calculations and labels use IST. The stored `timezone` column
+// (when present from older saves) is normalized to IST on read
+// and on save — no migration, no data loss.
 // ============================================================
 
 export type TableAssignmentMode = "round_robin" | "percentage";
+
+/**
+ * The only timezone assignment uses, everywhere: UI, validation,
+ * pause math, and display. A fixed IANA name (never a hardcoded
+ * UTC+5:30 offset) so date boundaries resolve through the zone
+ * database.
+ */
+export const ASSIGNMENT_TIMEZONE = "Asia/Kolkata";
 
 export interface TableAssigneeInput {
   /** Internal team member. Null/undefined = external-only recipient. */
@@ -43,6 +53,11 @@ export interface ValidTableAssignee {
 export interface TableConfigInput {
   enabled?: unknown;
   mode?: unknown;
+  /**
+   * Legacy per-table zone. Ignored: every table normalizes to
+   * {@link ASSIGNMENT_TIMEZONE} on read and on save, so older
+   * saved values keep working without a migration.
+   */
   timezone?: unknown;
   whatsapp_template_name?: unknown;
   whatsapp_template_language?: unknown;
@@ -66,6 +81,10 @@ export interface PauseInput {
   until?: unknown;
   reason?: unknown;
   scope?: unknown;
+  /**
+   * Legacy zone override. Ignored: pauses always compute in
+   * {@link ASSIGNMENT_TIMEZONE}, so older callers keep working.
+   */
   timezone?: unknown;
 }
 
@@ -148,15 +167,22 @@ export function zoneOffsetMs(zone: string, at: Date = new Date()): number {
   const parts = dtf.formatToParts(at);
   const get = (type: string): string =>
     parts.find((p) => p.type === type)?.value ?? "";
+  // The wall reading resolves whole seconds only, so `at` is
+  // floored to the second first: otherwise a millisecond component
+  // leaks into the offset and every derived instant ("today"
+  // midnight, wall-clock "until") lands up to a second late.
+  const atSec = at.getTime() - (((at.getTime() % 1000) + 1000) % 1000);
   const asUtc = Date.parse(
     `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}Z`,
   );
-  return asUtc - at.getTime();
+  return asUtc - atSec;
 }
 
 /**
- * "Paused until <date>" label in the config's zone, e.g.
- * "Paused until 29 October". Pure.
+ * "Paused until <date>" label in the given zone, e.g.
+ * "Paused until 29 October". Callers always pass
+ * {@link ASSIGNMENT_TIMEZONE}; the parameter stays explicit so
+ * the pure formatter remains zone-agnostic and testable. Pure.
  */
 export function formatPausedUntil(pausedUntil: string, timezone: string): string {
   const at = new Date(pausedUntil);
@@ -167,6 +193,36 @@ export function formatPausedUntil(pausedUntil: string, timezone: string): string
     month: "long",
   }).format(at);
   return `Paused until ${label}`;
+}
+
+/**
+ * Interpret a zone-less wall-clock reading ("YYYY-MM-DDTHH:mm",
+ * as produced by `datetime-local` inputs) in the given IANA zone
+ * and return the UTC instant. Offset-less input is the only form
+ * that needs a zone; explicit instants (trailing Z or numeric
+ * offset) are absolute and returned verbatim. Pure.
+ *
+ * Offset resolution mirrors `endOfTodayUtc` (wall reading minus
+ * the zone's own offset, refined with a second pass so a
+ * DST-bearing zone converges). IST has no DST, so the first pass
+ * is already exact — the zone database, not a hardcoded +5:30,
+ * is the source of truth.
+ */
+export function wallClockInZoneToUtc(wall: string, zone: string, now: Date = new Date()): number {
+  try {
+    const m =
+      /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(
+        wall.trim(),
+      );
+    if (!m) return NaN;
+    const [, y, mo, d, h, mi, s = "00", ms = "000"] = m;
+    const asUtc = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s}.${ms}Z`);
+    if (Number.isNaN(asUtc)) return NaN;
+    const first = asUtc - zoneOffsetMs(zone, now);
+    return asUtc - zoneOffsetMs(zone, new Date(first));
+  } catch {
+    return NaN;
+  }
 }
 
 function cleanString(value: unknown, max: number): string | null {
@@ -258,13 +314,10 @@ export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
   if (mode !== "round_robin" && mode !== "percentage") {
     throw new Error("Choose Round Robin or Percentage-Based distribution.");
   }
-  const timezoneRaw =
-    typeof input.timezone === "string" && input.timezone.trim() !== ""
-      ? input.timezone.trim()
-      : "UTC";
-  if (!isValidTimezone(timezoneRaw)) {
-    throw new Error(`Unknown timezone "${timezoneRaw}". Use an IANA name like Asia/Kolkata.`);
-  }
+  // India-only: any supplied zone (including legacy per-table
+  // values) normalizes to IST. Stored `paused_until` instants are
+  // absolute UTC, so this never shifts an active pause.
+  const timezoneRaw = ASSIGNMENT_TIMEZONE;
   const templateName = cleanOptionalString(input.whatsapp_template_name, 120);
   const templateLanguage =
     cleanOptionalString(input.whatsapp_template_language, 32) ?? "en_US";
@@ -326,19 +379,20 @@ export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
 
 /**
  * Validate a pause/resume request and compute the UTC window end.
- * `now` is injectable for tests. Never adjusts input.
+ * `now` is injectable for tests. The zone is always
+ * {@link ASSIGNMENT_TIMEZONE}: "today" ends at IST midnight,
+ * "days" keeps its duration semantics from now, and a zone-less
+ * "until" wall reading is interpreted as IST wall time (explicit
+ * instants with Z/offset stay absolute). Never adjusts input.
  */
 export function validatePauseInput(input: PauseInput, now: Date = new Date()): ValidPause {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Invalid pause request.");
   }
-  const timezone =
-    typeof input.timezone === "string" && input.timezone.trim() !== ""
-      ? input.timezone.trim()
-      : "UTC";
-  if (!isValidTimezone(timezone)) {
-    throw new Error(`Unknown timezone "${timezone}".`);
-  }
+  // India-only: any supplied zone (including legacy values or
+  // typos) normalizes to IST instead of rejecting the request,
+  // so existing configurations keep working.
+  const timezone = ASSIGNMENT_TIMEZONE;
   const scope = input.scope ?? "table";
   if (scope !== "table" && scope !== "account") {
     throw new Error("Pause scope must be this table or the whole account.");
@@ -374,7 +428,12 @@ export function validatePauseInput(input: PauseInput, now: Date = new Date()): V
     if (typeof input.until !== "string" || input.until.trim() === "") {
       throw new Error("Choose the date and time the pause ends.");
     }
-    const at = Date.parse(input.until);
+    const raw = input.until.trim();
+    // Explicit instants (Z suffix or numeric offset) are absolute
+    // and keep their meaning; a bare wall reading from a
+    // `datetime-local` input is IST wall time.
+    const hasExplicitOffset = /(Z|[+-]\d{2}:?\d{2})$/.test(raw);
+    const at = hasExplicitOffset ? Date.parse(raw) : wallClockInZoneToUtc(raw, timezone, now);
     if (Number.isNaN(at)) {
       throw new Error("The resume date and time could not be understood.");
     }

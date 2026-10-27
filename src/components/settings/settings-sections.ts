@@ -79,7 +79,7 @@ export const SECTION_META: Record<SettingsSection, SectionMeta> = {
   appearance: { id: 'appearance', label: 'Appearance', icon: Palette, group: 'account' },  notifications: { id: 'notifications', label: 'Notifications', icon: Bell, group: 'account' },
   'travel-crm': { id: 'travel-crm', label: 'Travel Agency CRM', icon: ArrowLeftRight, group: 'integrations' },
   'meta-lead-ads': { id: 'meta-lead-ads', label: 'Meta', icon: Megaphone, group: 'integrations' },
-  'google-sheets-meta': { id: 'google-sheets-meta', label: 'Google Sheets — Meta Lead Ads', icon: Table2, group: 'integrations' },
+  'google-sheets-meta': { id: 'google-sheets-meta', label: 'Google Sheets — Meta Lead Ads', icon: Table2, group: 'integrations', hideFromRail: true },
   whatsapp: { id: 'whatsapp', label: 'WhatsApp', icon: PlugZap, group: 'workspace' },
   'reminder-number': { id: 'reminder-number', label: 'Reminder WhatsApp Number', icon: Smartphone, group: 'workspace' },
   'call-recording': { id: 'call-recording', label: 'Call Recording', icon: Mic, group: 'account' },

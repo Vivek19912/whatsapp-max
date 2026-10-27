@@ -89,13 +89,30 @@ describe("workspace redesign — header and toolbar", () => {
     expect(header).toContain('placeholder="Search tables');
     expect(header).toContain("No tables match");
   });
+
+  it("shows no table-type badge for Meta Lead Ads tables, keeps Flow badge", () => {
+    const page = src("src/app/(dashboard)/workspace/page.tsx");
+    // The Workspace title and table selector stay wired; only the
+    // Meta badge value is gone — Flow tables keep theirs.
+    expect(page).toContain("WorkspacePageHeader");
+    expect(page).toContain("<WorkspaceTableSelector");
+    expect(page).not.toContain("? 'Meta Lead Ads'");
+    expect(page).toContain("? 'Flow'");
+  });
 });
 
 describe("workspace redesign — controls row and filters", () => {
-  it("uses one h-9 control height across search, filters, columns, and actions", () => {
+  it("uses one h-9 control height across search and the single actions menu", () => {
     const page = src("src/app/(dashboard)/workspace/page.tsx");
     expect(page).toContain("WorkspaceSearchField");
-    expect(page).toContain("flex flex-wrap items-center gap-2");
+    // One icon is the only visible control: search beside the menu,
+    // no wrapping toolbar row.
+    expect(page).toContain("WorkspaceActionsMenu");
+    expect(page).toContain("flex flex-row items-center gap-2");
+    // The menu trigger shares the workspace control token, and the
+    // embedded Filters/Columns triggers keep theirs.
+    const menu = src("src/components/workspace/workspace-actions-menu.tsx");
+    expect(menu).toContain("WS_CONTROL_BUTTON");
     const filters = src("src/components/workspace/workspace-filters.tsx");
     expect(filters).toContain("WS_CONTROL_BUTTON");
     const columns = src("src/components/workspace/columns-menu.tsx");
@@ -147,13 +164,19 @@ describe("workspace redesign — dense sticky grid", () => {
 });
 
 describe("workspace redesign — assignment dialog structure", () => {
-  it("uses radio cards for distribution and a searchable timezone", () => {
+  it("uses radio cards for distribution with an India-only timezone", () => {
     const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
     expect(dialog).toContain("RadioGroup");
     expect(dialog).toContain('value="round_robin"');
     expect(dialog).toContain('value="percentage"');
+    // Roster linking keeps its search; the timezone dropdown,
+    // search field, and options list are gone — IST is fixed.
     expect(dialog).toContain("SearchableSelect");
-    expect(dialog).toContain("Asia/Kolkata");
+    expect(dialog).not.toContain("Table timezone");
+    expect(dialog).not.toContain("Search timezones");
+    expect(dialog).not.toContain("COMMON_TIMEZONES");
+    expect(dialog).toContain("ASSIGNMENT_TIMEZONE");
+    expect(dialog).toContain("IST");
   });
 
   it("shows assignees as a table on desktop and cards on mobile", () => {

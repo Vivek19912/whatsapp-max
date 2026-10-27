@@ -5,16 +5,15 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { ExternalLink, Inbox, MessageCircle, Plus, Table2, UserPlus } from 'lucide-react';
+import { Inbox, Table2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   WorkspacePageHeader,
   WorkspaceSearchField,
   WorkspaceTableSelector,
-  WorkspaceToolbar,
 } from '@/components/workspace/workspace-header';
-import { WS_CONTROL_BUTTON } from '@/components/workspace/workspace-tokens';
+import { WorkspaceActionsMenu } from '@/components/workspace/workspace-actions-menu';
 import {
   Sheet,
   SheetContent,
@@ -87,7 +86,6 @@ import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { MetaTableWhatsappDialog } from '@/components/workspace/meta-table-whatsapp-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
-import { resolveSpreadsheetOpenUrl } from '@/lib/meta-lead-sheets/sheets-client';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
@@ -361,18 +359,15 @@ export default function WorkspacePage() {
   const [refreshSeq, setRefreshSeq] = useState(0);
   const [addColumnOpen, setAddColumnOpen] = useState(false);
   // Per-table Google Sheets configuration dialog (Meta Lead Ads
-  // tables only; Flow Tables never see it).
+  // tables only; Flow Tables never see it). The dialog component
+  // stays mounted so the saved configuration, import workflow,
+  // and backend functionality are preserved — only the visible
+  // Workspace toolbar entry points were removed.
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
   const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false);
   // Per-table WhatsApp auto-send dialog (Meta Lead Ads tables
   // only; Flow Tables never see it).
   const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
-  // This Meta table's saved spreadsheet URL for the Workspace
-  // open-sheet action. Null until the table-scoped config loads
-  // (or when no spreadsheet is saved) — the button only renders
-  // with a valid URL, so the configuration dialog is the path
-  // otherwise.
-  const [sheetUrl, setSheetUrl] = useState<string | null>(null);
   const [editingField, setEditingField] = useState<WorkspaceField | null>(null);
   // Workspace filters (Date over Submission Time + Assigned To over
   // the live roster). Applied state only — the panel owns its
@@ -930,50 +925,6 @@ export default function WorkspacePage() {
   const overridesForRequest =
     valueOverrides.key === requestKey ? valueOverrides.map : {};
 
-  // This Meta table's saved spreadsheet URL for the Workspace
-  // open-sheet action — read from the SAME table-scoped config
-  // endpoint the dialog saves (never another table's). Refetched
-  // per selected table AND whenever the configuration dialog
-  // closes, with the previous URL cleared first: saving a new
-  // spreadsheet (e.g. right after Create Spreadsheet) otherwise
-  // leaves this button pointing at the previously connected
-  // sheet until a full page refresh. The dialog's unsaved draft
-  // never touches this state, so the active sheet only changes
-  // after a successful save. Best-effort like the roster above:
-  // failures leave null (no button) and the configuration dialog
-  // remains the path. Owner-gated like the buttons themselves.
-  useEffect(() => {
-    setSheetUrl(null);
-    if (!isMetaTable || !isOwner || !flowId) return;
-    const ctrl = new AbortController();
-    fetch(
-      `/api/integrations/meta-lead-ads/sheets/tables/${encodeURIComponent(flowId)}/config`,
-      { signal: ctrl.signal, cache: 'no-store' }
-    )
-      .then(async (res) => {
-        if (!res.ok || ctrl.signal.aborted) return;
-        const json = (await res.json().catch(() => null)) as {
-          status?: {
-            spreadsheetUrl?: unknown;
-            spreadsheetId?: unknown;
-          };
-        } | null;
-        if (ctrl.signal.aborted || !json || typeof json !== 'object') return;
-        const status = json.status;
-        setSheetUrl(
-          resolveSpreadsheetOpenUrl({
-            spreadsheetUrl: status?.spreadsheetUrl ?? null,
-            spreadsheetId: status?.spreadsheetId ?? null,
-          })
-        );
-      })
-      .catch(() => {});
-    return () => ctrl.abort();
-    // sheetDialogOpen: refetch on close so a just-saved spreadsheet
-    // takes effect immediately (the refetch on open is harmless —
-    // the dialog covers the header while open).
-  }, [isMetaTable, isOwner, flowId, sheetDialogOpen]);
-
   const reloadTable = useCallback(() => {
     setRefreshSeq((n) => n + 1);
   }, []);
@@ -1512,8 +1463,10 @@ export default function WorkspacePage() {
             : 'One live table per flow — every run, completed or not.'
         }
         kindLabel={
+          /* Meta Lead Ads tables show no badge beside the Workspace
+             title; Flow Tables keep their badge exactly as before. */
           payload?.meta.kind === 'meta_lead_ads'
-            ? 'Meta Lead Ads'
+            ? null
             : payload
               ? 'Flow'
               : null
@@ -1526,57 +1479,6 @@ export default function WorkspacePage() {
               onSelect={selectFlow}
               wide={isMetaTable}
               displayName={flowDisplayName}
-            />
-          ) : null
-        }
-        toolbar={
-          isOwner && flowId ? (
-            <WorkspaceToolbar
-              primary={
-                isMetaTable
-                  ? [
-                      {
-                        key: 'sheet-config',
-                        label: 'Configure Sheet',
-                        icon: Table2,
-                        onClick: () => setSheetDialogOpen(true),
-                      },
-                      {
-                        key: 'wa-autosend',
-                        label: 'Auto-send WhatsApp',
-                        icon: MessageCircle,
-                        onClick: () => setWhatsappDialogOpen(true),
-                      },
-                      {
-                        key: 'assignment',
-                        label: 'Assignment',
-                        icon: UserPlus,
-                        onClick: () => setAssignmentDialogOpen(true),
-                      },
-                    ]
-                  : [
-                      {
-                        key: 'assignment',
-                        label: 'Assignment',
-                        icon: UserPlus,
-                        onClick: () => setAssignmentDialogOpen(true),
-                      },
-                    ]
-              }
-              secondary={
-                isMetaTable && sheetUrl
-                  ? [
-                      {
-                        key: 'open-sheet',
-                        label: 'Open Sheet',
-                        icon: ExternalLink,
-                        ariaLabel: "Open this table's spreadsheet in a new tab",
-                        onClick: () =>
-                          window.open(sheetUrl, '_blank', 'noopener,noreferrer'),
-                      },
-                    ]
-                  : []
-              }
             />
           ) : null
         }
@@ -1658,70 +1560,79 @@ export default function WorkspacePage() {
           )}
 
           <div className="flex flex-col gap-2">
-            <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+            <div className="flex flex-row items-center gap-2">
               <div className="min-w-0 flex-1 lg:max-w-sm">
                 <WorkspaceSearchField
                   value={search}
                   onChange={setSearch}
                 />
               </div>
-              {/* Table utilities: wrap cleanly on small screens without ever
-                  scrolling the page itself sideways (the grid keeps its own
-                  scroll viewport). All controls share one h-9 height. */}
-              <div className="flex flex-wrap items-center gap-2 lg:ml-auto lg:justify-end">
-                <WorkspaceFilters
-                  members={teamMembers}
-                  appliedDate={appliedDate}
-                  appliedAssignee={appliedAssignee}
-                  appliedColumns={appliedColumns}
-                  columnOptions={columnFilterOptions}
-                  onApply={applyFilters}
-                />
-                <ColumnsMenu
-                  flowId={flowId}
-                  flowColumns={payload?.columns ?? []}
-                  customFields={customFieldsScoped}
-                  hiddenIds={visibility.hiddenIds}
-                  onToggleVisibility={visibility.toggle}
-                  onShowAll={visibility.showAll}
-                  onReset={visibility.reset}
-                  onEditField={(f) => {
-                    setEditingField(f);
+              {/* Single actions menu: the only permanently visible
+                  toolbar control for every secondary Workspace
+                  action. Search and the table selector stay visible;
+                  every tool below keeps its existing handler,
+                  permissions, and behavior — the menu only groups
+                  their entry points. Never reintroduce sheet
+                  actions here. */}
+              <div className="flex shrink-0 items-center lg:ml-auto">
+                <WorkspaceActionsMenu
+                  filters={
+                    <WorkspaceFilters
+                      members={teamMembers}
+                      appliedDate={appliedDate}
+                      appliedAssignee={appliedAssignee}
+                      appliedColumns={appliedColumns}
+                      columnOptions={columnFilterOptions}
+                      onApply={applyFilters}
+                    />
+                  }
+                  columns={
+                    <ColumnsMenu
+                      flowId={flowId}
+                      flowColumns={payload?.columns ?? []}
+                      customFields={customFieldsScoped}
+                      hiddenIds={visibility.hiddenIds}
+                      onToggleVisibility={visibility.toggle}
+                      onShowAll={visibility.showAll}
+                      onReset={visibility.reset}
+                      onEditField={(f) => {
+                        setEditingField(f);
+                        setAddColumnOpen(true);
+                      }}
+                      onChanged={reloadTable}
+                      headerColors={headerColors}
+                      onSaveHeaderColor={handleSaveHeaderColor}
+                      canCustomizeColors={canSendMessages}
+                      headerColorMap={headerMap}
+                    />
+                  }
+                  hiddenRows={
+                    canSendMessages ? (
+                      <HiddenRowsMenu
+                        hidden={hiddenRows}
+                        pendingIds={rowActionPending}
+                        restoreAllPending={rowActionPending.has('__all__')}
+                        onRestore={handleRestoreRow}
+                        onRestoreAll={handleRestoreAllHidden}
+                      />
+                    ) : undefined
+                  }
+                  travelCrmSettings={
+                    <TravelCrmSettings
+                      key={flowId ?? 'no-flow'}
+                      flowId={flowId}
+                      flowName={flowDisplayName(activeFlowName)}
+                    />
+                  }
+                  canAddColumn={canEditSettings}
+                  onAddColumn={() => {
+                    setEditingField(null);
                     setAddColumnOpen(true);
                   }}
-                  onChanged={reloadTable}
-                  headerColors={headerColors}
-                  onSaveHeaderColor={handleSaveHeaderColor}
-                  canCustomizeColors={canSendMessages}
-                  headerColorMap={headerMap}
-                />
-                {canSendMessages && (
-                  <HiddenRowsMenu
-                    hidden={hiddenRows}
-                    pendingIds={rowActionPending}
-                    restoreAllPending={rowActionPending.has('__all__')}
-                    onRestore={handleRestoreRow}
-                    onRestoreAll={handleRestoreAllHidden}
-                  />
-                )}
-                {canEditSettings && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => {
-                      setEditingField(null);
-                      setAddColumnOpen(true);
-                    }}
-                    className={cn(WS_CONTROL_BUTTON, 'shrink-0 border-primary/30 bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground')}
-                  >
-                    <Plus className="h-4 w-4" aria-hidden />
-                    Add Column
-                  </Button>
-                )}
-                <TravelCrmSettings
-                  key={flowId ?? 'no-flow'}
-                  flowId={flowId}
-                  flowName={flowDisplayName(activeFlowName)}
+                  showAutoSend={isMetaTable && isOwner}
+                  onOpenAutoSend={() => setWhatsappDialogOpen(true)}
+                  showAssignment={isOwner}
+                  onOpenAssignment={() => setAssignmentDialogOpen(true)}
                 />
               </div>
             </div>
@@ -1895,10 +1806,11 @@ export default function WorkspacePage() {
                             </TableHead>
                             {showDialAfter && (
                       <TableHead
-                        aria-label="Dial"
-                        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                        scope="col"
+                        className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+                        style={{ minWidth: 112, width: 128 }}
                       >
-                                Dial
+                                <span className="block whitespace-nowrap">Dial</span>
                               </TableHead>
                             )}
                           </Fragment>
@@ -2051,16 +1963,18 @@ export default function WorkspacePage() {
                             </TableCell>
                             {showDialAfter && (
                       <TableCell
-                        aria-label="Dial"
-                        className="max-w-36 truncate border-r border-border px-2 py-1.5 whitespace-nowrap last:border-r-0"
+                        className="border-r border-border px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
+                        style={{ minWidth: 112, width: 128 }}
                         onClick={(e) => e.stopPropagation()}
                       >
-                                <DialAction
-                                  phone={row.phone}
-                                  contactId={row.contactId}
-                                  flowId={flowId}
-                                  runId={row.runId}
-                                />
+                                <span className="inline-flex justify-center">
+                                  <DialAction
+                                    phone={row.phone}
+                                    contactId={row.contactId}
+                                    flowId={flowId}
+                                    runId={row.runId}
+                                  />
+                                </span>
                               </TableCell>
                             )}
                           </Fragment>

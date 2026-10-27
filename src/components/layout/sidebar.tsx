@@ -61,7 +61,7 @@ export const navItems: NavItem[] = [
   { href: "/recordings", label: "Recordings", icon: Mic },
   { href: "/flows", label: "Flows", icon: Workflow, beta: false },
   { href: "/followups", label: "Reminders", icon: CalendarClock },
-  { href: "/workspace", label: "Workspace", icon: Table2, beta: true },
+  { href: "/workspace", label: "Workspace", icon: Table2 },
   { href: "/broadcasts", label: "Bulk Messages", icon: Radio },
   { href: "/quick-replies", label: "Quick Replies", icon: MessageSquareText },
   { href: "/automations", label: "Automations", icon: Zap },

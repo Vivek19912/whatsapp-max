@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pause, Play, Plus, Trash2, UserPlus } from "lucide-react";
+import { Loader2, Pause, Play, Plus, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -33,60 +33,137 @@ import {
   ConfigStatusBadge,
 } from "./config-dialog";
 import { SearchableSelect } from "./searchable-select";
+import { ASSIGNMENT_TIMEZONE } from "@/lib/lead-assignment/table-validation";
 
-/** Common IANA zones for quick picking; full list follows. */
-const COMMON_TIMEZONES = [
-  "UTC",
-  "Asia/Kolkata",
-  "Asia/Dubai",
-  "Asia/Singapore",
-  "Europe/London",
-  "Europe/Berlin",
-  "America/New_York",
-  "America/Chicago",
-  "America/Los_Angeles",
-  "Australia/Sydney",
-];
-
-function allTimezones(): string[] {
-  try {
-    const supported = (Intl as unknown as {
-      supportedValuesOf?: (kind: string) => string[];
-    }).supportedValuesOf;
-    if (typeof supported === "function") {
-      const zones = supported.call(Intl, "timeZone");
-      if (Array.isArray(zones) && zones.length > 0) return zones;
-    }
-  } catch {
-    // Fall through to the curated list below.
-  }
-  return COMMON_TIMEZONES;
-}
-
-/** "Paused until 29 Oct, 5:00 PM" in the table's zone (display only). */
-function formatPausedUntilFull(iso: string, timeZone: string): string {
-  try {
+/** "29 Oct, 5:00 PM IST" from a stored UTC instant (display only). */
+function formatPausedUntilFull(iso: string): string {  try {
     const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
+      timeZone: ASSIGNMENT_TIMEZONE,
       day: "numeric",
       month: "short",
       hour: "numeric",
       minute: "2-digit",
     }).formatToParts(new Date(iso));
     const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
-    return `${get("day")} ${get("month")}, ${get("hour")}:${get("minute")} ${get("dayPeriod")}`.replace("  ", " ");
+    return `${get("day")} ${get("month")}, ${get("hour")}:${get("minute")} ${get("dayPeriod")} IST`.replace("  ", " ");
   } catch {
     return iso;
   }
 }
 
 /**
+ * Saved assignees for per-row lookups. The unconfigured-table GET
+ * response omits `assignees`; anything iterating it must go
+ * through here instead of crashing the render the moment a local
+ * draft exists. Pure.
+ */
+export function payloadAssignees(
+  payload: AssignmentPayload | null | undefined,
+): AssigneeView[] {
+  return Array.isArray(payload?.assignees) ? payload.assignees : [];
+}
+
+/** One send-eligible WhatsApp template from the templates endpoint. */
+export interface AssignmentTemplateOption {
+  name: string;
+  language: string;
+  status: string;
+  /** Meta category as stored by the sync (`Utility`/`Marketing`/`Authentication`); null when unknown. */
+  category: string | null;
+}
+
+/**
+ * Display category for a template option: the actual stored
+ * category uppercased to Meta's style (`UTILITY`, `MARKETING`,
+ * `AUTHENTICATION`). Anything missing or unrecognized falls back
+ * to "Category unavailable" — never guessed. Pure.
+ */
+export function formatTemplateCategory(category: unknown): string {
+  const normalized = typeof category === "string" ? category.trim().toUpperCase() : "";
+  if (
+    normalized === "UTILITY" ||
+    normalized === "MARKETING" ||
+    normalized === "AUTHENTICATION"
+  ) {
+    return normalized;
+  }
+  return "Category unavailable";
+}
+
+/**
+ * Opaque selector value for a (name, language) template identity.
+ * Names and languages never contain NUL, so the join is
+ * unambiguous without escaping. Pure.
+ */
+const TEMPLATE_KEY_SEP = "\0";
+
+export function encodeTemplateKey(template: { name: string; language: string }): string {
+  return `${template.name}${TEMPLATE_KEY_SEP}${template.language}`;
+}
+
+/** Inverse of {@link encodeTemplateKey}; null when malformed. Pure. */
+export function decodeTemplateKey(value: string): { name: string; language: string } | null {
+  const sep = value.indexOf(TEMPLATE_KEY_SEP);
+  if (sep <= 0 || sep === value.length - 1) return null;
+  const name = value.slice(0, sep);
+  const language = value.slice(sep + 1);
+  if (!name || !language) return null;
+  return { name, language };
+}
+
+/**
+ * SearchableSelect options from endpoint rows: one entry per
+ * (name, language) pair (first wins on duplicates), label =
+ * template name, hint = `CATEGORY · language · status`. The
+ * selector filters over label, value, and hint, so name,
+ * language, and category search all work. Pure.
+ */
+export function toTemplateOptions(
+  templates: readonly AssignmentTemplateOption[],
+): Array<{ value: string; label: string; hint: string }> {
+  const seen = new Set<string>();
+  const options: Array<{ value: string; label: string; hint: string }> = [];
+  for (const t of templates) {
+    if (typeof t.name !== "string" || t.name === "") continue;
+    if (typeof t.language !== "string" || t.language === "") continue;
+    const value = encodeTemplateKey({ name: t.name, language: t.language });
+    if (seen.has(value)) continue;
+    seen.add(value);
+    options.push({
+      value,
+      label: t.name,
+      hint: `${formatTemplateCategory(t.category)} · ${t.language} · ${t.status}`,
+    });
+  }
+  return options;
+}
+
+/**
+ * True when the dialog's current (name, language) matches a loaded
+ * approved template. A saved template that no longer matches —
+ * renamed, removed, or unapproved — needs a valid replacement.
+ * Pure.
+ */
+export function isTemplateSelectionValid(
+  templates: readonly AssignmentTemplateOption[] | null,
+  name: string,
+  language: string,
+): boolean {
+  if (name.trim() === "") return true;
+  if (templates === null) return true;
+  const trimmedName = name.trim();
+  const trimmedLanguage = language.trim();
+  return templates.some((t) => t.name === trimmedName && t.language === trimmedLanguage);
+}
+
+/**
  * Per-table Lead Assignment settings (Meta Lead Ads tables and
  * Flow tables alike). Opened from the Workspace header via
  * "Assignment". One compact single-panel dialog: status,
- * distribution method, timezone, assignees, pauses, and
- * notification preferences live in sections (no step flow).
- * Every read and write is scoped to this table server-side.
+ * distribution method, assignees, pauses, and notification
+ * preferences live in sections (no step flow). All times are
+ * Indian Standard Time. Every read and write is scoped to this
+ * table server-side.
  */
 
 interface AssigneeView {
@@ -184,9 +261,14 @@ export function TableAssignmentDialog({
   const [roster, setRoster] = useState<RosterMember[]>([]);
   const [enabled, setEnabled] = useState(false);
   const [mode, setMode] = useState<"round_robin" | "percentage">("round_robin");
-  const [timezone, setTimezone] = useState("UTC");
   const [templateName, setTemplateName] = useState("");
-  const [templateLanguage, setTemplateLanguage] = useState("en_US");
+  const [templateLanguage, setTemplateLanguage] = useState("");
+  // Send-eligible templates for the picker: null until the first
+  // load resolves (unknown), [] when the account has none.
+  const [templates, setTemplates] = useState<readonly AssignmentTemplateOption[] | null>(null);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [senderConnected, setSenderConnected] = useState<boolean | null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [form, setForm] = useState<Draft>(emptyDraft());
@@ -238,13 +320,22 @@ export function TableAssignmentDialog({
         ),
       ]);
       const data = assignJson as unknown as AssignmentPayload;
-      setPayload(data);
+      // Normalize once at the boundary: unconfigured tables arrive
+      // without an `assignees` key, and every render lookup below
+      // assumes an array.
+      const assignees = payloadAssignees(data);
+      setPayload({ ...data, assignees });
       setEnabled(data.config?.enabled ?? false);
       setMode(data.config?.mode ?? "round_robin");
-      setTimezone(data.config?.timezone ?? "UTC");
       setTemplateName(data.config?.whatsapp_template_name ?? "");
-      setTemplateLanguage(data.config?.whatsapp_template_language ?? "en_US");
-      setDrafts((data.assignees ?? []).map(toDraft));
+      // Show a language only when a template is saved; the save
+      // path falls back to "en_US" for the empty state.
+      setTemplateLanguage(
+        data.config?.whatsapp_template_name
+          ? (data.config?.whatsapp_template_language ?? "")
+          : "",
+      );
+      setDrafts(assignees.map(toDraft));
       const members = (rosterJson as { members?: RosterMember[] }).members ?? [];
       setRoster(members);
     } catch (err) {
@@ -254,6 +345,55 @@ export function TableAssignmentDialog({
     }
   }, [flowId, toDraft]);
 
+  /**
+   * Send-eligible templates for this account (APPROVED only,
+   * verified server-side). Runs on every open so a newly synced
+   * template is pickable without stale state; failures leave the
+   * previous list (if any) in place with a retry affordance.
+   */
+  const loadTemplates = useCallback(async () => {
+    setTemplatesLoading(true);
+    setTemplatesError(null);
+    try {
+      const json = (await readJson(
+        await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment/templates`, {
+          cache: "no-store",
+        }),
+      )) as {
+        templates?: Array<{ name?: unknown; language?: unknown; status?: unknown; category?: unknown }>;
+        sender_connected?: unknown;
+      };
+      const rows = Array.isArray(json.templates) ? json.templates : [];
+      setTemplates(
+        rows
+          .filter(
+            (t): t is { name: string; language: string; status: string; category: string | null } =>
+              !!t &&
+              typeof t.name === "string" &&
+              t.name !== "" &&
+              typeof t.language === "string" &&
+              t.language !== "" &&
+              typeof t.status === "string" &&
+              t.status !== "" &&
+              (t.category === null || t.category === undefined || typeof t.category === "string"),
+          )
+          .map((t) => ({
+            name: t.name,
+            language: t.language,
+            status: t.status,
+            category: typeof t.category === "string" ? t.category : null,
+          })),
+      );
+      setSenderConnected(json.sender_connected === true);
+    } catch (err) {
+      setTemplatesError(
+        err instanceof Error ? err.message : "Could not load WhatsApp templates.",
+      );
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }, [flowId]);
+
   useEffect(() => {
     if (open) {
       setEditingKey(null);
@@ -262,21 +402,22 @@ export function TableAssignmentDialog({
       setShowNotifications(false);
       setNotifications(null);
       void load();
+      void loadTemplates();
     }
-  }, [open, load]);
+  }, [open, load, loadTemplates]);
 
   const rosterById = useMemo(() => {
     return new Map(roster.map((m) => [m.user_id, m]));
   }, [roster]);
 
-  const timezoneOptions = useMemo(() => {
-    const zones = allTimezones();
-    const ordered = [
-      ...COMMON_TIMEZONES.filter((z) => zones.includes(z)),
-      ...zones.filter((z) => !COMMON_TIMEZONES.includes(z)),
-    ];
-    return ordered.map((z) => ({ value: z, label: z }));
-  }, []);
+  // Saved rows by id for the per-draft status cells below. Built
+  // from the normalized payload, so local drafts on an
+  // unconfigured table (no `assignees` key in the GET) look up
+  // safely instead of crashing.
+  const savedById = useMemo(
+    () => new Map(payloadAssignees(payload).map((a) => [a.id, a] as const)),
+    [payload],
+  );
 
   const rosterOptions = useMemo(
     () =>
@@ -298,6 +439,36 @@ export function TableAssignmentDialog({
     mode === "percentage" && drafts.some((d) => d.is_active) && activeWeightTotal !== 100
       ? `Active percentages must total exactly 100% (currently ${activeWeightTotal}%).`
       : null;
+
+  const templateOptions = useMemo(() => toTemplateOptions(templates ?? []), [templates]);
+
+  // Selector value for the current (name, language); empty when no
+  // template is set so the placeholder shows.
+  const templateKey =
+    templateName.trim() === ""
+      ? ""
+      : encodeTemplateKey({ name: templateName.trim(), language: templateLanguage.trim() });
+
+  // A saved template that vanished from the approved list (renamed,
+  // removed, or unapproved) needs a valid replacement before the
+  // settings can be saved with WhatsApp alerts enabled. Unknown
+  // lists (not yet loaded / failed) never block saving.
+  const templateStale =
+    templateName.trim() !== "" &&
+    templates !== null &&
+    !isTemplateSelectionValid(templates, templateName, templateLanguage);
+
+  const selectTemplate = (value: string) => {
+    const parsed = decodeTemplateKey(value);
+    if (!parsed) return;
+    setTemplateName(parsed.name);
+    setTemplateLanguage(parsed.language);
+  };
+
+  const clearTemplate = () => {
+    setTemplateName("");
+    setTemplateLanguage("");
+  };
 
   const patchDraft = (key: string, patch: Partial<Draft>) => {
     setDrafts((prev) => prev.map((d) => (d.key === key ? { ...d, ...patch } : d)));
@@ -366,8 +537,15 @@ export function TableAssignmentDialog({
   };
 
   const save = async () => {
+    if (busy !== null) return;
     if (weightError) {
       toast.error(weightError);
+      return;
+    }
+    if (templateStale) {
+      const message = `Template "${templateName.trim()}" is no longer approved or available — choose a replacement before saving.`;
+      setSaveError(message);
+      toast.error(message);
       return;
     }
     setBusy("save");
@@ -380,7 +558,7 @@ export function TableAssignmentDialog({
           body: JSON.stringify({
             enabled,
             mode,
-            timezone: timezone.trim() || "UTC",
+            timezone: ASSIGNMENT_TIMEZONE,
             whatsapp_template_name: templateName.trim() || null,
             whatsapp_template_language: templateLanguage.trim() || "en_US",
             assignees: drafts.map((d) => ({
@@ -565,27 +743,6 @@ export function TableAssignmentDialog({
             </ConfigSection>
           </section>
 
-          <section aria-label="Timezone">
-            <ConfigSection
-              title="Timezone"
-              hint="Controls pause calculations (“Pause for today” ends at local midnight here) and how availability times are displayed."
-            >
-              <div className="flex w-full flex-col gap-1.5">
-                <Label htmlFor="assign-tz">Table timezone (IANA name)</Label>
-                <SearchableSelect
-                  value={timezoneOptions.some((o) => o.value === timezone) ? timezone : ""}
-                  options={timezoneOptions}
-                  onChange={(v) => setTimezone(v)}
-                  placeholder="Select a timezone…"
-                  searchPlaceholder="Search timezones…"
-                  emptyText="No matching timezone."
-                  ariaLabel="Table timezone"
-                  triggerClassName="h-9 font-mono text-[13px]"
-                />
-              </div>
-            </ConfigSection>
-          </section>
-
           <section aria-label="WhatsApp notifications">
             <ConfigSection
               title="WhatsApp notifications"
@@ -593,25 +750,84 @@ export function TableAssignmentDialog({
             >
               <div className="flex flex-col gap-3">
                     <div className="flex flex-col gap-1.5">
-                      <Label htmlFor="assign-wa-template">WhatsApp template (optional)</Label>
-                  <Input
-                    id="assign-wa-template"
-                    value={templateName}
-                    onChange={(e) => setTemplateName(e.target.value)}
-                    placeholder="new_lead_assigned"
-                    className="h-9"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="assign-wa-lang">Template language</Label>
-                  <Input
-                    id="assign-wa-lang"
-                    value={templateLanguage}
-                    onChange={(e) => setTemplateLanguage(e.target.value)}
-                    placeholder="en_US"
-                    className="h-9 max-w-48"
-                  />
-                </div>
+                      <Label>WhatsApp template (optional)</Label>
+                      {templatesLoading && templates === null ? (
+                        <div
+                          className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-sm text-muted-foreground"
+                          role="status"
+                        >
+                          <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                          Loading templates…
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <SearchableSelect
+                              value={templateKey}
+                              options={templateOptions}
+                              onChange={selectTemplate}
+                              placeholder="Select a template…"
+                              searchPlaceholder="Search templates…"
+                              emptyText={
+                                templatesError
+                                  ? "Could not load templates."
+                                  : "No approved templates found."
+                              }
+                              ariaLabel="WhatsApp template (optional)"
+                            />
+                          </div>
+                          {templateName.trim() !== "" ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={clearTemplate}
+                              aria-label="Clear template selection"
+                              className="h-9 shrink-0 px-2.5"
+                            >
+                              Clear
+                            </Button>
+                          ) : null}
+                        </div>
+                      )}
+                      {templatesError ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p role="alert" className="text-xs text-destructive">
+                            {templatesError}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void loadTemplates()}
+                            disabled={templatesLoading}
+                          >
+                            Retry
+                          </Button>
+                        </div>
+                      ) : null}
+                      {templates !== null &&
+                      templateOptions.length === 0 &&
+                      !templatesError ? (
+                        <p className="text-xs text-muted-foreground">
+                          No APPROVED templates for this account yet — sync them from
+                          WhatsApp Templates.
+                        </p>
+                      ) : null}
+                      {senderConnected === false ? (
+                        <p className="text-xs text-muted-foreground">
+                          WhatsApp sender is not connected for this account — connect it
+                          in Settings → WhatsApp before relying on these alerts.
+                        </p>
+                      ) : null}
+                      {templateStale ? (
+                        <p role="alert" className="text-xs font-medium text-amber-600 dark:text-amber-400">
+                          Saved template “{templateName.trim()}” (
+                          {templateLanguage.trim() || "unknown language"}) is no longer
+                          approved or available — choose a replacement below.
+                        </p>
+                      ) : null}
+                    </div>
               </div>
             </ConfigSection>
           </section>
@@ -658,7 +874,7 @@ export function TableAssignmentDialog({
                     </TableHeader>
                     <TableBody>
                       {drafts.map((d) => {
-                        const saved = payload?.assignees.find((a) => a.id === d.key);
+                        const saved = savedById.get(d.key);
                         return (
                           <TableRow key={d.key} className={cn(!d.is_active && "opacity-60")}>
                             <TableCell>
@@ -705,7 +921,7 @@ export function TableAssignmentDialog({
                             </span>
                             {saved.paused_until && (
                               <span className="text-[11px] tabular-nums text-muted-foreground">
-                                until {formatPausedUntilFull(saved.paused_until, timezone)}
+                                until {formatPausedUntilFull(saved.paused_until)}
                               </span>
                             )}
                           </div>
@@ -762,7 +978,7 @@ export function TableAssignmentDialog({
                   </div>
                   <div className="flex flex-col gap-2 md:hidden">
                     {drafts.map((d) => {
-                      const saved = payload?.assignees.find((a) => a.id === d.key);
+                      const saved = savedById.get(d.key);
                       return (
                         <div
                           key={d.key}
@@ -970,17 +1186,20 @@ export function TableAssignmentDialog({
 
                 {pauseFor &&
                   (() => {
-                    const target = payload?.assignees.find((a) => a.id === pauseFor);
+                    const target = savedById.get(pauseFor);
                     return (
                       <Card className="border-dashed">
                         <CardContent className="flex flex-col gap-3 pt-4">
                           <p className="text-sm font-medium">
                             {target ? `Pause ${target.display_name}` : "Pause assignee"}
                           </p>
+                          <p className="text-xs text-muted-foreground">
+                            All times are in Indian Standard Time (IST).
+                          </p>
                       {target?.paused_until ? (
                         <p className="text-muted-foreground text-xs">
                           Current: Paused until{" "}
-                          {formatPausedUntilFull(target.paused_until, timezone)}
+                          {formatPausedUntilFull(target.paused_until)}
                           {target.pause_reason ? ` — ${target.pause_reason}` : ""} (
                           {target.pause_scope === "account" ? "whole account" : "this table"})
                         </p>
@@ -1020,7 +1239,7 @@ export function TableAssignmentDialog({
                           )}
                           {pauseMode === "until" && (
                             <div className="flex flex-col gap-1.5">
-                              <Label>Resume date and time</Label>
+                              <Label>Resume date and time (IST)</Label>
                               <Input
                                 type="datetime-local"
                                 value={pauseUntil}

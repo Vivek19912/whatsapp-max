@@ -50,9 +50,9 @@ describe('Features removal — sidebar', () => {
     ]);
   });
 
-  it('places Workspace seventh with its Beta badge', () => {
+  it('places Workspace seventh with no Beta badge', () => {
     expect(navItems[6]).toMatchObject({ href: '/workspace' });
-    expect(navItems[6].beta).toBe(true);
+    expect(navItems[6].beta ?? false).toBe(false);
   });
 
   it('places Chat Assignment after the Google Sheets children', () => {

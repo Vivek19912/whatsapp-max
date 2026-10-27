@@ -226,11 +226,14 @@ describe('settings UI separation', () => {
   it('workspace dialog is Meta-table-only and owner-gated', () => {
     const page = src('src/app/(dashboard)/workspace/page.tsx');
     expect(page).toContain('MetaTableSheetsDialog');
-    // Only rendered for Meta Lead Ads tables with the owner behind
-    // the wheel — admins, agents, and viewers see no sheet actions.
-    // (The toolbar is owner-gated per table; Meta tables get the
-    // sheet actions in their action set.)
-    expect(page).toContain('isOwner && flowId');
+    // The sheets dialog renders only for Meta Lead Ads tables; the
+    // owner-gated entries (Assignment, Auto-send) now live in the
+    // single actions menu — admins, agents, and viewers see no
+    // sheet actions anywhere.
+    expect(page).toContain('{isMetaTable && flowId ? (');
+    expect(page).toContain('showAssignment={isOwner}');
+    expect(page).not.toContain("label: 'Configure Sheet'");
+    expect(page).not.toContain("label: 'Open Sheet'");
     // Flow Table rendering paths are untouched.
     expect(page).toContain('{isMetaTable ? null : (');
   });

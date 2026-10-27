@@ -22,9 +22,17 @@ const dialSrc = readFileSync(
 
 describe('dial action column (every Workspace table, handoff + tel:)', () => {
   it('renders a Dial header immediately after Phone Number', () => {
-    expect(pageSrc).toContain('aria-label="Dial"');
+    // Single centered header label (no duplicated aria-label text):
+    // one visible "Dial" on one line with a sensible minimum width.
+    expect(pageSrc).toContain('>Dial</span>');
+    expect(pageSrc).toContain('text-center');
+    expect(pageSrc).toContain('minWidth: 112');
+    // Subtle light-gray header tint (light mode) with a theme-token
+    // fallback for dark mode — header only, body cells untouched.
+    expect(pageSrc).toContain('bg-[#F1F5F9]');
+    expect(pageSrc).toContain('[html[data-mode=dark]_&]:bg-muted');
     const phoneHead = pageSrc.indexOf("c.key === 'phone'");
-    const dialHead = pageSrc.indexOf('aria-label="Dial"');
+    const dialHead = pageSrc.indexOf('>Dial</span>');
     expect(phoneHead).toBeGreaterThan(-1);
     expect(dialHead).toBeGreaterThan(-1);
     // Dial header is emitted from inside the phone-column branch.

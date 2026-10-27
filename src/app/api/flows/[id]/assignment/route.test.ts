@@ -257,6 +257,16 @@ describe("GET /flows/[id]/assignment", () => {
     expect(json.flow.kind).toBe("meta_lead_ads");
   });
 
+  it("always includes an assignees array, even with no saved config", async () => {
+    // The dialog iterates assignees for every draft row; a missing
+    // key crashed Add on fresh tables. The contract is now total.
+    const res = await route.GET(new Request("https://x/"), params("flow-meta"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { config: unknown; assignees: unknown };
+    expect(json.config).toBeNull();
+    expect(json.assignees).toEqual([]);
+  });
+
   it("masks private contacts for non-owners and reports eligibility", async () => {
     h.configs = [
       {
@@ -391,6 +401,36 @@ describe("PUT /flows/[id]/assignment", () => {
     expect(h.configs.filter((c) => c.flow_id === "flow-plain")).toHaveLength(0);
   });
 
+  it("creates an external-only assignee with no team link", async () => {
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          assignees: [
+            { display_name: "External Seller", email: "ext@example.com", phone: "+15551234567" },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      ok: boolean;
+      config: { assignees: Array<{ user_id: string | null; display_name: string }> };
+    };
+    expect(json.ok).toBe(true);
+    expect(json.config.assignees).toHaveLength(1);
+    expect(json.config.assignees[0].user_id).toBeNull();
+    // Persisted as a notification-only row (lead stays Unassigned).
+    const stored = h.assignees.find((a) => a.config_id === h.configs[0].id);
+    expect(stored?.user_id).toBeNull();
+    expect(stored?.display_name).toBe("External Seller");
+    expect(stored?.email).toBe("ext@example.com");
+  });
+
   it("rejects team links outside the account", async () => {
     const res = await route.PUT(
       new Request("https://x/", {
@@ -405,5 +445,82 @@ describe("PUT /flows/[id]/assignment", () => {
       params("flow-meta"),
     );
     expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("normalizes any crafted timezone to IST on save", async () => {
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          timezone: "America/New_York",
+          assignees: [
+            { user_id: "u-asha", display_name: "Asha", weight: 100 },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      config: { timezone: string };
+    };
+    expect(json.config.timezone).toBe("Asia/Kolkata");
+    // Persisted row carries IST too — the next read needs no repair.
+    expect(h.configs.find((c) => c.flow_id === "flow-meta")?.timezone).toBe(
+      "Asia/Kolkata",
+    );
+  });
+
+  it("normalizes a legacy stored timezone to IST on read without touching pause state", async () => {
+    h.configs = [
+      {
+        id: "config-legacy",
+        account_id: "acct-1",
+        flow_id: "flow-meta",
+        enabled: true,
+        mode: "round_robin",
+        timezone: "America/New_York",
+        whatsapp_template_name: "tpl",
+        whatsapp_template_language: "en_US",
+      },
+    ];
+    // Fixed instant: 26 Oct 19:00 UTC = 27 Oct 00:30 IST (still 26 Oct in UTC).
+    h.assignees = [
+      {
+        id: "a-1",
+        config_id: "config-legacy",
+        user_id: "u-asha",
+        display_name: "Asha",
+        email: null,
+        phone: null,
+        position: 0,
+        weight: 0,
+        is_active: true,
+        paused_until: "2099-10-26T19:00:00.000Z",
+        pause_reason: null,
+        pause_scope: "table",
+        notify_email: true,
+        notify_whatsapp: false,
+      },
+    ];
+    const res = await route.GET(new Request("https://x/"), params("flow-meta"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      config: { timezone: string };
+      assignees: Array<{ paused_until: string | null; available: boolean; status_label: string }>;
+    };
+    expect(json.config.timezone).toBe("Asia/Kolkata");
+    // Assignees, pause window, and availability survive normalization.
+    expect(json.assignees).toHaveLength(1);
+    expect(json.assignees[0].paused_until).toBe("2099-10-26T19:00:00.000Z");
+    expect(json.assignees[0].available).toBe(false);
+    // Status renders in IST (27 Oct) — neither the legacy zone (26 Oct)
+    // nor UTC (26 Oct) would label it the 27th.
+    expect(json.assignees[0].status_label).toBe("Paused until 27 October");
+    // The stored row is left untouched — no silent rewrite.
+    expect(h.configs[0].timezone).toBe("America/New_York");
   });
 });

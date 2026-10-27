@@ -13,16 +13,17 @@ type Ctx = { params: Promise<{ id: string }> };
  *   { assignee_id: string,
  *     mode: "today" | "days" | "until" | "resume",
  *     days?: number,            // mode "days": 1–365
- *     until?: string,            // mode "until": ISO datetime
+ *     until?: string,            // mode "until": IST wall time or absolute ISO instant
  *     reason?: string,           // optional, ≤280 chars
  *     scope?: "table" | "account", // default "table"
- *     timezone?: string }        // default: this table's zone
+ *     timezone?: string }        // legacy, ignored: always Asia/Kolkata
  *
- * "today" ends at local midnight in the table's timezone (or the
- * explicit zone). Expiry is automatic (evaluated at assignment
- * time); "resume" clears the window immediately. The assignee id
- * is resolved strictly under this table's config — foreign ids
- * 404 and can never pause another table's roster.
+ * "today" ends at midnight IST. A zone-less "until" wall reading is
+ * interpreted as IST; explicit instants (Z/offset) stay absolute.
+ * Expiry is automatic (evaluated at assignment time); "resume"
+ * clears the window immediately. The assignee id is resolved
+ * strictly under this table's config — foreign ids 404 and can
+ * never pause another table's roster.
  */
 export async function POST(request: Request, { params }: Ctx) {
   try {

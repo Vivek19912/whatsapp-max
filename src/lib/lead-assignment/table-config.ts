@@ -16,6 +16,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
+  ASSIGNMENT_TIMEZONE,
   validatePauseInput,
   validateTableConfig,
   type PauseInput,
@@ -161,7 +162,11 @@ export async function getTableConfig(
     form_db_id: flow.formDbId,
     enabled: (row.enabled as boolean) === true,
     mode: (row.mode as string) === "percentage" ? "percentage" : "round_robin",
-    timezone: (row.timezone as string) || "UTC",
+    // India-only: legacy per-table zones normalize to IST on read.
+    // `paused_until` values are absolute UTC instants, so this never
+    // extends or shortens an active pause — the stored row is left
+    // untouched (no migration) and rewritten to IST on next save.
+    timezone: ASSIGNMENT_TIMEZONE,
     whatsapp_template_name: (row.whatsapp_template_name as string | null) ?? null,
     whatsapp_template_language:
       (row.whatsapp_template_language as string) || "en_US",
@@ -300,13 +305,11 @@ export async function pauseTableAssignee(
     err.status = 404;
     throw err;
   }
-  const pause: ValidPause = validatePauseInput(args.input);
-  // Pauses are computed in the table's own timezone unless the
-  // request carries an explicit one.
-  const effective: ValidPause =
-    args.input.timezone === undefined
-      ? validatePauseInput({ ...args.input, timezone: detail.timezone })
-      : pause;
+  // India-only: the validator enforces IST regardless of any
+  // supplied zone, and `detail.timezone` above is already IST, so
+  // "today" always ends at IST midnight. Stored `paused_until`
+  // instants are absolute — pausing never rewrites history.
+  const effective: ValidPause = validatePauseInput(args.input);
   const { data, error } = await db
     .from("lead_assignment_table_assignees")
     .update({

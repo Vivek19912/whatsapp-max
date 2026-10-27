@@ -366,6 +366,48 @@ describe("POST pause — guards and semantics", () => {
       );
     }
   });
+
+  it("ends 'today' at IST midnight even with a legacy stored zone", async () => {
+    // Stored zone predates India-only assignment; the pause must
+    // still expire at IST midnight, and the stored row keeps its
+    // legacy value (normalization happens on read, not by rewrite).
+    h.configs[0].timezone = "America/New_York";
+    const res = await pauseRoute.POST(
+      post({ assignee_id: "a-asha", mode: "today" }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const row = h.assignees.find((a) => a.id === "a-asha")!;
+    // IST midnight is 18:29:59.999Z — the same suffix on every date.
+    expect(row.paused_until).toMatch(/T18:29:59\.999Z$/);
+    expect(Date.parse(row.paused_until as string)).toBeGreaterThan(Date.now());
+    expect(h.configs[0].timezone).toBe("America/New_York");
+  });
+
+  it("interprets a zone-less 'until' wall reading as IST", async () => {
+    // IST wall of a minute-aligned instant ~30 days out: feeding it
+    // back must return the same instant (10:00 IST wall = 04:30Z).
+    const target = Math.floor((Date.now() + 30 * 86400000) / 60000) * 60000;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(target));
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    const wall = `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+    const res = await pauseRoute.POST(
+      post({ assignee_id: "a-asha", mode: "until", until: wall }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    expect(h.assignees.find((a) => a.id === "a-asha")!.paused_until).toBe(
+      new Date(target).toISOString(),
+    );
+  });
 });
 
 describe("POST retry — table-scoped reassignment guard", () => {

@@ -27,7 +27,7 @@ export const WS_ACTION_BUTTON =
 
 /** Secondary control-row button (matches Columns/Filters triggers). */
 export const WS_CONTROL_BUTTON =
-  "h-9 gap-1.5 rounded-lg border border-border bg-card px-2.5 text-sm font-medium text-muted-foreground shadow-xs hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0";
+  "inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-sm font-medium text-muted-foreground shadow-xs hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0";
 
 /** Text input shared by the search field and dialog forms. */
 export const WS_INPUT = "h-9 rounded-lg border-border bg-card text-sm shadow-xs";

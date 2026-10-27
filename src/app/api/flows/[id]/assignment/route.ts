@@ -45,9 +45,12 @@ export async function GET(_request: Request, { params }: Ctx) {
     const detail = await getTableConfig(supabaseAdmin(), ctx.accountId, id);
     if (!detail) {
       // No settings saved yet (the table itself resolved above).
+      // `assignees` is always present (possibly empty) so clients
+      // can iterate without nil checks.
       return NextResponse.json({
         flow: { id: gate.flowId, kind: gate.kind, form_db_id: gate.formDbId },
         config: null,
+        assignees: [],
       });
     }
     const privileged = ctx.role === "owner" || ctx.role === "admin";

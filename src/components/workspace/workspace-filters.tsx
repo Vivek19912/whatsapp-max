@@ -469,7 +469,7 @@ export function WorkspaceFilters({
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger
-        className={cn(WS_CONTROL_BUTTON, "shrink-0")}
+        className={cn(WS_CONTROL_BUTTON, "shrink-0 justify-start whitespace-nowrap")}
         aria-label="Filter table"
       >
         <Filter className="h-4 w-4" aria-hidden />
