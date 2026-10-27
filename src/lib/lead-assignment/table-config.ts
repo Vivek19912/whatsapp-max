@@ -17,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   ASSIGNMENT_TIMEZONE,
+  AssignmentValidationError,
   validatePauseInput,
   validateTableConfig,
   type PauseInput,
@@ -127,6 +128,51 @@ function toAssigneeRow(raw: Record<string, unknown>): TableAssigneeRow {
   };
 }
 
+/**
+ * Best-effort roster restore after a failed wholesale replace:
+ * clears whatever the failed save left behind and re-inserts the
+ * snapshot (original ids included, so pause windows and positions
+ * survive). Never throws — callers must surface the ORIGINAL save
+ * failure, and nothing logged here carries contact data.
+ */
+async function restoreAssigneeRows(
+  db: SupabaseClient,
+  configId: string,
+  rows: TableAssigneeRow[],
+): Promise<void> {
+  try {
+    const { error: clearErr } = await db
+      .from("lead_assignment_table_assignees")
+      .delete()
+      .eq("config_id", configId);
+    if (clearErr) throw clearErr;
+    if (rows.length === 0) return;
+    const { error: insertErr } = await db
+      .from("lead_assignment_table_assignees")
+      .insert(
+        rows.map((a) => ({
+          id: a.id,
+          config_id: a.config_id,
+          user_id: a.user_id,
+          display_name: a.display_name,
+          email: a.email,
+          phone: a.phone,
+          position: a.position,
+          weight: a.weight,
+          is_active: a.is_active,
+          paused_until: a.paused_until,
+          pause_reason: a.pause_reason,
+          pause_scope: a.pause_scope,
+          notify_email: a.notify_email,
+          notify_whatsapp: a.notify_whatsapp,
+        })),
+      );
+    if (insertErr) throw insertErr;
+  } catch (restoreErr) {
+    console.error("[lead-assignment] roster restore failed after a partial save:", restoreErr);
+  }
+}
+
 /** Load one table's saved config with assignees in position order. */
 export async function getTableConfig(
   db: SupabaseClient,
@@ -215,7 +261,9 @@ export async function saveTableConfig(
     );
     const missing = linkedIds.filter((id) => !found.has(id));
     if (missing.length > 0) {
-      throw new Error("One or more linked team members are not in this company.");
+      throw new AssignmentValidationError(
+        "One or more linked team members are not in this company.",
+      );
     }
   }
 
@@ -239,6 +287,27 @@ export async function saveTableConfig(
   if (error) throw error;
   const configId = (config as { id: string }).id;
 
+  // Snapshot the current roster BEFORE the wholesale replace so a
+  // failed insert can restore it instead of leaving a partial (or
+  // empty) deletion behind. Single-statement inserts are atomic, so
+  // the only partial window is delete-succeeded + insert-failed.
+  let previousAssignees: TableAssigneeRow[] = [];
+  let snapshotOk = false;
+  try {
+    const { data: prevRows, error: prevErr } = await db
+      .from("lead_assignment_table_assignees")
+      .select(
+        "id, config_id, user_id, display_name, email, phone, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
+      )
+      .eq("config_id", configId);
+    if (prevErr) throw prevErr;
+    previousAssignees = ((prevRows ?? []) as Record<string, unknown>[]).map(toAssigneeRow);
+    snapshotOk = true;
+  } catch {
+    previousAssignees = [];
+    snapshotOk = false;
+  }
+
   const { error: deleteErr } = await db
     .from("lead_assignment_table_assignees")
     .delete()
@@ -261,7 +330,13 @@ export async function saveTableConfig(
           notify_whatsapp: a.notify_whatsapp,
         })),
       );
-    if (insertErr) throw insertErr;
+    if (insertErr) {
+      // The delete above already ran: restore the previous roster
+      // (best-effort, never masking the original failure) so the
+      // table is not left emptied by a failed save.
+      if (snapshotOk) await restoreAssigneeRows(db, configId, previousAssignees);
+      throw insertErr;
+    }
   }
   // Lazily ensure the algorithm state row exists so the first
   // assignment never pays for a racy init (insert is unique-keyed;

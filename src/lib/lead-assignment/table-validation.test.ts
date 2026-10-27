@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ASSIGNMENT_TIMEZONE,
+  AssignmentValidationError,
   endOfTodayUtc,
   formatPausedUntil,
   isValidAssigneeEmail,
@@ -211,7 +212,7 @@ describe("validateTableConfig", () => {
     expect(valid.assignees[1].is_active).toBe(false);
   });
 
-  it("rejects bad contacts, duplicates, and empty enabled configs", () => {
+  it("rejects bad contacts and duplicates with clear client errors", () => {
     expect(() =>
       validateTableConfig({
         enabled: true,
@@ -250,12 +251,66 @@ describe("validateTableConfig", () => {
         ],
       }),
     ).toThrow(/only once/);
-    expect(() =>
-      validateTableConfig({ enabled: true, mode: "round_robin", assignees: [] }),
-    ).toThrow(/at least one assignee/);
-    // Disabled configs may be saved empty (draft state).
+  });
+
+  it("marks every config rejection as a 400 client error", () => {
+    // The assignment API maps this class to HTTP 400 with the
+    // message; anything else stays a generic 500.
+    const cases: Array<Record<string, unknown>> = [
+      { enabled: true, mode: "round_robin", assignees: [{ display_name: "  " }] },
+      { enabled: true, mode: "bogus", assignees: [] },
+      {
+        enabled: true,
+        mode: "percentage",
+        assignees: [
+          { user_id: "u1", display_name: "A", weight: 60 },
+          { user_id: "u2", display_name: "B", weight: 30 },
+        ],
+      },
+    ];
+    for (const input of cases) {
+      try {
+        validateTableConfig(input);
+        expect.unreachable(`expected a validation error for ${JSON.stringify(input)}`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(AssignmentValidationError);
+        expect((err as AssignmentValidationError).status).toBe(400);
+      }
+    }
+  });
+
+  it("accepts an empty roster with the toggle either way, in both modes", () => {
+    // Regression: deleting the last assignee and saving returned a
+    // generic 500. An empty roster is valid — new leads simply stay
+    // unassigned — and the toggle/mode are preserved as configured.
+    for (const mode of ["round_robin", "percentage"] as const) {
+      for (const enabled of [true, false]) {
+        const valid = validateTableConfig({ enabled, mode, assignees: [] });
+        expect(valid.assignees).toEqual([]);
+        expect(valid.enabled).toBe(enabled);
+        expect(valid.mode).toBe(mode);
+      }
+    }
+  });
+
+  it("requires no 100% total when percentage mode has zero active assignees", () => {
+    // All-inactive rosters (and empty rosters) need no share total,
+    // enabled or not; a single active member at 100% still passes.
+    for (const enabled of [true, false]) {
+      const valid = validateTableConfig({
+        enabled,
+        mode: "percentage",
+        assignees: [{ user_id: "u1", display_name: "A", weight: 0, is_active: false }],
+      });
+      expect(valid.assignees).toHaveLength(1);
+      expect(valid.enabled).toBe(enabled);
+    }
     expect(
-      validateTableConfig({ enabled: false, mode: "round_robin", assignees: [] }).enabled,
-    ).toBe(false);
+      validateTableConfig({
+        enabled: true,
+        mode: "percentage",
+        assignees: [{ user_id: "u1", display_name: "A", weight: 100 }],
+      }).assignees,
+    ).toHaveLength(1);
   });
 });

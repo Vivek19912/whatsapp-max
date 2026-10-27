@@ -16,6 +16,10 @@ const h = vi.hoisted(() => ({
   fields: [] as Array<Record<string, unknown>>,
   values: [] as Array<Record<string, unknown>>,
   seq: 0,
+  /** Tables touched by the fake client (tenant-scope + no-sequence-write pins). */
+  touched: [] as string[],
+  /** When true, assignee inserts fail (partial-save regression). */
+  failAssigneeInsert: false,
 }));
 
 function statusError(status: number, message: string) {
@@ -137,6 +141,12 @@ function fakeSupabase() {
         return { data: applyUpsert(state.upsertObj, state.upsertConflict), error: null };
       }
       if (state.insertRows) {
+        if (state.table === "lead_assignment_table_assignees" && h.failAssigneeInsert) {
+          // One-shot: models a transient failure so the save path's
+          // best-effort restore (which re-inserts) can succeed.
+          h.failAssigneeInsert = false;
+          return { data: null, error: { code: "P0001", message: "boom" } };
+        }
         const rows = state.insertRows.map((r) => {
           const row = { id: `row-${++h.seq}`, ...r };
           tableRows(state.table).push(row);
@@ -175,6 +185,12 @@ function fakeSupabase() {
         return resolve({ data: [applyUpsert(state.upsertObj, state.upsertConflict)], error: null });
       }
       if (state.insertRows) {
+        if (state.table === "lead_assignment_table_assignees" && h.failAssigneeInsert) {
+          // One-shot: models a transient failure so the save path's
+          // best-effort restore (which re-inserts) can succeed.
+          h.failAssigneeInsert = false;
+          return resolve({ data: null, error: { code: "P0001", message: "boom" } });
+        }
         const rows = state.insertRows.map((r) => {
           const row = { id: `row-${++h.seq}`, ...r };
           tableRows(state.table).push(row);
@@ -200,6 +216,7 @@ function fakeSupabase() {
   };
   return {
     from: (table: string) => {
+      h.touched.push(table);
       state.table = table;
       state.filters = [];
       state.orderCol = null;
@@ -239,6 +256,8 @@ function seed() {
   ];
   h.values = [];
   h.seq = 0;
+  h.touched = [];
+  h.failAssigneeInsert = false;
 }
 
 beforeEach(seed);
@@ -522,5 +541,237 @@ describe("PUT /flows/[id]/assignment", () => {
     expect(json.assignees[0].status_label).toBe("Paused until 27 October");
     // The stored row is left untouched — no silent rewrite.
     expect(h.configs[0].timezone).toBe("America/New_York");
+  });
+
+  it("saves a zero-assignee roster with the toggle either way, in both modes", async () => {
+    // Production regression: deleting the last assignee and saving
+    // returned a generic 500. Empty is valid — leads stay
+    // unassigned — and the toggle/mode persist as configured.
+    for (const mode of ["round_robin", "percentage"]) {
+      for (const enabled of [true, false]) {
+        const res = await route.PUT(
+          new Request("https://x/", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled, mode, assignees: [] }),
+          }),
+          params("flow-meta"),
+        );
+        expect(res.status).toBe(200);
+        const json = (await res.json()) as {
+          ok: boolean;
+          config: { enabled: boolean; mode: string; assignees: unknown[] };
+        };
+        expect(json.ok).toBe(true);
+        expect(json.config.enabled).toBe(enabled);
+        expect(json.config.mode).toBe(mode);
+        expect(json.config.assignees).toEqual([]);
+        // No placeholder assignee invented, no toggle flipped.
+        expect(h.assignees.filter((a) => a.config_id === h.configs[0].id)).toHaveLength(0);
+      }
+    }
+    // No sibling table touched.
+    expect(h.configs.filter((c) => c.flow_id === "flow-plain")).toHaveLength(0);
+  });
+
+  it("deletes the last assignee and persists the empty roster", async () => {
+    h.configs = [
+      {
+        id: "config-1",
+        account_id: "acct-1",
+        flow_id: "flow-meta",
+        enabled: true,
+        mode: "percentage",
+        timezone: "Asia/Kolkata",
+        whatsapp_template_name: null,
+        whatsapp_template_language: "en_US",
+      },
+    ];
+    h.assignees = [
+      {
+        id: "a-1",
+        config_id: "config-1",
+        user_id: "u-asha",
+        display_name: "Asha",
+        email: null,
+        phone: null,
+        position: 0,
+        weight: 100,
+        is_active: true,
+        paused_until: null,
+        pause_reason: null,
+        pause_scope: "table",
+        notify_email: true,
+        notify_whatsapp: false,
+      },
+      {
+        id: "a-2",
+        config_id: "config-1",
+        user_id: null,
+        display_name: "Ext",
+        email: "ext@example.com",
+        phone: null,
+        position: 1,
+        weight: 0,
+        is_active: false,
+        paused_until: null,
+        pause_reason: null,
+        pause_scope: "table",
+        notify_email: true,
+        notify_whatsapp: false,
+      },
+    ];
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: true, mode: "percentage", assignees: [] }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      config: { enabled: boolean; assignees: unknown[] };
+    };
+    expect(json.config.enabled).toBe(true);
+    expect(json.config.assignees).toEqual([]);
+    expect(h.assignees).toHaveLength(0);
+  });
+
+  it("removes one assignee without corrupting the other's configuration", async () => {
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          assignees: [
+            { user_id: "u-asha", display_name: "Asha", weight: 99, notify_whatsapp: true },
+            { display_name: "Ext", email: "ext@example.com", phone: "+15551234567" },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const first = (await res.json()) as {
+      config: { assignees: Array<{ display_name: string }> };
+    };
+    expect(first.config.assignees.map((a) => a.display_name).sort()).toEqual(["Asha", "Ext"]);
+    // Drop Ext; Asha's row must survive verbatim.
+    const res2 = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          assignees: [
+            { user_id: "u-asha", display_name: "Asha", weight: 99, notify_whatsapp: true },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res2.status).toBe(200);
+    const second = (await res2.json()) as {
+      config: { assignees: Array<{ display_name: string; email: string | null; notify_whatsapp: boolean }> };
+    };
+    expect(second.config.assignees).toHaveLength(1);
+    expect(second.config.assignees[0].display_name).toBe("Asha");
+    expect(second.config.assignees[0].notify_whatsapp).toBe(true);
+  });
+
+  it("returns an exact 400 with the message for invalid percentage shares", async () => {
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "percentage",
+          assignees: [
+            { user_id: "u-asha", display_name: "Asha", weight: 60 },
+            { display_name: "Ext", email: "e@x.com", weight: 30 },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    // Not a generic 500: invalid input is a client error.
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string };
+    expect(json.error).toContain("exactly 100%");
+  });
+
+  it("restores the previous roster when the assignee insert fails", async () => {
+    h.configs = [
+      {
+        id: "config-1",
+        account_id: "acct-1",
+        flow_id: "flow-meta",
+        enabled: true,
+        mode: "round_robin",
+        timezone: "Asia/Kolkata",
+        whatsapp_template_name: null,
+        whatsapp_template_language: "en_US",
+      },
+    ];
+    h.assignees = [
+      {
+        id: "a-1",
+        config_id: "config-1",
+        user_id: "u-asha",
+        display_name: "Asha",
+        email: null,
+        phone: null,
+        position: 0,
+        weight: 0,
+        is_active: true,
+        paused_until: null,
+        pause_reason: null,
+        pause_scope: "table",
+        notify_email: true,
+        notify_whatsapp: false,
+      },
+    ];
+    h.failAssigneeInsert = true;
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          assignees: [{ display_name: "New", email: "new@example.com" }],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    // No partial deletion: the previous roster is intact.
+    expect(h.assignees).toHaveLength(1);
+    expect(h.assignees[0].display_name).toBe("Asha");
+    expect(h.assignees[0].user_id).toBe("u-asha");
+  });
+
+  it("never writes salesperson sequences or queue rows while saving an empty roster", async () => {
+    // Sequence storage follows its own per-salesperson lifecycle
+    // (retained by identity, never started from a config save);
+    // the assignment save path must not touch it.
+    h.touched = [];
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: true, mode: "percentage", assignees: [] }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    expect(h.touched).not.toContain("meta_lead_assignee_sequences");
+    expect(h.touched).not.toContain("meta_lead_assignee_sequence_items");
+    expect(h.touched).not.toContain("meta_lead_whatsapp_queue");
   });
 });

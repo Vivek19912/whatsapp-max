@@ -13,6 +13,7 @@ import {
   type AvailabilityView,
   type TableConfigDetail,
 } from "@/lib/lead-assignment/table-config";
+import { AssignmentValidationError } from "@/lib/lead-assignment/table-validation";
 import { isPausedAt, resolveEligibleAssignees } from "@/lib/lead-assignment/table-assignment";
 import { formatPausedUntil } from "@/lib/lead-assignment/table-validation";
 import { eligibleMemberIds } from "@/lib/lead-assignment/members";
@@ -146,6 +147,12 @@ export async function PUT(request: Request, { params }: Ctx) {
     });
     return NextResponse.json({ ok: true, config: serializeDetail(detail) });
   } catch (err) {
+    // Genuinely invalid input gets a clear 400 with the safe,
+    // user-facing message. Everything else keeps the generic 500
+    // (no server internals, credentials, or contact data on the wire).
+    if (err instanceof AssignmentValidationError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
     return toErrorResponse(err);
   }
 }

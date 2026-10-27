@@ -694,6 +694,68 @@ describe("pauses and availability", () => {
     ).toBe("no-eligible-assignees");
   });
 
+  it("empty roster with automatic assignment enabled leaves leads unassigned without throwing", async () => {
+    // Production regression: saving zero assignees failed, so this
+    // path was unreachable. An enabled-but-empty table must behave
+    // like "nobody eligible": no owner, no notifications, and no
+    // customer-facing sequence — even when a removed salesperson's
+    // sequence row still exists (orphaned sequences never fire
+    // because only actually-assigned salespeople enqueue).
+    const db = fakeSupabase();
+    const detail = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "percentage",
+      assignees: [],
+    });
+    expect(detail.enabled).toBe(true);
+    expect(detail.assignees).toEqual([]);
+    h.assigneeSeqs.push({
+      id: "seq-stale",
+      account_id: "acct-1",
+      form_id: "formdb-1",
+      salesperson_key: "user:u-asha",
+      delay_seconds: 0,
+    });
+    h.assigneeItems.push({
+      id: "seq-stale-i0",
+      sequence_id: "seq-stale",
+      template_name: "welcome_back",
+      template_language: "en_US",
+      position: 0,
+      variable_mappings: {},
+    });
+    h.submissions.push({
+      id: "sub-1",
+      account_id: "acct-1",
+      flow_run_id: "run-empty",
+      form_id: "formdb-1",
+    });
+    run("run-empty", "flow-meta-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-empty",
+      formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "no-eligible", userId: null, assigneeId: null });
+    expect(h.values).toHaveLength(0);
+    expect(
+      h.events.find((e) => e.flow_run_id === "run-empty" && e.kind === "unassigned")?.reason,
+    ).toBe("no-eligible-assignees");
+    // No customer-facing sequence started from the emptied roster.
+    expect(h.queue).toHaveLength(0);
+    expect(h.drainScheduled).toHaveLength(0);
+    // The never-throw ingestion wrapper agrees.
+    run("run-empty-2", "flow-meta-1");
+    const viaWrapper = await engine.maybeAutoAssignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-empty-2",
+      formId: "formdb-1",
+    });
+    expect(viaWrapper).toMatchObject({ outcome: "no-eligible" });
+  });
+
   it("account-scope pauses block the person on every table", async () => {
     const db = fakeSupabase();
     await saveConfig(db, "flow-plain-1", {

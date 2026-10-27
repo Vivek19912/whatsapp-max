@@ -73,6 +73,22 @@ export interface ValidTableConfig {
   assignees: ValidTableAssignee[];
 }
 
+/**
+ * Client-error marker for assignment configuration validation.
+ * The assignment API maps this to HTTP 400 with the message (safe,
+ * user-facing text — never credentials, tokens, or contact data);
+ * every other failure keeps the generic 500. Carrying the status on
+ * the error (instead of a parallel return channel) keeps the pure
+ * validators' signatures unchanged for existing callers and tests.
+ */
+export class AssignmentValidationError extends Error {
+  readonly status = 400 as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "AssignmentValidationError";
+  }
+}
+
 export type PauseMode = "today" | "days" | "until" | "resume";
 
 export interface PauseInput {
@@ -250,26 +266,27 @@ export function validateTableAssignee(
       ? entry.user_id.trim()
       : null;
   const displayName = cleanString(entry.display_name, 120);
-  if (!displayName) throw new Error(`${where} needs a display name (1–120 characters).`);
+  if (!displayName)
+    throw new AssignmentValidationError(`${where} needs a display name (1–120 characters).`);
 
   const emailRaw = cleanOptionalString(entry.email, 254);
   const email = emailRaw ? emailRaw.toLowerCase() : null;
   if (emailRaw && !isValidAssigneeEmail(email as string)) {
-    throw new Error(`${where} has an invalid email address.`);
+    throw new AssignmentValidationError(`${where} has an invalid email address.`);
   }
   const phoneRaw = cleanOptionalString(entry.phone, 32);
   let phone: string | null = null;
   if (phoneRaw) {
     const normalized = normalizeAssigneePhone(phoneRaw);
     if (!normalized) {
-      throw new Error(
+      throw new AssignmentValidationError(
         `${where} has an invalid phone number. Use international format with country code, e.g. +911234567890.`,
       );
     }
     phone = normalized;
   }
   if (!rawUserId && !email && !phone) {
-    throw new Error(
+    throw new AssignmentValidationError(
       `${where} needs a team member link or at least an email address or phone number.`,
     );
   }
@@ -282,7 +299,9 @@ export function validateTableAssignee(
       ? Math.trunc(weightRaw)
       : 0;
   if (weight < 0 || weight > 100) {
-    throw new Error(`${where}: percentage must be a whole number from 0 to 100.`);
+    throw new AssignmentValidationError(
+      `${where}: percentage must be a whole number from 0 to 100.`,
+    );
   }
   return {
     user_id: rawUserId,
@@ -307,12 +326,12 @@ export function validateTableAssignee(
  */
 export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("Invalid assignment settings.");
+    throw new AssignmentValidationError("Invalid assignment settings.");
   }
   const enabled = input.enabled === undefined ? false : input.enabled === true;
   const mode = input.mode ?? "round_robin";
   if (mode !== "round_robin" && mode !== "percentage") {
-    throw new Error("Choose Round Robin or Percentage-Based distribution.");
+    throw new AssignmentValidationError("Choose Round Robin or Percentage-Based distribution.");
   }
   // India-only: any supplied zone (including legacy per-table
   // values) normalizes to IST. Stored `paused_until` instants are
@@ -323,7 +342,13 @@ export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
     cleanOptionalString(input.whatsapp_template_language, 32) ?? "en_US";
 
   if (!Array.isArray(input.assignees) || input.assignees.length === 0) {
-    if (enabled) throw new Error("Add at least one assignee before enabling automatic assignment.");
+    // An empty roster is a valid saved configuration in both modes
+    // and with the toggle either way: with no assignees there are
+    // no shares to total, and the engine leaves new leads
+    // unassigned without throwing (see assignTableLead
+    // "no-eligible"). The enabled toggle and mode are preserved as
+    // configured — never flipped silently to bypass validation —
+    // and no placeholder assignee is invented.
     return {
       enabled,
       mode,
@@ -334,14 +359,14 @@ export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
     };
   }
   if (input.assignees.length > 50) {
-    throw new Error("A table supports at most 50 assignees.");
+    throw new AssignmentValidationError("A table supports at most 50 assignees.");
   }
   const seenUsers = new Set<string>();
   const assignees = (input.assignees as TableAssigneeInput[]).map((entry, index) => {
     const valid = validateTableAssignee(entry ?? {}, index);
     if (valid.user_id) {
       if (seenUsers.has(valid.user_id)) {
-        throw new Error("A team member can appear only once per table.");
+        throw new AssignmentValidationError("A team member can appear only once per table.");
       }
       seenUsers.add(valid.user_id);
     }
@@ -350,15 +375,14 @@ export function validateTableConfig(input: TableConfigInput): ValidTableConfig {
 
   if (mode === "percentage") {
     // Inactive members are out of the pool: their shares must be
-    // re-allocated explicitly across the active members.
+    // re-allocated explicitly across the active members. Zero
+    // active members need no 100% total (nothing to distribute —
+    // new leads simply stay unassigned); one or more active members
+    // must still total exactly 100%.
     const active = assignees.filter((a) => a.is_active);
     const total = active.reduce((sum, a) => sum + a.weight, 0);
-    if (active.length === 0) {
-      if (enabled) {
-        throw new Error("Enable at least one assignee before enabling automatic assignment.");
-      }
-    } else if (total !== 100) {
-      throw new Error(
+    if (active.length > 0 && total !== 100) {
+      throw new AssignmentValidationError(
         `Active assignees' percentages must total exactly 100% (currently ${total}%).`,
       );
     }
