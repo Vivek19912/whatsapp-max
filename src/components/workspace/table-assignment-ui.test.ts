@@ -446,5 +446,17 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
     expect(configRoute).toContain("status: t.status");
     expect(editor).toContain("formatTemplateCategory");
   });
+
+  it("labels variable mappings with the table's actual column headers", () => {
+    // The config route builds the mapping catalog from this table's
+    // real headers (Submission Time / Phone Number / question
+    // headers incl. renames), not generic labels — while storing
+    // the same stable field keys the drain resolves.
+    expect(configRoute).toContain("buildTableVariableFields");
+    expect(configRoute).toContain("meta_lead_header_labels");
+    // The Assignment dialog feeds that catalog straight into the
+    // editor's mapping dropdown.
+    expect(dialog).toContain("fields={sequenceCatalog.fields}");
+  });
 });
 

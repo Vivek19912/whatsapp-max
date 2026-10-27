@@ -49,6 +49,7 @@ import {
   META_SOURCE_COLUMN_KEY,
   questionVarKeys,
 } from "@/lib/meta-lead-ads/virtual-flow";
+import { formatColumnLabel } from "@/lib/flows/column-label";
 import { resolveFlowAnswers } from "@/lib/flows/flow-tables";
 import { extractVariableIndices } from "@/lib/whatsapp/template-validators";
 import type { MessageTemplate, TemplateButton } from "@/types";
@@ -194,6 +195,66 @@ export function buildAvailableVariableFields(
     const label =
       (q.label ?? "").trim() || (q.key ?? "").trim() || `Question ${index + 1}`;
     out.push({ key: fieldKey, label });
+  });
+  return out;
+}
+
+/**
+ * Mapping targets labeled with one Meta Lead Ads table's ACTUAL
+ * Workspace headers (what the grid shows): the fixed system
+ * columns render as "Submission Time", "Name"/"WhatsApp Name",
+ * and "Phone Number", while each Instant Form question column
+ * renders under its effective header (a stored custom rename
+ * wins, else the formatted question label — exactly the grid's
+ * rule). Keys are byte-identical to
+ * {@link buildAvailableVariableFields}, so saved mappings,
+ * validation (`validateVariableMappings`), and send-time
+ * resolution (`resolveLeadVariableFieldMap`) behave exactly as
+ * before — only the display labels change. Pure.
+ *
+ * @param questions the table form's stored questions (form order).
+ * @param renames custom header overrides keyed by storage id
+ *   (`flow:<questionKey>`, as rendered by the grid); unknown keys
+ *   are ignored.
+ */
+export function buildTableVariableFields(
+  questions: ReadonlyArray<{ key?: string | null; label?: string | null }>,
+  renames?: Readonly<Record<string, string>>,
+): VariableFieldDef[] {
+  const out: VariableFieldDef[] = STANDARD_VARIABLE_FIELDS.map((f) => {
+    if (f.key === "submitted_at") return { ...f, label: "Submission Time" };
+    if (f.key === "phone") return { ...f, label: "Phone Number" };
+    return { ...f };
+  });
+  const keys = questionVarKeys(questions);
+  // System "Name" renders as "WhatsApp Name" when the table has its
+  // own Name question column (mirrors buildFlowTableColumns'
+  // display rule, evaluated on the same raw question labels).
+  const rendersAsName = (q: { key?: string | null; label?: string | null }, index: number): boolean => {
+    const base = ((q.label ?? "").trim() || (q.key ?? "").trim() || keys[index] || "").trim();
+    return base.toLowerCase() === "name";
+  };
+  if (questions.some((q, index) => rendersAsName(q, index))) {
+    const nameEntry = out.find((f) => f.key === "name");
+    if (nameEntry) nameEntry.label = "WhatsApp Name";
+  }
+  const seen = new Set(out.map((f) => f.key));
+  questions.forEach((q, index) => {
+    const key = keys[index];
+    if (!key) return;
+    const fieldKey = `answer:${key}`;
+    if (seen.has(fieldKey)) return;
+    seen.add(fieldKey);
+    const baseLabel =
+      (q.label ?? "").trim() || (q.key ?? "").trim() || `Question ${index + 1}`;
+    const custom = renames?.[`flow:${key}`];
+    out.push({
+      key: fieldKey,
+      label:
+        typeof custom === "string" && custom.trim() !== ""
+          ? custom
+          : formatColumnLabel(baseLabel),
+    });
   });
   return out;
 }

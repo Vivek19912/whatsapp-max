@@ -8,6 +8,7 @@ import { buildSendComponents } from '@/lib/whatsapp/template-send-builder';
 
 import {
   buildAvailableVariableFields,
+  buildTableVariableFields,
   buildVariableSendParams,
   getTemplateVariableSlots,
   renderVariablePreview,
@@ -126,6 +127,76 @@ describe('buildAvailableVariableFields', () => {
   });
 });
 
+describe('buildTableVariableFields', () => {
+  it('labels system fields with the actual Workspace headers', () => {
+    const fields = buildTableVariableFields([]);
+    const label = (key: string) => fields.find((f) => f.key === key)?.label;
+    // Grid headers, not generic validation labels.
+    expect(label('submitted_at')).toBe('Submission Time');
+    expect(label('phone')).toBe('Phone Number');
+    expect(label('name')).toBe('Name');
+  });
+
+  it('renders the system name as WhatsApp Name when the table has its own Name column', () => {
+    const plain = buildTableVariableFields([{ key: 'city', label: 'City' }]);
+    expect(plain.find((f) => f.key === 'name')?.label).toBe('Name');
+    // A different table whose form asks for the name renders the
+    // system contact column as "WhatsApp Name" (mirrors the grid).
+    for (const questions of [
+      [{ key: 'full_name', label: 'Name' }],
+      [{ key: 'full_name', label: '  name  ' }],
+    ]) {
+      const fields = buildTableVariableFields(questions);
+      expect(fields.find((f) => f.key === 'name')?.label).toBe('WhatsApp Name');
+    }
+  });
+
+  it('labels answer fields with the effective question header', () => {
+    const fields = buildTableVariableFields([
+      { key: 'full_name', label: 'Full name' },
+      { key: 'city', label: 'city' },
+    ]);
+    // Same formatting the grid applies to stored question labels.
+    expect(fields.find((f) => f.key === 'answer:full_name')?.label).toBe('Full name');
+    expect(fields.find((f) => f.key === 'answer:city')?.label).toBe('City');
+  });
+
+  it('prefers a stored custom rename over the formatted question label', () => {
+    const fields = buildTableVariableFields(
+      [{ key: 'full_name', label: 'Full name' }],
+      { 'flow:full_name': 'Customer' }
+    );
+    expect(fields.find((f) => f.key === 'answer:full_name')?.label).toBe('Customer');
+    // Renames for other columns are ignored; blank renames fall back.
+    const fallback = buildTableVariableFields(
+      [{ key: 'full_name', label: 'Full name' }],
+      { 'flow:other': 'Other', 'flow:full_name': '  ' }
+    );
+    expect(fallback.find((f) => f.key === 'answer:full_name')?.label).toBe('Full name');
+  });
+
+  it('keeps byte-identical keys with the legacy catalog (validation unchanged)', () => {
+    const questions = [
+      { key: 'full_name', label: 'Full name' },
+      { key: 'phone_number', label: 'Phone number' },
+      { key: 'city', label: null },
+    ];
+    const legacy = buildAvailableVariableFields(questions).map((f) => f.key).sort();
+    const tabled = buildTableVariableFields(questions, {}).map((f) => f.key).sort();
+    expect(tabled).toEqual(legacy);
+  });
+
+  it('keeps every standard field available under its existing key', () => {
+    const fields = buildTableVariableFields([]);
+    for (const key of [
+      'name', 'phone', 'email', 'form_name', 'campaign_name', 'ad_name',
+      'source', 'submitted_at', 'assignee', 'lead_type', 'stage', 'meta_lead_id',
+    ]) {
+      expect(fields.map((f) => f.key)).toContain(key);
+    }
+  });
+});
+
 describe('validateVariableMappings', () => {
   const slots = getTemplateVariableSlots(BODY_ONLY);
   const keys = new Set(['name', 'phone', 'answer:city']);
@@ -143,6 +214,18 @@ describe('validateVariableMappings', () => {
     expect(
       validateVariableMappings(slots, { 'body:1': 'name', 'bogus': 'phone' }, keys)
     ).toContain('Unknown variable');
+  });
+
+  it('rejects a mapping to a column that no longer exists on the table', () => {
+    // The question was removed from the form, so the fresh catalog
+    // no longer lists it: the saved mapping fails loudly instead of
+    // sending the wrong column's value.
+    const freshKeys = new Set(
+      buildTableVariableFields([{ key: 'other', label: 'Other' }]).map((f) => f.key)
+    );
+    expect(
+      validateVariableMappings(slots, { 'body:1': 'answer:city' }, freshKeys)
+    ).toContain('unknown field');
   });
 });
 
@@ -174,6 +257,18 @@ describe('resolveVariableValues', () => {
     for (const v of Object.values(values)) {
       expect(v).not.toContain('{{');
     }
+  });
+
+  it('resolves the present slot without substituting the missing one', () => {
+    // A missing cell reports its own slot; the resolved value is
+    // never copied, shifted, or invented from another column.
+    const { values, missing } = resolveVariableValues(
+      slots,
+      { 'body:1': 'name', 'body:2': 'answer:city' },
+      { name: 'Asha' }
+    );
+    expect(values).toEqual({ 'body:1': 'Asha' });
+    expect(missing).toEqual([{ slotKey: 'body:2', fieldKey: 'answer:city' }]);
   });
 });
 

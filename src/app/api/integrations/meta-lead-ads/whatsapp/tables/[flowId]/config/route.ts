@@ -50,7 +50,7 @@ import {
 } from '@/lib/meta-lead-whatsapp/assignee-sequences';
 import { getTableConfig } from '@/lib/lead-assignment/table-config';
 import {
-  buildAvailableVariableFields,
+  buildTableVariableFields,
   getLatestLeadFieldMap,
   getTemplateVariableSlots,
   validateVariableMappings,
@@ -194,18 +194,49 @@ export async function GET(request: Request, { params }: Ctx) {
     );
 
     // This table's mapping targets: standard fields + one entry
-    // per Instant Form question (same keys the drain resolves).
+    // per Instant Form question (same keys the drain resolves),
+    // labeled with this table's ACTUAL Workspace headers — system
+    // columns render as "Submission Time" / "Name" (or "WhatsApp
+    // Name") / "Phone Number", and each question column renders
+    // under its effective header (custom rename wins, else the
+    // formatted question label, exactly like the grid).
     const { data: formRow } = await ctx.supabase
       .from('meta_lead_forms')
       .select('questions')
       .eq('id', table.formDbId)
       .eq('account_id', ctx.accountId)
       .maybeSingle();
-    const fields = buildAvailableVariableFields(
-      parseFormQuestions(
-        (formRow as { questions?: unknown } | null)?.questions
-      )
+    const questions = parseFormQuestions(
+      (formRow as { questions?: unknown } | null)?.questions
     );
+    // Custom header renames for this table (best-effort: missing
+    // rows or read errors fall back to default headers — the
+    // mapping keys never depend on labels).
+    let renames: Record<string, string> = {};
+    try {
+      const { data: labelRows, error: labelsErr } = await ctx.supabase
+        .from('meta_lead_header_labels')
+        .select('column_key, label')
+        .eq('account_id', ctx.accountId)
+        .eq('flow_id', flowId);
+      if (labelsErr) throw labelsErr;
+      for (const r of (labelRows ?? []) as Array<{
+        column_key?: unknown;
+        label?: unknown;
+      }>) {
+        if (
+          typeof r.column_key === 'string' &&
+          r.column_key !== '' &&
+          typeof r.label === 'string' &&
+          r.label.trim() !== ''
+        ) {
+          renames[r.column_key] = r.label;
+        }
+      }
+    } catch {
+      renames = {};
+    }
+    const fields = buildTableVariableFields(questions, renames);
 
     // APPROVED templates only — the picker must never offer a
     // template that auto-send would refuse to deliver. Slots are

@@ -133,4 +133,35 @@ describe("assignee sequence editor — template presentation", () => {
     expect(html).toContain("Body {{1}}");
     expect(html).toContain("Name");
   });
+
+  it("shows the table's actual column headers in the mapping dropdown", () => {
+    const tableFields = [
+      { key: "name", label: "Name" },
+      { key: "phone", label: "Phone Number" },
+      { key: "submitted_at", label: "Submission Time" },
+      { key: "answer:full_name", label: "Customer" },
+    ];
+    const items: SequenceItem[] = [
+      {
+        template_name: "hello_world",
+        template_language: "en_US",
+        variable_mappings: { "body:1": "phone" },
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <AssigneeSequenceEditor
+        templates={templates}
+        fields={tableFields}
+        sample={null}
+        delay="0"
+        items={items}
+        readOnly
+        onDelayChange={() => {}}
+        onItemsChange={() => {}}
+      />,
+    );
+    // Real headers — never generic "Phone" / "Submitted At" labels.
+    expect(html).toContain("Phone Number");
+    expect(html).not.toContain(">Phone<");
+  });
 });
