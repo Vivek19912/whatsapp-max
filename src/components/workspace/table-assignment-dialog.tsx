@@ -33,7 +33,9 @@ import {
   ConfigStatusBadge,
 } from "./config-dialog";
 import { SearchableSelect } from "./searchable-select";
+import { AssigneeSequenceEditor, type SequenceFieldDef, type SequenceItem, type SequenceTemplateOption } from "./assignee-sequence-editor";
 import { ASSIGNMENT_TIMEZONE } from "@/lib/lead-assignment/table-validation";
+import { salespersonKeyFor } from "@/lib/meta-lead-whatsapp/assignee-sequences";
 
 /** "29 Oct, 5:00 PM IST" from a stored UTC instant (display only). */
 function formatPausedUntilFull(iso: string): string {  try {
@@ -64,97 +66,21 @@ export function payloadAssignees(
 }
 
 /** One send-eligible WhatsApp template from the templates endpoint. */
-export interface AssignmentTemplateOption {
-  name: string;
-  language: string;
-  status: string;
-  /** Meta category as stored by the sync (`Utility`/`Marketing`/`Authentication`); null when unknown. */
-  category: string | null;
-}
-
-/**
- * Display category for a template option: the actual stored
- * category uppercased to Meta's style (`UTILITY`, `MARKETING`,
- * `AUTHENTICATION`). Anything missing or unrecognized falls back
- * to "Category unavailable" — never guessed. Pure.
- */
-export function formatTemplateCategory(category: unknown): string {
-  const normalized = typeof category === "string" ? category.trim().toUpperCase() : "";
-  if (
-    normalized === "UTILITY" ||
-    normalized === "MARKETING" ||
-    normalized === "AUTHENTICATION"
-  ) {
-    return normalized;
-  }
-  return "Category unavailable";
-}
-
-/**
- * Opaque selector value for a (name, language) template identity.
- * Names and languages never contain NUL, so the join is
- * unambiguous without escaping. Pure.
- */
-const TEMPLATE_KEY_SEP = "\0";
-
-export function encodeTemplateKey(template: { name: string; language: string }): string {
-  return `${template.name}${TEMPLATE_KEY_SEP}${template.language}`;
-}
-
-/** Inverse of {@link encodeTemplateKey}; null when malformed. Pure. */
-export function decodeTemplateKey(value: string): { name: string; language: string } | null {
-  const sep = value.indexOf(TEMPLATE_KEY_SEP);
-  if (sep <= 0 || sep === value.length - 1) return null;
-  const name = value.slice(0, sep);
-  const language = value.slice(sep + 1);
-  if (!name || !language) return null;
-  return { name, language };
-}
-
-/**
- * SearchableSelect options from endpoint rows: one entry per
- * (name, language) pair (first wins on duplicates), label =
- * template name, hint = `CATEGORY · language · status`. The
- * selector filters over label, value, and hint, so name,
- * language, and category search all work. Pure.
- */
-export function toTemplateOptions(
-  templates: readonly AssignmentTemplateOption[],
-): Array<{ value: string; label: string; hint: string }> {
-  const seen = new Set<string>();
-  const options: Array<{ value: string; label: string; hint: string }> = [];
-  for (const t of templates) {
-    if (typeof t.name !== "string" || t.name === "") continue;
-    if (typeof t.language !== "string" || t.language === "") continue;
-    const value = encodeTemplateKey({ name: t.name, language: t.language });
-    if (seen.has(value)) continue;
-    seen.add(value);
-    options.push({
-      value,
-      label: t.name,
-      hint: `${formatTemplateCategory(t.category)} · ${t.language} · ${t.status}`,
-    });
-  }
-  return options;
-}
-
-/**
- * True when the dialog's current (name, language) matches a loaded
- * approved template. A saved template that no longer matches —
- * renamed, removed, or unapproved — needs a valid replacement.
- * Pure.
- */
-export function isTemplateSelectionValid(
-  templates: readonly AssignmentTemplateOption[] | null,
-  name: string,
-  language: string,
-): boolean {
-  if (name.trim() === "") return true;
-  if (templates === null) return true;
-  const trimmedName = name.trim();
-  const trimmedLanguage = language.trim();
-  return templates.some((t) => t.name === trimmedName && t.language === trimmedLanguage);
-}
+export type { AssignmentTemplateOption } from "./assignment-template-utils";
+import type { AssignmentTemplateOption } from "./assignment-template-utils";
+import {
+  decodeTemplateKey,
+  encodeTemplateKey,
+  isTemplateSelectionValid,
+  toTemplateOptions,
+} from "./assignment-template-utils";
+export {
+  decodeTemplateKey,
+  encodeTemplateKey,
+  formatTemplateCategory,
+  isTemplateSelectionValid,
+  toTemplateOptions,
+} from "./assignment-template-utils";
 
 /**
  * Per-table Lead Assignment settings (Meta Lead Ads tables and
@@ -218,6 +144,12 @@ interface NotificationRow {
   created_at: string;
 }
 
+/** One salesperson's customer-facing sequence draft (delay is a raw input string). */
+interface SequenceDraft {
+  delay_seconds: string;
+  items: SequenceItem[];
+}
+
 type Draft = {
   key: string;
   user_id: string | null;
@@ -228,7 +160,52 @@ type Draft = {
   is_active: boolean;
   notify_email: boolean;
   notify_whatsapp: boolean;
+  /** Customer-facing sequence for this salesperson (Meta tables only); null = not loaded. */
+  sequence: SequenceDraft | null;
+  /** True once the user edited the sequence (must be persisted on save). */
+  sequenceDirty: boolean;
+  /** The salesperson key `sequence` was loaded for (dedupes re-fetches). */
+  sequenceLoadedKey: string | null;
 };
+
+/** Stable salesperson key for a draft (shared with the assignment engine). */
+function draftKey(d: { user_id: string | null; email: string; phone: string }): string | null {
+  return salespersonKeyFor({
+    user_id: d.user_id,
+    email: d.email || null,
+    phone: d.phone || null,
+  });
+}
+
+/**
+ * Compact, read-only customer-sequence summary for the assignee
+ * table/cards: "No customer templates" when unconfigured, else the
+ * ordered template names (with language) joined by arrows. Keeps
+ * the main list dense; the full editor carries category/status.
+ */
+function SequenceSummary({ draft }: { draft: Draft }) {
+  const seq = draft.sequence;
+  if (seq === null) {
+    // Not loaded yet (or load failed) — distinct from "configured
+    // empty" so a saved sequence never flashes as "No templates".
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  if (seq.items.length === 0) {
+    return (
+      <span className="text-xs text-muted-foreground">No customer templates</span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 flex-col items-start gap-0.5 text-xs">
+      <span className="text-muted-foreground">
+        {seq.items.length} template{seq.items.length === 1 ? "" : "s"}
+      </span>
+      <span className="max-w-56 truncate text-foreground" title={seq.items.map((t) => `${t.template_name} (${t.template_language})`).join(" → ")}>
+        {seq.items.map((t) => `${t.template_name} (${t.template_language})`).join(" → ")}
+      </span>
+    </span>
+  );
+}
 
 const emptyDraft = (): Draft => ({
   key: `new-${Date.now()}`,
@@ -240,6 +217,9 @@ const emptyDraft = (): Draft => ({
   is_active: true,
   notify_email: true,
   notify_whatsapp: false,
+  sequence: null,
+  sequenceDirty: false,
+  sequenceLoadedKey: null,
 });
 
 export function TableAssignmentDialog({
@@ -289,8 +269,25 @@ export function TableAssignmentDialog({
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRow[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Customer-facing sequence support (Meta Lead Ads tables only —
+  // Flow Tables never resolve the config endpoint). The catalog
+  // (approved templates + slots + fields) is loaded once per open;
+  // each salesperson's saved sequence is loaded and attached to
+  // its draft so View mode can render order + metadata read-only.
+  const [sequenceCatalog, setSequenceCatalog] = useState<{
+    templates: SequenceTemplateOption[];
+    fields: SequenceFieldDef[];
+    sample: Record<string, string> | null;
+    configuredKeys: string[];
+  } | null>(null);
+  const [sequenceCatalogLoading, setSequenceCatalogLoading] = useState(false);
 
-  const readJson = async (res: Response) => {
+  // Customer-facing sequences are a Meta Lead Ads feature; Flow
+  // tables keep assignment but never touch the WhatsApp config
+  // endpoint (which resolves Flow tables to 404).
+  const isMetaTable = tableKind === "meta_lead_ads";
+
+  const readJson = useCallback(async (res: Response) => {
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) {
       throw new Error(
@@ -298,7 +295,7 @@ export function TableAssignmentDialog({
       );
     }
     return json;
-  };
+  }, []);
 
   const toDraft = useCallback((a: AssigneeView): Draft => {
     return {
@@ -311,8 +308,147 @@ export function TableAssignmentDialog({
       is_active: a.is_active,
       notify_email: a.notify_email,
       notify_whatsapp: a.notify_whatsapp,
+      sequence: null,
+      sequenceDirty: false,
+      sequenceLoadedKey: null,
     };
   }, []);
+
+  const configUrl = useCallback(
+    (scope?: string) =>
+      `/api/integrations/meta-lead-ads/whatsapp/tables/${encodeURIComponent(flowId)}/config` +
+      (scope ? `?assignee_key=${encodeURIComponent(scope)}` : ""),
+    [flowId],
+  );
+
+  /**
+   * Load the customer-sequence catalog (approved templates with
+   * variable slots, this table's mapping fields, sample preview
+   * values, and which salespeople already have a saved sequence).
+   * Meta tables only; failures leave the catalog null so the
+   * sequence editor degrades to a retry hint without blocking
+   * assignment editing.
+   */
+  const loadSequenceCatalog = useCallback(async () => {
+    setSequenceCatalogLoading(true);
+    try {
+      const json = (await readJson(await fetch(configUrl(), { cache: "no-store" }))) as {
+        approved_templates?: unknown;
+        fields?: unknown;
+        sample_values?: unknown;
+        configured_keys?: unknown;
+      };
+      const rawTemplates = Array.isArray(json.approved_templates)
+        ? json.approved_templates
+        : [];
+      const templates: SequenceTemplateOption[] = (rawTemplates as Array<Record<string, unknown>>)
+        .filter(
+          (t) =>
+            typeof t.template_name === "string" &&
+            t.template_name !== "" &&
+            typeof t.template_language === "string",
+        )
+        .map((t) => ({
+          template_name: t.template_name as string,
+          template_language: t.template_language as string,
+          category: typeof t.category === "string" ? t.category : null,
+          status: typeof t.status === "string" ? t.status : "APPROVED",
+          preview: typeof t.preview === "string" ? t.preview : null,
+          body_text: typeof t.body_text === "string" ? t.body_text : "",
+          variables: Array.isArray(t.variables)
+            ? (t.variables as SequenceTemplateOption["variables"])
+            : [],
+        }));
+      const rawFields = Array.isArray(json.fields) ? json.fields : [];
+      const fields: SequenceFieldDef[] = (rawFields as Array<Record<string, unknown>>)
+        .filter((f) => typeof f.key === "string" && f.key !== "")
+        .map((f) => ({
+          key: f.key as string,
+          label: typeof f.label === "string" ? f.label : (f.key as string),
+        }));
+      const sample =
+        json.sample_values && typeof json.sample_values === "object"
+          ? (json.sample_values as Record<string, string>)
+          : null;
+      const configuredKeys = Array.isArray(json.configured_keys)
+        ? (json.configured_keys as unknown[]).filter(
+            (k): k is string => typeof k === "string",
+          )
+        : [];
+      setSequenceCatalog({ templates, fields, sample, configuredKeys });
+    } catch {
+      setSequenceCatalog(null);
+    } finally {
+      setSequenceCatalogLoading(false);
+    }
+  }, [readJson, configUrl]);
+
+  /** Load one salesperson's saved customer sequence (empty when none). */
+  const loadSequenceFor = useCallback(
+    async (key: string): Promise<SequenceDraft> => {
+      const json = (await readJson(await fetch(configUrl(key), { cache: "no-store" }))) as {
+        assignee?: { delay_seconds?: unknown; items?: unknown } | null;
+      };
+      const a = json.assignee;
+      const items = Array.isArray(a?.items)
+        ? ((a?.items as Array<Record<string, unknown>>)
+            .filter(
+              (t) =>
+                typeof t.template_name === "string" &&
+                typeof t.template_language === "string",
+            )
+            .map((t) => ({
+              template_name: t.template_name as string,
+              template_language: t.template_language as string,
+              variable_mappings:
+                t.variable_mappings && typeof t.variable_mappings === "object"
+                  ? (t.variable_mappings as Record<string, string>)
+                  : {},
+            })) as SequenceItem[])
+        : [];
+      return {
+        delay_seconds: String(a?.delay_seconds ?? 0),
+        items,
+      };
+    },
+    [readJson, configUrl],
+  );
+
+  /**
+   * Attach each saved assignee's customer sequence to its draft
+   * (Meta tables only). Runs after the assignment payload loads so
+   * View mode and the compact table both show the real saved order.
+   */
+  const attachSequences = useCallback(
+    async (assignees: AssigneeView[]) => {
+      if (!isMetaTable) return;
+      const entries = await Promise.all(
+        assignees.map(async (a) => {
+          const key = draftKey({ user_id: a.user_id, email: a.email ?? "", phone: a.phone ?? "" });
+          if (!key) return null;
+          try {
+            return [a.id, await loadSequenceFor(key)] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const seqById = new Map(
+        entries.filter((e): e is readonly [string, SequenceDraft] => e !== null),
+      );
+      if (seqById.size > 0) {
+        setDrafts((prev) =>
+          prev.map((d) => {
+            const seq = seqById.get(d.key);
+            if (!seq) return d;
+            const key = draftKey(d);
+            return { ...d, sequence: seq, sequenceLoadedKey: key };
+          }),
+        );
+      }
+    },
+    [isMetaTable, loadSequenceFor],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -346,12 +482,13 @@ export function TableAssignmentDialog({
       setDrafts(assignees.map(toDraft));
       const members = (rosterJson as { members?: RosterMember[] }).members ?? [];
       setRoster(members);
+      void attachSequences(assignees);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load assignment settings.");
     } finally {
       setLoading(false);
     }
-  }, [flowId, toDraft]);
+  }, [flowId, toDraft, attachSequences, readJson]);
 
   /**
    * Send-eligible templates for this account (APPROVED only,
@@ -400,7 +537,7 @@ export function TableAssignmentDialog({
     } finally {
       setTemplatesLoading(false);
     }
-  }, [flowId]);
+  }, [flowId, readJson]);
 
   useEffect(() => {
     if (open) {
@@ -409,10 +546,14 @@ export function TableAssignmentDialog({
       setPauseFor(null);
       setShowNotifications(false);
       setNotifications(null);
+      setSequenceCatalog(null);
       void load();
       void loadTemplates();
+      if (isMetaTable) {
+        void loadSequenceCatalog();
+      }
     }
-  }, [open, load, loadTemplates]);
+  }, [open, load, loadTemplates, loadSequenceCatalog, isMetaTable]);
 
   const rosterById = useMemo(() => {
     return new Map(roster.map((m) => [m.user_id, m]));
@@ -436,6 +577,56 @@ export function TableAssignmentDialog({
       })),
     [roster]
   );
+
+  // The customer-sequence key of the assignee being edited, derived
+  // live from the form identity. null while the form has no
+  // identifying field yet (no linked member, no email/phone).
+  const formKey = useMemo(
+    () => draftKey({ user_id: form.user_id, email: form.email, phone: form.phone }),
+    [form.user_id, form.email, form.phone],
+  );
+
+  // Load the edited salesperson's saved customer sequence whenever
+  // the form identity settles on a new key (linking a member, or
+  // typing an email/phone — debounced so free text doesn't spam the
+  // endpoint). Already-loaded keys are skipped, and in-progress
+  // edits are never clobbered by the same identity.
+  useEffect(() => {
+    if (!isMetaTable || !editingKey) return;
+    if (!formKey) {
+      setForm((f) =>
+        f.sequence === null && f.sequenceLoadedKey === null
+          ? f
+          : { ...f, sequence: null, sequenceLoadedKey: null, sequenceDirty: false },
+      );
+      return;
+    }
+    if (form.sequenceLoadedKey === formKey) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void loadSequenceFor(formKey)
+        .then((seq) => {
+          if (cancelled) return;
+          setForm((f) =>
+            draftKey({ user_id: f.user_id, email: f.email, phone: f.phone }) === formKey
+              ? { ...f, sequence: seq, sequenceLoadedKey: formKey, sequenceDirty: false }
+              : f,
+          );
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setForm((f) =>
+            draftKey({ user_id: f.user_id, email: f.email, phone: f.phone }) === formKey
+              ? { ...f, sequence: null, sequenceLoadedKey: formKey, sequenceDirty: false }
+              : f,
+          );
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [formKey, form.sequenceLoadedKey, isMetaTable, editingKey, loadSequenceFor]);
 
   const activeWeightTotal = useMemo(() => {
     return drafts
@@ -545,6 +736,38 @@ export function TableAssignmentDialog({
     }));
   };
 
+  /**
+   * Persist one salesperson's customer sequence through the existing
+   * per-salesperson config endpoint (empty list clears it).
+   */
+  const saveSequence = async (key: string, seq: SequenceDraft) => {
+    // An empty sequence deletes the row; the delay is then irrelevant
+    // (send 0) so a stale delay string can never block clearing.
+    const items = seq.items;
+    let delayNum = 0;
+    if (items.length > 0) {
+      delayNum = Number(seq.delay_seconds);
+      if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
+        throw new Error("Delay must be a whole number of seconds between 0 and 86400.");
+      }
+    }
+    await readJson(
+      await fetch(configUrl(key), {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          delay_seconds: delayNum,
+          assignee_key: key,
+          templates: items.map((t) => ({
+            template_name: t.template_name,
+            template_language: t.template_language,
+            variable_mappings: t.variable_mappings,
+          })),
+        }),
+      }),
+    );
+  };
+
   const save = async () => {
     if (readOnly || busy !== null) return;
     if (weightError) {
@@ -556,6 +779,18 @@ export function TableAssignmentDialog({
       setSaveError(message);
       toast.error(message);
       return;
+    }
+    // Client-side sequence guard (the server re-validates templates,
+    // mappings, and delay): a malformed delay must never be sent.
+    if (isMetaTable) {
+      for (const d of drafts) {
+        if (!d.sequenceDirty || !d.sequence || d.sequence.items.length === 0) continue;
+        const delayNum = Number(d.sequence.delay_seconds);
+        if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
+          toast.error("Delay must be a whole number of seconds between 0 and 86400.");
+          return;
+        }
+      }
     }
     setBusy("save");
     setSaveError(null);
@@ -588,6 +823,24 @@ export function TableAssignmentDialog({
         setPayload((p) =>
           p ? { ...p, config: { ...json.config!, }, assignees: p.assignees } : p,
         );
+      }
+      // Persist customer sequences for the drafts the user actually
+      // changed. Each is keyed by that salesperson's own identity,
+      // so saving one never overwrites another's sequence. Failures
+      // are surfaced without undoing the assignment save.
+      if (isMetaTable) {
+        const dirty = drafts.filter((d) => d.sequenceDirty && d.sequence);
+        for (const d of dirty) {
+          const key = draftKey(d);
+          if (!key) continue;
+          try {
+            await saveSequence(key, d.sequence!);
+          } catch (err) {
+            const message =
+              err instanceof Error ? err.message : "Failed to save a customer sequence.";
+            toast.error(message);
+          }
+        }
       }
       await load();
     } catch (err) {
@@ -897,6 +1150,7 @@ export function TableAssignmentDialog({
                         <TableHead>Contact</TableHead>
                         {mode === "percentage" && <TableHead className="w-20">Share %</TableHead>}
                         <TableHead>Status</TableHead>
+                        {isMetaTable ? <TableHead>Customer sequence</TableHead> : null}
                         {readOnly ? null : <TableHead className="text-right">Actions</TableHead>}
                       </TableRow>
                     </TableHeader>
@@ -958,6 +1212,11 @@ export function TableAssignmentDialog({
                           <Badge variant="outline">Unsaved</Badge>
                         )}
                       </TableCell>
+                      {isMetaTable ? (
+                        <TableCell>
+                          <SequenceSummary draft={d} />
+                        </TableCell>
+                      ) : null}
                             {readOnly ? null : (
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
@@ -1071,6 +1330,14 @@ export function TableAssignmentDialog({
                                 {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
                               </dd>
                             </div>
+                            {isMetaTable ? (
+                              <div className="flex gap-1.5">
+                                <dt className="w-16 shrink-0 text-muted-foreground">To lead</dt>
+                                <dd className="min-w-0 flex-1">
+                                  <SequenceSummary draft={d} />
+                                </dd>
+                              </div>
+                            ) : null}
                           </dl>
                             <div className="mt-2 flex flex-wrap gap-1">
                               {readOnly ? null : (
@@ -1208,6 +1475,73 @@ export function TableAssignmentDialog({
                           WhatsApp alerts
                         </label>
                       </div>
+                      {isMetaTable ? (
+                        <div className="flex flex-col gap-2 border-t border-border pt-3">
+                          <div className="flex flex-col gap-0.5">
+                            <p className="text-sm font-semibold text-foreground">
+                              WhatsApp messages to lead
+                            </p>
+                            <p className="text-xs leading-snug text-muted-foreground">
+                              These templates are sent to a lead when this salesperson receives
+                              the lead&apos;s initial assignment. Reassignment does not send
+                              customer-facing templates.
+                            </p>
+                          </div>
+                          {!formKey ? (
+                            <p className="text-xs text-muted-foreground">
+                              Link a team member or enter an email address or phone number to
+                              configure customer templates.
+                            </p>
+                          ) : sequenceCatalogLoading && sequenceCatalog === null ? (
+                            <p className="text-xs text-muted-foreground">
+                              Loading customer templates…
+                            </p>
+                          ) : sequenceCatalog === null ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p role="alert" className="text-xs text-destructive">
+                                Could not load customer templates.
+                              </p>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void loadSequenceCatalog()}
+                              >
+                                Retry
+                              </Button>
+                            </div>
+                          ) : (
+                            <AssigneeSequenceEditor
+                              templates={sequenceCatalog.templates}
+                              fields={sequenceCatalog.fields}
+                              sample={sequenceCatalog.sample}
+                              delay={form.sequence?.delay_seconds ?? "0"}
+                              items={form.sequence?.items ?? []}
+                              readOnly={false}
+                              onDelayChange={(v) =>
+                                setForm((f) => ({
+                                  ...f,
+                                  sequence: {
+                                    delay_seconds: v,
+                                    items: f.sequence?.items ?? [],
+                                  },
+                                  sequenceDirty: true,
+                                }))
+                              }
+                              onItemsChange={(items) =>
+                                setForm((f) => ({
+                                  ...f,
+                                  sequence: {
+                                    delay_seconds: f.sequence?.delay_seconds ?? "0",
+                                    items,
+                                  },
+                                  sequenceDirty: true,
+                                }))
+                              }
+                            />
+                          )}
+                        </div>
+                      ) : null}
                       <div className="flex justify-end gap-2">
                         <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
                           Cancel

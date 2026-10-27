@@ -16,7 +16,6 @@ import {
 import { SearchableSelect } from "@/components/workspace/searchable-select";
 import { ConfigDialog } from "@/components/workspace/config-dialog";
 import { TableAssignmentDialog } from "@/components/workspace/table-assignment-dialog";
-import { MetaTableWhatsappDialog } from "@/components/workspace/meta-table-whatsapp-dialog";
 import { TravelCrmSettings } from "@/components/workspace/travel-crm-settings";
 import {
   WorkspacePageHeader,
@@ -48,11 +47,6 @@ describe("config dialog shell contract (source pins; Base UI portals need a DOM)
           open={false}
           onOpenChange={() => {}}
         />
-      )
-    ).toBe("");
-    expect(
-      renderToStaticMarkup(
-        <MetaTableWhatsappDialog flowId="flow-1" open={false} onOpenChange={() => {}} />
       )
     ).toBe("");
   });
@@ -244,22 +238,11 @@ describe("assignment dialog props are table-scoped", () => {
       `${process.cwd()}/src/components/workspace/table-assignment-dialog.tsx`,
       "utf8"
     );
-    expect(src).toContain("title=\"Assignment\"");
+    expect(src).toContain('title="Assignment"');
     expect(src).toContain("flowName ??");
     expect(src).toContain("Meta Lead Ads table");
     expect(src).toContain("Save Assignment Settings");
     expect(src).toContain("/api/flows/${encodeURIComponent(flowId)}/assignment");
-  });
-});
-
-describe("whatsapp dialog keeps its scope copy", () => {
-  it("names the table scope explicitly", () => {
-    const src = readFileSync(
-      `${process.cwd()}/src/components/workspace/meta-table-whatsapp-dialog.tsx`,
-      "utf8"
-    );
-    expect(src).toContain("Auto-send WhatsApp");
-    expect(src).toContain("Other tables are unaffected");
   });
 });
 

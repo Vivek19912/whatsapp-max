@@ -84,7 +84,6 @@ import {
 } from '@/lib/meta-lead-ads/header-labels';
 import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
-import { MetaTableWhatsappDialog } from '@/components/workspace/meta-table-whatsapp-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
@@ -366,10 +365,6 @@ export default function WorkspacePage() {
   const [sheetDialogOpen, setSheetDialogOpen] = useState(false);
   const [assignmentDialogOpen, setAssignmentDialogOpen] = useState(false);
   const [assignmentViewMode, setAssignmentViewMode] = useState(false);
-  // Per-table WhatsApp auto-send dialog (Meta Lead Ads tables
-  // only; Flow Tables never see it).
-  const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
-  const [whatsappViewMode, setWhatsappViewMode] = useState(false);
   // Per-table Travel CRM defaults dialog (controlled from the
   // Workspace actions menu with separate view / edit entries).
   const [travelDialogOpen, setTravelDialogOpen] = useState(false);
@@ -1633,11 +1628,6 @@ export default function WorkspacePage() {
                     setEditingField(null);
                     setAddColumnOpen(true);
                   }}
-                  showAutoSend={isMetaTable && isOwner}
-                  onOpenAutoSend={(mode) => {
-                    setWhatsappViewMode(mode === 'view');
-                    setWhatsappDialogOpen(true);
-                  }}
                   showAssignment={isOwner}
                   onOpenAssignment={(mode) => {
                     setAssignmentViewMode(mode === 'view');
@@ -2123,19 +2113,6 @@ export default function WorkspacePage() {
           flowId={flowId}
           open={sheetDialogOpen}
           onOpenChange={setSheetDialogOpen}
-        />
-      ) : null}
-
-      {/* Per-table WhatsApp auto-send configuration (Meta Lead Ads
-          tables only — never rendered for Flow Tables). Keyed by
-          flow so switching tables loads that table's own settings. */}
-      {isMetaTable && flowId ? (
-        <MetaTableWhatsappDialog
-          key={`wa-${flowId}`}
-          flowId={flowId}
-          open={whatsappDialogOpen}
-          onOpenChange={setWhatsappDialogOpen}
-          viewMode={whatsappViewMode}
         />
       ) : null}
 

@@ -26,11 +26,8 @@ describe("workspace redesign — shared tokens and shell", () => {
     expect(src("src/components/workspace/table-assignment-dialog.tsx")).toContain(
       'width="xl"'
     );
-    // ...sheets and WhatsApp use the large preset, Travel CRM medium.
+    // ...sheets use the large preset, Travel CRM medium.
     expect(src("src/components/workspace/meta-table-sheets-dialog.tsx")).toContain(
-      'width="lg"'
-    );
-    expect(src("src/components/workspace/meta-table-whatsapp-dialog.tsx")).toContain(
       'width="lg"'
     );
     expect(src("src/components/workspace/travel-crm-settings.tsx")).toContain(
@@ -51,7 +48,6 @@ describe("workspace redesign — shared tokens and shell", () => {
   it("no dialog invents its own width or footer anymore", () => {
     for (const file of [
       "src/components/workspace/meta-table-sheets-dialog.tsx",
-      "src/components/workspace/meta-table-whatsapp-dialog.tsx",
       "src/components/workspace/table-assignment-dialog.tsx",
       "src/components/workspace/travel-crm-settings.tsx",
     ]) {

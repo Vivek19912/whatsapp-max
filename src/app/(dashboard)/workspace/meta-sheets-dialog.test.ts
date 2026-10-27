@@ -74,7 +74,6 @@ describe('workspace page — per-table Google Sheets action', () => {
     expect(menuSrc).toContain('Table tools');
     expect(menuSrc).toContain('Automation');
     expect(menuSrc).toContain('SlidersHorizontal');
-    expect(menuSrc).toContain('Auto-send WhatsApp');
     expect(menuSrc).toContain('Assignment');
     const src = page();
     // Removed entry points never appear in the page or the menu;
@@ -84,7 +83,6 @@ describe('workspace page — per-table Google Sheets action', () => {
     expect(menuSrc).not.toContain("label: 'Configure Sheet'");
     expect(menuSrc).not.toContain("label: 'Open Sheet'");
     expect(menuSrc).not.toContain('More actions');
-    expect(src).toContain('onOpenAutoSend');
     expect(src).toContain('onOpenAssignment');
   });
 

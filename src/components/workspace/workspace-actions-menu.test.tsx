@@ -5,7 +5,9 @@
 // lives in its grouped popover. Closed-state SSR proves the single
 // trigger renders with its accessible label while no panel content
 // leaks; source pins cover the grouped items, handlers, and the
-// collision-aware/viewport-bounded panel contract.
+// collision-aware/viewport-bounded panel contract. The separate
+// Auto-send WhatsApp entry was retired: customer-facing WhatsApp
+// templates are configured per assignee inside Assignment.
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -61,8 +63,6 @@ function closedMenu() {
       columns={<button type="button">Columns</button>}
       canAddColumn
       onAddColumn={() => {}}
-      showAutoSend
-      onOpenAutoSend={() => {}}
       showAssignment
       onOpenAssignment={() => {}}
       onOpenTravelSettings={() => {}}
@@ -117,16 +117,13 @@ describe('workspace actions menu panel (grouped, bounded, collision-aware)', () 
     // Dialog actions close the menu, then run the existing
     // page-level opener — the dialogs mount outside the menu.
     expect(src).toContain('Add Column');
-    expect(src).toContain('Auto-send WhatsApp');
     expect(src).toContain('Assignment');
     expect(src).toContain('Travel CRM Settings');
     expect(src).toContain('onAddColumn');
-    expect(src).toContain('onOpenAutoSend');
     expect(src).toContain('onOpenAssignment');
     expect(src).toContain('onOpenTravelSettings');
     expect(src).toContain('setOpen(false)');
     expect(src).toContain('Plus');
-    expect(src).toContain('MessageCircle');
     expect(src).toContain('UserPlus');
     expect(src).toContain('Settings2');
     // Panel tools reuse the caller's wired components (slots) —
@@ -135,13 +132,17 @@ describe('workspace actions menu panel (grouped, bounded, collision-aware)', () 
     expect(src).toContain('columns');
     expect(src).toContain('hiddenRows');
     expect(src).not.toContain('travelCrmSettings={');
+    // The separate Auto-send WhatsApp entry is gone.
+    expect(src).not.toContain('Auto-send WhatsApp');
+    expect(src).not.toContain('MessageCircle');
+    expect(src).not.toContain('onOpenAutoSend');
   });
 
-  it('offers View and Edit for Assignment, Auto-send, and Travel CRM', () => {
+  it('offers View and Edit for Assignment and Travel CRM', () => {
     const src = menuSrc();
     // One compact row per setting: read-only View plus full Edit,
     // with accessible per-action labels (no second overflow menu).
-    for (const label of ['Assignment', 'Auto-send WhatsApp', 'Travel CRM Settings']) {
+    for (const label of ['Assignment', 'Travel CRM Settings']) {
       expect(src).toContain(label);
     }
     expect(src).toContain('aria-label={`View ${label}`}');
@@ -149,8 +150,6 @@ describe('workspace actions menu panel (grouped, bounded, collision-aware)', () 
     expect(src).toContain('Eye');
     expect(src).toContain('Pencil');
     // View opens the read-only dialog, Edit the full editor.
-    expect(src).toContain('onOpenAutoSend("view")');
-    expect(src).toContain('onOpenAutoSend("edit")');
     expect(src).toContain('onOpenAssignment("view")');
     expect(src).toContain('onOpenAssignment("edit")');
     expect(src).toContain('onOpenTravelSettings("view")');
@@ -256,20 +255,27 @@ describe('workspace page wires every tool through the single menu', () => {
     expect(src).not.toContain('travelCrmSettings={');
     // Same gates as the previously visible buttons.
     expect(src).toContain('canAddColumn={canEditSettings}');
-    expect(src).toContain('showAutoSend={isMetaTable && isOwner}');
     expect(src).toContain('showAssignment={isOwner}');
     expect(src).toContain('showTravelSettings={flowId !== null}');
     // View opens the read-only dialog, Edit the full editor.
-    expect(src).toContain("setWhatsappViewMode(mode === 'view')");
-    expect(src).toContain('setWhatsappDialogOpen(true)');
     expect(src).toContain("setAssignmentViewMode(mode === 'view')");
     expect(src).toContain('setAssignmentDialogOpen(true)');
     expect(src).toContain("setTravelViewMode(mode === 'view')");
     expect(src).toContain('setTravelDialogOpen(true)');
     expect(src).toContain('setAddColumnOpen(true)');
     // The dialogs render in view mode when asked.
-    expect(src).toContain('viewMode={whatsappViewMode}');
     expect(src).toContain('viewMode={assignmentViewMode}');
+  });
+
+  it('removes the separate Auto-send WhatsApp dialog entry from the page', () => {
+    const src = pageSrc();
+    // The separate entry point and dialog are gone; customer-facing
+    // WhatsApp configuration now lives inside Assignment.
+    expect(src).not.toContain('MetaTableWhatsappDialog');
+    expect(src).not.toContain('showAutoSend');
+    expect(src).not.toContain('onOpenAutoSend');
+    expect(src).not.toContain('whatsappDialogOpen');
+    expect(src).not.toContain('whatsappViewMode');
   });
 
   it('keeps the selector and search visible with no other toolbar buttons', () => {

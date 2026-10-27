@@ -214,7 +214,7 @@ export async function GET(request: Request, { params }: Ctx) {
     const { data: templates } = await ctx.supabase
       .from('message_templates')
       .select(
-        'name, language, status, header_type, header_content, header_media_url, body_text, buttons'
+        'name, language, status, category, header_type, header_content, header_media_url, body_text, buttons'
       )
       .eq('account_id', ctx.accountId)
       .eq('status', 'APPROVED')
@@ -224,6 +224,7 @@ export async function GET(request: Request, { params }: Ctx) {
       name: string;
       language: string;
       status: string;
+      category?: string | null;
       header_type?: string | null;
       header_content?: string | null;
       header_media_url?: string | null;
@@ -320,6 +321,8 @@ export async function GET(request: Request, { params }: Ctx) {
         return {
           template_name: t.name,
           template_language: t.language,
+          category: typeof t.category === 'string' ? t.category : null,
+          status: t.status,
           preview: typeof t.body_text === 'string' ? t.body_text.slice(0, 160) : null,
           body_text: typeof t.body_text === 'string' ? t.body_text : '',
           variables: getTemplateVariableSlots({

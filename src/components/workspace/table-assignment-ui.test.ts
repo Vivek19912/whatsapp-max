@@ -31,7 +31,6 @@ describe("assignment entry points in the workspace actions menu", () => {
     expect(page).toContain("WorkspaceActionsMenu");
     expect(page).toContain("showAssignment={isOwner}");
     expect(page).toContain("onOpenAssignment={(mode) => {");
-    expect(page).toContain("showAutoSend={isMetaTable && isOwner}");
     expect(page).toContain("setAssignmentDialogOpen(true)");
     expect(page).toContain("setAssignmentViewMode(mode === 'view')");
     expect(page).toContain("viewMode={assignmentViewMode}");
@@ -41,7 +40,7 @@ describe("assignment entry points in the workspace actions menu", () => {
     // The single menu renders both actions under one heading with
     // no sheet entry points and no second overflow menu.
     expect(menu).toContain("Assignment");
-    expect(menu).toContain("Auto-send WhatsApp");
+    expect(menu).not.toContain("Auto-send WhatsApp");
     expect(menu).toContain("Automation");
     // View/Edit render through one shared row component, so the
     // accessible labels are template expressions over the label.
@@ -341,3 +340,89 @@ describe("assignment template selector (searchable, approved-only)", () => {
     expect(dialog).toContain("choose a replacement before saving");
   });
 });
+
+describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+  const editor = src("src/components/workspace/assignee-sequence-editor.tsx");
+  const configRoute = src(
+    "src/app/api/integrations/meta-lead-ads/whatsapp/tables/[flowId]/config/route.ts",
+  );
+
+  it("adds a clearly labelled customer-facing section inside the assignee form", () => {
+    expect(dialog).toContain("WhatsApp messages to lead");
+    expect(dialog).toContain(
+      "These templates are sent to a lead when this salesperson receives",
+    );
+    expect(dialog).toContain("Reassignment does not send");
+    expect(dialog).toContain("customer-facing templates");
+    expect(dialog).toContain("<AssigneeSequenceEditor");
+  });
+
+  it("keeps the salesperson notification template separate from the customer sequence", () => {
+    // The notification template (WhatsApp alerts) stays its own
+    // section; the customer sequence is a distinct labelled section.
+    expect(dialog).toContain("WhatsApp notifications");
+    expect(dialog).toContain("WhatsApp template (optional)");
+    expect(dialog).toContain("WhatsApp messages to lead");
+    // The customer sequence is never the notification template.
+    expect(dialog).toContain("whatsapp_template_name");
+    expect(dialog).toContain("assignee_key");
+  });
+
+  it("uses the existing stable salesperson key for internal and external assignees", () => {
+    expect(dialog).toContain("salespersonKeyFor");
+    expect(dialog).toContain("assignee-sequences");
+    expect(dialog).toContain("draftKey(");
+    expect(dialog).toContain("user_id");
+    expect(dialog).toContain("email");
+    expect(dialog).toContain("phone");
+  });
+
+  it("loads and saves each sequence through the existing per-salesperson config API", () => {
+    expect(dialog).toContain("/api/integrations/meta-lead-ads/whatsapp/tables/");
+    expect(dialog).toContain("/config");
+    expect(dialog).toContain("assignee_key=");
+    expect(dialog).toContain("assignee_key: key");
+    expect(dialog).toContain("method: \"PUT\"");
+  });
+
+  it("saves each salesperson's sequence independently (never another's)", () => {
+    // Saving iterates only the drafts the user changed, keyed by
+    // each draft's own identity, so one assignee's save can never
+    // overwrite another's sequence.
+    expect(dialog).toContain("d.sequenceDirty && d.sequence");
+    expect(dialog).toContain("draftKey(d)");
+    expect(dialog).toContain("saveSequence(key, d.sequence");
+  });
+
+  it("handles empty/cleared sequences and the no-configure state", () => {
+    expect(editor).toContain("No customer templates configured");
+    expect(dialog).toContain("sequence: null");
+    // Clearing a sequence persists the empty list (the config route
+    // deletes the row).
+    expect(dialog).toContain("templates: items.map");
+  });
+
+  it("gates customer sequences to Meta Lead Ads tables only", () => {
+    expect(dialog).toContain('const isMetaTable = tableKind === "meta_lead_ads"');
+    expect(dialog).toContain("{isMetaTable ? (");
+  });
+
+  it("shows the sequence order in the compact list and stays read-only in view mode", () => {
+    // Compact per-assignee summary with ordered names; the full
+    // editor is edit-only (hidden behind the readOnly gate).
+    expect(dialog).toContain("<SequenceSummary");
+    expect(dialog).toContain("Customer sequence");
+    expect(dialog).toContain("No customer templates");
+    expect(dialog).toContain("const readOnly = viewMode === true");
+  });
+
+  it("exposes category and status in the sequence editor options", () => {
+    // The config route now returns category + status alongside the
+    // existing name/language/slots, so the editor can present them.
+    expect(configRoute).toContain("category: typeof t.category === 'string'");
+    expect(configRoute).toContain("status: t.status");
+    expect(editor).toContain("formatTemplateCategory");
+  });
+});
+

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ComponentType, type ReactNode } from "react";
-import { Eye, MessageCircle, Pencil, Plus, Settings2, SlidersHorizontal, UserPlus } from "lucide-react";
+import { Eye, Pencil, Plus, Settings2, SlidersHorizontal, UserPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,10 +23,6 @@ export interface WorkspaceActionsMenuProps {
   canAddColumn: boolean;
   /** Existing Add Column handler (opens the column dialog). */
   onAddColumn: () => void;
-  /** Mirrors the previous toolbar gate (Meta tables, owner only). */
-  showAutoSend: boolean;
-  /** Existing Auto-send WhatsApp handler (opens view or edit dialog). */
-  onOpenAutoSend: (mode: "view" | "edit") => void;
   /** Mirrors the previous toolbar gate (owner only). */
   showAssignment: boolean;
   /** Existing Assignment handler (opens view or edit dialog). */
@@ -98,7 +94,7 @@ function SettingRow({
  * (tooltip + accessible label "Workspace actions"). Clicking it
  * opens a grouped popover — "Table tools" (Filters, Columns,
  * Hidden rows, Add Column, Travel CRM Settings) and "Automation
- * & assignment" (Auto-send WhatsApp, Assignment).
+ * & assignment" (Assignment).
  *
  * The Filters / Columns / Hidden-rows entries reuse the exact
  * components (and handlers, permissions, filter state, and API
@@ -111,8 +107,8 @@ function SettingRow({
  * page-level open handler — the dialogs live outside this menu
  * and are unaffected.
  *
- * Assignment, Auto-send WhatsApp, and Travel CRM Settings each
- * offer View (read-only dialog) and Edit (full editor) actions.
+ * Assignment and Travel CRM Settings each offer View (read-only
+ * dialog) and Edit (full editor) actions.
  *
  * Positioning is collision-aware (flips/shifts into view) and
  * the panel scrolls within the viewport on desktop and mobile.
@@ -123,8 +119,6 @@ export function WorkspaceActionsMenu({
   hiddenRows,
   canAddColumn,
   onAddColumn,
-  showAutoSend,
-  onOpenAutoSend,
   showAssignment,
   onOpenAssignment,
   showTravelSettings = true,
@@ -138,7 +132,7 @@ export function WorkspaceActionsMenu({
     hiddenRows != null ||
     canAddColumn ||
     showTravelSettings;
-  const hasAutomation = showAutoSend || showAssignment;
+  const hasAutomation = showAssignment;
 
   function runAndClose(fn: () => void) {
     // Dialogs mount outside this menu, so closing first is safe
@@ -205,14 +199,6 @@ export function WorkspaceActionsMenu({
               Automation &amp; assignment
             </p>
             <div className="grid gap-1.5">
-              {showAutoSend ? (
-                <SettingRow
-                  icon={MessageCircle}
-                  label="Auto-send WhatsApp"
-                  onView={() => runAndClose(() => onOpenAutoSend("view"))}
-                  onEdit={() => runAndClose(() => onOpenAutoSend("edit"))}
-                />
-              ) : null}
               {showAssignment ? (
                 <SettingRow
                   icon={UserPlus}
