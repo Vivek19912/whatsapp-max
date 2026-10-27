@@ -26,6 +26,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isUniqueViolation } from "@/lib/contacts/dedupe";
 import { decrypt } from "@/lib/whatsapp/encryption";
+import { standardContactFromAnswers } from "@/lib/meta-lead-ads/normalize";
 import { getMetaSmtpStatus } from "@/lib/meta-lead-ads/notify";
 import { sendEmailViaSmtp } from "@/lib/email/send";
 import {
@@ -124,7 +125,19 @@ interface LeadContext {
   receivedAt: string | null;
 }
 
-/** Best-effort lead snapshot for the alert body (Meta + Flow). */
+/**
+ * Best-effort lead snapshot for the alert body (Meta + Flow).
+ *
+ * Resolution mirrors exactly what the Workspace table renders for
+ * the same lead: the linked contact row first, then the run's own
+ * stored answers (standard name/phone/email derivation). Leads
+ * whose phone was never usable for a contact row — or whose run
+ * was never contact-linked at all — still carry their real Name
+ * and Phone Number in `flow_runs.vars`, and the table shows those
+ * values. Reading only the contact row dropped them, producing
+ * blank ("—") emails and failing the {{2}} WhatsApp variable for
+ * leads the table displays perfectly well.
+ */
 async function loadLeadContext(
   db: SupabaseClient,
   accountId: string,
@@ -142,31 +155,64 @@ async function loadLeadContext(
   try {
     const { data: run } = await db
       .from("flow_runs")
-      .select("started_at, contact_id")
+      .select("started_at, contact_id, vars")
       .eq("id", runId)
       .eq("account_id", accountId)
       .maybeSingle();
     const runRow = run as {
       started_at?: string | null;
       contact_id?: string | null;
+      vars?: unknown;
     } | null;
     ctx.receivedAt = runRow?.started_at ?? null;
-    if (runRow?.contact_id) {
-      const { data: contact } = await db
-        .from("contacts")
-        .select("name, phone, email")
-        .eq("id", runRow.contact_id)
-        .eq("account_id", accountId)
-        .maybeSingle();
-      const c = contact as {
-        name?: string | null;
-        phone?: string | null;
-        email?: string | null;
-      } | null;
-      ctx.leadName = c?.name ?? null;
-      ctx.leadPhone = c?.phone ?? null;
-      ctx.leadEmail = c?.email ?? null;
+    // The run's own answers, keyed exactly as stored — the same
+    // source the table's Name / Phone Number cells fall back to.
+    // Meta-only (formId set): Flow-table run vars are arbitrary
+    // flow data, so Flow tables keep the contact-only behavior
+    // they always had.
+    const answers: Record<string, string> = {};
+    if (formId) {
+      const rawVars = runRow?.vars;
+      if (rawVars && typeof rawVars === "object" && !Array.isArray(rawVars)) {
+        for (const [k, v] of Object.entries(rawVars as Record<string, unknown>)) {
+          if (typeof v === "string" && v.trim() !== "" && k.trim() !== "") {
+            answers[k.trim()] = v;
+          }
+        }
+      }
     }
+    const standard = standardContactFromAnswers(answers);
+    let name: string | null = standard.name;
+    let phone: string | null = standard.phone;
+    let email: string | null = standard.email;
+    if (runRow?.contact_id) {
+      try {
+        const { data: contact } = await db
+          .from("contacts")
+          .select("name, phone, email")
+          .eq("id", runRow.contact_id)
+          .eq("account_id", accountId)
+          .maybeSingle();
+        const c = contact as {
+          name?: string | null;
+          phone?: string | null;
+          email?: string | null;
+        } | null;
+        // Contact row wins (same precedence as the table); a
+        // contact-lookup failure must not discard the answers.
+        if (typeof c?.name === "string" && c.name.trim() !== "") name = c.name.trim();
+        if (typeof c?.phone === "string" && c.phone.trim() !== "") phone = c.phone.trim();
+        if (typeof c?.email === "string" && c.email.trim() !== "") email = c.email.trim();
+      } catch (contactErr) {
+        console.error(
+          "[table-assign-notify] contact lookup failed (answers fallback kept):",
+          contactErr instanceof Error ? contactErr.message : contactErr,
+        );
+      }
+    }
+    ctx.leadName = name;
+    ctx.leadPhone = phone;
+    ctx.leadEmail = email;
     if (formId) {
       const { data: form } = await db
         .from("meta_lead_forms")
@@ -315,8 +361,11 @@ export async function drainTableAssignmentNotifications(
       await db
         .from("lead_assignment_notifications")
         .update({
+          // Keep the full provider/validation detail (column is
+          // TEXT): the dialog shows the whole message on hover so
+          // owners can diagnose without guessing from a prefix.
           status: "failed",
-          last_error: message.slice(0, 500),
+          last_error: message.slice(0, 2000),
           failed_at: terminal ? nowIso : null,
           next_attempt_at: terminal
             ? null

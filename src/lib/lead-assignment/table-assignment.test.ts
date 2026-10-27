@@ -492,7 +492,14 @@ describe("custom vs internal assignees", () => {
     await saveConfig(db, "flow-meta-1", {
       enabled: true,
       mode: "round_robin",
-      assignees: [assignee("u-asha", { display_name: "Asha", email: "aman@example.com" })],
+      assignees: [
+        assignee("u-asha", {
+          display_name: "Asha",
+          email: "aman@example.com",
+          phone: "+15550001111",
+          notify_whatsapp: true,
+        }),
+      ],
     });
     run("run-9", "flow-meta-1");
     h.submissions = [{ id: "sub-9", account_id: "acct-1", flow_run_id: "run-9" }];
@@ -510,6 +517,60 @@ describe("custom vs internal assignees", () => {
     );
     expect(emailRows).toHaveLength(1);
     expect(emailRows[0]).toMatchObject({ to_email: "aman@example.com" });
+  });
+
+  it("resolves lead name and phone from run answers when no contact is linked", async () => {
+    // Production regression: the notification snapshot read only
+    // the contacts row, so unlinked leads produced blank emails and
+    // failed the {{2}} WhatsApp variable — even though the table
+    // shows real Name and Phone Number columns from the answers.
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", {
+          display_name: "Asha",
+          email: "aman@example.com",
+          notify_whatsapp: true,
+          phone: "+15550001111",
+        }),
+      ],
+    });
+    h.runs.push({
+      id: "run-answers",
+      account_id: "acct-1",
+      flow_id: "flow-meta-1",
+      started_at: "2026-10-27T19:28:40+00:00",
+      contact_id: null,
+      vars: { full_name: "Mukesh", phone_number: "+919876543210" },
+    });
+    h.submissions = [{ id: "sub-a", account_id: "acct-1", flow_run_id: "run-answers" }];
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-answers",
+      formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-asha" });
+    const emailRows = h.notifications.filter(
+      (n) => n.flow_run_id === "run-answers" && n.channel === "email",
+    );
+    expect(emailRows).toHaveLength(1);
+    expect(emailRows[0]).toMatchObject({
+      to_email: "aman@example.com",
+      lead_name: "Mukesh",
+      lead_phone: "+919876543210",
+    });
+    const whatsappRows = h.notifications.filter(
+      (n) => n.flow_run_id === "run-answers" && n.channel === "whatsapp",
+    );
+    expect(whatsappRows).toHaveLength(1);
+    expect(whatsappRows[0]).toMatchObject({
+      to_phone: "+15550001111",
+      lead_name: "Mukesh",
+      lead_phone: "+919876543210",
+    });
   });
 });
 

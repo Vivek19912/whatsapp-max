@@ -10,6 +10,9 @@ const h = vi.hoisted(() => ({
   profiles: [] as Array<Record<string, unknown>>,
   whatsappConfigs: [] as Array<Record<string, unknown>>,
   templates: [] as Array<Record<string, unknown>>,
+  runs: [] as Array<Record<string, unknown>>,
+  contacts: [] as Array<Record<string, unknown>>,
+  forms: [] as Array<Record<string, unknown>>,
   sentEmails: [] as Array<Record<string, unknown>>,
   sentWhatsapp: [] as Array<Record<string, unknown>>,
   emailThrows: false,
@@ -44,6 +47,9 @@ function tableRows(table: string): Array<Record<string, unknown>> {
     case "profiles": return h.profiles;
     case "whatsapp_config": return h.whatsappConfigs;
     case "message_templates": return h.templates;
+    case "flow_runs": return h.runs;
+    case "contacts": return h.contacts;
+    case "meta_lead_forms": return h.forms;
     default: return [];
   }
 }
@@ -198,6 +204,9 @@ beforeEach(() => {
   ];
   h.whatsappConfigs = [];
   h.templates = [];
+  h.runs = [];
+  h.contacts = [];
+  h.forms = [];
   h.sentEmails = [];
   h.sentWhatsapp = [];
   h.emailThrows = false;
@@ -254,6 +263,195 @@ describe("enqueueTableAssignmentNotifications", () => {
       formId: null,
     });
     expect(noPhone.whatsapp).toMatchObject({ enqueued: false, reason: "no-recipient" });
+  });
+});
+
+describe("lead snapshot resolution at enqueue time", () => {
+  const META_DETAIL: TableConfigDetail = {
+    ...DETAIL,
+    flow_id: "flow-meta",
+    kind: "meta_lead_ads",
+    form_db_id: "formdb-1",
+  };
+
+  function internalAssignee(extra: Partial<TableAssigneeRow> = {}): TableAssigneeRow {
+    return {
+      id: "assignee-int",
+      config_id: "config-1",
+      user_id: "u-asha",
+      display_name: "Asha",
+      email: null,
+      phone: "+15550001111",
+      position: 0,
+      weight: 0,
+      is_active: true,
+      paused_until: null,
+      pause_reason: null,
+      pause_scope: "table",
+      notify_email: true,
+      notify_whatsapp: true,
+      ...extra,
+    };
+  }
+
+  function seedRun(args: {
+    vars?: Record<string, unknown>;
+    contact_id?: string | null;
+    started_at?: string;
+  }) {
+    h.runs = [
+      {
+        id: "run-9",
+        account_id: "acct-1",
+        flow_id: "flow-meta",
+        started_at: args.started_at ?? "2026-10-27T19:28:40+00:00",
+        contact_id: args.contact_id ?? null,
+        vars: args.vars ?? {},
+      },
+    ];
+    h.forms = [{ id: "formdb-1", account_id: "acct-1", form_name: "Hiring Video Editor" }];
+  }
+
+  it("snapshots the lead's real name and phone from run answers when no contact is linked", async () => {
+    // Production regression: the snapshot read only the contacts
+    // row, so unlinked leads produced blank emails ("Name: —") and
+    // failed the {{2}} WhatsApp variable — even though the
+    // Workspace table shows real Name and Phone Number columns.
+    const db = fakeSupabase();
+    seedRun({
+      contact_id: null,
+      vars: { full_name: "Mukesh", phone_number: "+919876543210" },
+    });
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: META_DETAIL,
+      assignee: internalAssignee(),
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    expect(out.email).toMatchObject({ enqueued: true, reason: "enqueued" });
+    expect(out.whatsapp).toMatchObject({ enqueued: true, reason: "enqueued" });
+    const email = h.notifications.find((n) => n.channel === "email")!;
+    expect(email.lead_name).toBe("Mukesh");
+    expect(email.lead_phone).toBe("+919876543210");
+    const whatsapp = h.notifications.find((n) => n.channel === "whatsapp")!;
+    expect(whatsapp.lead_name).toBe("Mukesh");
+    expect(whatsapp.lead_phone).toBe("+919876543210");
+  });
+
+  it("prefers the contact row and fills gaps from answers", async () => {
+    const db = fakeSupabase();
+    h.contacts = [{ id: "c-1", account_id: "acct-1", name: "", phone: "+15550001111", email: null }];
+    seedRun({
+      contact_id: "c-1",
+      vars: { full_name: "Mukesh", city: "Goa" },
+    });
+    await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: META_DETAIL,
+      assignee: internalAssignee(),
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    const email = h.notifications.find((n) => n.channel === "email")!;
+    // Blank contact fields never overwrite real answer values.
+    expect(email.lead_name).toBe("Mukesh");
+    expect(email.lead_phone).toBe("+15550001111");
+  });
+
+  it("resolves table name and received timestamp from the actual records", async () => {
+    const db = fakeSupabase();
+    seedRun({ vars: { full_name: "Mukesh", phone_number: "+919876543210" } });
+    await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: META_DETAIL,
+      assignee: internalAssignee(),
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    const email = h.notifications.find((n) => n.channel === "email")!;
+    expect(email.subject).toBe("New lead assigned: Mukesh");
+    expect(email.body).toContain("Name: Mukesh");
+    expect(email.body).toContain("Phone: +919876543210");
+    expect(email.body).toContain("Table: Hiring Video Editor");
+    expect(email.body).toContain("Received: 2026-10-27T19:28:40+00:00");
+  });
+
+  it("leaves genuinely missing values blank instead of substituting", async () => {
+    const db = fakeSupabase();
+    seedRun({ vars: {} });
+    await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: META_DETAIL,
+      assignee: internalAssignee(),
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    const email = h.notifications.find((n) => n.channel === "email")!;
+    expect(email.lead_name).toBeNull();
+    expect(email.lead_phone).toBeNull();
+    expect(email.subject).toBe("New lead assigned: a new lead");
+    expect(email.body).toContain("Name: —");
+    // No other lead's data leaks in.
+    expect(JSON.stringify(h.notifications)).not.toContain("Mukesh");
+  });
+
+  it("sends both channels end to end from an answers-only lead", async () => {
+    // The fixed production flow in one test: enqueue snapshots the
+    // real values from the run answers (no contact linked), the
+    // drain then sends an email with real details AND a WhatsApp
+    // template with exactly two BODY params — no #132000, no blanks.
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_notification",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "New lead assigned to you. Lead Name: {{1}} Phone Number: {{2}}",
+      },
+    ];
+    seedRun({ vars: { full_name: "Mukesh", phone_number: "+919876543210" } });
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: {
+        ...META_DETAIL,
+        whatsapp_template_name: "new_lead_notification",
+        whatsapp_template_language: "en_US",
+      },
+      assignee: internalAssignee({ email: "aman@example.com" }),
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    expect(out.email).toMatchObject({ enqueued: true, reason: "enqueued" });
+    expect(out.whatsapp).toMatchObject({ enqueued: true, reason: "enqueued" });
+    // Mirror the real DB column defaults the mock does not apply.
+    for (const n of h.notifications) {
+      if (n.status == null) n.status = "queued";
+      if (typeof n.attempt !== "number") n.attempt = 0;
+    }
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 2, failed: 0 });
+    expect(h.sentEmails).toHaveLength(1);
+    expect(h.sentEmails[0]).toMatchObject({
+      to: "aman@example.com",
+      subject: "New lead assigned: Mukesh",
+    });
+    expect(String((h.sentEmails[0] as Record<string, unknown>).text)).toContain(
+      "Name: Mukesh",
+    );
+    expect(String((h.sentEmails[0] as Record<string, unknown>).text)).toContain(
+      "Phone: +919876543210",
+    );
+    expect(h.sentWhatsapp).toHaveLength(1);
+    expect(h.sentWhatsapp[0]).toMatchObject({
+      to: "15550001111",
+      templateName: "new_lead_notification",
+      messageParams: { body: ["Mukesh", "+919876543210"] },
+    });
   });
 });
 
@@ -547,6 +745,38 @@ describe("drainTableAssignmentNotifications", () => {
       expect(row.failed_at).not.toBeNull();
       expect(String(row.last_error)).toContain(c.error);
     }
+  });
+
+  it("stores the complete provider error instead of truncating the diagnosis away", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "tpl",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}",
+      },
+    ];
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      to_phone: "+15551234567",
+      flow_run_id: "run-1",
+      template_name: "tpl",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    h.whatsappError = `(#131000) Something went wrong: ${"detail ".repeat(120)}TAIL`;
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 0, failed: 1 });
+    const stored = h.notifications[0].last_error as string;
+    expect(stored.length).toBeGreaterThan(500);
+    expect(stored).toContain("TAIL");
+    expect(h.notifications[0].status).toBe("failed");
   });
 
   it("records Meta #132000 as a failure instead of suppressing it", async () => {

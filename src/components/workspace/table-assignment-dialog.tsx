@@ -1757,11 +1757,14 @@ export function TableAssignmentDialog({
                                 {n.status === "failed" ? ` (try ${n.attempt})` : ""}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-muted-foreground max-w-64 truncate text-xs">
-                              {n.status === "sent"
-                                ? n.sent_at ?? ""
-                                : (n.last_error ?? "retrying")}
-                            </TableCell>
+                    <TableCell
+                      className="text-muted-foreground max-w-64 truncate text-xs"
+                      title={n.status === "sent" ? (n.sent_at ?? "") : (n.last_error ?? "retrying")}
+                    >
+                      {n.status === "sent"
+                        ? n.sent_at ?? ""
+                        : (n.last_error ?? "retrying")}
+                    </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

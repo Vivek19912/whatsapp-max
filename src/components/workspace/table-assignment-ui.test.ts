@@ -439,6 +439,14 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
     expect(dialog).toContain("const readOnly = viewMode === true");
   });
 
+  it("keeps the full delivery error available on hover in Recent alert deliveries", () => {
+    // The detail cell truncates visually but carries the complete
+    // message in a tooltip so owners can diagnose failures.
+    expect(dialog).toContain("Recent alert deliveries");
+    expect(dialog).toContain("title={n.status === \"sent\"");
+    expect(dialog).toContain("n.last_error ?? \"retrying\"");
+  });
+
   it("exposes category and status in the sequence editor options", () => {
     // The config route now returns category + status alongside the
     // existing name/language/slots, so the editor can present them.
