@@ -247,6 +247,35 @@ function MediaImage({
  *
  * Pure function so the branching is unit-testable without a DOM.
  */
+/**
+ * Which media (if any) a `content_type === 'template'` bubble carries.
+ * Templates only support image/video/document headers; the row stores
+ * the header file as a normal `media_url` (+ mime/filename when known,
+ * see migration 077). Pure so it is unit-testable without a DOM.
+ */
+export function templateMediaKind(message: {
+  media_url?: string | null;
+  media_mime_type?: string | null;
+  media_file_name?: string | null;
+}): "image" | "video" | "document" | null {
+  const url = message.media_url?.trim() || "";
+  if (!url) return null;
+  const mime = message.media_mime_type?.trim().toLowerCase() || "";
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (
+    mime.startsWith("application/") ||
+    mime.startsWith("text/") ||
+    mime.startsWith("audio/")
+  )
+    return "document";
+  const lower = url.toLowerCase().split("?")[0];
+  if (/\.(jpg|jpeg|png|webp|gif)(\/|$)/.test(lower) || lower.includes("image"))
+    return "image";
+  if (/\.(mp4|mov|3gp|avi)(\/|$)/.test(lower)) return "video";
+  return "document";
+}
+
 export function interactiveRenderKind(message: Message): {
   kind: "inbound-reply" | "outgoing-prompt" | "plain";
   buttons: Array<{ id: string; title: string }>;
@@ -442,13 +471,57 @@ function MessageContent({
       );
     }
 
-    case "template":
+    case "template": {
+      const mediaKind = templateMediaKind(message);
+      const fileName =
+        message.media_file_name?.trim() || "Attachment";
+      const downloadHref = (message.media_url || "").startsWith(
+        "/api/whatsapp/media/",
+      )
+        ? `${message.media_url}?download=1`
+        : message.media_url || "";
       return (
-        <div>
+        <div className="min-w-0 max-w-full sm:max-w-[320px]">
           <span className="mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
             <LayoutTemplate className="h-3 w-3" />
             Template
           </span>
+          {mediaKind === "image" && message.media_url ? (
+            <div className="mt-1">
+              <MediaImage url={message.media_url} alt="Template image" />
+            </div>
+          ) : null}
+          {mediaKind === "video" && message.media_url ? (
+            <video
+              src={message.media_url}
+              controls
+              preload="metadata"
+              className="mt-1 block h-auto w-auto max-w-full rounded-xl sm:max-w-[320px] max-h-[320px] bg-black/60"
+            />
+          ) : null}
+          {mediaKind === "document" && message.media_url ? (
+            <div className="mt-1 flex items-center gap-1 rounded-xl bg-muted/50 px-2 py-1.5">
+              <a
+                href={message.media_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Open ${fileName}`}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-0.5 text-sm hover:bg-muted"
+              >
+                <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{fileName}</span>
+              </a>
+              <a
+                href={downloadHref}
+                download={fileName}
+                title={`Download ${fileName}`}
+                aria-label={`Download ${fileName}`}
+                className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <Download className="h-4 w-4" />
+              </a>
+            </div>
+          ) : null}
           {message.content_text && (
             <LinkifiedText
               text={message.content_text}
@@ -458,6 +531,7 @@ function MessageContent({
           )}
         </div>
       );
+    }
 
     case "location":
       return (

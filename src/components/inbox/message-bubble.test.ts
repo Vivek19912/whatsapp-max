@@ -4,6 +4,7 @@ import {
   displayMessageStatus,
   documentDisplayName,
   interactiveRenderKind,
+  templateMediaKind,
 } from "./message-bubble";
 
 function msg(overrides: Partial<Message>): Message {
@@ -110,6 +111,40 @@ describe("documentDisplayName", () => {
     expect(
       documentDisplayName({ media_file_name: "  ", content_text: "  " }),
     ).toBe("Document");
+  });
+});
+
+describe("templateMediaKind", () => {
+  it("returns null without a media_url", () => {
+    expect(templateMediaKind({})).toBeNull();
+    expect(templateMediaKind({ media_url: "  " })).toBeNull();
+  });
+
+  it("maps mime prefixes to image/video/document", () => {
+    expect(
+      templateMediaKind({ media_url: "https://x/y", media_mime_type: "image/jpeg" }),
+    ).toBe("image");
+    expect(
+      templateMediaKind({ media_url: "https://x/y", media_mime_type: "video/mp4" }),
+    ).toBe("video");
+    expect(
+      templateMediaKind({
+        media_url: "https://x/y.pdf",
+        media_mime_type: "application/pdf",
+      }),
+    ).toBe("document");
+  });
+
+  it("falls back to URL extension when mime is missing", () => {
+    expect(templateMediaKind({ media_url: "https://cdn.test/hero.jpg" })).toBe(
+      "image",
+    );
+    expect(templateMediaKind({ media_url: "https://cdn.test/clip.mp4" })).toBe(
+      "video",
+    );
+    expect(templateMediaKind({ media_url: "https://cdn.test/file.pdf" })).toBe(
+      "document",
+    );
   });
 });
 

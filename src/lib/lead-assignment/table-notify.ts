@@ -24,6 +24,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { findOrCreateContact } from "@/lib/api/v1/contacts";
+import { getOrCreateConversation } from "@/lib/conversations/get-or-create";
 import { isUniqueViolation } from "@/lib/contacts/dedupe";
 import { decrypt } from "@/lib/whatsapp/encryption";
 import { standardContactFromAnswers } from "@/lib/meta-lead-ads/normalize";
@@ -518,7 +520,7 @@ async function sendAssignmentWhatsapp(
     leadName,
     leadPhone,
   );
-  await sendTemplateMessage({
+  const sendResult = await sendTemplateMessage({
     phoneNumberId: cfg.phone_number_id,
     accessToken,
     to: phone,
@@ -527,6 +529,231 @@ async function sendAssignmentWhatsapp(
     template,
     messageParams: { body },
   });
+  // Best-effort Inbox mirror: the salesperson's thread must show the
+  // alert like any other outbound template (same columns, same
+  // renderer). Never throws — the Meta send already succeeded, and a
+  // persistence hiccup must not mark the row failed (which would
+  // retry the Meta send and double-notify the salesperson).
+  await persistAssignmentWhatsappToInbox(db, {
+    accountId,
+    row,
+    template,
+    bodyValues: body,
+    providerMessageId: sendResult.messageId,
+    salespersonPhone: row.to_phone as string,
+  });
+}
+
+/**
+ * Render the assignment template body with its resolved BODY values,
+ * so the Inbox row shows what the salesperson received. Falls back to
+ * `[templateName]` when the template has no body text.
+ */
+export function renderAssignmentTemplateText(
+  bodyText: string | null | undefined,
+  bodyValues: string[],
+): string {
+  const body = typeof bodyText === "string" ? bodyText : "";
+  if (!body) return "";
+  return body.replace(/\{\{(\d+)\}\}/g, (placeholder, rawIndex: string) => {
+    const value = bodyValues[Number(rawIndex) - 1];
+    return value === undefined ? placeholder : value;
+  });
+}
+
+function guessAssignmentMediaMime(
+  headerType: string,
+  url: string,
+): string | null {
+  const lower = url.toLowerCase().split("?")[0];
+  if (headerType === "image") {
+    if (lower.endsWith(".png")) return "image/png";
+    if (lower.endsWith(".webp")) return "image/webp";
+    if (lower.endsWith(".gif")) return "image/gif";
+    return "image/jpeg";
+  }
+  if (headerType === "video") return "video/mp4";
+  if (headerType === "document") {
+    if (lower.endsWith(".pdf")) return "application/pdf";
+    return "application/octet-stream";
+  }
+  return null;
+}
+
+function assignmentTemplateMedia(template: Pick<
+  MessageTemplate,
+  "header_type" | "header_media_url"
+>): { media_url: string; media_mime_type: string | null; media_file_name: string | null } | null {
+  const headerType = template.header_type;
+  const url =
+    typeof template.header_media_url === "string"
+      ? template.header_media_url.trim()
+      : "";
+  if (
+    (headerType === "image" || headerType === "video" || headerType === "document") &&
+    url !== ""
+  ) {
+    const lower = url.toLowerCase().split("?")[0];
+    const fileName =
+      headerType === "document"
+        ? lower.split("/").pop()?.split("%2F").pop() || "Attachment"
+        : null;
+    return {
+      media_url: url,
+      media_mime_type: guessAssignmentMediaMime(headerType, url),
+      media_file_name: fileName,
+    };
+  }
+  return null;
+}
+
+async function resolveAssignmentAuditUser(
+  db: SupabaseClient,
+  accountId: string,
+  flowRunId: unknown,
+): Promise<string> {
+  try {
+    if (typeof flowRunId === "string" && flowRunId !== "") {
+      const { data } = await db
+        .from("flow_runs")
+        .select("user_id")
+        .eq("id", flowRunId)
+        .maybeSingle();
+      const userId = (data as { user_id?: unknown } | null)?.user_id;
+      if (typeof userId === "string" && userId !== "") return userId;
+    }
+  } catch {
+    // Fall through to profile fallback.
+  }
+  try {
+    const { data } = await db
+      .from("profiles")
+      .select("user_id")
+      .eq("account_id", accountId)
+      .limit(1)
+      .maybeSingle();
+    const userId = (data as { user_id?: unknown } | null)?.user_id;
+    if (typeof userId === "string" && userId !== "") return userId;
+  } catch {
+    // Fall through to empty audit id (same convention as the queue).
+  }
+  return "";
+}
+
+/**
+ * Best-effort Inbox mirror for a salesperson assignment alert. Resolves
+ * the salesperson contact (recipient phone ONLY — never the lead),
+ * reuses the one-conversation-per-(account, contact) thread, and
+ * inserts a normal outbound `template` row keyed on the Meta wamid so
+ * SENT → DELIVERED → READ advances on the same row. Never throws and
+ * never duplicates: same (conversation, message_id) returns early.
+ */
+export async function persistAssignmentWhatsappToInbox(
+  db: SupabaseClient,
+  args: {
+    accountId: string;
+    row: Record<string, unknown>;
+    template: Pick<
+      MessageTemplate,
+      "header_type" | "header_media_url" | "body_text" | "name"
+    >;
+    bodyValues: string[];
+    providerMessageId: string;
+    salespersonPhone: string;
+  },
+): Promise<{ messageId: string } | null> {
+  try {
+    const { accountId, row, template, bodyValues, providerMessageId, salespersonPhone } =
+      args;
+    if (!providerMessageId || !salespersonPhone) return null;
+    const auditUserId = await resolveAssignmentAuditUser(
+      db,
+      accountId,
+      row.flow_run_id,
+    );
+    let contactName: string | null = null;
+    try {
+      const assigneeId = row.assignee_id;
+      if (typeof assigneeId === "string" && assigneeId !== "") {
+        const { data } = await db
+          .from("lead_assignment_table_assignees")
+          .select("display_name")
+          .eq("id", assigneeId)
+          .maybeSingle();
+        const displayName = (data as { display_name?: unknown } | null)?.display_name;
+        if (typeof displayName === "string" && displayName.trim() !== "") {
+          contactName = displayName.trim();
+        }
+      }
+    } catch {
+      // Name is cosmetic; the phone is the identity.
+    }
+    let contactId: string;
+    try {
+      const found = await findOrCreateContact(db, accountId, auditUserId, {
+        phone: salespersonPhone,
+        name: contactName ?? salespersonPhone,
+      });
+      contactId = found.id;
+    } catch (err) {
+      console.error(
+        "[table-assign-notify] inbox mirror skipped (contact unresolved):",
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+    const resolved = await getOrCreateConversation(
+      db,
+      accountId,
+      contactId,
+      auditUserId,
+    );
+    if (!resolved) return null;
+    const conversationId = resolved.conversation.id as string;
+    const { data: existing } = await db
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .eq("message_id", providerMessageId)
+      .maybeSingle();
+    if (existing) return { messageId: (existing as { id: string }).id };
+    const rendered =
+      renderAssignmentTemplateText(template.body_text, bodyValues) ||
+      `[${template.name}]`;
+    const media = assignmentTemplateMedia(template);
+    const { data: inserted, error: insertErr } = await db
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        sender_type: "agent",
+        content_type: "template",
+        content_text: rendered,
+        template_name: template.name,
+        message_id: providerMessageId,
+        status: "sent",
+        media_url: media?.media_url ?? null,
+        media_mime_type: media?.media_mime_type ?? null,
+        media_file_name: media?.media_file_name ?? null,
+      })
+      .select("id")
+      .single();
+    if (insertErr || !inserted) return null;
+    await db
+      .from("conversations")
+      .update({
+        last_message_text: rendered,
+        last_message_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", conversationId);
+    return { messageId: (inserted as { id: string }).id };
+  } catch (err) {
+    console.error(
+      "[table-assign-notify] inbox mirror failed (alert already sent):",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 /**
