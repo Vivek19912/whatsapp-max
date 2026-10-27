@@ -90,6 +90,28 @@ export function formatDeliveryDetail(value: string | null | undefined): string {
 }
 
 /**
+ * One Recent alert deliveries Detail cell. A tiny component (rather
+ * than inline JSX) so the ISO→IST formatting is covered by a
+ * render test: if this cell ever stops calling
+ * formatDeliveryDetail, the rendered HTML regresses to raw ISO and
+ * the test fails. Pure presentation — no fetching or mutation.
+ */
+export function AssignmentDeliveryDetailCell({
+  notification,
+}: {
+  notification: Pick<NotificationRow, "status" | "sent_at" | "last_error">;
+}) {
+  const detail = formatDeliveryDetail(
+    notification.status === "sent" ? notification.sent_at : notification.last_error ?? "retrying",
+  );
+  return (
+    <TableCell className="text-muted-foreground max-w-64 truncate text-xs" title={detail}>
+      {detail}
+    </TableCell>
+  );
+}
+
+/**
  * Saved assignees for per-row lookups. The unconfigured-table GET
  * response omits `assignees`; anything iterating it must go
  * through here instead of crashing the render the moment a local
@@ -1793,12 +1815,7 @@ export function TableAssignmentDialog({
                                 {n.status === "failed" ? ` (try ${n.attempt})` : ""}
                               </Badge>
                             </TableCell>
-                    <TableCell
-                      className="text-muted-foreground max-w-64 truncate text-xs"
-                      title={formatDeliveryDetail(n.status === "sent" ? n.sent_at : n.last_error ?? "retrying")}
-                    >
-                      {formatDeliveryDetail(n.status === "sent" ? n.sent_at : n.last_error ?? "retrying")}
-                    </TableCell>
+                    <AssignmentDeliveryDetailCell notification={n} />
                           </TableRow>
                         ))}
                       </TableBody>

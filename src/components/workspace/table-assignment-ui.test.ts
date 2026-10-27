@@ -442,9 +442,11 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
 
   it("keeps the full delivery error available on hover in Recent alert deliveries", () => {
     // The Detail cell truncates visually but carries the complete
-    // message as a tooltip so owners can diagnose failures.
+    // message as a tooltip so owners can diagnose failures. The
+    // rendered-output test lives in assignment-delivery-detail.test.tsx.
     expect(dialog).toContain("Recent alert deliveries");
-    expect(dialog).toContain("title={formatDeliveryDetail(");
+    expect(dialog).toContain("AssignmentDeliveryDetailCell");
+    expect(dialog).toContain("const detail = formatDeliveryDetail(");
     expect(dialog).toContain('n.last_error ?? "retrying"');
   });
 
