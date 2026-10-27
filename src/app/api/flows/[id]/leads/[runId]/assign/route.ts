@@ -82,19 +82,27 @@ export async function POST(
         reason: string;
         cancelled_global: number;
       } | null = null;
+      let legacyEmailEnqueued = false;
       if (result.current && result.current !== ASSIGNED_TO_UNASSIGNED) {
-        await maybeEnqueueForRun(supabaseAdmin(), {
+        const legacy = await maybeEnqueueForRun(supabaseAdmin(), {
           accountId,
           runId,
           assigneeUserId: result.current,
         });
+        // Skip the per-table email channel only when the legacy
+        // queue actually took the email — otherwise the salesperson
+        // would get two emails (one per outbox). Any other legacy
+        // outcome (account setting off, missing submission, error,
+        // or a duplicate from an earlier assignment) falls through
+        // to the per-table outbox below so Email alerts still
+        // produce exactly one attempt — including for a reassigned
+        // lead's new owner, whom the legacy per-submission dedup
+        // can never notify.
+        legacyEmailEnqueued = legacy.enqueued;
         // Manual assignments never ran through the per-table
         // outbox, so a reassigned lead's new owner would otherwise
         // get nothing: notify them here (WhatsApp + email per the
-        // table's toggles). The legacy queue above dedupes on
-        // reassign, so skip the per-table email channel only when
-        // the legacy path is actually sending (genuine initial
-        // manual assignment of an internal member).
+        // table's toggles).
         // A genuine initial manual assignment additionally starts
         // the new owner's salesperson sequence, if configured.
         // Reassignments never touch customer templates.
@@ -118,7 +126,7 @@ export async function POST(
               assignee,
               runId,
               formId,
-              skipEmail: isInitial && !!formId,
+              skipEmail: legacyEmailEnqueued,
             });
           }
           if (isInitial && formId) {

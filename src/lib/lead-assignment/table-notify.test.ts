@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   sentWhatsapp: [] as Array<Record<string, unknown>>,
   emailThrows: false,
   whatsappThrows: false,
+  whatsappError: null as string | null,
   seq: 0,
 }));
 
@@ -27,6 +28,7 @@ vi.mock("@/lib/email/send", () => ({
 
 vi.mock("@/lib/whatsapp/meta-api", () => ({
   sendTemplateMessage: async (input: Record<string, unknown>) => {
+    if (h.whatsappError) throw new Error(h.whatsappError);
     if (h.whatsappThrows) throw new Error("meta timeout");
     h.sentWhatsapp.push(input);
     return { messageId: "wa-1" };
@@ -145,6 +147,7 @@ function fakeSupabase() {
 
 import { encrypt } from "@/lib/whatsapp/encryption";
 import {
+  buildAssignmentBodyParams,
   drainTableAssignmentNotifications,
   enqueueTableAssignmentNotifications,
 } from "./table-notify";
@@ -199,6 +202,7 @@ beforeEach(() => {
   h.sentWhatsapp = [];
   h.emailThrows = false;
   h.whatsappThrows = false;
+  h.whatsappError = null;
   h.seq = 0;
   vi.stubEnv("SMTP_HOST", "smtp.example.com");
   vi.stubEnv("SMTP_USER", "bot@example.com");
@@ -328,7 +332,13 @@ describe("drainTableAssignmentNotifications", () => {
       },
     ];
     h.templates = [
-      { account_id: "acct-1", name: "new_lead_assigned", language: "en_US", status: "APPROVED" },
+      {
+        account_id: "acct-1",
+        name: "new_lead_assigned",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}, a new lead was assigned to you.",
+      },
     ];
     queued({
       channel: "whatsapp",
@@ -344,10 +354,306 @@ describe("drainTableAssignmentNotifications", () => {
     expect(h.sentWhatsapp[0]).toMatchObject({
       phoneNumberId: "pn-1",
       // sanitizePhoneForMeta strips the leading + (same as lead sends).
+      // The salesperson stays the recipient; the lead name fills the body.
       to: "15551234567",
       templateName: "new_lead_assigned",
-      params: ["Asha"],
+      messageParams: { body: ["Asha"] },
     });
+    // Structured components path — never the legacy positional params.
+    expect(h.sentWhatsapp[0]).not.toHaveProperty("params");
+  });
+
+  it("sends exactly two BODY params for a two-variable template (new_lead_notification)", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_notification",
+        language: "en_US",
+        status: "APPROVED",
+        category: "Utility",
+        body_text:
+          "New lead assigned to you. Lead Name: {{1}} Phone Number: {{2}} Please follow up with this lead.",
+      },
+    ];
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      // The salesperson's phone stays the recipient…
+      to_phone: "+15550001111",
+      flow_run_id: "run-1",
+      template_name: "new_lead_notification",
+      template_language: "en_US",
+      // …while the lead's facts fill the body, in order.
+      lead_name: "Ravi Kumar",
+      lead_phone: "+919876543210",
+    });
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect(h.sentWhatsapp).toHaveLength(1);
+    expect(h.sentWhatsapp[0]).toMatchObject({
+      phoneNumberId: "pn-1",
+      to: "15550001111",
+      templateName: "new_lead_notification",
+      language: "en_US",
+      messageParams: { body: ["Ravi Kumar", "+919876543210"] },
+    });
+    expect(h.sentWhatsapp[0]).not.toHaveProperty("params");
+    expect(h.notifications[0].status).toBe("sent");
+  });
+
+  it("sends static templates with no body params instead of a stale single value", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "static_alert",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "A new lead was assigned to you. Please check the app.",
+      },
+    ];
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      to_phone: "+15551234567",
+      flow_run_id: "run-1",
+      template_name: "static_alert",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect(h.sentWhatsapp[0]).toMatchObject({ messageParams: { body: [] } });
+  });
+
+  it("fails terminally before Meta when the lead phone is missing for {{2}}", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_notification",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Lead Name: {{1}} Phone Number: {{2}}",
+      },
+    ];
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      to_phone: "+15551234567",
+      flow_run_id: "run-1",
+      template_name: "new_lead_notification",
+      template_language: "en_US",
+      lead_name: "Asha",
+      lead_phone: null,
+    });
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 0, failed: 1 });
+    // Never called Meta (no shifted params, no placeholders).
+    expect(h.sentWhatsapp).toHaveLength(0);
+    const row = h.notifications[0];
+    expect(row.status).toBe("failed");
+    // Terminal: the snapshot cannot heal on retry.
+    expect(row.failed_at).not.toBeNull();
+    expect(row.next_attempt_at).toBeNull();
+    expect(row.last_error).toContain("{{2}}");
+  });
+
+  it("fails terminally before Meta for templates it cannot fill", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    const cases = [
+      {
+        name: "three vars",
+        template: { body_text: "A {{1}} B {{2}} C {{3}}" },
+        error: "{{3}}",
+      },
+      {
+        name: "header variable",
+        template: { body_text: "Hi {{1}}", header_type: "text", header_content: "Lead {{1}}" },
+        error: "header",
+      },
+      {
+        name: "URL button variable",
+        template: {
+          body_text: "Hi {{1}}",
+          buttons: [{ type: "URL", url: "https://x.test/l/{{1}}" }],
+        },
+        error: "button",
+      },
+    ];
+    for (const c of cases) {
+      h.templates = [
+        {
+          account_id: "acct-1",
+          name: "tpl",
+          language: "en_US",
+          status: "APPROVED",
+          ...c.template,
+        },
+      ];
+      h.notifications = [];
+      h.sentWhatsapp = [];
+      queued({
+        channel: "whatsapp",
+        assignee_id: "assignee-ext",
+        to_phone: "+15551234567",
+        flow_run_id: "run-1",
+        template_name: "tpl",
+        template_language: "en_US",
+        lead_name: "Asha",
+        lead_phone: "+15550001111",
+      });
+      const result = await drainTableAssignmentNotifications(db as never);
+      expect(result).toMatchObject({ sent: 0, failed: 1 });
+      expect(h.sentWhatsapp).toHaveLength(0);
+      const row = h.notifications[0];
+      expect(row.status).toBe("failed");
+      expect(row.failed_at).not.toBeNull();
+      expect(String(row.last_error)).toContain(c.error);
+    }
+  });
+
+  it("records Meta #132000 as a failure instead of suppressing it", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_assigned",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}",
+      },
+    ];
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      to_phone: "+15551234567",
+      flow_run_id: "run-1",
+      template_name: "new_lead_assigned",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    // A provider rejection (e.g. a template edited on Meta after
+    // sync) surfaces verbatim on the row — never marked sent.
+    h.whatsappError =
+      "(#132000) Number of parameters does not match the expected number of params.";
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 0, failed: 1 });
+    expect(h.notifications[0].status).toBe("failed");
+    expect(h.notifications[0].last_error).toContain("#132000");
+  });
+
+  it("keeps the channels independent: one channel's failure never blocks the other", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_assigned",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}",
+      },
+    ];
+    const both = (runId: string) => {
+      queued({
+        channel: "email",
+        assignee_id: "assignee-ext",
+        to_email: "ext@example.com",
+        flow_run_id: runId,
+        subject: "Hi",
+        body: "Hello",
+      });
+      queued({
+        channel: "whatsapp",
+        assignee_id: "assignee-ext",
+        to_phone: "+15551234567",
+        flow_run_id: runId,
+        template_name: "new_lead_assigned",
+        template_language: "en_US",
+        lead_name: "Asha",
+      });
+    };
+    // SMTP down: WhatsApp still sends.
+    both("run-1");
+    h.emailThrows = true;
+    const first = await drainTableAssignmentNotifications(db as never);
+    expect(first).toMatchObject({ sent: 1, failed: 1 });
+    expect(h.sentWhatsapp).toHaveLength(1);
+    expect(h.sentEmails).toHaveLength(0);
+
+    // WhatsApp down: queued email still sends.
+    h.emailThrows = false;
+    h.whatsappThrows = true;
+    both("run-2");
+    const second = await drainTableAssignmentNotifications(db as never);
+    expect(second.sent).toBe(1);
+    expect(h.sentEmails).toHaveLength(1);
+    expect(h.sentWhatsapp).toHaveLength(1);
+  });
+
+  it("retries one channel without duplicating the other's success", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_assigned",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}",
+      },
+    ];
+    queued({
+      channel: "email",
+      assignee_id: "assignee-ext",
+      to_email: "ext@example.com",
+      flow_run_id: "run-1",
+      subject: "Hi",
+      body: "Hello",
+    });
+    queued({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      to_phone: "+15551234567",
+      flow_run_id: "run-1",
+      template_name: "new_lead_assigned",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    h.emailThrows = true;
+    await drainTableAssignmentNotifications(db as never);
+    expect(h.sentWhatsapp).toHaveLength(1);
+    expect(h.sentEmails).toHaveLength(0);
+    // The email backoff elapses; the WhatsApp row is already sent.
+    h.emailThrows = false;
+    for (const n of h.notifications) {
+      if (n.channel === "email") n.next_attempt_at = new Date(0).toISOString();
+    }
+    const retry = await drainTableAssignmentNotifications(db as never);
+    expect(retry).toMatchObject({ sent: 1, failed: 0 });
+    expect(h.sentEmails).toHaveLength(1);
+    expect(h.sentWhatsapp).toHaveLength(1);
   });
 
   it("skips WhatsApp without sender config or with unapproved templates", async () => {
@@ -382,5 +688,69 @@ describe("drainTableAssignmentNotifications", () => {
     const row = h.notifications.find((n) => n.flow_run_id === "run-1")!;
     expect(row.failed_at).not.toBeNull();
     expect(row.next_attempt_at).toBeNull();
+  });
+});
+
+describe("buildAssignmentBodyParams", () => {
+  const tpl = (body_text: string, extra: Record<string, unknown> = {}) => ({
+    body_text,
+    ...extra,
+  });
+
+  it("maps {{1}} to the lead name and {{2}} to the lead phone, in order", () => {
+    expect(
+      buildAssignmentBodyParams(
+        tpl("Lead Name: {{1}} Phone Number: {{2}}"),
+        "new_lead_notification",
+        "en_US",
+        "Ravi Kumar",
+        "+919876543210",
+      ),
+    ).toEqual(["Ravi Kumar", "+919876543210"]);
+  });
+
+  it("fills {{1}} only for single-variable templates and omits params for static ones", () => {
+    expect(
+      buildAssignmentBodyParams(tpl("Hi {{1}}"), "t", "en_US", "Asha", ""),
+    ).toEqual(["Asha"]);
+    expect(buildAssignmentBodyParams(tpl("Static text."), "t", "en_US", "Asha", "")).toEqual(
+      [],
+    );
+  });
+
+  it("never shifts values and never emits placeholders", () => {
+    // Missing phone with {{2}} required → throw, not ["phone-in-{{1}}"].
+    expect(() =>
+      buildAssignmentBodyParams(tpl("{{1}} {{2}}"), "t", "en_US", "Asha", ""),
+    ).toThrow(/\{\{2\}\}/);
+    expect(() =>
+      buildAssignmentBodyParams(tpl("{{1}} {{2}}"), "t", "en_US", "Asha", "   "),
+    ).toThrow(/\{\{2\}\}/);
+  });
+
+  it("rejects variables with no assignment-time value", () => {
+    for (const body of ["A {{1}} B {{2}} C {{3}}", "Only {{2}}"]) {
+      expect(() =>
+        buildAssignmentBodyParams(tpl(body), "t", "en_US", "Asha", "+15550001111"),
+      ).toThrow(/cannot be sent/);
+    }
+    expect(() =>
+      buildAssignmentBodyParams(
+        tpl("Hi {{1}}", { header_type: "text", header_content: "Lead {{1}}" }),
+        "t",
+        "en_US",
+        "Asha",
+        "+15550001111",
+      ),
+    ).toThrow(/header/);
+    expect(() =>
+      buildAssignmentBodyParams(
+        tpl("Hi {{1}}", { buttons: [{ type: "URL", url: "https://x.test/l/{{1}}" }] }),
+        "t",
+        "en_US",
+        "Asha",
+        "+15550001111",
+      ),
+    ).toThrow(/button/);
   });
 });

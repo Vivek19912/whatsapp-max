@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   queue: [] as Array<Record<string, unknown>>,
   legacyNotifyCalls: [] as Array<Record<string, unknown>>,
   legacyNotifyThrows: false,
+  legacyEmailEnqueued: true,
   drainScheduled: [] as Array<Record<string, unknown>>,
   seq: 0,
   bumpVersionOnStateRead: false,
@@ -31,7 +32,9 @@ vi.mock("@/lib/meta-lead-ads/notify", () => ({
   maybeEnqueueLeadNotification: async (_db: unknown, args: Record<string, unknown>) => {
     h.legacyNotifyCalls.push(args);
     if (h.legacyNotifyThrows) throw new Error("smtp down");
-    return { enqueued: true, reason: "enqueued" };
+    return h.legacyEmailEnqueued
+      ? { enqueued: true, reason: "enqueued" }
+      : { enqueued: false, reason: "disabled" };
   },
 }));
 
@@ -322,6 +325,7 @@ function seedBase() {
   h.assigneeItems = [];
   h.queue = [];
   h.legacyNotifyCalls = [];
+  h.legacyEmailEnqueued = true;
   h.drainScheduled = [];
   h.seq = 0;
   h.bumpVersionOnStateRead = false;
@@ -494,6 +498,38 @@ describe("custom vs internal assignees", () => {
       h.legacyNotifyCalls.filter((c) => c.assigneeUserId === "u-asha"),
     ).toHaveLength(1);
     expect(h.notifications.filter((n) => n.flow_run_id === "run-1")).toHaveLength(0);
+  });
+
+  it("falls back to the per-table outbox email when the legacy queue does not take it", async () => {
+    // Production regression: with the account-level email setting
+    // off, internal members got no email at all — the legacy path
+    // returned "disabled" and the table outbox email was skipped.
+    // Now the table outbox sends the single attempt instead.
+    h.legacyEmailEnqueued = false;
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-asha", { display_name: "Asha", email: "stale@example.com" })],
+    });
+    run("run-9", "flow-meta-1");
+    h.submissions = [{ id: "sub-9", account_id: "acct-1", flow_run_id: "run-9" }];
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      runId: "run-9",
+      formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-asha" });
+    // Exactly one email attempt: the per-table outbox row (legacy skipped).
+    expect(
+      h.legacyNotifyCalls.filter((c) => c.assigneeUserId === "u-asha"),
+    ).toHaveLength(1);
+    const emailRows = h.notifications.filter(
+      (n) => n.flow_run_id === "run-9" && n.channel === "email",
+    );
+    expect(emailRows).toHaveLength(1);
+    expect(emailRows[0]).toMatchObject({ to_email: "stale@example.com" });
   });
 });
 

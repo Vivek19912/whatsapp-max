@@ -432,9 +432,14 @@ export async function assignTableLead(
   // Best-effort notifications (email and/or WhatsApp per the
   // assignee's toggles). Failures are queued/recorded, never
   // thrown — assignment always survives notification outages.
-  // Internal members on Meta tables keep the existing durable
-  // queue (unchanged behavior, templates, and dedup); every other
-  // combination uses the per-table outbox.
+  // Internal members on Meta tables first try the existing durable
+  // legacy queue (unchanged behavior, templates, and dedup); the
+  // per-table outbox below sends the email only when the legacy
+  // queue did NOT take it (account setting off, missing submission,
+  // error) so Email alerts still produce exactly one attempt and
+  // the salesperson is never mailed twice. Every other combination
+  // uses the per-table outbox directly.
+  let legacyEmailEnqueued = false;
   if (selected.user_id && formId && selected.notify_email) {
     try {
       const { data: sub } = await db
@@ -448,26 +453,24 @@ export async function assignTableLead(
         const { maybeEnqueueLeadNotification } = await import(
           "@/lib/meta-lead-ads/notify"
         );
-        await maybeEnqueueLeadNotification(db, {
+        const legacy = await maybeEnqueueLeadNotification(db, {
           accountId,
           submissionId,
           assigneeUserId: selected.user_id,
         });
+        legacyEmailEnqueued = legacy.enqueued;
       }
     } catch {
-      // Best-effort only; the outbox below still covers WhatsApp.
+      // Best-effort only; the outbox below still covers both channels.
     }
   }
-  // Internal Meta members already used the legacy email queue
-  // above — skip the email channel here so they are never mailed
-  // twice. Flow tables and external recipients use this outbox.
   await enqueueTableAssignmentNotifications(db, {
     accountId,
     detail,
     assignee: selected,
     runId,
     formId,
-    skipEmail: !!(selected.user_id && formId),
+    skipEmail: legacyEmailEnqueued,
   });
 
   // ADDITIVE salesperson customer sequence: only on a genuine

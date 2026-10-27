@@ -30,6 +30,7 @@ const h = vi.hoisted(() => ({
   states: [] as Array<Record<string, unknown>>,
   seq: 0,
   enqueued: [] as Array<Record<string, unknown>>,
+  legacyDisabled: false,
   tableNotifyCalls: [] as Array<Record<string, unknown>>,
   assigneeEnqueueCalls: [] as Array<Record<string, unknown>>,
   drainScheduled: [] as Array<Record<string, unknown>>,
@@ -89,8 +90,22 @@ vi.mock("@/lib/flows/admin-client", () => ({
 
 vi.mock("@/lib/meta-lead-ads/notify", () => ({
   maybeEnqueueForRun: async (_db: unknown, args: Record<string, unknown>) => {
+    if (h.legacyDisabled) {
+      h.enqueued.push(args);
+      return { enqueued: false, reason: "disabled" as const };
+    }
+    // Faithful to the legacy UNIQUE(account, submission) ledger: the
+    // first call for a run enqueues, repeats are duplicates — this
+    // is exactly what lets a reassigned lead's new owner fall
+    // through to the per-table outbox.
+    const key = `${args.accountId as string}:${args.runId as string}`;
+    const seen = h.enqueued.some(
+      (e) => `${e.accountId as string}:${e.runId as string}` === key,
+    );
     h.enqueued.push(args);
-    return { enqueued: true, reason: "enqueued" as const };
+    return seen
+      ? { enqueued: false, reason: "duplicate" as const }
+      : { enqueued: true, reason: "enqueued" as const };
   },
 }));
 
@@ -321,6 +336,7 @@ beforeEach(() => {
   h.states = [];
   h.seq = 0;
   h.enqueued = [];
+  h.legacyDisabled = false;
   h.tableNotifyCalls = [];
   h.assigneeEnqueueCalls = [];
   h.drainScheduled = [];
@@ -427,6 +443,31 @@ describe("POST assign (manual)", () => {
     expect(h.drainScheduled).toEqual([{ accountId: "acct-1" }]);
   });
 
+  it("sends the per-table email on initial manual assignment when the legacy queue is off", async () => {
+    h.configs.push({
+      id: "cfg-1", account_id: "acct-1", flow_id: "flow-1",
+      enabled: true, mode: "round_robin", timezone: "Asia/Kolkata",
+    });
+    h.assignees.push({
+      id: "a-1", config_id: "cfg-1", user_id: "u-mohan", display_name: "Mohan",
+      email: null, phone: "+15550001111", position: 0, weight: 0,
+      is_active: true, notify_email: true, notify_whatsapp: true,
+    });
+    // Account-level email setting off (the production gap): the
+    // legacy queue declines, so the per-table outbox must carry the
+    // email instead of silently dropping it — still exactly once.
+    h.legacyDisabled = true;
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.tableNotifyCalls).toHaveLength(1);
+    expect(h.tableNotifyCalls[0]).toMatchObject({
+      accountId: "acct-1",
+      runId: "run-1",
+      skipEmail: false,
+      assignee: expect.objectContaining({ user_id: "u-mohan" }),
+    });
+  });
+
   it("notifies the new assignee on reassign without starting customer templates", async () => {
     h.configs.push({
       id: "cfg-1", account_id: "acct-1", flow_id: "flow-1",
@@ -451,6 +492,9 @@ describe("POST assign (manual)", () => {
       id: "ev-0", account_id: "acct-1", flow_id: "flow-1", flow_run_id: "run-1",
       kind: "auto", assigned_user_id: "u-mohan", previous_user_id: null,
     });
+    // The prior assignment already queued its legacy email, so the
+    // legacy ledger dedupes this reassignment.
+    h.enqueued.push({ accountId: "acct-1", runId: "run-1", assigneeUserId: "u-mohan" });
     const res = await assignPOST(assignBody({ user_id: "u-sohan" }), ASSIGN_PARAMS);
     expect(res.status).toBe(200);
     expect((await res.json()).assignment).toMatchObject({ previous: "u-mohan", current: "u-sohan" });

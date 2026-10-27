@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   runs: [] as Array<Record<string, unknown>>,
   events: [] as Array<Record<string, unknown>>,
   notifications: [] as Array<Record<string, unknown>>,
+  legacyNotifications: [] as Array<Record<string, unknown>>,
   seq: 0,
 }));
 
@@ -72,6 +73,8 @@ function tableRows(table: string): Array<Record<string, unknown>> {
     case "flow_runs": return h.runs;
     case "lead_assignment_events": return h.events;
     case "lead_assignment_notifications": return h.notifications;
+    case "meta_lead_notifications": return h.legacyNotifications;
+    case "flow_runs": return h.runs;
     case "meta_lead_submissions": return [];
     default: return [];
   }
@@ -296,6 +299,7 @@ function seed() {
   h.values = [];
   h.runs = [{ id: "run-1", account_id: "acct-1", flow_id: "flow-meta" }];
   h.events = [];
+  h.legacyNotifications = [];
   h.notifications = [
     {
       id: "n-1",
@@ -458,5 +462,56 @@ describe("GET notifications — owner-only delivery history", () => {
     expect(json.notifications).toHaveLength(1);
     expect(json.notifications[0].status).toBe("failed");
     expect(json.notifications[0].last_error).toBe("smtp down");
+  });
+
+  it("also surfaces legacy new-lead emails for this table (same shape, table-scoped)", async () => {
+    h.runs.push({ id: "run-2", account_id: "acct-1", flow_id: "flow-meta" });
+    h.runs.push({ id: "run-x", account_id: "acct-1", flow_id: "flow-other" });
+    h.legacyNotifications.push({
+      id: "legacy-1",
+      account_id: "acct-1",
+      recipient_email: "asha@x.com",
+      status: "sent",
+      attempt: 1,
+      max_attempts: 3,
+      last_error: null,
+      sent_at: new Date().toISOString(),
+      failed_at: null,
+      created_at: new Date().toISOString(),
+      flow_run_id: "run-2",
+    });
+    // Another account's table: never leaks in.
+    h.legacyNotifications.push({
+      id: "legacy-2",
+      account_id: "acct-1",
+      recipient_email: "other@x.com",
+      status: "sent",
+      attempt: 1,
+      max_attempts: 3,
+      last_error: null,
+      sent_at: new Date().toISOString(),
+      failed_at: null,
+      created_at: new Date().toISOString(),
+      flow_run_id: "run-x",
+    });
+    const res = await notificationsRoute.GET(new Request("https://x/"), params("flow-meta"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      notifications: Array<{
+        channel: string;
+        to_email: string | null;
+        status: string;
+        flow_run_id: string;
+      }>;
+    };
+    // One per-table row (seeded) + the legacy email for this table.
+    expect(json.notifications).toHaveLength(2);
+    const legacy = json.notifications.find((n) => n.flow_run_id === "run-2");
+    expect(legacy).toMatchObject({
+      channel: "email",
+      to_email: "asha@x.com",
+      status: "sent",
+    });
+    expect(json.notifications.some((n) => n.to_email === "other@x.com")).toBe(false);
   });
 });

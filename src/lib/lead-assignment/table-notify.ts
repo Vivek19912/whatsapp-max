@@ -30,6 +30,8 @@ import {
   sanitizePhoneForMeta,
 } from "@/lib/whatsapp/phone-utils";
 import { sendTemplateMessage } from "@/lib/whatsapp/meta-api";
+import { extractVariableIndices } from "@/lib/whatsapp/template-validators";
+import type { MessageTemplate, TemplateButton } from "@/types";
 import type { TableAssigneeRow, TableConfigDetail } from "./table-config";
 import { isValidAssigneeEmail } from "./table-validation";
 
@@ -418,18 +420,23 @@ async function sendAssignmentWhatsapp(
   } catch {
     throw new Error("WhatsApp credentials cannot be decrypted; reconnect WhatsApp.");
   }
+  // The template's ACTUAL structure drives the send: body
+  // parameters are built from its real variable slots (never a
+  // hardcoded count), so a 2-variable template like
+  // `new_lead_notification` gets exactly two BODY values instead of
+  // tripping Meta #132000 (parameter count mismatch).
   const { data: templateRow } = await db
     .from("message_templates")
-    .select("name, status, language")
+    .select(
+      "name, status, language, body_text, header_type, header_content, header_media_url, buttons",
+    )
     .eq("account_id", accountId)
     .eq("name", templateName)
     .eq("language", templateLanguage)
     .maybeSingle();
-  const template = templateRow as {
-    name?: string;
+  const template = templateRow as (MessageTemplate & {
     status?: string;
-    language?: string;
-  } | null;
+  }) | null;
   if (!template || !template.name) {
     throw new Error(
       `Template "${templateName}" (${templateLanguage}) no longer exists; update this table's assignment settings.`,
@@ -444,14 +451,110 @@ async function sendAssignmentWhatsapp(
     typeof row.lead_name === "string" && row.lead_name.trim() !== ""
       ? row.lead_name.trim()
       : "a new lead";
+  const leadPhone =
+    typeof row.lead_phone === "string" && row.lead_phone.trim() !== ""
+      ? row.lead_phone.trim()
+      : "";
+  // Validates before any Meta call: unsatisfiable templates fail
+  // here with an actionable message (terminal — retrying the same
+  // snapshot can never heal it) instead of a #132000 from Meta.
+  const body = buildAssignmentBodyParams(
+    template,
+    templateName,
+    templateLanguage,
+    leadName,
+    leadPhone,
+  );
   await sendTemplateMessage({
     phoneNumberId: cfg.phone_number_id,
     accessToken,
     to: phone,
     templateName,
     language: templateLanguage,
-    params: [leadName],
+    template,
+    messageParams: { body },
   });
+}
+
+/**
+ * BODY values for one assignment notification, derived from the
+ * template's ACTUAL variable slots. Assignment notifications carry
+ * exactly two facts about the lead: body {{1}} is the lead's name,
+ * body {{2}} is the lead's phone number. Anything beyond that —
+ * further body variables, text-header variables, URL-button
+ * variables — has no assignment-time value, so such templates are
+ * rejected here (before Meta is called) with an actionable,
+ * terminal error instead of Meta #132000. Pure (unit-testable).
+ */
+export function buildAssignmentBodyParams(
+  template: Pick<
+    MessageTemplate,
+    "body_text" | "header_type" | "header_content" | "buttons"
+  >,
+  templateName: string,
+  templateLanguage: string,
+  leadName: string,
+  leadPhone: string,
+): string[] {
+  const label = `"${templateName}" (${templateLanguage})`;
+  const name = typeof leadName === "string" ? leadName : "";
+  const phone = typeof leadPhone === "string" ? leadPhone.trim() : "";
+  const bodyText =
+    typeof template.body_text === "string" ? template.body_text : "";
+  const bodyIndices = extractVariableIndices(bodyText);
+  // Meta numbers body variables sequentially from {{1}} — a gap
+  // would silently shift values into the wrong slots, so reject it
+  // here instead of guessing.
+  if (bodyIndices.length > 0 && !bodyIndices.every((n, i) => n === i + 1)) {
+    throw new Error(
+      `Template ${label} cannot be sent: body variables must run {{1}}..{{${bodyIndices.length}}} without gaps. Re-sync the template from Meta, then retry.`,
+    );
+  }
+  const body: string[] = [];
+  for (const n of bodyIndices) {
+    if (n === 1) {
+      body.push(name);
+    } else if (n === 2) {
+      if (!phone) {
+        throw new Error(
+          `Template ${label} cannot be sent: it needs the lead's phone number for {{2}} but this lead has none. Update the lead's contact details, then retry.`,
+        );
+      }
+      body.push(phone);
+    } else {
+      throw new Error(
+        `Template ${label} cannot be sent: variable {{${n}}} has no assignment-notification value (only lead name {{1}} and lead phone {{2}} are available). Choose a template that needs at most those two.`,
+      );
+    }
+  }
+  if (
+    template.header_type === "text" &&
+    extractVariableIndices(
+      typeof template.header_content === "string"
+        ? template.header_content
+        : "",
+    ).length > 0
+  ) {
+    throw new Error(
+      `Template ${label} cannot be sent: its text header needs a variable value that assignment notifications do not provide. Choose a template without header variables.`,
+    );
+  }
+  const buttons: TemplateButton[] = Array.isArray(template.buttons)
+    ? template.buttons
+    : [];
+  for (const btn of buttons) {
+    if (
+      btn &&
+      btn.type === "URL" &&
+      typeof btn.url === "string" &&
+      extractVariableIndices(btn.url).length > 0
+    ) {
+      throw new Error(
+        `Template ${label} cannot be sent: a URL button needs a variable value that assignment notifications do not provide. Choose a template without URL-button variables.`,
+      );
+    }
+  }
+  return body;
 }
 
 function escapeHtml(text: string): string {
