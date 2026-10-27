@@ -253,6 +253,28 @@ describe("validateTableConfig", () => {
     ).toThrow(/only once/);
   });
 
+  it("requires an email address for external assignees with email alerts on", () => {
+    // A phone-only external contact can never receive an email —
+    // block the misconfiguration at save time instead of failing
+    // silently later. Internal members may rely on the roster email.
+    expect(() =>
+      validateTableConfig({
+        enabled: true,
+        mode: "round_robin",
+        assignees: [{ display_name: "X", phone: "+15551234567", notify_email: true }],
+      }),
+    ).toThrow(/needs an email address because Email alerts are on/);
+    const ok = validateTableConfig({
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        { display_name: "X", phone: "+15551234567", notify_email: false },
+        { user_id: "u1", display_name: "A", notify_email: true },
+      ],
+    });
+    expect(ok.assignees).toHaveLength(2);
+  });
+
   it("marks every config rejection as a 400 client error", () => {
     // The assignment API maps this class to HTTP 400 with the
     // message; anything else stays a generic 500.

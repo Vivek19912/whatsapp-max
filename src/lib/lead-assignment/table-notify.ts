@@ -8,15 +8,18 @@
 //     UNIQUE(account_id, submission_id) queue cannot hold them);
 //   * WhatsApp alerts to assignee phones.
 //
-// Internal members on Meta tables keep the existing
-// maybeEnqueueLeadNotification path untouched. Everything else
-// lands here: one row per (lead, assignee, channel), so retries
-// and duplicate deliveries collapse to a single alert.
+// Every per-table assignment lands here — internal members,
+// external recipients, Meta and Flow tables alike: one row per
+// (lead, assignee, channel), so retries and duplicate deliveries
+// collapse to a single alert. The legacy account-level email queue
+// is intentionally never consulted: the per-assignee toggles and
+// the configured recipient below are the single authority, so one
+// assignment can never produce two emails from two outboxes.
 //
-// Email reuses the account's Meta notification templates + SMTP
-// (same look as the legacy alerts). WhatsApp reuses the account's
-// whatsapp_config sender + an admin-chosen APPROVED template.
-// Assignment never throws because of notifications.
+// Email reuses the account's SMTP sender with the per-table alert
+// format. WhatsApp reuses the account's whatsapp_config sender +
+// an admin-chosen APPROVED template. Assignment never throws
+// because of notifications.
 // ============================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -59,12 +62,6 @@ export async function enqueueTableAssignmentNotifications(
     assignee: TableAssigneeRow;
     runId: string;
     formId: string | null;
-    /**
-     * Skip the email channel here because the caller already used
-     * the legacy Meta queue for it (internal members on Meta
-     * tables). Prevents double emails from two outboxes.
-     */
-    skipEmail?: boolean;
   },
 ): Promise<EnqueueTableNotificationsResult> {
   const out: EnqueueTableNotificationsResult = {
@@ -74,7 +71,10 @@ export async function enqueueTableAssignmentNotifications(
   try {
     const { accountId, detail, assignee, runId, formId } = args;
     const channels: Array<"email" | "whatsapp"> = [];
-    if (assignee.notify_email && !args.skipEmail) channels.push("email");
+    // The per-assignee toggles are the single authority for which
+    // channels fire. The legacy account-level email queue is never
+    // consulted here, so one assignment yields at most one email.
+    if (assignee.notify_email) channels.push("email");
     if (assignee.notify_whatsapp) channels.push("whatsapp");
     if (channels.length === 0) return out;
 
@@ -356,9 +356,13 @@ async function sendAssignmentEmail(
   const accountId = row.account_id as string;
   let to = typeof row.to_email === "string" ? row.to_email.trim() : "";
   const userId = row.assignee_id as string | null;
-  // Internal members: re-resolve from the roster at send time so a
-  // fixed email still delivers; the snapshot covers removed rows.
-  if (userId) {
+  // The queued snapshot is authoritative: an explicitly configured
+  // address always wins and is never replaced. The roster is only
+  // a fallback when the assignee row carries no address (e.g. saved
+  // before the field existed, or fixed after enqueue), so a roster
+  // edit can never override — or leak another person's address
+  // into — this delivery.
+  if (!to && userId) {
     const { data: assignee } = await db
       .from("lead_assignment_table_assignees")
       .select("user_id")

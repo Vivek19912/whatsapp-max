@@ -728,12 +728,19 @@ export function TableAssignmentDialog({
       return;
     }
     const member = rosterById.get(userId);
-    setForm((f) => ({
-      ...f,
-      user_id: userId,
-      display_name: f.display_name.trim() || member?.full_name?.trim() || member?.email || userId,
-      email: f.email.trim() || member?.email || "",
-    }));
+    setForm((f) => {
+      // Switching salespeople must not retain the previous
+      // person's address: reset to the newly linked member's
+      // roster email (or empty). Re-selecting the same member
+      // keeps any explicitly typed address.
+      const changed = f.user_id !== userId;
+      return {
+        ...f,
+        user_id: userId,
+        display_name: f.display_name.trim() || member?.full_name?.trim() || member?.email || userId,
+        email: changed ? member?.email || "" : f.email.trim() || member?.email || "",
+      };
+    });
   };
 
   /**
@@ -779,6 +786,22 @@ export function TableAssignmentDialog({
       setSaveError(message);
       toast.error(message);
       return;
+    }
+    // An enabled email alert with no possible recipient can never
+    // deliver: block the save with an actionable message instead of
+    // persisting the misconfiguration. Internal members fall back
+    // to the linked roster email; external recipients need a typed
+    // address. Drafts are preserved so nothing is lost.
+    for (const d of drafts) {
+      if (!d.notify_email || d.email.trim() !== "") continue;
+      const rosterEmail =
+        (d.user_id ? rosterById.get(d.user_id)?.email : null)?.trim() || "";
+      if (!rosterEmail) {
+        const message = `Email alerts are on for "${d.display_name.trim() || "Unnamed assignee"}" but there is no email address — enter one or turn Email alerts off.`;
+        setSaveError(message);
+        toast.error(message);
+        return;
+      }
     }
     // Client-side sequence guard (the server re-validates templates,
     // mappings, and delay): a malformed delay must never be sent.
@@ -1435,13 +1458,18 @@ export function TableAssignmentDialog({
                           />
                         </div>
                         <div className="flex flex-col gap-1.5">
-                          <Label>Email {form.user_id ? "(optional — roster email is used)" : ""}</Label>
+                          <Label htmlFor="assign-email">Email for notifications (optional)</Label>
                           <Input
+                            id="assign-email"
                             value={form.email}
                             onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
                             placeholder="priya@example.com"
                             inputMode="email"
                           />
+                          <p className="text-xs leading-snug text-muted-foreground">
+                            This address receives notifications. If left empty, the linked team
+                            member&apos;s roster email is used.
+                          </p>
                         </div>
                         <div className="flex flex-col gap-1.5">
                           <Label>Phone (with country code)</Label>

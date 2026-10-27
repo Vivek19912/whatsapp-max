@@ -43,4 +43,14 @@ describe("Meta Lead Ads settings — no OAuth Connect card", () => {
     expect(src).toContain("Import leads");
     expect(src).toContain("Polling active");
   });
+
+  it("has no New-lead email notifications section (recipients live in Assignment)", () => {
+    expect(src).not.toContain("New-lead email notifications");
+    expect(src).not.toContain("Email the assigned salesperson for new leads");
+    expect(src).not.toContain("Save notification settings");
+    expect(src).not.toContain("Send test email to me");
+    expect(src).not.toContain("Recent deliveries");
+    expect(src).not.toContain("meta-notif-enabled");
+    expect(src).not.toContain("NOTIFY_PLACEHOLDERS");
+  });
 });

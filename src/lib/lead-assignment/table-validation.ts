@@ -293,6 +293,18 @@ export function validateTableAssignee(
   // An internal member link without any contact channel is fine
   // (ownership + roster email still work); an external-only
   // recipient needs at least one channel (enforced above).
+  // An enabled email alert with no possible recipient can never
+  // deliver: external recipients have no roster fallback, so
+  // require a typed address up front instead of persisting a
+  // misconfiguration that would only fail silently later.
+  // (Internal members fall back to the linked roster email.)
+  const notifyEmail =
+    entry.notify_email === undefined ? true : entry.notify_email === true;
+  if (notifyEmail && !email && !rawUserId) {
+    throw new AssignmentValidationError(
+      `${where} needs an email address because Email alerts are on for this assignee.`,
+    );
+  }
   const weightRaw = entry.weight;
   const weight =
     typeof weightRaw === "number" && Number.isFinite(weightRaw)
@@ -310,8 +322,7 @@ export function validateTableAssignee(
     phone,
     weight,
     is_active: entry.is_active === undefined ? true : entry.is_active === true,
-    notify_email:
-      entry.notify_email === undefined ? true : entry.notify_email === true,
+    notify_email: notifyEmail,
     notify_whatsapp:
       entry.notify_whatsapp === undefined ? false : entry.notify_whatsapp === true,
   };

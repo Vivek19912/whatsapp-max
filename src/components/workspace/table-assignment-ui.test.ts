@@ -119,6 +119,28 @@ describe("assignment dialog is a single panel", () => {
     expect(dialog).toContain("External recipient");
     expect(dialog).toContain("notifications only — the lead stays Unassigned");
   });
+
+  it("labels the email field as the notification recipient with a roster fallback", () => {
+    // The entered address is authoritative; the roster email is
+    // only a fallback — the old "roster email is used" wording is gone.
+    expect(dialog).toContain("Email for notifications (optional)");
+    expect(dialog).toContain('id="assign-email"');
+    expect(dialog).toContain("If left empty, the linked team");
+    expect(dialog).not.toContain("optional — roster email is used");
+  });
+
+  it("resets the email when a different member is linked", () => {
+    // Switching salespeople must not retain the previous
+    // person's address; re-selecting the same member keeps a
+    // typed address.
+    expect(dialog).toContain("const changed = f.user_id !== userId");
+    expect(dialog).toContain('email: changed ? member?.email || ""');
+  });
+
+  it("blocks saving an enabled email alert with no possible recipient", () => {
+    expect(dialog).toContain("but there is no email address — enter one or turn Email alerts off");
+    expect(dialog).toContain("rosterById.get(d.user_id)?.email");
+  });
 });
 
 describe("assignment dialog view mode (read-only inspection)", () => {

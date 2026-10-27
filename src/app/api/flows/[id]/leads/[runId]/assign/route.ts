@@ -82,23 +82,7 @@ export async function POST(
         reason: string;
         cancelled_global: number;
       } | null = null;
-      let legacyEmailEnqueued = false;
       if (result.current && result.current !== ASSIGNED_TO_UNASSIGNED) {
-        const legacy = await maybeEnqueueForRun(supabaseAdmin(), {
-          accountId,
-          runId,
-          assigneeUserId: result.current,
-        });
-        // Skip the per-table email channel only when the legacy
-        // queue actually took the email — otherwise the salesperson
-        // would get two emails (one per outbox). Any other legacy
-        // outcome (account setting off, missing submission, error,
-        // or a duplicate from an earlier assignment) falls through
-        // to the per-table outbox below so Email alerts still
-        // produce exactly one attempt — including for a reassigned
-        // lead's new owner, whom the legacy per-submission dedup
-        // can never notify.
-        legacyEmailEnqueued = legacy.enqueued;
         // Manual assignments never ran through the per-table
         // outbox, so a reassigned lead's new owner would otherwise
         // get nothing: notify them here (WhatsApp + email per the
@@ -119,6 +103,21 @@ export async function POST(
             !wasPreviouslyAssigned;
           const detail = await getTableConfig(supabaseAdmin(), accountId, id);
           const assignee = detail?.assignees.find((a) => a.user_id === result.current);
+          // When the per-table assignee exists and its Email alerts
+          // toggle is on, the per-table outbox is the single
+          // authority for this assignment's email (the configured
+          // recipient, visible in Recent alert deliveries). The
+          // legacy account-level queue is only used when the table
+          // outbox will NOT send the email — so one assignment can
+          // never produce two emails from two outboxes.
+          const tableHandlesEmail = !!detail && !!assignee && assignee.notify_email;
+          if (!tableHandlesEmail) {
+            await maybeEnqueueForRun(supabaseAdmin(), {
+              accountId,
+              runId,
+              assigneeUserId: result.current,
+            });
+          }
           if (detail && assignee && (assignee.notify_email || assignee.notify_whatsapp)) {
             await enqueueTableAssignmentNotifications(supabaseAdmin(), {
               accountId,
@@ -126,7 +125,6 @@ export async function POST(
               assignee,
               runId,
               formId,
-              skipEmail: legacyEmailEnqueued,
             });
           }
           if (isInitial && formId) {

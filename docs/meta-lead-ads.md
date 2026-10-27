@@ -326,40 +326,46 @@ success.
 
 ## New-lead email notifications
 
-Each account can opt in (default **off**) at Settings › Integrations ›
-Meta › Lead capture › **New-lead email notifications**. When enabled,
-each genuinely new lead row that gains an owner triggers exactly one
-email to that salesperson's registered profile address — from the
-shared `leadnotificationss@gmail.com` mailbox over Gmail SMTP.
+Assignment emails are configured per salesperson in Workspace ›
+**Assignment** (Email alerts toggle + the assignee's notification
+email; empty falls back to the linked member's roster email). That
+per-assignee address is authoritative end to end — the shared
+mailbox is only ever the sender, never the recipient. The old
+account-level Settings section for these emails has been removed;
+the tables and history below remain for the legacy paths that still
+need them (tables without a per-table assignment config, and the
+assignment retry endpoint).
 
 - **Trigger.** Enqueue happens when the assignment is known: automatic
   assignment during processing, manual assignment, or assignment
   retry. Leads inserted before assignment stay pending and notify on
-  the later assignment. Reassignment after a sent notification does
-  not send again; clearing an assignment never notifies.
+  the later assignment. Reassignment notifies only the new owner via
+  the per-table outbox; clearing an assignment never notifies.
 - **Dedup.** `meta_lead_notifications` is unique on
-  `(account_id, submission_id)`, so polling, imports, retries and
-  concurrent workers collapse to one row.
-- **Delivery.** A durable outbox drained by the existing 5-minute
+  `(account_id, submission_id)` and `lead_assignment_notifications`
+  is unique per (lead, assignee, channel), so polling, imports,
+  retries and concurrent workers collapse to one row each; the two
+  outboxes never both send for the same assignment.
+- **Delivery.** Durable outboxes drained by the existing 5-minute
   meta-lead-ads cron sweep (no new scheduler): claim → render →
-  Gmail SMTP → sent, with bounded retries (3 attempts, 1m/2m/4m…
-  backoff capped at 15m). Email failure never rolls back ingestion.
-- **Content.** Subject/body templates are configurable per account
-  (`{{lead_name}}`, `{{lead_phone}}`, `{{form_name}}`,
-  `{{campaign_name}}`, `{{ad_name}}`, `{{received_at}}`,
-  `{{lead_link}}`, …); the HTML shell is branded and all values are
-  escaped. The link uses the trusted site origin (`NEXT_PUBLIC_SITE_URL`).
-  Ad-set name is unavailable from Meta's Lead node and is omitted.
+  Gmail SMTP → sent, with bounded retries. Email failure never rolls
+  back ingestion.
+- **Content.** Per-table assignment emails use the fixed assignment
+  format (lead name/phone, table, received time). The legacy queue
+  renders per-account subject/body templates (`{{lead_name}}`,
+  `{{lead_phone}}`, `{{form_name}}`, `{{campaign_name}}`,
+  `{{ad_name}}`, `{{received_at}}`, `{{lead_link}}`, …); the HTML
+  shell is branded and all values are escaped. The link uses the
+  trusted site origin (`NEXT_PUBLIC_SITE_URL`). Ad-set name is
+  unavailable from Meta's Lead node and is omitted.
 - **SMTP setup (operator).** Set on the deployed server (never in the
-  app): `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`,
-  `SMTP_SECURE=false`, `SMTP_USER=leadnotificationss@gmail.com`,
-  `SMTP_PASS=<Gmail App Password>`, `MAIL_FROM_NAME=WhatsApp Max`,
-  `MAIL_FROM_EMAIL=leadnotificationss@gmail.com`. Resend is never
-  used as a fallback. Verify with **Send test email to me** (goes
-  only to your own registered address) before relying on it.
+  app): `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`,
+  `SMTP_PASS` (or `SMTP_PASSWORD`), `MAIL_FROM_NAME`,
+  `MAIL_FROM_EMAIL`. Resend is never used as a fallback for these
+  assignment emails.
 - **Observability.** Recent deliveries (sent/failed/pending + reasons)
-  are listed in the settings card and via
-  `GET /api/integrations/meta-lead-ads/notifications/deliveries`.
+  are listed in each table's Assignment dialog ("Recent alert
+  deliveries") and via the notifications APIs.
 
 ## Two-company staging verification
 

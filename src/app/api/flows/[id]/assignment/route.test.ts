@@ -420,6 +420,34 @@ describe("PUT /flows/[id]/assignment", () => {
     expect(h.configs.filter((c) => c.flow_id === "flow-plain")).toHaveLength(0);
   });
 
+  it("preserves an explicitly configured assignee email distinct from the roster", async () => {
+    // The form's email is authoritative at send time; the roster
+    // address (asha@x.com) is only a fallback when the field is
+    // empty. Saving, reopening, and editing must round-trip it.
+    const res = await route.PUT(
+      new Request("https://x/", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          mode: "round_robin",
+          assignees: [
+            { user_id: "u-asha", display_name: "Asha", email: "aman@example.com" },
+          ],
+        }),
+      }),
+      params("flow-meta"),
+    );
+    expect(res.status).toBe(200);
+    const get = await route.GET(new Request("https://x/"), params("flow-meta"));
+    expect(get.status).toBe(200);
+    const json = (await get.json()) as {
+      assignees: Array<{ user_id: string | null; email: string | null }>;
+    };
+    expect(json.assignees).toHaveLength(1);
+    expect(json.assignees[0].email).toBe("aman@example.com");
+  });
+
   it("creates an external-only assignee with no team link", async () => {
     const res = await route.PUT(
       new Request("https://x/", {

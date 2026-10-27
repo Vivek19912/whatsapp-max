@@ -74,7 +74,6 @@ function tableRows(table: string): Array<Record<string, unknown>> {
     case "lead_assignment_events": return h.events;
     case "lead_assignment_notifications": return h.notifications;
     case "meta_lead_notifications": return h.legacyNotifications;
-    case "flow_runs": return h.runs;
     case "meta_lead_submissions": return [];
     default: return [];
   }

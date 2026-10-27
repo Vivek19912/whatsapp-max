@@ -270,7 +270,7 @@ describe("drainTableAssignmentNotifications", () => {
     });
   }
 
-  it("sends external emails and resolves internal roster email at send time", async () => {
+  it("sends external emails; the configured address is authoritative", async () => {
     const db = fakeSupabase();
     h.assignees = [
       { id: "assignee-int", user_id: "u-asha" },
@@ -278,14 +278,37 @@ describe("drainTableAssignmentNotifications", () => {
     queued({
       channel: "email",
       assignee_id: "assignee-int",
-      to_email: "stale@example.com",
+      to_email: "aman@example.com",
       flow_run_id: "run-1",
       subject: "Hi",
       body: "Hello",
     });
     const result = await drainTableAssignmentNotifications(db as never);
     expect(result).toMatchObject({ sent: 1, failed: 0 });
-    // Roster email wins over the stale snapshot.
+    // The explicitly configured address wins — the roster email
+    // must never override or leak into the delivery.
+    expect(h.sentEmails[0]).toMatchObject({ to: "aman@example.com", subject: "Hi" });
+    // And the shared SMTP sender account is never substituted as
+    // the recipient (SMTP_USER is bot@example.com in this env).
+    expect(h.sentEmails[0].to).not.toBe("bot@example.com");
+    expect(h.notifications[0].status).toBe("sent");
+  });
+
+  it("falls back to the roster email only when no address was configured", async () => {
+    const db = fakeSupabase();
+    h.assignees = [
+      { id: "assignee-int", user_id: "u-asha" },
+    ];
+    queued({
+      channel: "email",
+      assignee_id: "assignee-int",
+      to_email: null,
+      flow_run_id: "run-1",
+      subject: "Hi",
+      body: "Hello",
+    });
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
     expect(h.sentEmails[0]).toMatchObject({ to: "asha@x.com", subject: "Hi" });
     expect(h.notifications[0].status).toBe("sent");
   });

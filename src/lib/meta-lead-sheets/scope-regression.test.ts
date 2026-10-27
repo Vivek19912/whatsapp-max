@@ -204,10 +204,29 @@ describe('migration scope', () => {
 });
 
 describe('settings UI separation', () => {
-  it('adds Sheets as a separate card without replacing CAPI/email sections', () => {
+  it('adds Sheets as a separate card without replacing CAPI sections', () => {
     const settings = src('src/components/settings/meta-lead-ads-settings.tsx');
     expect(settings).toContain('MetaLeadSheetsSettings');
-    expect(settings).toContain('New-lead email notifications');
+    expect(settings).toContain('Conversions API');
+  });
+
+  it('no longer renders the legacy New-lead email notifications section', () => {
+    // Recipient authority moved to the per-assignee Assignment
+    // settings; the account-level email section (toggle, templates,
+    // test email, deliveries) is gone from Settings → Meta while
+    // Sheets and CAPI stay.
+    const settings = src('src/components/settings/meta-lead-ads-settings.tsx');
+    expect(settings).not.toContain('New-lead email notifications');
+    expect(settings).not.toContain('Save notification settings');
+    expect(settings).not.toContain('Send test email to me');
+    expect(settings).not.toContain('meta-notif-enabled');
+    expect(settings).not.toContain('meta-notif-subject');
+    expect(settings).not.toContain('meta-notif-body');
+    expect(settings).not.toContain('NOTIFY_PLACEHOLDERS');
+    expect(settings).not.toContain('/notifications/settings');
+    expect(settings).not.toContain('/notifications/test');
+    expect(settings).not.toContain('/notifications/deliveries');
+    expect(settings).toContain('MetaLeadSheetsSettings');
     expect(settings).toContain('Conversions API');
   });
 
