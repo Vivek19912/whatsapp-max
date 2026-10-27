@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeTemplateKey,
   encodeTemplateKey,
+  formatDeliveryDetail,
   formatTemplateCategory,
   isTemplateSelectionValid,
   payloadAssignees,
@@ -440,11 +441,33 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
   });
 
   it("keeps the full delivery error available on hover in Recent alert deliveries", () => {
-    // The detail cell truncates visually but carries the complete
-    // message in a tooltip so owners can diagnose failures.
+    // The Detail cell truncates visually but carries the complete
+    // message as a tooltip so owners can diagnose failures.
     expect(dialog).toContain("Recent alert deliveries");
-    expect(dialog).toContain("title={n.status === \"sent\"");
-    expect(dialog).toContain("n.last_error ?? \"retrying\"");
+    expect(dialog).toContain("title={formatDeliveryDetail(");
+    expect(dialog).toContain('n.last_error ?? "retrying"');
+  });
+
+  it("formats ISO delivery timestamps as DD-MM-YYYY hh:mm AM/PM in IST", () => {
+    // Production example: 2026-10-27T19:55:07.137Z is 01:25 IST the next day.
+    expect(formatDeliveryDetail("2026-10-27T19:55:07.137+00:00")).toBe("28-10-2026 01:25 AM");
+    expect(formatDeliveryDetail("2026-10-27T19:55:07.137Z")).toBe("28-10-2026 01:25 AM");
+    // 12-hour clock edges: midnight renders as 12 AM, noon as 12 PM.
+    expect(formatDeliveryDetail("2026-10-26T18:30:00.000Z")).toBe("27-10-2026 12:00 AM");
+    expect(formatDeliveryDetail("2026-10-27T06:30:00.000Z")).toBe("27-10-2026 12:00 PM");
+  });
+
+  it("leaves non-date delivery details byte-for-byte untouched", () => {
+    const err = 'Template "new_lead_notification" (en_US) cannot be sent: it needs the lead\'s phone number';
+    expect(formatDeliveryDetail(err)).toBe(err);
+    expect(formatDeliveryDetail("retrying")).toBe("retrying");
+    expect(formatDeliveryDetail("")).toBe("");
+    expect(formatDeliveryDetail(null)).toBe("");
+    expect(formatDeliveryDetail(undefined)).toBe("");
+    // Malformed timestamps never crash and never reformat.
+    expect(formatDeliveryDetail("not-a-date")).toBe("not-a-date");
+    expect(formatDeliveryDetail("2026-13-45T99:99")).toBe("2026-13-45T99:99");
+    expect(formatDeliveryDetail("27-10-2026 01:25 AM")).toBe("27-10-2026 01:25 AM");
   });
 
   it("exposes category and status in the sequence editor options", () => {

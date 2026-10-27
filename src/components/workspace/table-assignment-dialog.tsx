@@ -54,6 +54,42 @@ function formatPausedUntilFull(iso: string): string {  try {
 }
 
 /**
+ * Display an alert-delivery Detail value: ISO timestamps render as
+ * `DD-MM-YYYY hh:mm AM/PM` in Asia/Kolkata; everything else
+ * (template errors, "retrying", empty) passes through byte-for-byte
+ * so non-date details are never mangled. Pure.
+ */
+export function formatDeliveryDetail(value: string | null | undefined): string {
+  if (!value) return value ?? "";
+  const text = value.trim();
+  // Only reformat ISO-like timestamps — never guess at error text.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return value;
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return value;
+  try {
+    const parts = new Intl.DateTimeFormat("en-IN", {
+      timeZone: ASSIGNMENT_TIMEZONE,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).formatToParts(new Date(at));
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    const dayPeriod = get("dayPeriod").toUpperCase();
+    const date = `${get("day")}-${get("month")}-${get("year")}`;
+    const time = `${get("hour")}:${get("minute")}`;
+    if (!get("day") || !get("month") || !get("year") || !get("hour") || !get("minute")) {
+      return value;
+    }
+    return dayPeriod ? `${date} ${time} ${dayPeriod}` : `${date} ${time}`;
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Saved assignees for per-row lookups. The unconfigured-table GET
  * response omits `assignees`; anything iterating it must go
  * through here instead of crashing the render the moment a local
@@ -1759,11 +1795,9 @@ export function TableAssignmentDialog({
                             </TableCell>
                     <TableCell
                       className="text-muted-foreground max-w-64 truncate text-xs"
-                      title={n.status === "sent" ? (n.sent_at ?? "") : (n.last_error ?? "retrying")}
+                      title={formatDeliveryDetail(n.status === "sent" ? n.sent_at : n.last_error ?? "retrying")}
                     >
-                      {n.status === "sent"
-                        ? n.sent_at ?? ""
-                        : (n.last_error ?? "retrying")}
+                      {formatDeliveryDetail(n.status === "sent" ? n.sent_at : n.last_error ?? "retrying")}
                     </TableCell>
                           </TableRow>
                         ))}
