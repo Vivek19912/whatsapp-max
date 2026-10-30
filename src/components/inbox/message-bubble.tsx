@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import type { Message, MessageReaction, MessageTemplate } from "@/types";
 import {
@@ -16,6 +16,7 @@ import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
 import { MessageReactions } from "./message-reactions";
 import { LinkifiedText } from "./linkified-text";
+import { linkify } from "@/lib/inbox/linkify";
 
 interface MessageBubbleProps {
   message: Message;
@@ -123,11 +124,19 @@ function MediaImage({
   url,
   alt,
   compact,
+  fill,
 }: {
   url: string;
   alt: string;
   /** Stickers render smaller; same lazy fetch + lightbox. */
   compact?: boolean;
+  /**
+   * Fill the parent width (WhatsApp-style media-template headers):
+   * `width:100%`, auto height, aspect preserved, fully visible.
+   * Default (non-fill) keeps the intrinsic-size behavior for ordinary
+   * messages so small images don't inflate the bubble.
+   */
+  fill?: boolean;
 }) {
   // Proxy URLs need an authenticated fetch at runtime, so they can only
   // resolve client-side. Direct CDN/public URLs are usable immediately —
@@ -203,12 +212,15 @@ function MediaImage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, loadImage]);
 
-  // Loading / error placeholder frames are fixed-but-bounded so a pending
-  // image reserves a sensible area without stretching the bubble across
-  // the thread. `max-w-full` keeps it inside narrow viewports.
+  // Loading / error placeholder frames reserve space without
+  // stretching the bubble. Fill mode takes the full parent width with
+  // a poster-like aspect; the default fixed frame keeps ordinary
+  // thumbnails small. `max-w-full` keeps it inside narrow viewports.
   const frameClass = compact
     ? "h-32 w-32 max-w-full"
-    : "h-40 w-[240px] max-w-full";
+    : fill
+      ? "aspect-[4/3] w-full max-w-full"
+      : "h-40 w-[240px] max-w-full";
 
   if (error) {
     return (
@@ -227,7 +239,7 @@ function MediaImage({
   }
 
   return (
-    <div ref={hostRef} className="min-w-0 max-w-full">
+    <div ref={hostRef} className={cn(fill && "w-full", "min-w-0 max-w-full")}>
       <img
         src={src ?? ""}
         alt={alt}
@@ -235,11 +247,17 @@ function MediaImage({
         className={
           compact
             ? "h-32 w-32 max-w-full cursor-pointer rounded-lg object-contain transition-opacity hover:opacity-90"
-            : // Media determines its own size: natural dimensions up to a
-              // bounded box, aspect preserved, never stretched. `w-auto`
-              // (not `w-full`) is load-bearing — a small image must stay
-              // small instead of inflating the bubble to full width.
-              "block h-auto w-auto max-w-full cursor-pointer rounded-xl object-cover transition-opacity hover:opacity-90 sm:max-w-[320px] max-h-[320px]"
+            : fill
+              ? // Media-template header: full parent width, automatic
+                // height from the original aspect ratio, fully visible.
+                // `object-contain` (not cover) so promotional text,
+                // faces, and contact info are never cropped.
+                "block h-auto w-full max-w-full cursor-pointer rounded-lg object-contain transition-opacity hover:opacity-90"
+              : // Media determines its own size: natural dimensions up to a
+                // bounded box, aspect preserved, never stretched. `w-auto`
+                // (not `w-full`) is load-bearing — a small image must stay
+                // small instead of inflating the bubble to full width.
+                "block h-auto w-auto max-w-full cursor-pointer rounded-xl object-cover transition-opacity hover:opacity-90 sm:max-w-[320px] max-h-[320px]"
         }
         onClick={() => setIsExpanded(true)}
         onError={() => setError(true)}
@@ -365,6 +383,87 @@ export function interactiveRenderKind(message: Message): {
     kind: buttons.length > 0 ? "outgoing-prompt" : "plain",
     buttons,
   };
+}
+
+/**
+ * WhatsApp-style `*bold*` runs inside a plain-text segment. Single
+ * asterisks (not newlines) delimit the run; unmatched asterisks stay
+ * literal so nothing is ever swallowed. Pure (no DOM) apart from the
+ * returned nodes, so segment logic stays testable.
+ */
+function BoldRuns({ text, baseKey }: { text: string; baseKey: string }) {
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let i = 0;
+  const re = /\*([^*\n]+)\*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      nodes.push(
+        <Fragment key={`${baseKey}-t${i++}`}>
+          {text.slice(last, m.index)}
+        </Fragment>,
+      );
+    }
+    nodes.push(
+      <strong key={`${baseKey}-b${i++}`} className="font-semibold">
+        {m[1]}
+      </strong>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    nodes.push(
+      <Fragment key={`${baseKey}-t${i++}`}>{text.slice(last)}</Fragment>,
+    );
+  }
+  if (nodes.length === 0) {
+    nodes.push(<Fragment key={`${baseKey}-t0`}>{text}</Fragment>);
+  }
+  return <>{nodes}</>;
+}
+
+/**
+ * Template body typography: WhatsApp-style presentation of the actual
+ * saved body text. Linkifies URLs (same safe segment approach as
+ * LinkifiedText) and renders `*text*` as bold, preserving line breaks,
+ * paragraph separation, bullets, emojis, and punctuation. Text stays
+ * selectable — never a flattened image. Template bodies only; ordinary
+ * messages keep LinkifiedText unchanged.
+ */
+function TemplateBodyText({
+  text,
+  onPrimary,
+}: {
+  text: string;
+  onPrimary?: boolean;
+}) {
+  const segments = linkify(text);
+
+  return (
+    <div className="whitespace-pre-wrap break-words text-sm leading-[1.45]">
+      {segments.map((segment, i) => {
+        if (segment.type === "link") {
+          return (
+            <a
+              key={i}
+              href={segment.href}
+              target="_blank"
+              rel="noopener noreferrer nofollow"
+              onClick={(e) => e.stopPropagation()}
+              className={cn(
+                "underline underline-offset-2 hover:opacity-80",
+                onPrimary ? "text-primary-foreground" : "text-primary",
+              )}
+            >
+              {segment.value}
+            </a>
+          );
+        }
+        return <BoldRuns key={i} text={segment.value} baseKey={`s${i}`} />;
+      })}
+    </div>
+  );
 }
 
 function MessageContent({
@@ -554,25 +653,47 @@ function MessageContent({
         header && header.url.startsWith("/api/whatsapp/media/")
           ? `${header.url}?download=1`
           : (header?.url ?? "");
+      // WhatsApp-style media template: fixed compact content width so
+      // the image fills ~95-100% of the inner bubble width instead of
+      // collapsing to its intrinsic size. `max-w-full` keeps it inside
+      // narrow (mobile) viewports. Video shares the layout; documents
+      // and text-only templates keep the existing rendering below.
+      if (header?.kind === "image" || header?.kind === "video") {
+        return (
+          <div className="w-[270px] max-w-full sm:w-[320px]">
+            <span className="mx-2 mt-1.5 mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+              <LayoutTemplate className="h-3 w-3" />
+              Template
+            </span>
+            <div className="px-2 pt-1">
+              {header.kind === "image" ? (
+                <MediaImage url={header.url} alt="Template image" fill />
+              ) : (
+                <video
+                  src={header.url}
+                  controls
+                  preload="metadata"
+                  className="block h-auto w-full max-w-full rounded-lg bg-black/60 object-contain"
+                />
+              )}
+            </div>
+            {message.content_text && (
+              <div className="px-2.5 pb-0.5 pt-1.5">
+                <TemplateBodyText
+                  text={message.content_text}
+                  onPrimary={onPrimary}
+                />
+              </div>
+            )}
+          </div>
+        );
+      }
       return (
         <div className="min-w-0 max-w-full sm:max-w-[320px]">
           <span className="mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
             <LayoutTemplate className="h-3 w-3" />
             Template
           </span>
-          {header?.kind === "image" ? (
-            <div className="mt-1">
-              <MediaImage url={header.url} alt="Template image" />
-            </div>
-          ) : null}
-          {header?.kind === "video" ? (
-            <video
-              src={header.url}
-              controls
-              preload="metadata"
-              className="mt-1 block h-auto w-auto max-w-full rounded-xl sm:max-w-[320px] max-h-[320px] bg-black/60"
-            />
-          ) : null}
           {header?.kind === "document" ? (
             <div className="mt-1 flex items-center gap-1 rounded-xl bg-muted/50 px-2 py-1.5">
               <a
@@ -597,11 +718,12 @@ function MessageContent({
             </div>
           ) : null}
           {message.content_text && (
-            <LinkifiedText
-              text={message.content_text}
-              onPrimary={onPrimary}
-              className="mt-1"
-            />
+            <div className="mt-1">
+              <TemplateBodyText
+                text={message.content_text}
+                onPrimary={onPrimary}
+              />
+            </div>
           )}
         </div>
       );
@@ -694,6 +816,16 @@ export function MessageBubble({
     message.content_type === "video" ||
     message.content_type === "audio" ||
     message.content_type === "document";
+  // WhatsApp-style media template (image/video header): the fixed-width
+  // content column owns all spacing, so the shell drops its text
+  // padding and clips to the rounded bubble — the image then sits
+  // nearly edge-to-edge instead of floating in a large blue card.
+  const templateHeader =
+    message.content_type === "template"
+      ? resolveTemplateHeaderMedia(message, template)
+      : null;
+  const isTemplateMedia =
+    templateHeader?.kind === "image" || templateHeader?.kind === "video";
 
   // Row alignment + width cap are owned by <MessageActions> so its hover
   // group matches the bubble's content area, not the full row.
@@ -712,7 +844,15 @@ export function MessageBubble({
           // without painting a giant rectangle around the art.
           isSticker
             ? "bg-transparent p-0"
-            : isMediaAttachment
+            : isTemplateMedia
+              ? // Media template: no shell padding — the fixed-width
+                // content column (badge / image / body each with their
+                // own small insets) defines the compact bubble.
+                // `overflow-hidden` clips the image to the rounded
+                // bubble; `w-fit` + `max-w-full` keep it compact on
+                // desktop and inside narrow viewports on mobile.
+                "w-fit max-w-full overflow-hidden p-0"
+              : isMediaAttachment
               ? // Media attachment: tight padding + shrink-to-fit so the
                 // MEDIA defines the width, not a text-sized bubble.
                 // `w-fit` + `overflow-hidden` + `max-w-full` keep large
@@ -737,7 +877,11 @@ export function MessageBubble({
         <div
           className={cn(
             "mt-1 flex items-center gap-1",
-            isMediaAttachment || isSticker ? "px-1" : undefined,
+            isTemplateMedia
+              ? "px-2 pb-1.5"
+              : isMediaAttachment || isSticker
+                ? "px-1"
+                : undefined,
             isAgent ? "justify-end" : "justify-start",
           )}
         >

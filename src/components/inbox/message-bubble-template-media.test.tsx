@@ -211,3 +211,136 @@ describe("template bubble rendering (actual component)", () => {
     expect(out).toMatch(/\d{1,2}:\d{2} [AP]M/);
   });
 });
+
+describe("WhatsApp-style media template layout (rendered component)", () => {
+  const LONG_BODY = [
+    "*Namaste!* 🙏",
+    "Kashi Yatra package for 4 days.",
+    "• Specialist guidance",
+    "• Daily aarti darshan",
+    "Call *98765 43210* for details.",
+    "",
+    "*What's Next?*",
+    "Reply to confirm your seat. 🙏",
+  ].join("\n");
+
+  function mediaHtml(body: string, url: string): string {
+    return html(
+      msg({ content_text: body, template_name: "promo" }),
+      { header_type: "image", header_media_url: url },
+    );
+  }
+
+  it("1. tall portrait poster fills the bubble width without distortion", () => {
+    const out = mediaHtml("Poster body", "https://cdn.test/poster-tall.jpg");
+    // Template img uses full parent width + contain (never cropped).
+    expect(out).toMatch(/<img[^>]*w-full[^>]*object-contain/);
+    // No narrow intrinsic-size or capped sizing on the template image.
+    expect(out).not.toMatch(/<img[^>]*w-auto/);
+    expect(out).not.toMatch(/<img[^>]*sm:max-w-\[320px\]/);
+    expect(out).toContain("Poster body");
+  });
+
+  it("2. landscape promotional image uses the same full-width layout", () => {
+    const out = mediaHtml("Landscape body", "https://cdn.test/banner-wide.png");
+    expect(out).toMatch(/<img[^>]*w-full[^>]*object-contain/);
+    expect(out).toContain("https://cdn.test/banner-wide.png");
+  });
+
+  it("3. square image renders undistorted with aligned text", () => {
+    const out = mediaHtml("Square body", "https://cdn.test/square.webp");
+    const imgIdx = out.indexOf("<img");
+    const textIdx = out.indexOf("Square body");
+    expect(imgIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThan(imgIdx);
+    expect(out).toMatch(/<img[^>]*object-contain/);
+  });
+
+  it("4. long body keeps paragraphs, emojis, and line breaks", () => {
+    const out = mediaHtml(LONG_BODY, IMG);
+    expect(out).toContain("Kashi Yatra package for 4 days.");
+    expect(out).toContain("🙏");
+    expect(out).toContain("Reply to confirm your seat.");
+    expect(out).toContain("whitespace-pre-wrap");
+  });
+
+  it("5. *bold* and bullet-like lines render naturally", () => {
+    const out = mediaHtml(LONG_BODY, IMG);
+    // Bold runs render as <strong> without raw asterisks.
+    expect(out).toContain("<strong");
+    expect(out).toContain("Namaste!");
+    expect(out).not.toContain("*Namaste!*");
+    expect(out).toContain("98765 43210");
+    expect(out).not.toContain("*98765 43210*");
+    expect(out).toContain("What&#x27;s Next?");
+    // Bullets preserved as text.
+    expect(out).toContain("Specialist guidance");
+  });
+
+  it("6. text-only template keeps the compact text layout", () => {
+    const out = html(
+      msg({ content_text: "*Hi* there", template_name: "plain" }),
+      null,
+    );
+    expect(out).not.toContain("<img");
+    expect(out).toContain("Hi");
+    expect(out).not.toContain("*Hi*");
+  });
+
+  it("7. document/PDF template still renders the attachment card", () => {
+    const out = html(
+      msg({ content_text: "Doc body", template_name: "doc", media_file_name: "notice.pdf" }),
+      { header_type: "document", header_media_url: DOC },
+    );
+    expect(out).toContain(DOC);
+    expect(out).toContain("notice.pdf");
+  });
+
+  it("8. video template renders a full-width player", () => {
+    const out = html(
+      msg({ content_text: "Watch this", template_name: "vid" }),
+      { header_type: "video", header_media_url: "https://cdn.test/clip.mp4" },
+    );
+    expect(out).toMatch(/<video[^>]*w-full/);
+    expect(out).toContain("Watch this");
+  });
+
+  it("9/10. theme-aware bubble styling (light/dark via tokens)", () => {
+    const out = mediaHtml("Themed body", IMG);
+    // Theme tokens — no hardcoded hex colors in the media template branch.
+    expect(out).toContain("bg-primary");
+    expect(out).toContain("text-primary-foreground");
+    expect(out).not.toMatch(/#[0-9a-fA-F]{3,8}/);
+  });
+
+  it("bubble stays compact: fixed content column, clipped overflow", () => {
+    const out = mediaHtml("Compact", IMG);
+    expect(out).toContain("w-[270px]");
+    expect(out).toContain("sm:w-[320px]");
+    expect(out).toContain("overflow-hidden");
+  });
+
+  it("timestamp/status row keeps padding and stays below the body", () => {
+    const out = mediaHtml("Body text", IMG);
+    const textIdx = out.indexOf("Body text");
+    const timeIdx = out.search(/\d{1,2}:\d{2} [AP]M/);
+    expect(timeIdx).toBeGreaterThan(textIdx);
+    expect(out).toContain("Unseen");
+  });
+
+  it("ordinary inbound image message sizing is unchanged", () => {
+    const out = renderToStaticMarkup(
+      <MessageBubble
+        message={msg({
+          sender_type: "customer",
+          content_type: "image",
+          content_text: "plain photo",
+          media_url: "https://cdn.test/photo.jpg",
+        })}
+      />,
+    );
+    // Ordinary path keeps intrinsic sizing + cover + cap.
+    expect(out).toMatch(/<img[^>]*w-auto/);
+    expect(out).toMatch(/<img[^>]*object-cover/);
+  });
+});
