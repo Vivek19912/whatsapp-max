@@ -77,6 +77,9 @@ vi.mock('@/lib/auth/account', async (importOriginal) => {
   };
 });
 
+const notifyDialRequest = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('@/lib/dial/notify-ws', () => ({ notifyDialRequest }));
+
 import { POST, GET } from '@/app/api/dial-requests/route';
 
 function req(body: unknown, headers: Record<string, string> = {}) {
@@ -94,6 +97,7 @@ describe('POST /api/dial-requests', () => {
     h.flows = [{ id: 'f-1' }];
     h.existing = null;
     h.lastInsert = null;
+    notifyDialRequest.mockClear();
   });
 
   it('creates a request with normalized number and tel-safe storage', async () => {
@@ -105,6 +109,16 @@ describe('POST /api/dial-requests', () => {
     // Account/user derive from session, never from body.
     expect(h.lastInsert?.account_id).toBe('acct-A');
     expect(h.lastInsert?.requested_by).toBe('user-1');
+    // The durable row is followed by exactly one socket signal,
+    // scoped to the clicking user and carrying ids only.
+    expect(notifyDialRequest).toHaveBeenCalledTimes(1);
+    expect(notifyDialRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'd-1',
+        account_id: 'acct-A',
+        requested_by: 'user-1',
+      })
+    );
   });
 
   it('rejects empty and malformed numbers without touching lead data', async () => {

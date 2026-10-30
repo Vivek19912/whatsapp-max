@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { Phone } from 'lucide-react';
 
 import {
@@ -23,12 +23,15 @@ interface DialActionProps {
 type DialState =
   | { kind: 'idle' }
   | { kind: 'queueing' }
+  // `queued` is terminal in the browser: there is deliberately no
+  // status polling (no repeated status reads). The
+  // request is delivered over the authenticated WebSocket and the
+  // phone opens the native dialer itself; the browser leaves the
+  // cell at Queued until a WebSocket status event arrives (not yet
+  // implemented) rather than re-asking the server. Delivered is never
+  // shown unless a device acknowledgement is observed.
   | { kind: 'queued'; requestId: string }
-  | { kind: 'delivered' }
   | { kind: 'failed'; reason: string };
-
-const POLL_INTERVAL_MS = 2500;
-const POLL_MAX_ATTEMPTS = 24; // ~60s: longer than any foreground-sync round trip.
 
 /**
  * Duplicate-click protection without server state: the same row +
@@ -47,7 +50,12 @@ export function dialIdempotencyKey(
   return `${runId ?? 'row'}:${normalizedPhone}:${bucket}`.slice(0, 128);
 }
 
-/** Terminal server states mapped onto the cell's user-facing status. */
+/**
+ * Terminal server states mapped onto the cell's user-facing status.
+ * Reserved for future WebSocket status events (`delivered`/`opened`/
+ * `failed` pushed to the browser). Nothing calls this yet: the cell
+ * stays at Queued rather than polling the server for status.
+ */
 export function interpretDialStatus(status: string | null | undefined): 'delivered' | 'failed' | null {
   if (status === 'delivered' || status === 'opened' || status === 'completed') {
     return 'delivered';
@@ -59,7 +67,7 @@ export function interpretDialStatus(status: string | null | undefined): 'deliver
   ) {
     return 'failed';
   }
-  return null; // still pending — keep polling.
+  return null; // still pending — no status event yet.
 }
 
 /**
@@ -73,10 +81,13 @@ export function interpretDialStatus(status: string | null | undefined): 'deliver
  * - On desktop: clicking sends ONE authenticated dial request for
  *   the clicking user's own authorized device
  *   (server routes by the session's `requested_by`, never by
- *   Assigned To). Status reads Queued → Delivered / Failed by
- *   polling the request — Delivered is shown ONLY after the
- *   server reports the device received it; no premature
- *   confirmation is ever displayed.
+ *   Assigned To). The cell reads Queued once the server accepts the
+ *   request. There is no status polling: delivery happens over the
+ *   authenticated phone WebSocket and the phone opens the dialer
+ *   itself. Delivered is shown ONLY after a device acknowledgement
+ *   is observed over a WebSocket status event; until such events
+ *   exist the cell stays at Queued — no premature confirmation is
+ *   ever displayed and the server is never re-asked.
  */
 export function isAndroidDialSupported(userAgent: string | null | undefined): boolean {
   if (!userAgent) return false;
@@ -105,67 +116,10 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
   );
 
   const [state, setState] = useState<DialState>({ kind: 'idle' });
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const stopPolling = () => {
-    if (pollTimer.current !== null) {
-      clearInterval(pollTimer.current);
-      pollTimer.current = null;
-    }
-  };
-
-  useEffect(() => stopPolling, []);
 
   const dialable = isDialablePhoneNumber(phone);
   const telUri = toTelUri(phone);
   const normalized = dialable ? normalizeDialNumber(phone) : '';
-
-  async function pollStatus(requestId: string) {
-    let attempts = 0;
-    const tick = async () => {
-      attempts += 1;
-      try {
-        const res = await fetch(
-          `/api/dial-requests?id=${encodeURIComponent(requestId)}`
-        );
-        if (!res.ok) throw new Error(`status ${res.status}`);
-        const json = (await res.json()) as {
-          dial_request?: { status?: string };
-        };
-        const mapped = interpretDialStatus(json.dial_request?.status);
-        if (mapped === 'delivered') {
-          stopPolling();
-          setState({ kind: 'delivered' });
-          return;
-        }
-        if (mapped === 'failed') {
-          stopPolling();
-          setState({
-            kind: 'failed',
-            reason: 'The request expired before your phone picked it up.',
-          });
-          return;
-        }
-      } catch {
-        // Transient poll failure — keep waiting until the budget
-        // runs out rather than flashing an error.
-      }
-      if (attempts >= POLL_MAX_ATTEMPTS) {
-        stopPolling();
-        if (stateRef.current.kind === 'queued') {
-          setState({
-            kind: 'failed',
-            reason: 'Timed out waiting for your phone. Open CallVault on it and retry.',
-          });
-        }
-      }
-    };
-    stopPolling();
-    pollTimer.current = setInterval(() => void tick(), POLL_INTERVAL_MS);
-    void tick();
-  }
 
   async function handleDesktopDial() {
     if (!dialable || state.kind === 'queueing' || state.kind === 'queued') return;
@@ -188,8 +142,10 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
       };
       const requestId = json.dial_request?.id;
       if (!requestId) throw new Error('no id');
+      // Terminal UI state: no polling follows. The phone receives
+      // the request over its WebSocket and opens the dialer; the
+      // cell stays Queued.
       setState({ kind: 'queued', requestId });
-      void pollStatus(requestId);
     } catch {
       setState({
         kind: 'failed',
@@ -233,19 +189,15 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
       ? 'Queueing…'
       : state.kind === 'queued'
         ? 'Queued'
-        : state.kind === 'delivered'
-          ? 'Delivered ✓'
-          : state.kind === 'failed'
-            ? 'Retry'
-            : 'Dial';
+        : state.kind === 'failed'
+          ? 'Retry'
+          : 'Dial';
   const title =
     state.kind === 'queued'
-      ? 'Dial request queued — waiting for your phone to pick it up'
-      : state.kind === 'delivered'
-        ? 'Your phone received the dial request'
-        : state.kind === 'failed'
-          ? state.reason
-          : `Send dial request for ${normalized} to your phone`;
+      ? 'Dial request queued — your phone opens the dialer automatically'
+      : state.kind === 'failed'
+        ? state.reason
+        : `Send dial request for ${normalized} to your phone`;
 
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -254,8 +206,9 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
         disabled={busy}
         onClick={(e) => {
           e.stopPropagation();
-          // Idle, failed, or finished (Delivered starts a fresh
-          // request) — never while queueing or awaiting delivery.
+          // Idle or failed only — never while queueing or queued.
+          // A queued cell stays queued (no status polling) until a
+          // WebSocket status event arrives.
           if (!busy) void handleDesktopDial();
         }}
         title={title}

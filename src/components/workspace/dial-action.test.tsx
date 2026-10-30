@@ -60,12 +60,18 @@ describe('dial action column (every Workspace table, handoff + tel:)', () => {
     expect(dialSrc).toContain('phone_number');
     expect(dialSrc).toContain('idempotency_key');
     expect(dialSrc).toContain('Queued');
-    expect(dialSrc).toContain('Delivered');
-    expect(dialSrc).toContain('Failed');
+    // No status polling: the cell stays Queued after the 201 and
+    // never re-asks the server. No interval, no status GET.
+    expect(dialSrc).not.toContain('setInterval');
+    expect(dialSrc).not.toContain('clearInterval');
+    expect(dialSrc).not.toContain('/api/dial-requests?id=');
+    expect(dialSrc).not.toContain('POLL_');
     // A premature confirmation must never appear: Delivered is
-    // shown only after the device acknowledgement is observed.
+    // shown only after a device acknowledgement is observed over
+    // a WebSocket status event — until then the cell stays Queued.
     expect(dialSrc).not.toMatch(/['">]Sent/);
     expect(dialSrc).not.toContain('Sent ✓');
+    expect(dialSrc).not.toContain('Delivered ✓');
   });
 
   it('passes row ownership for server-side authorization', () => {
@@ -93,7 +99,7 @@ describe('dial action column (every Workspace table, handoff + tel:)', () => {
     expect(dialIdempotencyKey('run-1', '+14155552672', base)).not.toBe(k1);
   });
 
-  it('maps server states without inventing delivery', () => {
+  it('maps server states without inventing delivery (reserved for WS status events)', () => {
     expect(interpretDialStatus('delivered')).toBe('delivered');
     expect(interpretDialStatus('opened')).toBe('delivered');
     expect(interpretDialStatus('completed')).toBe('delivered');

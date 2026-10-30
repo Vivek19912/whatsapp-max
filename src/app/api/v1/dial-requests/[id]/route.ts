@@ -31,15 +31,75 @@ const TRANSITIONS: Record<string, string[]> = {
 
 async function resolveAccount(request: Request): Promise<{
   accountId: string;
+  /** Set for user-token auth: only this user's own requests. */
+  userId: string | null;
   db: SupabaseClient;
 }> {
   const presented = bearerToken(request);
   if (presented && !looksLikeApiKey(presented)) {
     const dev = await requireDeviceUser(request);
-    return { accountId: dev.accountId, db: dev.service };
+    return { accountId: dev.accountId, userId: dev.userId, db: dev.service };
   }
   const ctx = await requireApiKey(request, 'recordings:write');
-  return { accountId: ctx.accountId, db: ctx.supabase };
+  return { accountId: ctx.accountId, userId: null, db: ctx.supabase };
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * GET /api/v1/dial-requests/{id} — one-shot authoritative read.
+ *
+ * This is NOT a poll. The device calls it only after a WebSocket
+ * signal (or on reconnect) to verify the request is still live and
+ * to obtain the server-owned phone number. The signal itself never
+ * carries a number, so a forged socket frame cannot choose what is
+ * dialled.
+ */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { accountId, userId, db } = await resolveAccount(request);
+    const id = (await params).id;
+    if (!UUID_RE.test(id)) {
+      return fail('bad_request', 'A valid id is required.', 400);
+    }
+
+    let query = db
+      .from('dial_requests')
+      .select(
+        'id, phone_number, contact_id, flow_id, run_id, status, expires_at, created_at, delivered_at, opened_at, consumed_at'
+      )
+      .eq('id', id)
+      .eq('account_id', accountId);
+    if (userId) query = query.eq('requested_by', userId);
+    const { data, error } = await query.maybeSingle();
+    if (error) {
+      console.error('[api/v1/dial-requests] read one failed:', error.message);
+      return fail('internal', 'Failed to read dial request.', 500);
+    }
+    if (!data) return fail('not_found', 'Dial request not found.', 404);
+
+    const row = data as { status?: string; expires_at?: string };
+    const expiresMs = Date.parse(String(row.expires_at ?? ''));
+    if (
+      (row.status === 'pending' || row.status === 'delivered') &&
+      Number.isFinite(expiresMs) &&
+      expiresMs <= Date.now()
+    ) {
+      await db
+        .from('dial_requests')
+        .update({ status: 'expired' })
+        .eq('id', id)
+        .eq('account_id', accountId);
+      return fail('gone', 'Dial request has expired.', 410);
+    }
+    return ok({ dial_request: data });
+  } catch (err) {
+    return toApiErrorResponse(err);
+  }
 }
 
 export async function PATCH(
@@ -58,7 +118,7 @@ export async function POST(
 
 async function handleAck(request: Request, id: string, method: string) {
   try {
-    const { accountId, db } = await resolveAccount(request);
+    const { accountId, userId, db } = await resolveAccount(request);
 
     let body: Record<string, unknown>;
     try {
@@ -69,12 +129,13 @@ async function handleAck(request: Request, id: string, method: string) {
     const next = typeof body.status === 'string' ? body.status.trim() : '';
     if (!next) return fail('bad_request', "'status' is required.", 400);
 
-    const { data: row, error: readError } = await db
+    let readQuery = db
       .from('dial_requests')
       .select('id, account_id, status, expires_at, consumed_at')
       .eq('id', id)
-      .eq('account_id', accountId)
-      .maybeSingle();
+      .eq('account_id', accountId);
+    if (userId) readQuery = readQuery.eq('requested_by', userId);
+    const { data: row, error: readError } = await readQuery.maybeSingle();
     if (readError) {
       console.error('[api/v1/dial-requests] ack read failed:', readError.message);
       return fail('internal', 'Failed to read dial request.', 500);

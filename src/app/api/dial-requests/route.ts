@@ -18,6 +18,7 @@ import {
   isDialablePhoneNumber,
   normalizeDialNumber,
 } from '@/lib/dial/validation';
+import { notifyDialRequest } from '@/lib/dial/notify-ws';
 
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const DIAL_TTL_MS = 10 * 60 * 1000;
@@ -137,6 +138,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Failed to create dial request.' }, { status: 500 });
     }
 
+    // Wake the requesting user's connected device over the local
+    // WebSocket sidecar. Fire-and-forget: the durable row is the
+    // source of truth, and a sidecar outage must not fail the click.
+    // The event carries ids only — never the phone number.
+    void notifyDialRequest({
+      id: created.id,
+      account_id: ctx.accountId,
+      requested_by: ctx.userId,
+      status: created.status,
+      expires_at: created.expires_at,
+      created_at: created.created_at,
+    });
+
     return NextResponse.json(
       {
         dial_request: created,
@@ -149,7 +163,7 @@ export async function POST(request: Request) {
   }
 }
 
-/** GET /api/dial-requests?id= — poll one request's status (owner account only). */
+/** GET /api/dial-requests?id= — read one request's status once (owner account only). Not polled. */
 export async function GET(request: Request) {
   try {
     const ctx = await getCurrentAccount();
@@ -168,6 +182,27 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Failed to read dial request.' }, { status: 500 });
     }
     if (!data) return NextResponse.json({ error: 'Not found.' }, { status: 404 });
+
+    // Lazy expiry for an explicit status read: without this a row
+    // past its TTL keeps reporting `pending`. Device reads do the same.
+    const row = data as {
+      id: string;
+      status?: string;
+      expires_at?: string;
+    };
+    const expiresMs = Date.parse(String(row.expires_at ?? ''));
+    if (
+      (row.status === 'pending' || row.status === 'delivered') &&
+      Number.isFinite(expiresMs) &&
+      expiresMs <= Date.now()
+    ) {
+      await ctx.supabase
+        .from('dial_requests')
+        .update({ status: 'expired' })
+        .eq('id', id)
+        .eq('account_id', ctx.accountId);
+      row.status = 'expired';
+    }
     return NextResponse.json({ dial_request: data });
   } catch (err) {
     return toErrorResponse(err);

@@ -1101,24 +1101,19 @@ export async function drainWhatsappQueue(
         row.account_id,
         row.form_id,
       );
-      if (!table) {
-        // No config row at all: park the row untouched so a later
-        // configuration resumes it (mirrors the Sheets no-config
-        // path). Applies to global and salesperson rows alike.
-        await db
-          .from("meta_lead_whatsapp_queue")
-          .update({ status: "pending", claimed_at: null, updated_at: nowIso })
-          .eq("id", row.id);
-        result.skippedNoConfig += 1;
-        continue;
-      }
       // Resolve the effective sequence: the salesperson's own items
       // when the row carries their key, else the table-wide items.
+      // Salesperson rows must NOT require a global auto-send config:
+      // customer sequences are configured inside Assignment, so a
+      // table with only salesperson sequences has no
+      // meta_lead_whatsapp_configs row. A missing global row means
+      // "not paused", not "not configured". Global rows keep the
+      // original strict requirement.
       // A removed or emptied salesperson sequence parks its rows
       // (same resume semantics as a removed global template).
-    let items = table.items;
-    if (row.assignee_key != null) {
-      const sequence = await loadAssigneeSequence(
+      let items = table?.items ?? [];
+      if (row.assignee_key != null) {
+        const sequence = await loadAssigneeSequence(
           db,
           row.account_id,
           row.form_id,
@@ -1136,18 +1131,33 @@ export async function drainWhatsappQueue(
           ...t,
           id: `assignee:${row.assignee_key}:${t.position}`,
         }));
-      } else if (table.items.length === 0) {
-        // No configured templates: park the row untouched so a
-        // re-configuration resumes it (mirrors the Sheets
-        // no-config path).
-        await db
-          .from("meta_lead_whatsapp_queue")
-          .update({ status: "pending", claimed_at: null, updated_at: nowIso })
-          .eq("id", row.id);
-        result.skippedNoConfig += 1;
-        continue;
+      } else {
+        if (!table) {
+          // No config row at all: park the row untouched so a later
+          // configuration resumes it (mirrors the Sheets no-config
+          // path). Global rows only — salesperson rows are handled
+          // above without requiring this row.
+          await db
+            .from("meta_lead_whatsapp_queue")
+            .update({ status: "pending", claimed_at: null, updated_at: nowIso })
+            .eq("id", row.id);
+          result.skippedNoConfig += 1;
+          continue;
+        }
+        if (table.items.length === 0) {
+          // No configured templates: park the row untouched so a
+          // re-configuration resumes it (mirrors the Sheets
+          // no-config path).
+          await db
+            .from("meta_lead_whatsapp_queue")
+            .update({ status: "pending", claimed_at: null, updated_at: nowIso })
+            .eq("id", row.id);
+          result.skippedNoConfig += 1;
+          continue;
+        }
+        items = table.items;
       }
-      if (table.config.paused) {
+      if (table?.config.paused) {
         // Paused: release the claim untouched. History, order, and
         // delay survive; unpausing resumes the same sequence. The
         // table-wide pause covers salesperson rows too.
