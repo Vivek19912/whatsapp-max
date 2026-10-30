@@ -165,6 +165,35 @@ export async function sendReminderToAgent(
 }
 
 /**
+ * Normalize free-form reminder text into a single Meta template
+ * body parameter. Meta rejects (#132018) parameters containing
+ * newline/tab characters or 4+ consecutive spaces, and
+ * Workspace-generated defaults are multiline — so newlines/tabs
+ * become spaces, runs of spaces collapse to one, and the result
+ * is trimmed. Wording, names, numbers, punctuation, and emojis
+ * are otherwise preserved byte-for-byte.
+ *
+ * Template path only: the free-text path sends the original text
+ * (with line breaks) untouched.
+ */
+export function normalizeTemplateTextParam(text: string): string {
+  return text
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+/** Meta #132018 guard: no newlines/tabs, no 4+ consecutive spaces. */
+function assertTemplateParamSendable(param: string, templateName: string, language: string): void {
+  if (/[\r\n\t]/.test(param) || / {4,}/.test(param)) {
+    throw new SendMessageError(
+      "template_invalid",
+      `The reminder text cannot be sent through template "${templateName}" (${language}): parameters must not contain line breaks, tabs, or long runs of spaces.`,
+      400,
+    );
+  }
+}
+/**
  * Template fallback for closed-window sends: delivers the reminder
  * through the account's configured APPROVED template with the
  * reminder text as `{{1}}`. Same recipient, same sender, same
@@ -266,6 +295,16 @@ export async function sendReminderViaTemplate(
     accountId,
   );
 
+  // Meta #132018: template body parameters reject newlines, tabs,
+  // and 4+ consecutive spaces. Normalize ONLY the outgoing template
+  // parameter — the stored row, the free-text path, and the Inbox
+  // preview are untouched.
+  const param = normalizeTemplateTextParam(text);
+  if (!param) {
+    throw new SendMessageError("bad_request", "Reminder text is required.", 400);
+  }
+  assertTemplateParamSendable(param, templateName, language);
+
   // Pre-flight the exact Meta components BEFORE touching the
   // network: a template needing more than the single body value
   // (media/text header variable, URL-button variable) can never be
@@ -273,7 +312,7 @@ export async function sendReminderViaTemplate(
   // failure classified as `template_invalid` with the precise
   // reason instead of a misleading Meta error after the fact.
   try {
-    buildSendComponents(row, { body: [text] });
+    buildSendComponents(row, { body: [param] });
   } catch (err) {
     throw new SendMessageError(
       "template_invalid",
@@ -290,7 +329,7 @@ export async function sendReminderViaTemplate(
       templateName,
       language,
       template: row,
-      messageParams: { body: [text] },
+      messageParams: { body: [param] },
     });
     return {
       whatsappMessageId: result.messageId,

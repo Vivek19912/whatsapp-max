@@ -144,10 +144,10 @@ describe("template bubble rendering (actual component)", () => {
       { header_type: "image", header_media_url: broken },
     );
     // Static render keeps the <img> (client swaps to fallback on error);
-    // the bubble, badge, body and timestamp must all survive.
+    // the bubble, body, timestamp must all survive — with no badge.
     expect(out).toContain(broken);
     expect(out).toContain("Body intact");
-    expect(out).toContain("Template");
+    expect(out).not.toContain(">Template<");
   });
 
   it("7. existing document/PDF template rendering still works", () => {
@@ -194,7 +194,7 @@ describe("template bubble rendering (actual component)", () => {
     ).toBe("image");
   });
 
-  it("9. badge and delivery status remain visible with a header image", () => {
+  it("9. no badge on image headers; delivery status remains visible", () => {
     const out = html(
       msg({
         content_text: "Body",
@@ -204,7 +204,9 @@ describe("template bubble rendering (actual component)", () => {
       }),
       { header_type: "image", header_media_url: IMG },
     );
-    expect(out).toContain("Template");
+    // Badge removed from image-header bubbles (alt text is not a badge).
+    expect(out).not.toContain(">Template<");
+    expect(out).not.toContain("bg-black/55");
     // Non-read outbound renders "Unseen" per locked Seen/Unseen semantics.
     expect(out).toContain("Unseen");
     // Timestamp renders.
@@ -342,5 +344,51 @@ describe("WhatsApp-style media template layout (rendered component)", () => {
     // Ordinary path keeps intrinsic sizing + cover + cap.
     expect(out).toMatch(/<img[^>]*w-auto/);
     expect(out).toMatch(/<img[^>]*object-cover/);
+  });
+});
+
+describe("template image top spacing (rendered component)", () => {
+  const out = renderToStaticMarkup(
+    <MessageBubble
+      message={msg({
+        content_text: "Top gap body",
+        template_name: "promo",
+      })}
+      template={{ header_type: "image", header_media_url: "https://cdn.test/poster.jpg" }}
+    />,
+  );
+
+  it("image sits ~4px from the bubble top with no in-flow gap row", () => {
+    // Image wrapper keeps only pt-1 above the image.
+    expect(out).toContain("px-2 pt-1");
+    // No in-flow badge margins ahead of the image branch.
+    expect(out).not.toContain("mt-1.5");
+  });
+
+  it("badge is gone but image position and size are unchanged", () => {
+    expect(out).not.toContain(">Template<");
+    expect(out).not.toContain("bg-black/55");
+    expect(out).toContain("px-2 pt-1");
+    expect(out).toMatch(/<img[^>]*w-full[^>]*object-contain/);
+    expect(out).toContain("Top gap body");
+  });
+
+  it("horizontal sizing and image-to-text spacing are unchanged", () => {
+    expect(out).toMatch(/<img[^>]*w-full[^>]*object-contain/);
+    expect(out).toContain("px-2.5 pb-0.5 pt-1.5");
+    expect(out).toContain("Top gap body");
+  });
+
+  it("video headers keep the existing in-flow badge layout", () => {
+    const video = renderToStaticMarkup(
+      <MessageBubble
+        message={msg({ content_text: "Watch", template_name: "vid" })}
+        template={{ header_type: "video", header_media_url: "https://cdn.test/clip.mp4" }}
+      />,
+    );
+    expect(video).toContain("mt-1.5");
+    expect(video).toContain(">Template<");
+    expect(video).toMatch(/<video[^>]*w-full/);
+    expect(video).not.toMatch(/<span[^>]*absolute[^>]*>([\s\S]*?)Template/);
   });
 });

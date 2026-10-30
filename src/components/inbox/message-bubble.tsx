@@ -661,22 +661,28 @@ function MessageContent({
       if (header?.kind === "image" || header?.kind === "video") {
         return (
           <div className="w-[270px] max-w-full sm:w-[320px]">
-            <span className="mx-2 mt-1.5 mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-              <LayoutTemplate className="h-3 w-3" />
-              Template
-            </span>
-            <div className="px-2 pt-1">
-              {header.kind === "image" ? (
+            {header.kind === "image" ? (
+              // No badge overlay: the image fills the top of the bubble
+              // on its own (~4px pt-1 inset, rounded corners intact).
+              <div className="px-2 pt-1">
                 <MediaImage url={header.url} alt="Template image" fill />
-              ) : (
-                <video
-                  src={header.url}
-                  controls
-                  preload="metadata"
-                  className="block h-auto w-full max-w-full rounded-lg bg-black/60 object-contain"
-                />
-              )}
-            </div>
+              </div>
+            ) : (
+              <>
+                <span className="mx-2 mt-1.5 mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                  <LayoutTemplate className="h-3 w-3" />
+                  Template
+                </span>
+                <div className="px-2 pt-1">
+                  <video
+                    src={header.url}
+                    controls
+                    preload="metadata"
+                    className="block h-auto w-full max-w-full rounded-lg bg-black/60 object-contain"
+                  />
+                </div>
+              </>
+            )}
             {message.content_text && (
               <div className="px-2.5 pb-0.5 pt-1.5">
                 <TemplateBodyText
