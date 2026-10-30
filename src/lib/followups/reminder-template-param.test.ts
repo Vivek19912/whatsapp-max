@@ -34,7 +34,10 @@ vi.mock("@/lib/whatsapp/meta-api", () => ({
     const body = (
       args.messageParams as { body?: string[] } | undefined
     )?.body?.[0] as string | undefined;
-    if (body !== undefined && (/[\r\n\t]/.test(body) || / {4,}/.test(body))) {
+    if (
+      body !== undefined &&
+      (/[\r\n\t\v\f\u2028\u2029]/.test(body) || / {4,}/.test(body))
+    ) {
       throw new Error(
         "(#132018) Param text cannot have new-line/tab characters or more than 4 consecutive spaces.",
       );
@@ -120,6 +123,36 @@ describe("normalizeTemplateTextParam", () => {
     expect(normalizeTemplateTextParam("   \n\t  ")).toBe("");
     expect(normalizeTemplateTextParam("  padded  ")).toBe("padded");
   });
+
+  it("standalone carriage returns become spaces", () => {
+    expect(normalizeTemplateTextParam("Line one\rLine two\r\rLine three")).toBe(
+      "Line one Line two Line three",
+    );
+  });
+
+  it("unicode line/paragraph separators become spaces", () => {
+    expect(normalizeTemplateTextParam("First\u2028Second\u2029Third")).toBe(
+      "First Second Third",
+    );
+  });
+
+  it("non-breaking spaces collapse to ordinary spaces", () => {
+    expect(normalizeTemplateTextParam("Hello\u00a0\u00a0world")).toBe("Hello world");
+  });
+
+  it("multiple paragraphs become one clean line", () => {
+    expect(
+      normalizeTemplateTextParam("Para one.\n\nPara two.\r\n\r\nPara three.\n\t- item"),
+    ).toBe("Para one. Para two. Para three. - item");
+  });
+
+  it("exact production failure example normalizes to the expected parameter", () => {
+    const original =
+      "Follow up with I am Animation creator\n\nPhone: 916296413616\n\nRemember to contact this lead at the scheduled time.";
+    expect(normalizeTemplateTextParam(original)).toBe(
+      "Follow up with I am Animation creator Phone: 916296413616 Remember to contact this lead at the scheduled time.",
+    );
+  });
 });
 
 describe("reminder send paths (#132018)", () => {
@@ -154,5 +187,57 @@ describe("reminder send paths (#132018)", () => {
       }),
     ).rejects.toMatchObject({ code: "bad_request" });
     expect(h.templateCalls).toHaveLength(0);
+  });
+
+  it("empty text is rejected on the template path", async () => {
+    await expect(
+      sendReminderViaTemplate(fakeDb() as never, "acct-1", { to: "919876543210", text: "" }),
+    ).rejects.toMatchObject({ code: "bad_request" });
+    expect(h.templateCalls).toHaveLength(0);
+  });
+
+  it("production example sends end-to-end with exact template structure", async () => {
+    const original =
+      "Follow up with I am Animation creator\n\nPhone: 916296413616\n\nRemember to contact this lead at the scheduled time.";
+    const res = await sendReminderViaTemplate(fakeDb() as never, "acct-1", {
+      to: "919130287749",
+      text: original,
+    });
+    expect(res).toMatchObject({
+      via: "template",
+      templateName: "reminder_fallback",
+      templateLanguage: "en_US",
+      phoneNumberId: "pn-1",
+      whatsappMessageId: "wamid-tpl-1",
+    });
+    expect(h.templateCalls).toHaveLength(1);
+    expect(h.templateCalls[0]).toMatchObject({
+      phoneNumberId: "pn-1",
+      accessToken: "decrypted(enc)",
+      to: "919130287749",
+      templateName: "reminder_fallback",
+      language: "en_US",
+      messageParams: {
+        body: [
+          "Follow up with I am Animation creator Phone: 916296413616 Remember to contact this lead at the scheduled time.",
+        ],
+      },
+    });
+  });
+
+  it("stored reminder message_text is never modified by sending", async () => {
+    const stored = {
+      message_text:
+        "Follow up with I am Animation creator\n\nPhone: 916296413616\n\nRemember to contact this lead at the scheduled time.",
+    };
+    const snapshot = stored.message_text;
+    await sendReminderViaTemplate(fakeDb() as never, "acct-1", {
+      to: "919876543210",
+      text: stored.message_text,
+    });
+    // The row object is untouched; only the in-memory template
+    // parameter was normalized.
+    expect(stored.message_text).toBe(snapshot);
+    expect(stored.message_text).toContain("\n");
   });
 });

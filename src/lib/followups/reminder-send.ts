@@ -168,24 +168,29 @@ export async function sendReminderToAgent(
  * Normalize free-form reminder text into a single Meta template
  * body parameter. Meta rejects (#132018) parameters containing
  * newline/tab characters or 4+ consecutive spaces, and
- * Workspace-generated defaults are multiline — so newlines/tabs
- * become spaces, runs of spaces collapse to one, and the result
- * is trimmed. Wording, names, numbers, punctuation, and emojis
- * are otherwise preserved byte-for-byte.
+ * Workspace-generated defaults are multiline — so every line or
+ * paragraph break (CR, LF, CRLF, vertical tab, form feed, tab,
+ * U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR) becomes an
+ * ordinary space, every run of spaces (including non-breaking and
+ * other Unicode spaces) collapses to exactly one ordinary space,
+ * and the result is trimmed. Wording, names, numbers, punctuation,
+ * and emojis are otherwise preserved byte-for-byte — nothing is
+ * truncated or dropped.
  *
  * Template path only: the free-text path sends the original text
- * (with line breaks) untouched.
+ * (with line breaks) untouched. The stored database message is
+ * never modified; normalization happens in memory right here.
  */
 export function normalizeTemplateTextParam(text: string): string {
   return text
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/ {2,}/g, " ")
+    .replace(/[\r\n\t\v\f\u2028\u2029]+/g, " ")
+    .replace(/[ \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]{2,}/g, " ")
     .trim();
 }
 
-/** Meta #132018 guard: no newlines/tabs, no 4+ consecutive spaces. */
+/** Meta #132018 guard: no line breaks/tabs of any kind, no 4+ consecutive spaces. */
 function assertTemplateParamSendable(param: string, templateName: string, language: string): void {
-  if (/[\r\n\t]/.test(param) || / {4,}/.test(param)) {
+  if (/[\r\n\t\v\f\u2028\u2029]/.test(param) || / {4,}/.test(param)) {
     throw new SendMessageError(
       "template_invalid",
       `The reminder text cannot be sent through template "${templateName}" (${language}): parameters must not contain line breaks, tabs, or long runs of spaces.`,
