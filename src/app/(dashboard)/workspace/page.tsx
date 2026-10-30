@@ -86,7 +86,6 @@ import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
-import { WorkspaceFollowupsView } from '@/components/workspace/workspace-followups-view';
 import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
 
 /**
@@ -346,10 +345,6 @@ export default function WorkspacePage() {
   const [flowsError, setFlowsError] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
   const [view, setView] = useState<FlowTableView>('completed');
-  // Workspace tab: the leads table vs the follow-ups management view.
-  // Follow-ups exist only on Meta Lead Ads tables; Flow Tables keep
-  // exactly their previous UI (no toggle rendered there).
-  const [workspaceTab, setWorkspaceTab] = useState<'leads' | 'followups'>('leads');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(0);
@@ -657,7 +652,6 @@ export default function WorkspacePage() {
     if (!id) return;
     setFlowId(id);
     setView('completed');
-    setWorkspaceTab('leads');
     setPage(0);
     setSelected(null);
     saveSelectedFlowId(accountId, id);
@@ -1511,39 +1505,7 @@ export default function WorkspacePage() {
           {/* Meta Lead Ads tables show one unified table (view=all),
               so the Completed/Incomplete tabs are hidden here.
               Flow Tables keep the tabs exactly as before. */}
-          {isMetaTable ? (
-            /* Meta Lead Ads tables: Leads table vs Follow-ups
-               management view. Flow Tables keep their
-               Completed/Incomplete tabs exactly as before. */
-            <div
-              className="flex items-center gap-1.5"
-              role="tablist"
-              aria-label="Workspace view"
-            >
-              {(
-                [
-                  { id: "leads", label: "Leads" },
-                  { id: "followups", label: "Follow-ups" },
-                ] as const
-              ).map((t) => (
-                <Button
-                  key={t.id}
-                  role="tab"
-                  aria-selected={workspaceTab === t.id}
-                  variant={workspaceTab === t.id ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setWorkspaceTab(t.id)}
-                  className={cn(
-                    "h-8 rounded-full px-3.5 text-sm font-medium",
-                    workspaceTab !== t.id &&
-                      "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
-                  )}
-                >
-                  {t.label}
-                </Button>
-              ))}
-            </div>
-          ) : (
+          {!isMetaTable && (
             <div
               className="flex items-center gap-1.5"
               role="tablist"
@@ -1598,15 +1560,6 @@ export default function WorkspacePage() {
             )
           )}
 
-          {workspaceTab === "followups" && isMetaTable && flowId ? (
-            <WorkspaceFollowupsView
-              key={flowId}
-              flowId={flowId}
-              followupFieldId={followupFieldId}
-              onTableRefresh={reloadTable}
-            />
-          ) : null}
-          {workspaceTab === "followups" && isMetaTable ? null : (
           <>
           <div className="flex flex-col gap-2">
             <div className="flex flex-row items-center gap-2">
@@ -2136,7 +2089,6 @@ export default function WorkspacePage() {
             </>
           )}
           </>
-          )}
         </>
       )}
 

@@ -35,8 +35,6 @@ function toFollowup(row: Record<string, unknown>): Followup {
     failed_at: (row.failed_at as string | null) ?? null,
     failure_reason: (row.failure_reason as string | null) ?? null,
     created_by: (row.created_by as string | null) ?? null,
-    followup_completed_at: (row.followup_completed_at as string | null) ?? null,
-    followup_completed_by: (row.followup_completed_by as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
