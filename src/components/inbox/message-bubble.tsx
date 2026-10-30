@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { cn } from "@/lib/utils";
-import type { Message, MessageReaction } from "@/types";
+import type { Message, MessageReaction, MessageTemplate } from "@/types";
 import {
   Download,
   FileText,
@@ -24,6 +24,13 @@ interface MessageBubbleProps {
   reactions?: MessageReaction[];
   currentUserId?: string;
   onToggleReaction?: (emoji: string) => void;
+  /**
+   * Approved-template header fallback for `content_type === 'template'`
+   * rows (see resolveTemplateHeaderMedia). The thread provides it from
+   * its client-side approved-templates fetch; absent/null means
+   * render from the row's own media_url only.
+   */
+  template?: TemplateHeaderInfo | null;
 }
 
 /**
@@ -122,14 +129,25 @@ function MediaImage({
   /** Stickers render smaller; same lazy fetch + lightbox. */
   compact?: boolean;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
+  // Proxy URLs need an authenticated fetch at runtime, so they can only
+  // resolve client-side. Direct CDN/public URLs are usable immediately —
+  // initializing them synchronously also makes server/static renders
+  // include the image instead of a permanent spinner.
+  const isProxyUrl = url.startsWith("/api/whatsapp/media/");
+  const [src, setSrc] = useState<string | null>(() =>
+    isProxyUrl ? null : url,
+  );
   const [error, setError] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => isProxyUrl);
   const [isExpanded, setIsExpanded] = useState(false);
   // Viewport-gated: proxy URLs are fetched (auth blob) only once the
   // bubble scrolls near the viewport — opening a conversation with 50
-  // images must not fire 50 media requests up front.
-  const [visible, setVisible] = useState(false);
+  // images must not fire 50 media requests up front. Outside a
+  // browser (SSR/static render, no IntersectionObserver) there is no
+  // viewport to gate on, so render immediately.
+  const [visible, setVisible] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
   const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -276,6 +294,57 @@ export function templateMediaKind(message: {
   return "document";
 }
 
+/**
+ * Minimal approved-template header info the Inbox already has
+ * client-side (TemplatePicker / thread-level fetch of
+ * `message_templates`). Only the header fields are needed to render
+ * a template's image/video/document header.
+ */
+export interface TemplateHeaderInfo {
+  header_type?: MessageTemplate["header_type"];
+  header_media_url?: MessageTemplate["header_media_url"];
+}
+
+/**
+ * Which header media (if any) a `content_type === 'template'` bubble
+ * should render.
+ *
+ * Priority: the row's own `media_url` first (inbound media templates
+ * and any future sends that persist it — resolved via
+ * `templateMediaKind`), then the approved template's
+ * `header_media_url` + `header_type` fallback. The fallback exists
+ * because outbound template sends (manual, broadcast, queue,
+ * reminders) persist `content_type/template_name/content_text` but no
+ * `media_url`, so without it an image-header template renders as
+ * text-only even though the template definition has an image.
+ *
+ * Pure so it is unit-testable without a DOM. Never invents a URL:
+ * returns null when neither source provides one.
+ */
+export function resolveTemplateHeaderMedia(
+  message: {
+    media_url?: string | null;
+    media_mime_type?: string | null;
+    media_file_name?: string | null;
+  },
+  template?: TemplateHeaderInfo | null,
+): { kind: "image" | "video" | "document"; url: string } | null {
+  const directKind = templateMediaKind(message);
+  const directUrl = message.media_url?.trim() || "";
+  if (directKind && directUrl) return { kind: directKind, url: directUrl };
+  const headerUrl = template?.header_media_url?.trim() || "";
+  const headerType = template?.header_type;
+  if (!headerUrl) return null;
+  if (
+    headerType === "image" ||
+    headerType === "video" ||
+    headerType === "document"
+  ) {
+    return { kind: headerType, url: headerUrl };
+  }
+  return null;
+}
+
 export function interactiveRenderKind(message: Message): {
   kind: "inbound-reply" | "outgoing-prompt" | "plain";
   buttons: Array<{ id: string; title: string }>;
@@ -301,9 +370,12 @@ export function interactiveRenderKind(message: Message): {
 function MessageContent({
   message,
   onPrimary,
+  template,
 }: {
   message: Message;
   onPrimary: boolean;
+  /** Approved-template header fallback (see resolveTemplateHeaderMedia). */
+  template?: TemplateHeaderInfo | null;
 }) {
   switch (message.content_type) {
     case "text":
@@ -472,37 +544,39 @@ function MessageContent({
     }
 
     case "template": {
-      const mediaKind = templateMediaKind(message);
+      // Header media prefers the row's own media_url (when persisted);
+      // otherwise falls back to the approved template's header image
+      // so image-header templates don't render as text-only.
+      const header = resolveTemplateHeaderMedia(message, template);
       const fileName =
         message.media_file_name?.trim() || "Attachment";
-      const downloadHref = (message.media_url || "").startsWith(
-        "/api/whatsapp/media/",
-      )
-        ? `${message.media_url}?download=1`
-        : message.media_url || "";
+      const downloadHref =
+        header && header.url.startsWith("/api/whatsapp/media/")
+          ? `${header.url}?download=1`
+          : (header?.url ?? "");
       return (
         <div className="min-w-0 max-w-full sm:max-w-[320px]">
           <span className="mb-1 inline-flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium text-primary">
             <LayoutTemplate className="h-3 w-3" />
             Template
           </span>
-          {mediaKind === "image" && message.media_url ? (
+          {header?.kind === "image" ? (
             <div className="mt-1">
-              <MediaImage url={message.media_url} alt="Template image" />
+              <MediaImage url={header.url} alt="Template image" />
             </div>
           ) : null}
-          {mediaKind === "video" && message.media_url ? (
+          {header?.kind === "video" ? (
             <video
-              src={message.media_url}
+              src={header.url}
               controls
               preload="metadata"
               className="mt-1 block h-auto w-auto max-w-full rounded-xl sm:max-w-[320px] max-h-[320px] bg-black/60"
             />
           ) : null}
-          {mediaKind === "document" && message.media_url ? (
+          {header?.kind === "document" ? (
             <div className="mt-1 flex items-center gap-1 rounded-xl bg-muted/50 px-2 py-1.5">
               <a
-                href={message.media_url}
+                href={header.url}
                 target="_blank"
                 rel="noopener noreferrer"
                 title={`Open ${fileName}`}
@@ -605,6 +679,7 @@ export function MessageBubble({
   reactions,
   currentUserId,
   onToggleReaction,
+  template,
 }: MessageBubbleProps) {
   const isAgent = message.sender_type === "agent" || message.sender_type === "bot";
   const time = format(new Date(message.created_at), "h:mm a");
@@ -658,7 +733,7 @@ export function MessageBubble({
             onPrimary={isAgent && !isSticker}
           />
         )}
-        <MessageContent message={message} onPrimary={isAgent && !isSticker} />
+        <MessageContent message={message} onPrimary={isAgent && !isSticker} template={template} />
         <div
           className={cn(
             "mt-1 flex items-center gap-1",

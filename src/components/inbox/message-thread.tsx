@@ -163,6 +163,37 @@ export function MessageThread({
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
+  // Approved-template header metadata for rendering template bubbles.
+  // Outbound template rows persist content_type/template_name/content_text
+  // but no media_url, so without this client-side lookup an image-header
+  // template would render as text-only. Same RLS-scoped read the
+  // TemplatePicker uses; header URLs only, never credentials.
+  const [templatesByName, setTemplatesByName] = useState<
+    Map<string, MessageTemplate>
+  >(() => new Map());
+  useEffect(() => {
+    let cancelled = false;
+    const supabase = createClient();
+    supabase
+      .from("message_templates")
+      .select("id,name,header_type,header_media_url")
+      .eq("status", "APPROVED")
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.error("Failed to fetch templates for thread:", error);
+          return;
+        }
+        const map = new Map<string, MessageTemplate>();
+        for (const t of ((data as MessageTemplate[]) ?? [])) {
+          if (t?.name) map.set(t.name, t);
+        }
+        setTemplatesByName(map);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Purely visual spin state for the manual-refresh button. The actual
   // refetch is fire-and-forget through `onRefresh` (which bumps the
   // parent's resyncToken); the 700ms spin is just feedback so the click
@@ -579,6 +610,18 @@ export function MessageThread({
       const renderedBody = renderTemplateBody(template.body_text, values.body);
       const tempId = `temp-${Date.now()}`;
 
+      // Carry the template's header media on the optimistic row so the
+      // bubble shows the image immediately (the persisted row arrives
+      // via realtime/refetch with content_type + template_name, and the
+      // thread's template lookup covers it from there).
+      const headerMimeType =
+        template.header_type === "image"
+          ? "image/jpeg"
+          : template.header_type === "video"
+            ? "video/mp4"
+            : template.header_type === "document"
+              ? "application/pdf"
+              : undefined;
       const optimisticMsg: Message = {
         id: tempId,
         conversation_id: conversation.id,
@@ -586,6 +629,12 @@ export function MessageThread({
         content_type: "template",
         content_text: renderedBody,
         template_name: template.name,
+        ...(template.header_media_url
+          ? {
+              media_url: template.header_media_url,
+              ...(headerMimeType ? { media_mime_type: headerMimeType } : {}),
+            }
+          : {}),
         status: "sending",
         created_at: new Date().toISOString(),
       };
@@ -1016,6 +1065,11 @@ export function MessageThread({
                           reactions={msgReactions}
                           currentUserId={user?.id}
                           onToggleReaction={handlePillToggle}
+                          template={
+                            msg.content_type === "template" && msg.template_name
+                              ? (templatesByName.get(msg.template_name) ?? null)
+                              : undefined
+                          }
                         />
                       </MessageActions>
                     );
