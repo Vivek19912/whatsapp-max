@@ -23,6 +23,61 @@ export const WORKSPACE_FOLLOWUP_SOURCE_KIND = "meta_workspace_followup";
 export const WORKSPACE_FOLLOWUP_FIELD_NAME = "next follow-up date & time";
 
 /**
+ * Viewer-local calendar-day window as UTC ISO instants. The
+ * scheduling UI collects dates in the agent's browser zone and
+ * stores absolute UTC instants; KPI buckets reuse that exact
+ * convention — never a hardcoded zone. DST-safe: the end is
+ * derived from the viewer's local midnight, not +24h arithmetic.
+ */
+export function localDayWindow(now: Date = new Date()): { start: string; end: string } {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(now);
+  end.setHours(23, 59, 59, 999);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
+/**
+ * Viewer-local day window N days after today (0 = today).
+ * Month/year boundaries fall out of the Date arithmetic.
+ */
+export function localDayWindowOffset(now: Date, days: number): { start: string; end: string } {
+  const shifted = new Date(now);
+  shifted.setDate(shifted.getDate() + days);
+  return localDayWindow(shifted);
+}
+
+export type FollowupKpiBucket = "overdue" | "today" | "tomorrow" | "upcoming";
+
+/**
+ * Server-side range for one KPI bucket, as half-open [from, to)
+ * UTC ISO bounds over the stored follow-up instant. Bounds come
+ * from viewer-local midnights (same convention as the counts
+ * endpoint), so KPI filtering and KPI counts always agree:
+ * - overdue:  [..., todayStart)
+ * - today:    [todayStart, tomorrowStart)
+ * - tomorrow: [tomorrowStart, dayAfterStart)
+ * - upcoming: [tomorrowStart, ...) — includes tomorrow.
+ * Empty/invalid instants never match a bounded range (same rule
+ * as the table RPC: the predicate requires a real value).
+ */
+export function kpiBucketRange(
+  bucket: FollowupKpiBucket,
+  bounds: { todayStart: string; tomorrowStart: string; dayAfterStart: string },
+): { from: string | null; to: string | null } {
+  switch (bucket) {
+    case "overdue":
+      return { from: null, to: bounds.todayStart };
+    case "today":
+      return { from: bounds.todayStart, to: bounds.tomorrowStart };
+    case "tomorrow":
+      return { from: bounds.tomorrowStart, to: bounds.dayAfterStart };
+    case "upcoming":
+      return { from: bounds.tomorrowStart, to: null };
+  }
+}
+
+/**
  * Whether a workspace field name is the canonical follow-up column.
  * Case/whitespace-insensitive; never matches non-text input.
  */
@@ -34,16 +89,15 @@ export function isWorkspaceFollowupFieldName(name: unknown): boolean {
 }
 
 /**
- * Default reminder message when the agent leaves the message blank.
- * Never emits literal "undefined"/"null"/template variables: a
- * missing name falls back to "this lead" and a missing phone omits
- * the Phone line entirely.
+ * Default reminder message for a NEW Workspace follow-up: just
+ * "<name>, <phone>". Never emits literal "undefined"/"null" and
+ * never emits a dangling comma: name-only yields the name,
+ * phone-only yields the phone, and neither yields "" (callers
+ * treat a blank default as "no default to offer").
  *
- * Exact shape (both present):
- *   Follow up with <name>
- *   Phone: <phone>
- *
- *   Remember to contact this lead at the scheduled time.
+ * Only new follow-ups flow through this default. Stored
+ * `whatsapp_followups.message_text` rows are never rewritten by
+ * changing this builder — there is no backfill.
  */
 export function buildWorkspaceFollowupMessage(args: {
   name?: string | null;
@@ -51,10 +105,54 @@ export function buildWorkspaceFollowupMessage(args: {
 }): string {
   const name = (args.name ?? "").trim();
   const phone = (args.phone ?? "").trim();
-  const lines = [`Follow up with ${name !== "" ? name : "this lead"}`];
-  if (phone !== "") lines.push(`Phone: ${phone}`);
-  lines.push("", "Remember to contact this lead at the scheduled time.");
-  return lines.join("\n");
+  if (name !== "" && phone !== "") return `${name}, ${phone}`;
+  return name !== "" ? name : phone;
+}
+
+/**
+ * Merge a linked reminder's saved message into an open dialog
+ * without clobbering the agent: returns the linked message only
+ * when the field still holds the untouched default. An explicitly
+ * typed value — including a deliberately cleared field — is
+ * preserved verbatim.
+ */
+export function mergeLinkedFollowupMessage(
+  current: string,
+  defaultMessage: string,
+  linkedMessage: string | null | undefined,
+): string {
+  if (typeof linkedMessage !== "string" || linkedMessage === "") return current;
+  return current === defaultMessage ? linkedMessage : current;
+}
+
+/**
+ * Resolve which (recipient, custom) pair to persist for a
+ * Workspace follow-up write.
+ *
+ * - No explicit value: creating → the profile snapshot
+ *   (non-custom); updating → the row's stored pair verbatim, so an
+ *   omitted field never rewrites history or flips auto-follow.
+ * - Explicit value identical to the stored one → keep the stored
+ *   custom flag untouched, so resaving an unchanged dialog never
+ *   flips auto-follow rows to custom and never un-marks explicit
+ *   overrides.
+ * - Explicit value differs from stored → store it, marked custom
+ *   only when it also differs from the current Settings number
+ *   (reverting to the Settings number restores auto-follow).
+ */
+export function resolveRecipientUpdate(
+  stored: { recipient_phone: string | null; recipient_custom: boolean } | null,
+  explicit: string | null,
+  profile: string | null,
+): { recipient_phone: string | null; recipient_custom: boolean } {
+  if (explicit === null) {
+    if (!stored) return { recipient_phone: profile, recipient_custom: false };
+    return { recipient_phone: stored.recipient_phone, recipient_custom: stored.recipient_custom };
+  }
+  if (stored && explicit === stored.recipient_phone) {
+    return { recipient_phone: explicit, recipient_custom: stored.recipient_custom };
+  }
+  return { recipient_phone: explicit, recipient_custom: explicit !== profile };
 }
 
 /**

@@ -150,8 +150,13 @@ describe("3. mode coverage per column", () => {
 describe("4. page wiring (server-side, conjunctive, page-safe)", () => {
   it("applied columns ride the table request and reset the page", () => {
     expect(pageSrc).toContain("appliedColumns");
-    expect(pageSrc).toContain("columnFiltersRequestKey(appliedColumns)");
-    expect(pageSrc).toContain("columns: appliedColumns,");
+    // The request serializes the KPI-composed columns (the KPI bucket
+    // range is AND-ed with the user's own nextFollowUp column filter
+    // via intersectFollowUpRanges; with no KPI active it is identical
+    // to the applied columns).
+    expect(pageSrc).toContain("columnFiltersRequestKey(effectiveColumns)");
+    expect(pageSrc).toContain("columns: effectiveColumns,");
+    expect(pageSrc).toContain("intersectFollowUpRanges");
     expect(pageSrc).toContain("setAppliedColumns(columns);");
     // applyFilters still resets to page 0 (no stale-page empties).
     const applyIdx = pageSrc.indexOf("const applyFilters");

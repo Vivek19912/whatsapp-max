@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Check, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,32 +15,35 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { FOLLOWUP_MESSAGE_MAX } from "@/lib/followups/types";
+import { FOLLOWUP_MESSAGE_MAX, normalizeAgentWhatsappNumber } from "@/lib/followups/types";
 import {
   buildWorkspaceFollowupMessage,
   combineFollowupDateTime,
+  mergeLinkedFollowupMessage,
   splitFollowupDateTime,
   validateFollowupDateTime,
 } from "@/lib/followups/workspace-link";
+import { createClient } from "@/lib/supabase/client";
+import { useAuth } from "@/hooks/use-auth";
 
 /**
  * Schedule Follow-up — the single modal for a lead's
  * "Next Follow-up Date & Time" cell on Meta Lead Ads Tables.
  *
  * Clicking the cell opens this modal directly (no inline picker,
- * no second dialog): the agent picks a date and a time, optionally
- * writes a reminder message, and Save Follow-up persists BOTH the
- * cell value and the linked WhatsApp reminder with the exact same
- * timestamp. The reminder goes to the agent's WhatsApp number —
- * never to the lead.
+ * no second dialog): the agent picks a date and a time, edits the
+ * prefilled "<name>, <phone>" reminder message if needed, and Save
+ * Follow-up persists BOTH the cell value and the linked WhatsApp
+ * reminder with the exact same timestamp. The reminder goes to the
+ * agent's WhatsApp number — never to the lead.
  *
  * Timezone handling is the whole point of this modal: the picked
  * wall-clock values are combined into an explicit viewer-local
  * instant client-side (see combineFollowupDateTime), so what the
  * agent picked is exactly what gets stored and delivered —
  * regardless of the server's timezone. Editing an existing
- * follow-up prefills its date, time, and linked message; clearing
- * removes the cell value and cancels the linked reminder.
+ * follow-up prefills its date, time, and exact saved message;
+ * clearing removes the cell value and cancels the linked reminder.
  */
 
 export interface ScheduleFollowupDialogProps {
@@ -72,57 +75,121 @@ export function ScheduleFollowupDialog({
 }: ScheduleFollowupDialogProps) {
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
-  const [message, setMessage] = useState("");
+  // Prefilled with the "<name>, <phone>" default for a new
+  // follow-up; an existing linked reminder's exact saved message
+  // overwrites it on load (see below). Always editable.
+  const defaultMessage = useMemo(
+    () => buildWorkspaceFollowupMessage({ name: leadName, phone: leadPhone }),
+    [leadName, leadPhone],
+  );
+  const [message, setMessage] = useState(defaultMessage);
+  // Per-reminder recipient ("Send reminder to"). Prefilled from the
+  // linked reminder's saved value, else the agent's current Settings
+  // default. The dirty ref keeps async prefills from clobbering
+  // typing — and from leaking one lead's/user's number into the
+  // next dialog session (reset on every open).
+  const [recipient, setRecipient] = useState("");
+  // Tracks whether the agent typed into the recipient field since
+  // the dialog opened, so async prefills never clobber typing — and
+  // never leak one lead's/user's number into the next session
+  // (reset on every open).
+  const recipientDirtyRef = useRef(false);
+  // True only when the visible value was defaulted from Settings
+  // (drives the helper copy below).
+  const [recipientFromSettings, setRecipientFromSettings] = useState(false);
+  const { user } = useAuth();
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // (Re)initialize when the modal opens for a (possibly different)
   // lead: prefill from the current cell value, then layer the
-  // linked reminder's message on top without clobbering typing.
+  // linked reminder's saved values on top without clobbering typing.
+  // Message: an untouched default is replaced by the saved message.
+  // Recipient: the linked row's saved destination wins; otherwise the
+  // agent's current Settings number. Anything the agent typed —
+  // including a deliberately cleared field — is preserved verbatim.
   useEffect(() => {
     if (!open) return;
     const parts = splitFollowupDateTime(initialValue);
     setDate(parts?.date ?? "");
     setTime(parts?.time ?? "");
-    setMessage("");
+    setMessage(defaultMessage);
+    setRecipient("");
+    recipientDirtyRef.current = false;
+    setRecipientFromSettings(false);
     setSaving(false);
     setClearing(false);
     setError(null);
     let cancelled = false;
-    void (async () => {
+    const supabase = createClient();
+    const fetchProfileNumber = (async (): Promise<string | null> => {
+      if (!user?.id) return null;
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("whatsapp_number")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (error || !data) return null;
+      return normalizeAgentWhatsappNumber(
+        (data as { whatsapp_number?: unknown }).whatsapp_number,
+      );
+    })();
+    const fetchLinked = (async (): Promise<{
+      message_text?: unknown;
+      recipient_phone?: unknown;
+    } | null> => {
       try {
         const res = await fetch(
           `/api/flows/${flowId}/followup-reminder?flow_run_id=${encodeURIComponent(runId)}`,
           { cache: "no-store" },
         );
-        if (cancelled || !res.ok) return;
+        if (!res.ok) return null;
         const json = (await res.json().catch(() => null)) as {
-          reminder?: { message_text?: unknown } | null;
+          reminder?: { message_text?: unknown; recipient_phone?: unknown } | null;
         } | null;
-        const linked = json?.reminder;
-        if (linked && typeof linked.message_text === "string" && linked.message_text !== "") {
-          // Only prefill if the agent hasn't started typing.
-          setMessage((current) => (current === "" ? linked.message_text as string : current));
-        }
+        return json?.reminder ?? null;
       } catch {
-        // Prefill is best-effort; a missing message just leaves the
-        // field blank (the default preview still shows).
+        return null;
       }
     })();
+    void Promise.all([fetchProfileNumber, fetchLinked]).then(([profileNumber, linked]) => {
+      if (cancelled) return;
+      const linkedMessage =
+        typeof linked?.message_text === "string" && linked.message_text !== ""
+          ? linked.message_text
+          : null;
+      if (linkedMessage !== null) {
+        // Only prefill if the agent hasn't started typing: a field
+        // that still holds the untouched default takes the saved
+        // message; anything typed (or cleared) is left alone.
+        setMessage((current) =>
+          mergeLinkedFollowupMessage(current, defaultMessage, linkedMessage),
+        );
+      }
+      if (recipientDirtyRef.current) return;
+      const savedRecipient =
+        typeof linked?.recipient_phone === "string" && linked.recipient_phone.trim() !== ""
+          ? linked.recipient_phone.trim()
+          : null;
+      if (savedRecipient) {
+        setRecipient(savedRecipient);
+      } else if (profileNumber) {
+        setRecipient(profileNumber);
+        setRecipientFromSettings(true);
+      } else {
+        setRecipient("");
+      }
+    });
     return () => {
       cancelled = true;
     };
-    // Re-run when a different lead's modal opens.
-  }, [open, runId, flowId, initialValue]);
+    // Re-run when a different lead's modal opens or the signed-in user changes.
+  }, [open, runId, flowId, initialValue, defaultMessage, user?.id]);
 
   const trimmedMessage = message.trim();
   const canSubmit =
     !saving && !clearing && trimmedMessage.length <= FOLLOWUP_MESSAGE_MAX;
-  const preview = buildWorkspaceFollowupMessage({
-    name: leadName,
-    phone: leadPhone,
-  });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -130,6 +197,14 @@ export function ScheduleFollowupDialog({
     const validationError = validateFollowupDateTime(date, time);
     if (validationError !== null) {
       setError(validationError);
+      return;
+    }
+    // Validate the per-reminder destination with the same rules as
+    // Settings → Reminder WhatsApp Number. Invalid input blocks the
+    // save inline so no other field values are lost.
+    const normalizedRecipient = normalizeAgentWhatsappNumber(recipient);
+    if (!normalizedRecipient) {
+      setError("Enter a valid WhatsApp number to receive this reminder.");
       return;
     }
     // Combine in the viewer's timezone into one unambiguous UTC
@@ -164,6 +239,7 @@ export function ScheduleFollowupDialog({
           flow_run_id: runId,
           scheduled_for: iso,
           message: trimmedMessage === "" ? null : message,
+          recipient_phone: normalizedRecipient,
           lead_name: leadName,
           lead_phone: leadPhone,
         }),
@@ -233,8 +309,9 @@ export function ScheduleFollowupDialog({
         <DialogHeader>
           <DialogTitle>Schedule Follow-up</DialogTitle>
           <DialogDescription>
-            Pick a date and time, optionally add a message, and save —
-            the reminder goes to your WhatsApp number, never to the lead.
+            Pick a date and time, choose the WhatsApp number that should
+            receive the reminder, edit the message if needed, and save —
+            the reminder never goes to the lead.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="grid gap-4">
@@ -252,6 +329,26 @@ export function ScheduleFollowupDialog({
               </dd>
             </div>
           </dl>
+
+          <div className="grid gap-2">
+            <Label htmlFor="fu-recipient">Send reminder to</Label>
+            <Input
+              id="fu-recipient"
+              type="tel"
+              value={recipient}
+              onChange={(e) => {
+                setRecipient(e.target.value);
+                recipientDirtyRef.current = true;
+                setRecipientFromSettings(false);
+              }}
+              maxLength={32}
+              placeholder="WhatsApp number"
+              autoComplete="tel"
+            />
+            <p className="text-xs text-muted-foreground">
+              {recipientFromSettings ? "Defaulted from Settings. You can change it for this reminder." : "Enter the WhatsApp number that should receive this reminder."}
+            </p>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="grid gap-2">
@@ -288,13 +385,8 @@ export function ScheduleFollowupDialog({
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               rows={4}
-              placeholder="Leave blank to use the default message below."
+              placeholder="Reminder message"
             />
-            {trimmedMessage === "" && (
-              <p className="rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm whitespace-pre-line">
-                {preview}
-              </p>
-            )}
           </div>
 
           {error !== null && (

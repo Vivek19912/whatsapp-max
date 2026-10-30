@@ -14,6 +14,7 @@ import {
   WorkspaceTableSelector,
 } from '@/components/workspace/workspace-header';
 import { WorkspaceActionsMenu } from '@/components/workspace/workspace-actions-menu';
+import { WorkspaceFollowupKpis } from '@/components/workspace/workspace-followup-kpis';
 import {
   Sheet,
   SheetContent,
@@ -44,6 +45,7 @@ import {
   columnFiltersRequestKey,
   emptyColumnFilters,
   hasActiveWorkspaceFilters,
+  intersectFollowUpRanges,
   serializeAssigneeSelection,
   type WorkspaceAssigneeSelection,
   type WorkspaceColumnFilters,
@@ -86,7 +88,7 @@ import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
-import { isWorkspaceFollowupFieldName } from '@/lib/followups/workspace-link';
+import { isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
 
 /**
  * Workspace-only typeface (DM Sans). Applied to the page root so
@@ -351,6 +353,25 @@ export default function WorkspacePage() {
   const [pageSize, setPageSize] = useState<WorkspacePageSize>(
     DEFAULT_WORKSPACE_PAGE_SIZE
   );
+  // KPI card filter for the Leads table: a single active bucket (or
+  // null for no KPI filtering). The bucket maps to a follow-up
+  // datetime range that is AND-ed with the existing search, assignee,
+  // date and column filters server-side.
+  const [kpiBucket, setKpiBucket] = useState<FollowupKpiBucket | null>(null);
+  // Noun phrases for the active-filter indicator ("Showing 8 overdue leads").
+  const KPI_BUCKET_NOUNS: Record<FollowupKpiBucket, string> = {
+    overdue: "overdue leads",
+    today: "leads due today",
+    tomorrow: "leads due tomorrow",
+    upcoming: "upcoming leads",
+  };
+  // KPI-specific empty states (spec wording) for the Leads table.
+  const KPI_EMPTY_TITLES: Record<FollowupKpiBucket, string> = {
+    overdue: "No overdue follow-ups.",
+    today: "No follow-ups scheduled for today.",
+    tomorrow: "No follow-ups scheduled for tomorrow.",
+    upcoming: "No upcoming follow-ups.",
+  };
   const [payload, setPayload] = useState<FlowTablePayload | null>(null);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [tableError, setTableError] = useState<string | null>(null);
@@ -652,10 +673,17 @@ export default function WorkspacePage() {
     if (!id) return;
     setFlowId(id);
     setView('completed');
+    setKpiBucket(null);
     setPage(0);
     setSelected(null);
     saveSelectedFlowId(accountId, id);
   }, [accountId]);
+
+  const selectKpiBucket = useCallback((bucket: FollowupKpiBucket | null) => {
+    setKpiBucket(bucket);
+    setPage(0);
+    setSelected(null);
+  }, []);
 
   const selectView = useCallback((v: Exclude<FlowTableView, 'all'>) => {
     setView(v);
@@ -778,8 +806,39 @@ export default function WorkspacePage() {
   const effectiveView: FlowTableView =
     payload?.meta?.kind === 'meta_lead_ads' ? 'all' : view;
   const appliedDateRange = appliedDate?.range ?? null;
+  // KPI bucket → server-side follow-up datetime range using the same
+  // viewer-local day boundaries as the KPI counts, so filtering and
+  // counts always agree. AND-ed with the existing search, assignee,
+  // date and column filters (the user's own nextFollowUp column
+  // filter wins any overlap via intersection).
+  const kpiDayBounds = useMemo(() => {
+    const now = new Date();
+    const today = localDayWindow(now);
+    const tomorrow = localDayWindowOffset(now, 1);
+    const dayAfter = localDayWindowOffset(now, 2);
+    return {
+      todayStart: today.start,
+      tomorrowStart: tomorrow.start,
+      dayAfterStart: dayAfter.start,
+    };
+  }, []);
+  const kpiRange = useMemo(
+    () => (kpiBucket === null ? null : kpiBucketRange(kpiBucket, kpiDayBounds)),
+    [kpiBucket, kpiDayBounds],
+  );
+  const effectiveColumns = useMemo(() => {
+    if (kpiRange === null) return appliedColumns;
+    const current = appliedColumns.nextFollowUp;
+    // Shared helper — also clamps an empty intersection to a valid
+    // half-open range that matches nothing (the API rejects from > to).
+    const { from, to } = intersectFollowUpRanges(current, kpiRange);
+    return {
+      ...appliedColumns,
+      nextFollowUp: { mode: "range" as const, from, to },
+    };
+  }, [appliedColumns, kpiRange]);
   const requestKey = flowId
-    ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(appliedColumns)}|${page}|${pageSize}`
+    ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(effectiveColumns)}|${page}|${pageSize}`
     : null;
   const loading = requestKey !== null && requestKey !== loadedKey;
   useEffect(() => {
@@ -792,7 +851,7 @@ export default function WorkspacePage() {
       pageSize,
       dateRange: appliedDateRange,
       assignee: appliedAssignee,
-      columns: appliedColumns,
+      columns: effectiveColumns,
     });
     fetch(`/api/flows/${flowId}/table?${qs}`, {
       signal: ctrl.signal,
@@ -827,7 +886,7 @@ export default function WorkspacePage() {
         setLoadedKey(requestKey);
       });
     return () => ctrl.abort();
-  }, [flowId, requestKey, effectiveView, debouncedSearch, appliedDateRange, appliedAssignee, appliedColumns, page, pageSize, refreshSeq]);
+  }, [flowId, requestKey, effectiveView, debouncedSearch, appliedDateRange, appliedAssignee, effectiveColumns, page, pageSize, refreshSeq]);
 
   const totalPages = useMemo(() => {
     const total = payload?.meta.total ?? 0;
@@ -1484,6 +1543,44 @@ export default function WorkspacePage() {
           ) : null
         }
       />
+      {/* Follow-up workload KPIs: account- and table-scoped counts of
+          the canonical "Next Follow-up Date & Time" values across ALL
+          leads (never the visible page). Meta tables with the column
+          only — Flow Tables keep their exact previous layout.
+          Clicking a card filters the Leads table below by that
+          bucket; clicking it again clears the filter. */}
+      {isMetaTable && followupFieldId && flowId ? (
+        <WorkspaceFollowupKpis
+          key={`${flowId}:${followupFieldId}`}
+          flowId={flowId}
+          followupFieldId={followupFieldId}
+          refreshSeq={refreshSeq}
+          activeBucket={kpiBucket}
+          onSelectBucket={selectKpiBucket}
+        />
+      ) : null}
+      {isMetaTable && followupFieldId ? (
+        kpiBucket === null ? (
+          <p className="text-xs text-muted-foreground">
+            Click any card to filter leads by follow-up schedule. Click the
+            selected card again to clear the filter.
+          </p>
+        ) : (
+          <div className="flex items-center gap-2 text-xs" aria-live="polite">
+            <span className="text-muted-foreground">
+              Showing {payload?.meta.total ?? 0} {kpiBucket === null ? "leads" : KPI_BUCKET_NOUNS[kpiBucket]}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => selectKpiBucket(null)}
+              className="h-6 px-2 text-xs"
+            >
+              Clear filter
+            </Button>
+          </div>
+        )
+      ) : null}
       {flows === null ? (
         <Skeleton className="h-10 w-72" />
       ) : flowsError ? (
@@ -1671,7 +1768,23 @@ export default function WorkspacePage() {
           ) : loading && !payload ? (
             <Skeleton className="h-64 w-full" />
           ) : !payload || payload.rows.length === 0 ? (
-            hasActiveWorkspaceFilters({
+            kpiBucket !== null ? (
+              <div className="flex flex-col items-center gap-2">
+                <EmptyState
+                  icon={Table2}
+                  title={KPI_EMPTY_TITLES[kpiBucket]}
+                  hint="Try a different follow-up bucket — or clear the filter to see everything."
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => selectKpiBucket(null)}
+                  className="h-7 px-2 text-xs"
+                >
+                  Clear filter
+                </Button>
+              </div>
+            ) : hasActiveWorkspaceFilters({
               dateRange: appliedDateRange,
               assignee: appliedAssignee,
               columns: appliedColumns,

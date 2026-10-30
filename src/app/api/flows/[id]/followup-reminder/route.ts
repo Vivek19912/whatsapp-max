@@ -10,6 +10,7 @@ import {
 import {
   buildWorkspaceFollowupMessage,
   isWorkspaceFollowupFieldName,
+  resolveRecipientUpdate,
   WORKSPACE_FOLLOWUP_SOURCE_KIND,
 } from "@/lib/followups/workspace-link";
 import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
@@ -31,12 +32,21 @@ import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
  * failed one being re-armed) is updated in place; sent/cancelled
  * history is never rewritten. A unique-violation race between two
  * concurrent inserts falls back to updating the winner's row.
+ *
+ * Per-reminder recipient: an optional `recipient_phone` body field
+ * overrides the destination for THIS reminder only (validated with
+ * the same rules as Settings; never the lead's number). The row is
+ * marked `recipient_custom` only when the override differs from the
+ * creator's current Settings number, so unchanged defaults keep
+ * following Settings changes while explicit choices stick.
  */
 
 interface LinkRow {
   id: string;
   status: string;
   created_by: string | null;
+  recipient_phone: string | null;
+  recipient_custom: boolean;
 }
 
 async function loadFlow(
@@ -133,14 +143,22 @@ async function findOpenLink(
 ): Promise<LinkRow | null> {
   const { data, error } = await supabase
     .from("whatsapp_followups")
-    .select("id, status, created_by")
+    .select("id, status, created_by, recipient_phone, recipient_custom")
     .eq("account_id", accountId)
     .eq("source_kind", WORKSPACE_FOLLOWUP_SOURCE_KIND)
     .eq("source_run_id", runId)
     .in("status", ["scheduled", "failed", "processing"])
     .maybeSingle();
   if (error) throw error;
-  return (data as LinkRow | null) ?? null;
+  const found = (data as Record<string, unknown> | null) ?? null;
+  if (!found) return null;
+  return {
+    id: found.id as string,
+    status: found.status as string,
+    created_by: (found.created_by as string | null) ?? null,
+    recipient_phone: (found.recipient_phone as string | null) ?? null,
+    recipient_custom: (found.recipient_custom as boolean | null) ?? false,
+  };
 }
 
 /**
@@ -184,7 +202,7 @@ export async function GET(
     }
     const { data, error } = await supabase
       .from("whatsapp_followups")
-      .select("id, scheduled_for, message_text, status")
+      .select("id, scheduled_for, message_text, status, recipient_phone")
       .eq("id", linked.id)
       .eq("account_id", accountId)
       .maybeSingle();
@@ -199,6 +217,7 @@ export async function GET(
         scheduled_for: row.scheduled_for,
         message_text: row.message_text,
         status: row.status,
+        recipient_phone: (row.recipient_phone as string | null) ?? null,
       },
     });
   } catch (err) {
@@ -300,11 +319,21 @@ export async function POST(
       return bad(err instanceof Error ? err.message : "Invalid input.");
     }
 
-    const recipient_phone = await loadAgentRecipientPhone(supabase, userId);
-    if (!recipient_phone) {
-      return bad(
-        "Add your WhatsApp number in Settings → Reminder WhatsApp Number before creating a reminder.",
-      );
+    const profile_phone = await loadAgentRecipientPhone(supabase, userId);
+
+    // Per-reminder destination override from the Schedule Follow-up
+    // dialog's "Send reminder to" field. A provided value is
+    // normalized with the same rules as Settings; an invalid one is
+    // a 400 (never silently replaced, never the lead's number).
+    // Absent/blank falls back to the legacy per-row behaviour.
+    const rawRecipient = body.recipient_phone;
+    let explicitRecipient: string | null = null;
+    if (typeof rawRecipient === "string" && rawRecipient.trim() !== "") {
+      const normalized = normalizeAgentWhatsappNumber(rawRecipient);
+      if (!normalized) {
+        return bad("Enter a valid WhatsApp number to receive this reminder.");
+      }
+      explicitRecipient = normalized;
     }
 
     const existing = await findOpenLink(supabase, accountId, runId);
@@ -321,6 +350,15 @@ export async function POST(
           403,
         );
       }
+      // Persist the resolved pair: an unchanged dialog keeps the
+      // row's stored flag (never flips auto-follow to custom);
+      // an actual change marks custom only when it also differs
+      // from the current Settings number.
+      const resolved = resolveRecipientUpdate(
+        { recipient_phone: existing.recipient_phone, recipient_custom: existing.recipient_custom },
+        explicitRecipient,
+        profile_phone,
+      );
       const { data, error } = await supabase
         .from("whatsapp_followups")
         .update({
@@ -329,10 +367,12 @@ export async function POST(
           status: "scheduled",
           failure_reason: null,
           failed_at: null,
+          recipient_phone: resolved.recipient_phone,
+          recipient_custom: resolved.recipient_custom,
         })
         .eq("id", existing.id)
         .eq("account_id", accountId)
-        .select("id, scheduled_for, message_text, status")
+        .select("id, scheduled_for, message_text, status, recipient_phone")
         .single();
       if (error) throw error;
       const row = data as Record<string, unknown>;
@@ -342,16 +382,25 @@ export async function POST(
           scheduled_for: row.scheduled_for,
           message_text: row.message_text,
           status: row.status,
+          recipient_phone: row.recipient_phone ?? null,
           created: false,
         },
       });
+    }
+
+    const created = resolveRecipientUpdate(null, explicitRecipient, profile_phone);
+    if (!created.recipient_phone) {
+      return bad(
+        "Add your WhatsApp number in Settings → Reminder WhatsApp Number before creating a reminder.",
+      );
     }
 
     const { data, error } = await supabase
       .from("whatsapp_followups")
       .insert({
         account_id: accountId,
-        recipient_phone,
+        recipient_phone: created.recipient_phone,
+        recipient_custom: created.recipient_custom,
         contact_id: null,
         conversation_id: null,
         scheduled_for: input.scheduled_for,
@@ -363,7 +412,7 @@ export async function POST(
         source_kind: WORKSPACE_FOLLOWUP_SOURCE_KIND,
         source_run_id: runId,
       })
-      .select("id, scheduled_for, message_text, status")
+      .select("id, scheduled_for, message_text, status, recipient_phone")
       .single();
     if (error) {
       // Lost a concurrent insert race: the winner's row is now the
@@ -378,6 +427,11 @@ export async function POST(
               403,
             );
           }
+          const raced = resolveRecipientUpdate(
+            { recipient_phone: winner.recipient_phone, recipient_custom: winner.recipient_custom },
+            explicitRecipient,
+            profile_phone,
+          );
           const { data: updated, error: updateErr } = await supabase
             .from("whatsapp_followups")
             .update({
@@ -386,10 +440,12 @@ export async function POST(
               status: "scheduled",
               failure_reason: null,
               failed_at: null,
+              recipient_phone: raced.recipient_phone,
+              recipient_custom: raced.recipient_custom,
             })
             .eq("id", winner.id)
             .eq("account_id", accountId)
-            .select("id, scheduled_for, message_text, status")
+            .select("id, scheduled_for, message_text, status, recipient_phone")
             .single();
           if (updateErr) throw updateErr;
           const row = updated as Record<string, unknown>;
@@ -399,6 +455,7 @@ export async function POST(
               scheduled_for: row.scheduled_for,
               message_text: row.message_text,
               status: row.status,
+              recipient_phone: row.recipient_phone ?? null,
               created: false,
             },
           });
@@ -414,6 +471,7 @@ export async function POST(
           scheduled_for: row.scheduled_for,
           message_text: row.message_text,
           status: row.status,
+          recipient_phone: row.recipient_phone ?? null,
           created: true,
         },
       },

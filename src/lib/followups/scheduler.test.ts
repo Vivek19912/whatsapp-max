@@ -214,6 +214,7 @@ beforeEach(() => {
   h.sendBehavior = "ok";
   h.tablesRead = [];
   h.writes = [];
+  h.profileNumber = "919876543210";
   // Open-window fixtures: the agent's number messaged the business
   // recently, so the default path stays free-text (existing tests).
   // created_at tracks real now; every drain NOW in these tests is an
@@ -303,6 +304,36 @@ describe("drainDueFollowups (self-reminders)", () => {
     expect(out).toMatchObject({ sent: 1 });
     expect(h.sends[0].to).toBe("919876543210");
     expect(h.followups[0].recipient_phone).toBe("919876543210");
+  });
+
+  it("never re-points an explicit per-reminder override", async () => {
+    // The creator changed their Settings number AFTER explicitly
+    // overriding this reminder's destination: the send must use the
+    // saved override and the row must keep it (no silent rewrite).
+    h.followups = [row({ recipient_phone: "919123456789", recipient_custom: true })];
+    h.profileNumber = "911111111111";
+    const db = fakeDb();
+    const out = await drainDueFollowups(db as never, NOW);
+    expect(out).toMatchObject({ sent: 1 });
+    expect(h.sends[0].to).toBe("919123456789");
+    expect(h.followups[0].recipient_phone).toBe("919123456789");
+    // No one else's Inbox thread is touched.
+    expectNoCustomerSideEffects("919123456789");
+  });
+
+  it("retries use the same saved recipient, not the live Settings number", async () => {
+    h.followups = [row({ recipient_phone: "919123456789", recipient_custom: true })];
+    h.profileNumber = "911111111111";
+    h.sendBehavior = "meta-fail";
+    const db = fakeDb();
+    expect(await drainDueFollowups(db as never, NOW)).toMatchObject({ failed: 1 });
+    // Manual retry re-queues the same row (mirrors POST /api/followups/[id]/retry).
+    Object.assign(h.followups[0], { status: "scheduled", attempts: 1, failure_reason: null, failed_at: null });
+    h.sendBehavior = "ok";
+    const retry = await drainDueFollowups(db as never, NOW);
+    expect(retry).toMatchObject({ sent: 1 });
+    expect(h.sends[h.sends.length - 1].to).toBe("919123456789");
+    expect(h.followups[0].recipient_phone).toBe("919123456789");
   });
 
   it("sends without a customer and without any template or window", async () => {

@@ -66,6 +66,13 @@ interface FollowupRow {
   status: string;
   attempts: number;
   created_by: string | null;
+  /**
+   * Explicit per-reminder destination override (migration 140).
+   * When true, the scheduler never re-points recipient_phone at the
+   * creator's current Settings number. Defaults to false so every
+   * historical row keeps the legacy refresh behavior.
+   */
+  recipient_custom: boolean;
 }
 
 function toFollowup(row: Record<string, unknown>): FollowupRow {
@@ -82,6 +89,7 @@ function toFollowup(row: Record<string, unknown>): FollowupRow {
     status: row.status as string,
     attempts: (row.attempts as number) ?? 0,
     created_by: (row.created_by as string | null) ?? null,
+    recipient_custom: (row.recipient_custom as boolean | null) ?? false,
   };
 }
 
@@ -113,11 +121,12 @@ function digitsOnly(phone: string | null | undefined): string {
  * (`profiles.whatsapp_number`) is valid and differs from the
  * stored snapshot, persist the current number on the row and
  * return it for this send. Returns null when the snapshot stays
- * authoritative (match, or no valid current number — the send
- * then proceeds with the snapshot exactly as before). Never
- * throws; never reads the Customer field. Only ever called for
- * rows under an atomic claim — sent/failed/cancelled history is
- * never rewritten.
+ * authoritative (match, no valid current number, or an explicit
+ * per-reminder override — `recipient_custom` rows are never
+ * re-pointed; the send then proceeds with the snapshot exactly as
+ * before). Never throws; never reads the Customer field. Only ever
+ * called for rows under an atomic claim — sent/failed/cancelled
+ * history is never rewritten.
  */
 async function refreshStaleRecipient(
   db: SupabaseClient,
@@ -126,6 +135,7 @@ async function refreshStaleRecipient(
 ): Promise<string | null> {
   try {
     if (!row.created_by || !current.recipient_phone) return null;
+    if (current.recipient_custom) return null;
     const { data, error } = await db
       .from('profiles')
       .select('whatsapp_number')

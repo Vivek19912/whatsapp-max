@@ -615,6 +615,30 @@ export function resolveFollowUpFilter(
 }
 
 /**
+ * Intersect two half-open [from, to) follow-up windows (null side =
+ * unbounded). Used to AND a KPI bucket window with the user's own
+ * Next Follow-up column filter without touching the saved
+ * selection. An empty intersection collapses to `from === to`
+ * (still a valid half-open range that matches nothing, which the
+ * API accepts — it only rejects `from > to`).
+ */
+export function intersectFollowUpRanges(
+  a: { from: string | null; to: string | null } | null,
+  b: { from: string | null; to: string | null },
+): { from: string | null; to: string | null } {
+  const froms = [a?.from ?? null, b.from].filter(
+    (v): v is string => typeof v === "string",
+  );
+  const tos = [a?.to ?? null, b.to].filter(
+    (v): v is string => typeof v === "string",
+  );
+  const from = froms.length > 0 ? froms.sort()[froms.length - 1] : null;
+  let to: string | null = tos.length > 0 ? tos.sort()[0] : null;
+  if (from !== null && to !== null && from > to) to = from;
+  return { from, to };
+}
+
+/**
  * Applied column filters. Categorical lists use OR within the
  * section (empty = inactive); every non-null section combines
  * with AND. Modes are preserved so the panel restores exactly

@@ -6,6 +6,7 @@ import {
   buildAssigneeFilterOptions,
   buildWorkspaceTableQuery,
   hasActiveWorkspaceFilters,
+  intersectFollowUpRanges,
   isWorkspaceDatePreset,
   parseAssigneeParam,
   resolveWorkspaceDateRange,
@@ -323,5 +324,53 @@ describe("15. No team member names/UUIDs are hardcoded", () => {
     // Panel renders whatever roster it is given — options are mapped,
     // never listed.
     expect(panel).toContain("members.map");
+  });
+});
+
+describe("16. KPI bucket × column-filter intersection (server-side AND)", () => {
+  // Viewer-local midnights serialized as UTC ISO instants — plain
+  // strings, so the max/min logic is pinned without timezone math.
+  const T0 = "2026-09-24T00:00:00.000Z";
+  const T1 = "2026-09-25T00:00:00.000Z";
+  const T2 = "2026-09-26T00:00:00.000Z";
+  const TODAY = { from: T0, to: T1 };
+
+  it("passes the KPI window through when the user has no next-follow-up filter", () => {
+    expect(intersectFollowUpRanges(null, TODAY)).toEqual(TODAY);
+  });
+
+  it("narrows to the overlap (max from, min to) when both bound the range", () => {
+    expect(
+      intersectFollowUpRanges({ from: "2026-09-24T12:00:00.000Z", to: null }, TODAY),
+    ).toEqual({ from: "2026-09-24T12:00:00.000Z", to: T1 });
+    expect(
+      intersectFollowUpRanges({ from: null, to: "2026-09-24T12:00:00.000Z" }, TODAY),
+    ).toEqual({ from: T0, to: "2026-09-24T12:00:00.000Z" });
+  });
+
+  it("clamps a disjoint intersection to from === to (matches nothing, API-accepted)", () => {
+    // User filtered "after tomorrow" while the Overdue KPI is active.
+    const empty = intersectFollowUpRanges({ from: T1, to: null }, { from: null, to: T0 });
+    if (empty.from === null || empty.to === null) throw new Error("expected a clamped range");
+    expect(empty.from).toBe(empty.to);
+    // Never emits the API-rejected from > to shape.
+    expect(empty.from <= empty.to).toBe(true);
+  });
+
+  it("keeps unbounded sides unbounded", () => {
+    expect(intersectFollowUpRanges({ from: null, to: null }, { from: T1, to: null })).toEqual({
+      from: T1,
+      to: null,
+    });
+    expect(intersectFollowUpRanges(null, { from: null, to: null })).toEqual({
+      from: null,
+      to: null,
+    });
+  });
+
+  it("pins the tomorrow/upcoming boundary used by the KPI ranges", () => {
+    expect(
+      intersectFollowUpRanges({ from: T1, to: null }, { from: T1, to: T2 }),
+    ).toEqual({ from: T1, to: T2 });
   });
 });

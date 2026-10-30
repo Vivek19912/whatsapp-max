@@ -256,9 +256,7 @@ describe("POST followup-reminder", () => {
       status: "scheduled",
       created: true,
     });
-    expect(json.reminder.message_text).toBe(
-      "Follow up with Rahul Sharma\nPhone: +919999999999\n\nRemember to contact this lead at the scheduled time.",
-    );
+    expect(json.reminder.message_text).toBe("Rahul Sharma, +919999999999");
     expect(h.reminders).toHaveLength(1);
     expect(h.reminders[0]).toMatchObject({
       account_id: "acct-1",
@@ -670,6 +668,7 @@ describe("GET followup-reminder (prefill for the single modal)", () => {
         scheduled_for: FUTURE,
         message_text: "Custom note",
         status: "scheduled",
+        recipient_phone: null,
       },
     });
   });
@@ -693,5 +692,216 @@ describe("GET followup-reminder (prefill for the single modal)", () => {
       { params: Promise.resolve({ id: "flow-1" }) },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe("per-reminder recipient override", () => {
+  it("saves an explicit recipient different from Settings and marks it custom", async () => {
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Call",
+        recipient_phone: "+91 91234 56789",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as { reminder: Record<string, unknown> };
+    expect(json.reminder.recipient_phone).toBe("919123456789");
+    expect(h.reminders).toHaveLength(1);
+    expect(h.reminders[0]).toMatchObject({
+      recipient_phone: "919123456789",
+      recipient_custom: true,
+    });
+    // The shared Settings value is untouched.
+    expect(h.agentProfile).toEqual({ whatsapp_number: "+91 98765 43210" });
+  });
+
+  it("leaves non-custom snapshots when the number matches Settings", async () => {
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Call",
+        recipient_phone: "919876543210",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
+    expect(h.reminders[0]).toMatchObject({
+      recipient_phone: "919876543210",
+      recipient_custom: false,
+    });
+  });
+
+  it("rejects an invalid recipient without writing anything", async () => {
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Call",
+        recipient_phone: "not-a-number",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(400);
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  it("accepts an explicit recipient when no Settings number exists", async () => {
+    h.agentProfile = null;
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Call",
+        recipient_phone: "+919123456789",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
+    expect(h.reminders[0]).toMatchObject({
+      recipient_phone: "919123456789",
+      recipient_custom: true,
+    });
+  });
+
+  it("still requires a Settings number when no override is given", async () => {
+    h.agentProfile = null;
+    const res = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "Call" }),
+      PARAMS,
+    );
+    expect(res.status).toBe(400);
+    expect(h.reminders).toHaveLength(0);
+  });
+
+  it("never substitutes the lead phone as the recipient", async () => {
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Call",
+        lead_name: "Rahul",
+        lead_phone: "+911234567890",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
+    expect(h.reminders[0]).toMatchObject({ recipient_phone: "919876543210" });
+  });
+
+  it("exposes the saved recipient on GET for dialog prefill", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Saved",
+      recipient_phone: "919111111111",
+      recipient_custom: true,
+    });
+    const res = await GET(
+      new Request("https://app.test/api/flows/flow-meta/followup-reminder?flow_run_id=run-1"),
+      { params: Promise.resolve({ id: "flow-meta" }) },
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { reminder: Record<string, unknown> };
+    expect(json.reminder).toMatchObject({ recipient_phone: "919111111111" });
+  });
+
+  it("rescheduling updates the recipient while preserving message history", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Original",
+      recipient_phone: "919876543210",
+      recipient_custom: false,
+    });
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Original",
+        recipient_phone: "+919123456789",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(200);
+    expect(h.reminders).toHaveLength(1);
+    expect(h.reminders[0]).toMatchObject({
+      id: "fu-1",
+      message_text: "Original",
+      recipient_phone: "919123456789",
+      recipient_custom: true,
+      status: "scheduled",
+    });
+  });
+
+  it("resaving with the same number keeps auto-follow instead of forcing custom", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Ping",
+      recipient_phone: "919876543210",
+      recipient_custom: false,
+    });
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Ping",
+        recipient_phone: "+91 98765 43210",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(200);
+    expect(h.reminders[0]).toMatchObject({
+      recipient_phone: "919876543210",
+      recipient_custom: false,
+    });
+  });
+
+  it("reverting to the Settings number clears the custom flag", async () => {
+    h.reminders.push({
+      id: "fu-1",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "user-1",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Ping",
+      recipient_phone: "919111111111",
+      recipient_custom: true,
+    });
+    const res = await POST(
+      post({
+        flow_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message: "Ping",
+        recipient_phone: "919876543210",
+      }),
+      PARAMS,
+    );
+    expect(res.status).toBe(200);
+    expect(h.reminders[0]).toMatchObject({
+      recipient_phone: "919876543210",
+      recipient_custom: false,
+    });
   });
 });
