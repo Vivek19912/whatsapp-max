@@ -61,9 +61,9 @@ describe("workspace redesign — shared tokens and shell", () => {
 });
 
 describe("workspace redesign — header and toolbar", () => {
-  it("renders a compact title row with a table-kind badge", () => {
+  it("renders a compact header without a large title, keeping the table-kind badge", () => {
     const header = src("src/components/workspace/workspace-header.tsx");
-    expect(header).toContain("text-xl font-semibold");
+    expect(header).not.toContain("text-xl font-semibold");
     expect(header).toContain("kindLabel");
     expect(header).toContain("Meta Lead Ads");
     expect(header).toContain("Flow");

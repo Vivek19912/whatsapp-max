@@ -72,6 +72,15 @@ export interface Followup {
   failed_at: string | null;
   failure_reason: string | null;
   created_by: string | null;
+  /**
+   * Manual sales-work completion (migration 140), independent of the
+   * WhatsApp delivery status above. NULL = pending. A `sent` reminder
+   * is NOT completed until someone sets these; completing a row with
+   * a still-scheduled reminder cancels that reminder via the normal
+   * guarded transition (delivery history preserved).
+   */
+  followup_completed_at: string | null;
+  followup_completed_by: string | null;
   created_at: string;
   updated_at: string;
   /** List-view enrichment only (never persisted on the row). */

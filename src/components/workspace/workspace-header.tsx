@@ -48,16 +48,13 @@ export function WorkspacePageHeader({
 }) {
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-        <h1 className="text-xl font-semibold tracking-tight text-foreground">
-          Workspace
-        </h1>
-        {kindLabel ? (
+      {kindLabel ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <Badge variant="secondary" className="shrink-0 text-xs font-medium">
             {kindLabel}
           </Badge>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {subtitle ? (
         <p className="-mt-2 text-[13px] text-muted-foreground">{subtitle}</p>
       ) : null}

@@ -198,7 +198,7 @@ describe("active filter chips render and clear", () => {
 });
 
 describe("workspace header renders title, badge, and selector", () => {
-  it("keeps the hierarchy compact with a kind badge", () => {
+  it("keeps the header compact: selector and badge, no large title", () => {
     const html = renderToStaticMarkup(
       <WorkspacePageHeader
         kindLabel="Meta Lead Ads"
@@ -215,7 +215,7 @@ describe("workspace header renders title, badge, and selector", () => {
         toolbar={null}
       />,
     );
-    expect(html).toContain("Workspace");
+    expect(html).not.toContain(">Workspace<");
     expect(html).toContain("Meta Lead Ads");
     expect(html).toContain("Form A");
     expect(html).toContain("Select flow");
