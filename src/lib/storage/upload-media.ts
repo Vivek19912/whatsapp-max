@@ -14,6 +14,119 @@ import { createClient } from "@/lib/supabase/client";
  * composer call this so the logic lives in exactly one place.
  */
 
+/**
+ * MIME types the platform accepts for WhatsApp image headers. Kept
+ * narrow on purpose: an incorrect image/* label breaks Meta media
+ * fetch, while an unknown type must never be guessed as an image.
+ */
+const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+const KNOWN_IMAGE_MIMES = new Set(Object.values(IMAGE_MIME_BY_EXTENSION));
+
+/**
+ * Detect an image MIME type from file magic bytes. Returns null when
+ * the signature is not a recognized PNG/JPEG/GIF/WebP image.
+ * Pure + unit-tested; used to cross-check uploads when bytes are
+ * available and to never mislabel unknown files.
+ */
+export function detectImageMimeFromBytes(
+  bytes: Uint8Array | ArrayBuffer,
+): string | null {
+  const b =
+    bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes as ArrayBuffer);
+  if (b.length < 3) return null;
+  // JPEG: FF D8 FF
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (b.length < 6) return null;
+  // GIF87a / GIF89a
+  if (
+    b[0] === 0x47 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x38 &&
+    (b[4] === 0x37 || b[4] === 0x39) &&
+    b[5] === 0x61
+  ) {
+    return "image/gif";
+  }
+  if (b.length < 8) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    b[0] === 0x89 &&
+    b[1] === 0x50 &&
+    b[2] === 0x4e &&
+    b[3] === 0x47 &&
+    b[4] === 0x0d &&
+    b[5] === 0x0a &&
+    b[6] === 0x1a &&
+    b[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (b.length < 12) return null;
+  // WebP: RIFF....WEBP
+  if (
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 &&
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/**
+ * Resolve the Content-Type to store for an upload.
+ *
+ * Rules (in order):
+ * 1. A browser-supplied type that is a known image MIME is preserved
+ *    when it agrees with the bytes (if bytes were supplied).
+ * 2. Any other non-empty browser type is preserved untouched (video,
+ *    audio, documents and all non-image behaviour unchanged).
+ * 3. When the browser type is empty/missing, infer PNG/JPG/JPEG/WebP/
+ *    GIF from the file extension.
+ * 4. Otherwise return null so callers omit `contentType` instead of
+ *    storing an empty value (empty previously became
+ *    `application/octet-stream`, which breaks Meta image fetch).
+ * 5. Prefer actual file signatures over filename extensions when the
+ *    two disagree: a mismatch resolves to null, never to a wrong
+ *    image label.
+ */
+export function resolveUploadContentType(
+  fileName: string,
+  browserType: string | null | undefined,
+  bytes?: Uint8Array | ArrayBuffer,
+): string | null {
+  const trimmed = (browserType ?? "").trim();
+  if (trimmed !== "" && !KNOWN_IMAGE_MIMES.has(trimmed)) return trimmed;
+  if (trimmed !== "") {
+    if (!bytes) return trimmed;
+    const sniffed = detectImageMimeFromBytes(bytes);
+    return sniffed === trimmed ? trimmed : null;
+  }
+  const match = /\.([^.]+)$/.exec(fileName ?? "");
+  const inferred =
+    (match ? IMAGE_MIME_BY_EXTENSION[match[1].toLowerCase()] : undefined) ??
+    null;
+  if (!inferred) return null;
+  if (!bytes) return inferred;
+  const sniffed = detectImageMimeFromBytes(bytes);
+  return sniffed === inferred ? inferred : null;
+}
+
 /** 16 MB — matches the `file_size_limit` on both buckets (migrations 016/020/023). */
 export const MEDIA_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -104,11 +217,18 @@ export async function uploadAccountMedia(
   }
 
   const path = buildMediaPath(profile.account_id as string, file.name);
-  const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
-    cacheControl: "3600",
-    upsert: false,
-    contentType: file.type,
-  });
+  // Never store an empty content type: empty previously became
+  // `application/octet-stream`, which breaks Meta image fetch for
+  // WhatsApp template headers. Extension-inferred for known image
+  // formats; omitted (Storage default) otherwise.
+  const contentType = resolveUploadContentType(file.name, file.type);
+  const { error: upErr } = await supabase.storage.from(bucket).upload(
+    path,
+    file,
+    contentType
+      ? { cacheControl: "3600", upsert: false, contentType }
+      : { cacheControl: "3600", upsert: false },
+  );
   if (upErr) throw new Error(upErr.message);
 
   const {

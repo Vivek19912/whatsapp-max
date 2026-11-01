@@ -6,6 +6,10 @@ import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { getOrCreateConversation } from '@/lib/conversations/get-or-create'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
+import {
+  buildDeliveryErrorRows,
+  persistDeliveryErrors,
+} from '@/lib/whatsapp/delivery-errors'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { isForwardMessageStatus } from '@/lib/whatsapp/message-status'
 import { reconcileReminderDelivery } from '@/lib/followups/delivery'
@@ -530,14 +534,23 @@ async function handleStatusUpdate(status: {
     .select('id, status')
     .eq('message_id', status.id)
 
+  // 1b) Persist Meta's errors[] (delivery diagnostics). Forward-only
+  //     status rules below are unchanged; this only appends diagnostic
+  //     rows. Account is resolved in step (3) via the same wamid
+  //     lookup; unattributable wamids are skipped (table requires an
+  //     account for tenant isolation).
+  const forwardIds: string[] =
+    !statusFetchErr && statusRows
+      ? (
+          (statusRows ?? []) as Array<{ id: string; status: string }>
+        )
+          .filter((row) => isForwardMessageStatus(row.status, status.status))
+          .map((row) => row.id)
+      : []
+
   if (statusFetchErr) {
     console.error('Error fetching messages for status update:', statusFetchErr)
   } else {
-    const forwardIds = (
-      (statusRows ?? []) as Array<{ id: string; status: string }>
-    )
-      .filter((row) => isForwardMessageStatus(row.status, status.status))
-      .map((row) => row.id)
     if (forwardIds.length > 0) {
       const { error: msgErr } = await supabaseAdmin()
         .from('messages')
@@ -631,6 +644,25 @@ async function handleStatusUpdate(status: {
           conversation_id: msgRow.conversation_id,
           status: status.status,
         }
+      )
+    }
+    // 1c) Persist Meta's errors[] for this status (delivery
+    //     diagnostics). Best-effort: never throws, never blocks the
+    //     mirrors above. Skipped when the wamid resolves to no
+    //     account or carries no errors.
+    if (accountId && status.errors && status.errors.length > 0) {
+      const matchedIds = !statusFetchErr && statusRows
+        ? ((statusRows ?? []) as Array<{ id: string }>).map((row) => row.id)
+        : []
+      await persistDeliveryErrors(
+        supabaseAdmin(),
+        buildDeliveryErrorRows({
+          accountId,
+          messageIds: matchedIds,
+          providerMessageId: status.id,
+          errors: status.errors,
+          providerTimestampIso: tsIso,
+        }),
       )
     }
   }

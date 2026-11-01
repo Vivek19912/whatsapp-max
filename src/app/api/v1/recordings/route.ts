@@ -50,7 +50,7 @@ import { requireApiKey } from '@/lib/auth/api-context';
 import { bearerToken, requireDeviceUser } from '@/lib/auth/device';
 import { looksLikeApiKey } from '@/lib/api-keys/keys';
 import { fail, ok, toApiErrorResponse } from '@/lib/api/v1/respond';
-import { buildMediaPath } from '@/lib/storage/upload-media';
+import { buildMediaPath, resolveUploadContentType } from '@/lib/storage/upload-media';
 import {
   RECORDING_BUCKET,
   toCallRecording,
@@ -218,13 +218,19 @@ export async function POST(request: Request) {
       accountId,
       file.name || 'recording.ogg'
     );
+    // Never store an empty content type (previously became
+    // `application/octet-stream`); non-empty types pass through
+    // unchanged, so valid audio uploads behave exactly as before.
+    const contentType = resolveUploadContentType(file.name, file.type);
     const { error: uploadError } = await db.storage
       .from(RECORDING_BUCKET)
-      .upload(storagePath, file, {
-        cacheControl: '3600',
-        upsert: false,
-        contentType: file.type,
-      });
+      .upload(
+        storagePath,
+        file,
+        contentType
+          ? { cacheControl: '3600', upsert: false, contentType }
+          : { cacheControl: '3600', upsert: false },
+      );
     if (uploadError) {
       console.error('[api/v1/recordings] storage upload failed:', uploadError.message);
       return fail('internal', 'Failed to store the recording', 500);
