@@ -64,6 +64,23 @@ describe("buildDeliveryErrorRows", () => {
     expect(row.details).toEqual({ href: "https://example.com/x" });
   });
 
+  it("persists nested error_data.details", () => {
+    const [row] = buildDeliveryErrorRows({
+      accountId: "a",
+      messageIds: ["m"],
+      providerMessageId: "w",
+      errors: [
+        {
+          code: 131053,
+          title: "Media upload error",
+          error_data: { details: "Image fetch failed" },
+        },
+      ],
+      providerTimestampIso: null,
+    });
+    expect(row.details).toEqual({ error_data_details: "Image fetch failed" });
+  });
+
   it("never includes tokens or payloads", () => {
     const [row] = buildDeliveryErrorRows({
       accountId: "a",

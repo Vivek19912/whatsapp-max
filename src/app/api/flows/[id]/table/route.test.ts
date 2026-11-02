@@ -904,7 +904,7 @@ describe("GET table � Meta Instant Form identity mapping", () => {
     },
   ];
 
-  it("shows Meta's name/phone when no contact exists; contact data still wins", async () => {
+  it("shows Meta's name/phone when no contact exists; the submission Full Name wins over the contact name", async () => {
     const previousFlow = h.flow;
     const previousRpc = h.rpc;
     const previousNodes = h.nodes;
@@ -976,9 +976,13 @@ describe("GET table � Meta Instant Form identity mapping", () => {
       expect(testLead?.answers.meta_lead_source).toBe("Other");
 
       const realLead = json.rows.find((r) => r.runId === "run-real-lead");
-      expect(realLead?.name).toBe("Rahul Sharma");
+      // The submission's own Full Name answer wins over the shared
+      // contact's WhatsApp profile name; the contact phone still wins
+      // for the Phone column (unchanged fallback).
+      expect(realLead?.name).toBe("Rahul Kumar");
       expect(realLead?.phone).toBe("+919999999999");
       expect(realLead?.answers.meta_lead_source).toBe("Facebook");
+      expect(realLead?.answers.full_name).toBe("Rahul Kumar");
     } finally {
       h.flow = previousFlow;
       h.rpc = previousRpc;
@@ -1002,6 +1006,289 @@ describe("GET table � Meta Instant Form identity mapping", () => {
       expect(json.rows[0].phone).toBeNull();
     } finally {
       h.rpc = previousRpc;
+    }
+  });
+});
+
+describe("GET table – Meta Full Name display-name projection", () => {
+  const fullNameNodes = [
+    {
+      node_key: "meta_source_node",
+      node_type: "collect_input",
+      config: {
+        var_key: "meta_lead_source",
+        prompt_text: "Source",
+        next_node_key: "meta_q_0_full_name",
+      },
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      node_key: "meta_q_0_full_name",
+      node_type: "collect_input",
+      config: {
+        var_key: "full_name",
+        prompt_text: "Full name",
+        next_node_key: "meta_q_1_phone_number",
+      },
+      created_at: "2026-01-01T00:00:01.000Z",
+    },
+    {
+      node_key: "meta_q_1_phone_number",
+      node_type: "collect_input",
+      config: {
+        var_key: "phone_number",
+        prompt_text: "Phone number",
+        next_node_key: "meta_q_2_city",
+      },
+      created_at: "2026-01-01T00:00:02.000Z",
+    },
+    {
+      node_key: "meta_q_2_city",
+      node_type: "collect_input",
+      config: { var_key: "city", prompt_text: "Which city?" },
+      created_at: "2026-01-01T00:00:03.000Z",
+    },
+  ];
+  const fullNameForm = {
+    id: "form-1",
+    questions: [
+      { key: "full_name", label: "Full name", type: "FULL_NAME" },
+      { key: "phone_number", label: "Phone number", type: "PHONE_NUMBER" },
+      { key: "city", label: "Which city?", type: "CUSTOM" },
+    ],
+  };
+
+  async function getMetaTable(
+    rows: Array<Record<string, unknown>>,
+    metaForm: Record<string, unknown> | null = fullNameForm as unknown as Record<string, unknown>,
+  ) {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    const previousMetaForm = h.metaForm;
+    try {
+      h.nodes = fullNameNodes;
+      h.flow = {
+        id: "flow-meta",
+        account_id: "acct-1",
+        name: "Meta Lead Ads · Full Name Projection",
+        kind: "meta_lead_ads",
+        completion_node_id: null,
+        entry_node_id: "meta_source_node",
+        meta_form_id: "form-1",
+      };
+      h.metaForm = metaForm;
+      h.rpc = { total: rows.length, rows };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as {
+        columns: Array<{ key: string; label: string; system: boolean }>;
+        rows: Array<{
+          runId: string;
+          name: string | null;
+          phone: string | null;
+          answers: Record<string, string | null>;
+          rawAnswers?: Record<string, string | null>;
+        }>;
+      };
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
+      h.metaForm = previousMetaForm;
+    }
+  }
+
+  const mahiRow = () => ({
+    run_id: "run-mahi",
+    contact_id: "c-mahi",
+    contact_name: "Mahi ❤️💕",
+    contact_phone: "916239419297",
+    conversation_id: null,
+    status: "completed",
+    started_at: "2026-10-19T20:10:33.000Z",
+    last_advanced_at: null,
+    ended_at: "2026-10-19T20:10:33.000Z",
+    reached_at: null,
+    is_completed: true,
+    vars: {
+      full_name: "Mahima Dixit Mukesh",
+      phone_number: "916239419297",
+      city: "Mumbai",
+      meta_lead_source: "Facebook",
+    },
+  });
+
+  it("shows the submission Full Name under system Name and no separate Full name column", async () => {
+    const json = await getMetaTable([mahiRow()]);
+    const row = json.rows[0];
+    expect(row.name).toBe("Mahima Dixit Mukesh");
+    expect(row.phone).toBe("916239419297");
+    // The stored answer is preserved in both projections.
+    expect(row.answers.full_name).toBe("Mahima Dixit Mukesh");
+    expect(row.rawAnswers?.full_name).toBe("Mahima Dixit Mukesh");
+    // Exactly one visible Name column: the system one.
+    const nameColumns = json.columns.filter((c) => c.label === "Name");
+    expect(nameColumns).toHaveLength(1);
+    expect(nameColumns[0]).toMatchObject({ key: "name", system: true });
+    // The Full name twin is excluded by stable key identity.
+    expect(
+      json.columns.filter((c) => !c.system && c.key === "full_name"),
+    ).toHaveLength(0);
+    // Every other column keeps its position and identity.
+    expect(json.columns.map((c) => c.key)).toEqual([
+      "submission_time",
+      "name",
+      "phone",
+      "phone_number",
+      "city",
+      "meta_lead_source",
+      "latest_recording",
+      "status",
+    ]);
+  });
+
+  it("resolves the Full Name per submission for rows sharing one contact", async () => {
+    const second = {
+      ...mahiRow(),
+      run_id: "run-mahi-2",
+      vars: {
+        full_name: "Yogesh Bigboss",
+        phone_number: "916239419297",
+        city: "Delhi",
+        meta_lead_source: "Facebook",
+      },
+    };
+    const json = await getMetaTable([mahiRow(), second]);
+    expect(
+      json.rows.find((r) => r.runId === "run-mahi")?.name,
+    ).toBe("Mahima Dixit Mukesh");
+    expect(
+      json.rows.find((r) => r.runId === "run-mahi-2")?.name,
+    ).toBe("Yogesh Bigboss");
+  });
+
+  it("falls back to the contact name when the submission has no Full Name", async () => {
+    const missing = {
+      ...mahiRow(),
+      run_id: "run-missing",
+      vars: {
+        phone_number: "916239419297",
+        city: "Mumbai",
+        meta_lead_source: "Facebook",
+      },
+    };
+    const empty = {
+      ...mahiRow(),
+      run_id: "run-empty",
+      vars: {
+        full_name: "   ",
+        phone_number: "916239419297",
+        city: "Mumbai",
+        meta_lead_source: "Facebook",
+      },
+    };
+    const json = await getMetaTable([missing, empty]);
+    expect(
+      json.rows.find((r) => r.runId === "run-missing")?.name,
+    ).toBe("Mahi ❤️💕");
+    expect(
+      json.rows.find((r) => r.runId === "run-empty")?.name,
+    ).toBe("Mahi ❤️💕");
+  });
+
+  it("suppresses the twin even when question metadata was never synced", async () => {
+    const json = await getMetaTable([mahiRow()], null);
+    expect(json.rows[0].name).toBe("Mahima Dixit Mukesh");
+    expect(
+      json.columns.filter((c) => !c.system && c.key === "full_name"),
+    ).toHaveLength(0);
+    expect(json.columns.some((c) => c.system && c.key === "name")).toBe(true);
+  });
+
+  it("leaves Flow Tables untouched: custom Full name column stays, system Name stays contact-based", async () => {
+    const previousFlow = h.flow;
+    const previousRpc = h.rpc;
+    const previousNodes = h.nodes;
+    try {
+      h.nodes = [
+        {
+          node_key: "start",
+          node_type: "start",
+          config: { next_node_key: "q_name" },
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          node_key: "q_name",
+          node_type: "collect_input",
+          config: {
+            var_key: "full_name",
+            prompt_text: "Full name",
+            next_node_key: "q_city",
+          },
+          created_at: "2026-01-01T00:00:01.000Z",
+        },
+        {
+          node_key: "q_city",
+          node_type: "collect_input",
+          config: { var_key: "city", prompt_text: "Which city?" },
+          created_at: "2026-01-01T00:00:02.000Z",
+        },
+      ];
+      // No `kind`: a regular Flow Table, not a Meta table.
+      h.flow = {
+        id: "flow-1",
+        account_id: "acct-1",
+        name: "Regular Flow",
+        completion_node_id: null,
+        entry_node_id: "start",
+      };
+      h.rpc = {
+        total: 1,
+        rows: [
+          {
+            run_id: "run-flow",
+            contact_id: "c-1",
+            contact_name: "Mahi ❤️💕",
+            contact_phone: "916239419297",
+            conversation_id: null,
+            status: "completed",
+            started_at: "2026-09-18T10:00:00.000Z",
+            last_advanced_at: null,
+            ended_at: null,
+            reached_at: null,
+            is_completed: true,
+            vars: { full_name: "Mahima Dixit Mukesh", city: "Mumbai" },
+          },
+        ],
+      };
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-1/table"),
+        { params: Promise.resolve({ id: "flow-1" }) },
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        columns: Array<{ key: string; label: string; system: boolean }>;
+        rows: Array<{
+          name: string | null;
+          answers: Record<string, string | null>;
+        }>;
+      };
+      // Custom Full name column retained with its own answer …
+      const twin = json.columns.find(
+        (c) => !c.system && c.key === "full_name",
+      );
+      expect(twin?.label).toBe("Full name");
+      expect(json.rows[0].answers.full_name).toBe("Mahima Dixit Mukesh");
+      // … and the system Name column still shows the contact value.
+      expect(json.rows[0].name).toBe("Mahi ❤️💕");
+    } finally {
+      h.flow = previousFlow;
+      h.rpc = previousRpc;
+      h.nodes = previousNodes;
     }
   });
 });

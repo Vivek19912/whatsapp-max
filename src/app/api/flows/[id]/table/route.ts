@@ -28,6 +28,11 @@ import { latestByContact } from '@/lib/recordings/recordings'
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders'
 import { standardContactFromAnswers } from '@/lib/meta-lead-ads/normalize'
 import {
+  excludeMetaFullNameColumns,
+  metaFullNameAnswerKeys,
+  metaWorkspaceDisplayName,
+} from '@/lib/meta-lead-ads/workspace-name'
+import {
   applyOptionLabelsToAnswers,
   buildOptionLabelMap,
   choiceQuestionKeys,
@@ -360,11 +365,20 @@ export async function GET(
   const rpcRows = ((payload as { rows?: unknown }).rows ?? []) as FlowTableRpcRow[]
   const total = Number((payload as { total?: unknown }).total ?? 0) || 0
   // Meta Instant Form leads without a contact row (no usable phone)
-  // still carry the name/phone Meta supplied. Surface those in the
-  // system Name/Phone columns as a read-only fallback — contact data
-  // wins whenever it exists, and nothing is invented for absent
-  // fields. Other flow kinds are untouched.
+  // still carry the name/phone Meta supplied. The phone fallback
+  // below surfaces those in the system Phone column as a read-only
+  // fallback — contact data wins whenever it exists, and nothing
+  // is invented for absent fields. The system NAME column follows
+  // a different, Meta-only rule (see the per-row projection
+  // below): the current submission's own Full Name answer wins over
+  // the shared contact's WhatsApp profile name. Other flow kinds
+  // are untouched.
   const isMetaLeadFlow = flowKind === 'meta_lead_ads'
+  // Full Name twin keys for this form (Meta-only). Defaults to the
+  // canonical `full_name` key so forms whose question metadata was
+  // never synced still suppress the twin; refined from the stored
+  // FULL_NAME question metadata when available.
+  let metaFullNameKeys = metaFullNameAnswerKeys(null, [])
 
   // Meta-only column order: the Source answer column moves to the
   // end of the dynamic Instant Form question columns (just before
@@ -429,8 +443,22 @@ export async function GET(
       const keys = questionVarKeys(stored)
       metaOptionLabels = buildOptionLabelMap(stored, keys)
       metaChoiceKeys = choiceQuestionKeys(stored, keys)
+      // Meta-only: resolve which answer keys are the Full Name
+      // twin (stored FULL_NAME question type, aligned by index).
+      metaFullNameKeys = metaFullNameAnswerKeys(stored, keys)
     }
   }
+
+  // Meta-only Full Name twin suppression: the `flow:full_name`
+  // question column is excluded from the table column list so the
+  // Full Name answer renders ONLY under the system Name header.
+  // Presentation-only — `answerKeys`, stored answers, visibility
+  // ids for every other column, and all downstream data readers
+  // (Sheets, variables, notifications, Travel CRM) are untouched.
+  // Flow Tables keep every column exactly as derived.
+  const responseColumns = isMetaLeadFlow
+    ? excludeMetaFullNameColumns(columns, metaFullNameKeys)
+    : columns
 
   const rows = rpcRows.map((r) => {
     const identityFallback = isMetaLeadFlow
@@ -445,6 +473,20 @@ export async function GET(
       answerKeys,
       identityFallback,
     )
+    // Meta-only display-name projection: the system Name cell shows
+    // the CURRENT submission's own Full Name answer first
+    // (flow_runs.vars["full_name"]), then the normalized
+    // standard-name fallback for that submission, and only then the
+    // shared contact's name. Each lead row therefore displays its
+    // own Instant Form answer even when the contact's WhatsApp
+    // profile name (shared across that contact's rows) differs.
+    // The stored contact, vars, and answers are never modified.
+    if (isMetaLeadFlow) {
+      row.name = metaWorkspaceDisplayName(
+        (r.vars ?? {}) as Record<string, unknown>,
+        row.name,
+      )
+    }
     // Meta-only, dynamic answers only: system Name/Phone columns
     // keep their contact/fallback values untouched. `rawAnswers`
     // preserves the exact ingested values (needed for Restore
@@ -657,7 +699,7 @@ export async function GET(
         assignee: serializeAssigneeSelection(assignee),
       },
     },
-    columns,
+    columns: responseColumns,
     rows,
     customFields: (customFields ?? []).map((f) => {
       const row = f as Record<string, unknown>;

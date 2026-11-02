@@ -518,6 +518,7 @@ async function handleStatusUpdate(status: {
     title?: string
     message?: string
     href?: string
+    error_data?: { details?: string }
   }>
 }) {
   // 1) Mirror onto messages (legacy behavior) — Meta's status values

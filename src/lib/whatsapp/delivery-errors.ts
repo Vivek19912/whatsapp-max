@@ -13,6 +13,7 @@ export interface StatusErrorEntry {
   title?: string;
   message?: string;
   href?: string;
+  error_data?: { details?: string };
 }
 
 export interface DeliveryErrorRow {
@@ -56,6 +57,19 @@ export function buildDeliveryErrorRows(args: {
   const rows: DeliveryErrorRow[] = [];
   for (const target of targets) {
     for (const entry of errors) {
+      const details: Record<string, unknown> = {};
+      if (typeof entry.href === "string" && entry.href !== "") {
+        details.href = entry.href;
+      }
+      // Meta's nested human-readable detail (e.g. why media fetch
+      // failed). Scalar string only; never tokens or payloads.
+      const nested =
+        typeof entry.error_data === "object" &&
+        entry.error_data !== null &&
+        typeof entry.error_data.details === "string"
+          ? entry.error_data.details
+          : null;
+      if (nested) details.error_data_details = nested;
       rows.push({
         account_id: accountId,
         message_id: target,
@@ -63,10 +77,7 @@ export function buildDeliveryErrorRows(args: {
         code: typeof entry.code === "number" ? entry.code : null,
         title: typeof entry.title === "string" ? entry.title : null,
         message: typeof entry.message === "string" ? entry.message : null,
-        details:
-          typeof entry.href === "string" && entry.href !== ""
-            ? { href: entry.href }
-            : {},
+        details,
         provider_timestamp: args.providerTimestampIso,
       });
     }
