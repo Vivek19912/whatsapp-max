@@ -85,7 +85,7 @@ export function handleExpiredSession(deps?: HandleExpiredSessionDeps): boolean {
   const onAuthPage = typeof pathname === "string" && isAuthPagePath(pathname);
 
   const doSignOut =
-    deps?.signOut ?? (() => createClient().auth.signOut());
+    deps?.signOut ?? (() => createClient().auth.signOut({ scope: "local" }));
   const doRedirect =
     deps?.redirect ??
     (hasWindow

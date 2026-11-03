@@ -569,7 +569,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = createClient();
     // Remove all active realtime channels before signing out
     supabase.removeAllChannels();
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" });
     setUser(null);
     setProfile(null);
     setAccount(null);

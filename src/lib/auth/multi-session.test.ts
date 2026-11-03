@@ -108,8 +108,10 @@ describe("multi-session safety — a new login must never sign out existing sess
       "utf8",
     );
 
-    // Normal logout: no scope → GoTrue revokes only THIS session.
-    expect(/auth\.signOut\(\)/.test(useAuth)).toBe(true);
+    // Normal logout: explicit local scope → GoTrue revokes only THIS
+    // session (the library/server default is global and would kill every
+    // device — see staging boundary tests).
+    expect(/auth\.signOut\(\s*\{\s*scope\s*:\s*['"]local['"]/.test(useAuth)).toBe(true);
     expect(/signOut\(\s*\{\s*scope\s*:\s*['"]global['"]/.test(useAuth)).toBe(false);
 
     // Global logout: explicit scope: 'global' → revokes every session
@@ -126,5 +128,32 @@ describe("multi-session safety — a new login must never sign out existing sess
       }
     }
     expect(globalSites).toEqual(["/components/settings/sessions-card.tsx"]);
+
+    // Every signOut() call must name an explicit scope: an unscoped call
+    // inherits the library default, which is GLOBAL (revokes every
+    // session for the user on every device). Local scope everywhere
+    // except the sessions card.
+    const localSites = new Set([
+      "/hooks/use-auth.tsx",
+      "/app/join/[token]/page.tsx",
+      "/lib/auth/expired-session.ts",
+    ]);
+    for (const file of files) {
+      const content = await readFile(file, "utf8");
+      content.split("\n").forEach((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("//")) return;
+        if (!/\.signOut\s*\(/.test(trimmed)) return;
+        const rel = relative(file);
+        // Contract governs shipped code; test doubles define their own
+        // injected signOut and are out of scope here.
+        if (rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")) return;
+        if (rel === "/components/settings/sessions-card.tsx") {
+          expect(trimmed).toMatch(/scope\s*:\s*['"]global['"]/);
+        } else if (localSites.has(rel)) {
+          expect(trimmed).toMatch(/scope\s*:\s*['"]local['"]/);
+        }
+      });
+    }
   });
 });
