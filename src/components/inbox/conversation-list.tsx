@@ -19,6 +19,10 @@ import {
   pinnedAtMapFromRecords,
   removePin,
 } from "@/lib/inbox/pins";
+import {
+  filterHidden,
+  getHiddenConversationIds,
+} from "@/lib/inbox/hidden";
 import { cn } from "@/lib/utils";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
@@ -176,10 +180,16 @@ export function ConversationList({
         customFrom,
         customTo,
       });
+      // Tenant-scoped hidden threads (Inbox display rule only).
+      const hiddenIds = await getHiddenConversationIds(supabase);
+      if (cancelled) return;
       let query = supabase
         .from("conversations")
         .select(CONVERSATION_SELECT)
         .order("last_message_at", { ascending: false });
+      if (hiddenIds.size > 0) {
+        query = query.not("id", "in", `(${[...hiddenIds].join(",")})`);
+      }
 
       if (dateRange) {
         query = query
@@ -203,7 +213,9 @@ export function ConversationList({
         return;
       }
 
-      onConversationsLoadedRef.current(normalizeConversations(data ?? []));
+      onConversationsLoadedRef.current(
+        filterHidden(normalizeConversations(data ?? []), hiddenIds),
+      );
       setLoading(false);
     })();
 

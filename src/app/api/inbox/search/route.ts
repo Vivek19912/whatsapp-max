@@ -21,6 +21,10 @@ import {
   normalizeConversations,
 } from "@/lib/inbox/conversations";
 import {
+  filterHiddenIds,
+  getHiddenConversationIds,
+} from "@/lib/inbox/hidden";
+import {
   SEARCH_PAGE_SIZE,
   encodeSearchCursor,
   parseSearchRequestParams,
@@ -100,7 +104,11 @@ export async function GET(request: Request) {
   // again here (defense in depth alongside the RPC's own scoping).
   // Cap to a page: the RPC never returns more than limit+1 ids, and
   // `.in()` preserves no order, so re-sort by the RPC's ordering.
-  const pageIds = ids.slice(0, params.limit || SEARCH_PAGE_SIZE);
+  // Tenant-scoped hidden threads are removed before hydration so they
+  // never appear in results (Inbox display rule only).
+  const hiddenIds = await getHiddenConversationIds(ctx.supabase);
+  const visibleIds = filterHiddenIds(ids, hiddenIds);
+  const pageIds = visibleIds.slice(0, params.limit || SEARCH_PAGE_SIZE);
   const { data: rows, error: hydrateError } = await ctx.supabase
     .from("conversations")
     .select(CONVERSATION_SELECT)
