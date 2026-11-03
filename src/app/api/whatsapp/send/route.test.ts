@@ -14,6 +14,7 @@ const messageInserts: Array<Record<string, unknown>> = []
 // Toggles for the per-test scenario.
 let existingConversation: Record<string, unknown> | null = null
 let contactRow: Record<string, unknown> | null = null
+let profileRole: string | null = 'owner'
 // A conversation created during the request becomes retrievable by id —
 // the shared send core re-loads the conversation (with its contact) from
 // just the id, so the mock must model insert-then-select-by-id.
@@ -35,7 +36,7 @@ function makeSupabaseMock() {
     const selectResult = () => {
       switch (table) {
         case 'profiles':
-          return { data: { account_id: 'acct-1' }, error: null }
+          return { data: { account_id: 'acct-1', account_role: profileRole }, error: null }
         case 'contacts':
           return { data: contactRow, error: null }
         case 'conversations':
@@ -184,6 +185,7 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
     existingConversation = null
     createdConversation = null
     contactRow = CONTACT
+    profileRole = 'owner'
     supabaseMock = makeSupabaseMock()
     sendTemplateMessage.mockClear()
   })
@@ -262,5 +264,100 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
       }),
     )
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /api/whatsapp/send — assignment gate (conversation_id path)', () => {
+  beforeEach(() => {
+    conversationInserts.length = 0
+    messageInserts.length = 0
+    createdConversation = null
+    contactRow = CONTACT
+    profileRole = 'agent'
+    supabaseMock = makeSupabaseMock()
+    sendTemplateMessage.mockClear()
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function postConversation() {
+    return POST(
+      new Request('http://localhost/api/whatsapp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversation_id: 'conv-1',
+          message_type: 'template',
+          template_name: 'order_update',
+          template_language: 'en_US',
+          template_message_params: { body: ['Acme'] },
+          template_params: ['Acme'],
+        }),
+      }),
+    )
+  }
+
+  it('agent can send into their own assigned thread', async () => {
+    existingConversation = {
+      id: 'conv-1',
+      account_id: 'acct-1',
+      contact_id: 'contact-1',
+      assigned_agent_id: 'user-1',
+      contact: CONTACT,
+    }
+    const res = await postConversation()
+    expect(res.status).toBe(200)
+    expect(sendTemplateMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('agent gets 404 for another salesperson\u2019s thread (no oracle)', async () => {
+    existingConversation = {
+      id: 'conv-1',
+      account_id: 'acct-1',
+      contact_id: 'contact-1',
+      assigned_agent_id: 'user-9',
+      contact: CONTACT,
+    }
+    const res = await postConversation()
+    expect(res.status).toBe(404)
+    expect(sendTemplateMessage).not.toHaveBeenCalled()
+  })
+
+  it('agent gets 404 for an unassigned thread', async () => {
+    existingConversation = {
+      id: 'conv-1',
+      account_id: 'acct-1',
+      contact_id: 'contact-1',
+      assigned_agent_id: null,
+      contact: CONTACT,
+    }
+    const res = await postConversation()
+    expect(res.status).toBe(404)
+    expect(sendTemplateMessage).not.toHaveBeenCalled()
+  })
+
+  it('owner can send into any thread', async () => {
+    profileRole = 'owner'
+    supabaseMock = makeSupabaseMock()
+    existingConversation = {
+      id: 'conv-1',
+      account_id: 'acct-1',
+      contact_id: 'contact-1',
+      assigned_agent_id: 'user-9',
+      contact: CONTACT,
+    }
+    const res = await postConversation()
+    expect(res.status).toBe(200)
+  })
+
+  it('viewer cannot start a contact-initiated send', async () => {
+    profileRole = 'viewer'
+    supabaseMock = makeSupabaseMock()
+    existingConversation = null
+    const res = await postContactTemplate()
+    expect(res.status).toBe(403)
+    expect(sendTemplateMessage).not.toHaveBeenCalled()
   })
 })

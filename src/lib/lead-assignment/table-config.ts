@@ -40,6 +40,17 @@ export interface TableAssigneeRow {
   display_name: string;
   email: string | null;
   phone: string | null;
+  /**
+   * Extra WhatsApp notification recipients, each with its own
+   * template ({ phone, template_name, template_language }[]).
+   * Empty = legacy single-number behavior. Stored as JSONB;
+   * validated by validateWhatsappNumbers on every save.
+   */
+  whatsapp_numbers: Array<{
+    phone: string;
+    template_name: string | null;
+    template_language: string;
+  }>;
   position: number;
   weight: number;
   is_active: boolean;
@@ -116,6 +127,7 @@ function toAssigneeRow(raw: Record<string, unknown>): TableAssigneeRow {
     display_name: raw.display_name as string,
     email: (raw.email as string | null) ?? null,
     phone: (raw.phone as string | null) ?? null,
+    whatsapp_numbers: normalizeWhatsappNumbers(raw.whatsapp_numbers),
     position: typeof raw.position === "number" ? raw.position : 0,
     weight: typeof raw.weight === "number" ? raw.weight : 0,
     is_active: raw.is_active !== false,
@@ -126,6 +138,40 @@ function toAssigneeRow(raw: Record<string, unknown>): TableAssigneeRow {
     notify_email: raw.notify_email !== false,
     notify_whatsapp: raw.notify_whatsapp === true,
   };
+}
+
+/**
+ * Normalize the stored whatsapp_numbers JSONB (legacy rows predate
+ * the column and read as null/undefined). Malformed entries are
+ * dropped rather than crashing the read — saves always rewrite
+ * validated data.
+ */
+function normalizeWhatsappNumbers(
+  value: unknown,
+): TableAssigneeRow["whatsapp_numbers"] {
+  if (!Array.isArray(value)) return [];
+  const out: TableAssigneeRow["whatsapp_numbers"] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const rec = entry as {
+      phone?: unknown;
+      template_name?: unknown;
+      template_language?: unknown;
+    };
+    if (typeof rec.phone !== "string" || rec.phone.trim() === "") continue;
+    out.push({
+      phone: rec.phone,
+      template_name:
+        typeof rec.template_name === "string" && rec.template_name.trim() !== ""
+          ? rec.template_name
+          : null,
+      template_language:
+        typeof rec.template_language === "string" && rec.template_language.trim() !== ""
+          ? rec.template_language
+          : "en_US",
+    });
+  }
+  return out;
 }
 
 /**
@@ -157,6 +203,7 @@ async function restoreAssigneeRows(
           display_name: a.display_name,
           email: a.email,
           phone: a.phone,
+          whatsapp_numbers: a.whatsapp_numbers,
           position: a.position,
           weight: a.weight,
           is_active: a.is_active,
@@ -195,7 +242,7 @@ export async function getTableConfig(
   const { data: assignees, error: assigneeErr } = await db
     .from("lead_assignment_table_assignees")
     .select(
-      "id, config_id, user_id, display_name, email, phone, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
+      "id, config_id, user_id, display_name, email, phone, whatsapp_numbers, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
     )
     .eq("config_id", row.id as string)
     .order("position", { ascending: true });
@@ -297,7 +344,7 @@ export async function saveTableConfig(
     const { data: prevRows, error: prevErr } = await db
       .from("lead_assignment_table_assignees")
       .select(
-        "id, config_id, user_id, display_name, email, phone, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
+        "id, config_id, user_id, display_name, email, phone, whatsapp_numbers, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
       )
       .eq("config_id", configId);
     if (prevErr) throw prevErr;
@@ -323,6 +370,7 @@ export async function saveTableConfig(
           display_name: a.display_name,
           email: a.email,
           phone: a.phone,
+          whatsapp_numbers: a.whatsapp_numbers,
           position: index,
           weight: valid.mode === "percentage" ? a.weight : 0,
           is_active: a.is_active,
@@ -396,7 +444,7 @@ export async function pauseTableAssignee(
     .eq("id", target.id)
     .eq("config_id", detail.id)
     .select(
-      "id, config_id, user_id, display_name, email, phone, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
+      "id, config_id, user_id, display_name, email, phone, whatsapp_numbers, position, weight, is_active, paused_until, pause_reason, pause_scope, notify_email, notify_whatsapp",
     )
     .single();
   if (error) throw error;

@@ -370,6 +370,18 @@ export async function assignLead(
     reason: rule.mode,
     createdBy: args.createdBy ?? null,
   });
+  // ADDITIVE Inbox mirror — an auto-assigned lead shows the same owner
+  // on its thread (if the thread exists yet; ingestion usually precedes
+  // the first WhatsApp message, and the adopt-on-open path covers the
+  // later thread creation). Best-effort: never fails assignment.
+  try {
+    const { mirrorRunAssignmentToConversation } = await import(
+      "@/lib/inbox/assignment-sync"
+    );
+    await mirrorRunAssignmentToConversation(db, accountId, runId, selected);
+  } catch {
+    // Mirror-only; the assignment above already succeeded.
+  }
   // ADDITIVE salesperson customer sequence: only on a genuine
   // initial assignment (no owner was present AND no prior
   // assignment event — duplicates and reassignments never start

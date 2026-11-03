@@ -94,7 +94,29 @@ describe("createWorkspaceRealtimeSubscription", () => {
         table: "flow_runs",
         filter: `flow_id=eq.${FLOW}`,
       },
+      {
+        event: "*",
+        schema: "public",
+        table: "workspace_values",
+      },
     ]);
+  });
+
+  it("workspace_values changes schedule the same debounced reload", () => {
+    const { client, channels } = fakeClient();
+    const onChange = vi.fn();
+    createWorkspaceRealtimeSubscription({
+      supabase: client,
+      accountId: ACCOUNT,
+      flowId: FLOW,
+      onDataChanged: onChange,
+    });
+    const ch = channels[0];
+    // Second handler = workspace_values (Assigned To edits from Inbox).
+    ch.handlers[1]?.({ eventType: "UPDATE" });
+    expect(onChange).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(WORKSPACE_REALTIME_DEBOUNCE_MS);
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("INSERT/UPDATE/DELETE each schedule one debounced reload", () => {

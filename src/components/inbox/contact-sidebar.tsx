@@ -23,7 +23,9 @@ import {
 } from "lucide-react";
 import {
   contactFlowRunsQuery,
+  isMetaLeadFlowRun,
   pickContactFlow,
+  pickContactFlowRun,
   type ContactFlowRun,
 } from "@/lib/inbox/contact-flow";
 import { Button } from "@/components/ui/button";
@@ -60,6 +62,10 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   const [copied, setCopied] = useState(false);
   const [notes, setNotes] = useState<ContactNote[]>([]);
   const [flowName, setFlowName] = useState<string | null>(null);
+  // True when the displayed run is a genuine Meta Instant Form
+  // submission (virtual flow, kind = 'meta_lead_ads'). Label-only:
+  // the flow name value below stays exactly as resolved.
+  const [isInstantForm, setIsInstantForm] = useState(false);
   const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [newNote, setNewNote] = useState("");
@@ -104,9 +110,9 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
     // Flow name for the selected contact (null → "No flow" empty state).
     // Cast via unknown: the untyped supabase client infers the embedded
     // `flow` relation as an array.
-    setFlowName(
-      pickContactFlow((flowRes.data ?? []) as unknown as ContactFlowRun[]),
-    );
+    const runs = (flowRes.data ?? []) as unknown as ContactFlowRun[];
+    setFlowName(pickContactFlow(runs));
+    setIsInstantForm(isMetaLeadFlowRun(pickContactFlowRun(runs)));
   }, [contact, accountId]);
 
   // Load on contact change. setContactData/setTags run inside async
@@ -579,11 +585,14 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
           <div className="my-4 border-t border-border" />
 
           {/* Flow — the flow associated with this contact, resolved from
-              its flow_runs (active run first, else most recent run). */}
+              its flow_runs (active run first, else most recent run).
+              Genuine Meta Instant Form submissions render the label
+              "Instant Form" instead; every other flow keeps "Flow",
+              and the displayed name never changes. */}
           <div>
             <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
               <Workflow className="h-3 w-3" />
-              Flow
+              {isInstantForm ? "Instant Form" : "Flow"}
             </div>
             <div className="mt-2">
               {flowName ? (

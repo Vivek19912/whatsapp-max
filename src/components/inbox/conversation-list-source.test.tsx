@@ -28,6 +28,32 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("setSelectedSource");
   });
 
+  it("places Lead Source second: All, Lead Source, Date, Tags, Company, Flow/Form, Team", () => {
+    // Source-order assertion on the toolbar: each marker must appear
+    // after the previous one. Markers are code tokens unique to their
+    // dropdown in render order (searched strictly forward).
+    const markers = [
+      "FILTER_OPTIONS.map((opt)", // 1. All
+      "All Sources", // 2. Lead Source option (inside its dropdown)
+      "customDateOpen", // 3. Date popover (first toolbar use is after Lead Source)
+      "tags.map((t)", // 4. Tags
+      "companies.map((co)", // Company (kept in relative place; not reordered)
+      "availableForms.map((form)", // 5a. Form (Instant Form source)
+      "flows.map((flow)", // 5b. Flow (all other sources)
+      "teamOptions.map((member)", // 6. Team
+    ];
+    let from = 0;
+    const positions: number[] = [];
+    for (const m of markers) {
+      const idx = listSrc.indexOf(m, from);
+      expect(idx, `toolbar marker missing or out of order: ${m}`).toBeGreaterThanOrEqual(0);
+      positions.push(idx);
+      from = idx + 1;
+    }
+    const sorted = [...positions].sort((a, b) => a - b);
+    expect(positions).toEqual(sorted);
+  });
+
   it("includes the source in the search key so stale pages never show", () => {
     expect(listSrc).toContain('source: selectedSource ?? "all"');
   });
@@ -65,16 +91,57 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("setSubmissionLinksError");
     expect(listSrc).toContain("setSubmissionLinksRetry((n) => n + 1)");
     expect(listSrc).toContain("Could not load lead source data");
-    // The effect refires on retry; cleanup cancels the superseded run.
-    expect(listSrc).toContain("[conversations, submissionLinksRetry]");
+    // The effect refires on retry, resync, and list change; cleanup
+    // cancels the superseded run.
+    expect(listSrc).toContain("[conversations, resyncToken, submissionLinksRetry]");
+  });
+
+  it("replaces the Flow filter with a Form filter under Instant Form", () => {
+    expect(listSrc).toContain("selectedSource === \"instant_form\"");
+    expect(listSrc).toContain("All Forms");
+    expect(listSrc).toContain("setSelectedFormId(");
+    // Source changes reset the incompatible Form/Flow pick wholesale.
+    expect(listSrc).toContain("handleSourceSelect");
+    expect(listSrc).toContain("setSelectedFlowId(null)");
+    // The form facet travels in the key and both fetch builds.
+    expect(listSrc).toContain("metaFormId: selectedSource");
+    const formSends = listSrc.match(/params\.set\("meta_form", selectedFormId\)/g) ?? [];
+    expect(formSends.length).toBe(2);
+    // Client filtering uses the per-contact form map, never N+1.
+    expect(listSrc).toContain(
+      "matchesFormFilter(c, selectedFormId, submissionForms)"
+    );
+  });
+
+  it("derives Form options from this account's actual submissions", () => {
+    expect(listSrc).toContain("availableForms");
+    expect(listSrc).toContain("MetaFormOption");
+    expect(listSrc).toContain("submissionForms");
+    // Distinct, account-scoped, processed-only — no hardcoding.
+    expect(listSrc).not.toContain("Kashmir");
   });
 
   it("keeps the filter independent: no existing filter is reset or dropped", () => {
-    // Clear-all still clears every facet including the new one.
+    // Clear-all still clears every facet including the new ones.
     expect(listSrc).toContain("setSelectedSource(null)");
+    expect(listSrc).toContain("setSelectedFormId(null)");
     // The chips row shows the source alongside the other facets.
     expect(listSrc).toContain("selectedSource &&");
     // Subscription stays keyed per request; no polling introduced.
     expect(listSrc).not.toContain("setInterval");
+  });
+
+  it("shows a form chip for the selected form; All Forms shows no chip", () => {
+    // Source chip (existing) plus a distinct form chip only when a
+    // specific form is picked; clearing the form removes just its chip.
+    expect(listSrc).toContain("LEAD_SOURCE_LABELS[selectedSource]");
+    expect(listSrc).toContain("selectedFormId &&");
+    expect(listSrc).toContain("availableForms.find((f) => f.id === selectedFormId)");
+  });
+
+  it("hides the Flow filter while Instant Form is selected (Form takes its place)", () => {
+    // Single ternary: Form dropdown when instant_form, Flow dropdown
+    // otherwise — never both at once.
+    expect(listSrc).toMatch(/selectedSource === "instant_form" \? \(/);
   });
 });

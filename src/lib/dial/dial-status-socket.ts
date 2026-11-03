@@ -18,11 +18,39 @@
 // ============================================================
 
 import { createClient } from '@/lib/supabase/client';
+import { withAuthTimeout } from '@/lib/auth/auth-errors';
 
 export interface DialStatusUpdate {
   requestId: string;
   status: string;
   expiresAt: string | null;
+}
+
+/**
+ * Minimal supabase surface this socket needs. Structurally typed (not
+ * `SupabaseClient`) so tests can inject a mock and so older/mocked
+ * clients missing `getUser`/`onAuthStateChange` degrade gracefully.
+ */
+export interface DialSocketSupabase {
+  auth: {
+    getSession: () => Promise<{
+      data: { session: { access_token?: string | null } | null };
+    }>;
+    getUser?: () => Promise<{ data: { user: unknown } }>;
+    onAuthStateChange?: (
+      callback: (event: string) => void,
+    ) => { data: { subscription: { unsubscribe: () => void } } };
+  };
+}
+
+export interface SubscribeDialStatusOptions {
+  /**
+   * Injected supabase client (tests). Defaults to the shared browser
+   * client from `@/lib/supabase/client`, created lazily so importing
+   * this module never constructs a client. No import cycle: that module
+   * only depends on cookie-options.
+   */
+  supabase?: DialSocketSupabase;
 }
 
 type Listener = (update: DialStatusUpdate) => void;
@@ -34,8 +62,17 @@ let started = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let activeGeneration = 0;
+// Set on SIGNED_OUT: the socket is closed and auto-reconnect is parked
+// until a fresh sign-in/refresh proves a session exists again. Cleared
+// by TOKEN_REFRESHED/SIGNED_IN or by an explicit reconnect trigger.
+let signedOut = false;
+let authSubscribed = false;
+let authUnsubscribe: (() => void) | null = null;
+let injectedSupabase: DialSocketSupabase | null = null;
 
 const MAX_BACKOFF_MS = 30_000;
+/** Bound for the getUser() refresh fallback (mirrors session-recovery). */
+const GET_USER_FALLBACK_TIMEOUT_MS = 4000;
 
 function backoffMs(attempt: number): number {
   const capped = Math.min(attempt, 6);
@@ -58,12 +95,48 @@ function wsUrl(): string | null {
   return null;
 }
 
-async function accessToken(): Promise<string | null> {
+function getSupabase(): DialSocketSupabase {
+  if (injectedSupabase) return injectedSupabase;
+  return createClient() as unknown as DialSocketSupabase;
+}
+
+async function accessToken(
+  supabase?: DialSocketSupabase,
+  opts?: { forceServerVerify?: boolean },
+): Promise<string | null> {
+  const client = supabase ?? getSupabase();
+  if (!opts?.forceServerVerify) {
+    try {
+      const { data } = await client.auth.getSession();
+      const token = data.session?.access_token;
+      if (typeof token === 'string' && token) return token;
+    } catch {
+      // Local read failed or hung — fall through to the server check.
+    }
+  }
+  // Local session missing/stale (post-refresh rotation, torn cookie
+  // read): one bounded server check. getUser() revalidates against the
+  // stored refresh token and lets a just-rotated session recover, so a
+  // 4401 close or an empty local read does not stick with a dead token.
+  // Never a full login — null stays null and the caller backs off.
   try {
-    const supabase = createClient();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    return typeof token === 'string' && token ? token : null;
+    if (typeof client.auth.getUser !== 'function') return null;
+    const { data } = await withAuthTimeout(
+      client.auth.getUser(),
+      GET_USER_FALLBACK_TIMEOUT_MS,
+    );
+    // getUser() resolves user:null on failure — only a confirmed user
+    // counts. The call itself revalidates via the server (refreshing a
+    // just-rotated session as a side effect), so re-read the local
+    // session for the fresh access token.
+    if (!data.user) return null;
+    try {
+      const { data: reread } = await client.auth.getSession();
+      const refreshed = reread.session?.access_token;
+      return typeof refreshed === 'string' && refreshed ? refreshed : null;
+    } catch {
+      return null;
+    }
   } catch {
     return null;
   }
@@ -100,7 +173,7 @@ function applySnapshot(requests: unknown): void {
 }
 
 function scheduleReconnect(): void {
-  if (reconnectTimer !== null) return;
+  if (reconnectTimer !== null || signedOut) return;
   const delay = backoffMs(reconnectAttempt);
   reconnectAttempt += 1;
   reconnectTimer = setTimeout(() => {
@@ -109,13 +182,96 @@ function scheduleReconnect(): void {
   }, delay);
 }
 
-async function connect(): Promise<void> {
+/** Soft reconnect: drop the live socket so the snapshot replays on a
+ * fresh connection. Bumps the generation so the old socket's (async)
+ * onclose can never schedule a duplicate reconnect, and resets backoff
+ * to the fast 1s lane — the trigger was a confirmed token rotation,
+ * not a failure. */
+function softReconnect(): void {
+  let remaining = 0;
+  for (const set of listeners.values()) remaining += set.size;
+  signedOut = false;
+  reconnectAttempt = 0;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (remaining === 0) return;
+  activeGeneration += 1;
+  const stale = socket;
+  socket = null;
+  if (stale) {
+    try {
+      stale.close(1000, 'token-rotated');
+    } catch {
+      // onclose still fires (or the socket was already gone).
+    }
+  }
+  void connect();
+}
+
+function handleSignedOut(): void {
+  signedOut = true;
+  activeGeneration += 1;
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (socket) {
+    try {
+      socket.close(1000, 'signed-out');
+    } catch {
+      // ignore
+    }
+    socket = null;
+  }
+}
+
+function ensureAuthSubscription(supabase: DialSocketSupabase): void {
+  if (authSubscribed || typeof window === 'undefined') return;
+  authSubscribed = true;
+  try {
+    if (typeof supabase.auth.onAuthStateChange !== 'function') return;
+    const { data } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'TOKEN_REFRESHED') {
+        // Live socket holds the pre-rotation token: reconnect so the
+        // handshake re-authenticates with the fresh one.
+        if (signedOut) signedOut = false;
+        softReconnect();
+      } else if (event === 'SIGNED_IN') {
+        // Re-login after a parked SIGNED_OUT: prove the session, then go.
+        if (signedOut) {
+          signedOut = false;
+          reconnectAttempt = 0;
+          void connect();
+        }
+      } else if (event === 'SIGNED_OUT') {
+        // Confirmed sign-out: close and PARK — no retry loop against a
+        // dead session. A later SIGNED_IN/TOKEN_REFRESHED revives us.
+        handleSignedOut();
+      }
+    });
+    authUnsubscribe = () => {
+      try {
+        data.subscription.unsubscribe();
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    // Older/mocked clients without auth events: polling-free socket
+    // still works, it just won't proactively rotate the token.
+  }
+}
+
+async function connect(supabase?: DialSocketSupabase): Promise<void> {
   const gen = activeGeneration;
-  if (typeof WebSocket === 'undefined') return;
+  if (typeof WebSocket === 'undefined' || signedOut) return;
   const url = wsUrl();
   if (!url) return;
-  const token = await accessToken();
-  if (gen !== activeGeneration) return;
+  const client = supabase ?? getSupabase();
+  const token = await accessToken(client);
+  if (gen !== activeGeneration || signedOut) return;
   if (!token) {
     // No session (signed out): back off and retry; a later login
     // triggers a fresh subscribe → connect cycle anyway.
@@ -164,9 +320,22 @@ async function connect(): Promise<void> {
     }
   };
 
-  const onGone = () => {
+  const onGone = (event?: { code?: number }) => {
     if (socket === ws) socket = null;
-    if (gen === activeGeneration) scheduleReconnect();
+    if (gen !== activeGeneration || signedOut) return;
+    if (event && event.code === 4401) {
+      // Sidecar rejected the token (stale post-rotation JWT). The local
+      // read would just hand back the same dead token, so force ONE
+      // server verify via the getUser() fallback — its round-trip lets a
+      // just-rotated session recover — then take the normal backoff lane
+      // (no hot retry with the same dead token).
+      const refreshClient = client;
+      void accessToken(refreshClient, { forceServerVerify: true }).finally(() => {
+        if (gen === activeGeneration && !signedOut) scheduleReconnect();
+      });
+      return;
+    }
+    scheduleReconnect();
   };
   ws.onclose = onGone;
   ws.onerror = () => {
@@ -178,12 +347,14 @@ async function connect(): Promise<void> {
   };
 }
 
-function ensureStarted(): void {
+function ensureStarted(supabase?: DialSocketSupabase): void {
+  const client = supabase ?? getSupabase();
+  ensureAuthSubscription(client);
   if (started || typeof window === 'undefined') return;
   started = true;
   activeGeneration += 1;
   reconnectAttempt = 0;
-  void connect();
+  void connect(client);
 }
 
 function maybeStop(): void {
@@ -212,10 +383,12 @@ function maybeStop(): void {
  */
 export function subscribeDialStatus(
   requestId: string,
-  listener: Listener
+  listener: Listener,
+  options?: SubscribeDialStatusOptions,
 ): () => void {
   if (!requestId) return () => {};
-  ensureStarted();
+  if (options?.supabase) injectedSupabase = options.supabase;
+  ensureStarted(options?.supabase);
   let set = listeners.get(requestId);
   if (!set) {
     set = new Set();
@@ -242,6 +415,15 @@ export function __resetDialStatusSocketForTest(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  try {
+    authUnsubscribe?.();
+  } catch {
+    // ignore
+  }
+  authUnsubscribe = null;
+  authSubscribed = false;
+  signedOut = false;
+  injectedSupabase = null;
   try {
     socket?.close();
   } catch {

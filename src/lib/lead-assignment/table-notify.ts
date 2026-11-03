@@ -50,7 +50,16 @@ function notifyRetryDelayMs(attempt: number): number {
 
 export interface EnqueueTableNotificationsResult {
   email: { enqueued: boolean; reason: string };
-  whatsapp: { enqueued: boolean; reason: string };
+  whatsapp: {
+    enqueued: boolean;
+    reason: string;
+    /**
+     * Per-recipient outcome, one entry per configured WhatsApp
+     * number (in configured order). A partial fan-out reports
+     * enqueued=true when at least one recipient row was created.
+     */
+    recipients?: Array<{ phone: string; enqueued: boolean; reason: string }>;
+  };
 }
 
 /**
@@ -84,22 +93,62 @@ export async function enqueueTableAssignmentNotifications(
     const ctx = await loadLeadContext(db, accountId, runId, formId);
     for (const channel of channels) {
       try {
-        const row = buildNotificationRow(detail, assignee, runId, ctx, channel);
-        if (!row) {
+        // WhatsApp fans out to EVERY configured number (one outbox
+        // row per recipient, so each delivery is tracked and
+        // retried independently). Email keeps the single-recipient
+        // row it always had — untouched.
+        const rows =
+          channel === "whatsapp"
+            ? buildWhatsappNotificationRows(detail, assignee, runId, ctx)
+            : (() => {
+                const single = buildNotificationRow(detail, assignee, runId, ctx, channel);
+                return single ? [single] : [];
+              })();
+        if (rows.length === 0) {
           out[channel] = { enqueued: false, reason: "no-recipient" };
           continue;
         }
-        const { error } = await db
-          .from("lead_assignment_notifications")
-          .insert(row);
-        if (error) {
-          if (isUniqueViolation(error)) {
-            out[channel] = { enqueued: false, reason: "duplicate" };
-            continue;
+        let enqueuedCount = 0;
+        const perRecipient: Array<{ phone: string; enqueued: boolean; reason: string }> = [];
+        for (const row of rows) {
+          const { error } = await db
+            .from("lead_assignment_notifications")
+            .insert(row);
+          if (error) {
+            if (isUniqueViolation(error)) {
+              perRecipient.push({
+                phone: String((row as Record<string, unknown>).to_phone ?? ""),
+                enqueued: false,
+                reason: "duplicate",
+              });
+              continue;
+            }
+            throw error;
           }
-          throw error;
+          enqueuedCount += 1;
+          perRecipient.push({
+            phone: String((row as Record<string, unknown>).to_phone ?? ""),
+            enqueued: true,
+            reason: "enqueued",
+          });
         }
-        out[channel] = { enqueued: true, reason: "enqueued" };
+        if (channel === "whatsapp") {
+          out.whatsapp = {
+            enqueued: enqueuedCount > 0,
+            reason:
+              enqueuedCount === rows.length
+                ? "enqueued"
+                : enqueuedCount === 0
+                  ? (perRecipient[0]?.reason ?? "error")
+                  : "partial",
+            recipients: perRecipient,
+          };
+        } else {
+          out[channel] = {
+            enqueued: enqueuedCount > 0,
+            reason: enqueuedCount > 0 ? "enqueued" : "duplicate",
+          };
+        }
       } catch (err) {
         console.error(
           "[table-assign-notify] enqueue failed (assignment unaffected):",
@@ -266,6 +315,7 @@ function buildNotificationRow(
     if (!assignee.user_id && !toEmail) return null;
     return {
       ...base,
+      recipient_key: "",
       to_email: toEmail,
       subject: `New lead assigned: ${ctx.leadName ?? ctx.leadPhone ?? "a new lead"}`,
       body:
@@ -283,10 +333,70 @@ function buildNotificationRow(
   if (!assignee.phone) return null;
   return {
     ...base,
+    recipient_key: assignee.phone,
     to_phone: assignee.phone,
     template_name: detail.whatsapp_template_name,
     template_language: detail.whatsapp_template_language,
   };
+}
+
+/**
+ * One outbox row per configured WhatsApp recipient number, each
+ * carrying its own template. Recipients resolve as:
+ *   1. `assignee.whatsapp_numbers` entries (in configured order,
+ *      per-number template, falling back to the config-level
+ *      template when a number has none), when non-empty;
+ *   2. otherwise the legacy single `phone` column with the
+ *      config-level template (existing configurations keep
+ *      working unchanged).
+ * Every row carries recipient_key (the normalized number) so the
+ * UNIQUE(account, run, assignee, channel, recipient_key) key
+ * dedupes per recipient: a retry re-enqueues nothing, while a
+ * second number still gets its own row.
+ */
+function buildWhatsappNotificationRows(
+  detail: TableConfigDetail,
+  assignee: TableAssigneeRow,
+  runId: string,
+  ctx: LeadContext,
+): Array<Record<string, unknown>> {
+  const nowIso = new Date().toISOString();
+  const base = {
+    account_id: detail.account_id,
+    config_id: detail.id,
+    assignee_id: assignee.id,
+    flow_id: detail.flow_id,
+    flow_run_id: runId,
+    form_id: detail.form_db_id,
+    channel: "whatsapp",
+    lead_name: ctx.leadName,
+    lead_phone: ctx.leadPhone,
+    max_attempts: TABLE_NOTIFY_MAX_ATTEMPTS,
+    queued_at: nowIso,
+    next_attempt_at: nowIso,
+  };
+  const extra = Array.isArray(assignee.whatsapp_numbers)
+    ? assignee.whatsapp_numbers
+    : [];
+  if (extra.length > 0) {
+    return extra.map((r) => ({
+      ...base,
+      recipient_key: r.phone,
+      to_phone: r.phone,
+      template_name: r.template_name ?? detail.whatsapp_template_name,
+      template_language: r.template_language || detail.whatsapp_template_language,
+    }));
+  }
+  if (!assignee.phone) return [];
+  return [
+    {
+      ...base,
+      recipient_key: assignee.phone,
+      to_phone: assignee.phone,
+      template_name: detail.whatsapp_template_name,
+      template_language: detail.whatsapp_template_language,
+    },
+  ];
 }
 
 export interface TableNotifyDrainResult {

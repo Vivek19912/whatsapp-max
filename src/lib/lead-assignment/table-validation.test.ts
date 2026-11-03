@@ -11,9 +11,11 @@ import {
   formatPausedUntil,
   isValidAssigneeEmail,
   isValidTimezone,
+  MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE,
   normalizeAssigneePhone,
   validatePauseInput,
   validateTableConfig,
+  validateWhatsappNumbers,
   wallClockInZoneToUtc,
 } from "./table-validation";
 
@@ -334,5 +336,117 @@ describe("validateTableConfig", () => {
         assignees: [{ user_id: "u1", display_name: "A", weight: 100 }],
       }).assignees,
     ).toHaveLength(1);
+  });
+});
+
+describe("validateWhatsappNumbers (multiple numbers per assignee)", () => {
+  const numbers = (phones: string[]) =>
+    phones.map((phone) => ({ phone }));
+
+  it("accepts one number, and at least five numbers for the same assignee", () => {
+    expect(validateWhatsappNumbers(numbers(["+911234567890"]), "Assignee 1")).toEqual([
+      { phone: "+911234567890", template_name: null, template_language: "en_US" },
+    ]);
+    const five = validateWhatsappNumbers(
+      numbers([
+        "+911234567890",
+        "+911234567891",
+        "+911234567892",
+        "+911234567893",
+        "+911234567894",
+      ]),
+      "Assignee 1",
+    );
+    expect(five).toHaveLength(5);
+    expect(five.map((n) => n.phone)).toEqual([
+      "+911234567890",
+      "+911234567891",
+      "+911234567892",
+      "+911234567893",
+      "+911234567894",
+    ]);
+  });
+
+  it(`supports a capacity of at least 5 (cap is ${MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE})`, () => {
+    expect(MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE).toBeGreaterThanOrEqual(5);
+    const many = Array.from(
+      { length: MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE },
+      (_, i) => ({ phone: `+91123456${String(100 + i)}` }),
+    );
+    expect(validateWhatsappNumbers(many, "Assignee 1")).toHaveLength(
+      MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE,
+    );
+    expect(() =>
+      validateWhatsappNumbers([...many, { phone: "+919999999999" }], "Assignee 1"),
+    ).toThrow(/at most/);
+  });
+
+  it("stores a different template per number, and allows repeats", () => {
+    const out = validateWhatsappNumbers(
+      [
+        { phone: "+911234567890", template_name: "new_lead_notification1", template_language: "en_US" },
+        { phone: "+911234567891", template_name: "travel_lead_alert", template_language: "en" },
+        { phone: "+911234567892", template_name: "new_lead_notification1", template_language: "en_US" },
+      ],
+      "Assignee 1",
+    );
+    expect(out.map((n) => n.template_name)).toEqual([
+      "new_lead_notification1",
+      "travel_lead_alert",
+      "new_lead_notification1",
+    ]);
+    // Blank template = table default at send time.
+    expect(
+      validateWhatsappNumbers([{ phone: "+911234567890" }], "Assignee 1")[0],
+    ).toMatchObject({ template_name: null, template_language: "en_US" });
+  });
+
+  it("rejects invalid numbers and duplicates (including the legacy phone)", () => {
+    expect(() =>
+      validateWhatsappNumbers([{ phone: "123" }], "Assignee 1"),
+    ).toThrow(/invalid/i);
+    expect(() =>
+      validateWhatsappNumbers(
+        numbers(["+911234567890", "+911234567890"]),
+        "Assignee 1",
+      ),
+    ).toThrow(/already configured/);
+    expect(() =>
+      validateWhatsappNumbers(numbers(["+911234567890"]), "Assignee 1", "+911234567890"),
+    ).toThrow(/already configured/);
+  });
+
+  it("accepts absent lists (legacy single-number behavior)", () => {
+    expect(validateWhatsappNumbers(undefined, "Assignee 1")).toEqual([]);
+    expect(validateWhatsappNumbers(null, "Assignee 1")).toEqual([]);
+    const ok = validateTableConfig({
+      enabled: true,
+      mode: "round_robin",
+      assignees: [{ display_name: "X", phone: "+15551234567", notify_email: false, notify_whatsapp: true }],
+    });
+    expect(ok.assignees[0]).toMatchObject({ phone: "+15551234567", whatsapp_numbers: [] });
+  });
+
+  it("flows through validateTableConfig with per-number templates", () => {
+    const ok = validateTableConfig({
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        {
+          display_name: "X",
+          phone: "+15551234567",
+          notify_email: false,
+          notify_whatsapp: true,
+          whatsapp_numbers: [
+            { phone: "+911234567890", template_name: "a", template_language: "en_US" },
+            { phone: "+911234567891", template_name: "b", template_language: "en_US" },
+          ],
+        },
+      ],
+    });
+    expect(ok.assignees[0].whatsapp_numbers).toEqual([
+      { phone: "+911234567890", template_name: "a", template_language: "en_US" },
+      { phone: "+911234567891", template_name: "b", template_language: "en_US" },
+    ]);
   });
 });

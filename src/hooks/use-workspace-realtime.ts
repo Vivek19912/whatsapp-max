@@ -4,7 +4,8 @@ import { useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 /**
- * Live Workspace updates via Supabase Realtime on `flow_runs`.
+ * Live Workspace updates via Supabase Realtime on `flow_runs` and
+ * `workspace_values`.
  *
  * The core logic lives in the pure `createWorkspaceRealtimeSubscription`
  * so it can be unit-tested without React rendering or a real Supabase
@@ -16,6 +17,12 @@ import { createClient } from "@/lib/supabase/client";
  * - One channel per account+flow: `workspace-${accountId}-${flowId}`.
  * - Subscribes to `postgres_changes` on `flow_runs`, event `*`,
  *   filter `flow_id=eq.<flowId>`.
+ * - ALSO subscribes to `postgres_changes` on `workspace_values`,
+ *   event `*`, with NO table filter (that table carries no flow_id;
+ *   scoping rides on RLS `workspace_values_select`). This refreshes
+ *   the Assigned To column when an Inbox reassign writes the same
+ *   cell from the other surface. Debounced like everything else, so
+ *   unrelated cell edits coalesce instead of refetching per edit.
  * - Any INSERT/UPDATE/DELETE schedules the existing table reload,
  *   debounced (~1.2s) so a flow advancing through nodes produces ONE
  *   refetch, not many.
@@ -97,6 +104,18 @@ export function createWorkspaceRealtimeSubscription({
         schema: "public",
         table: "flow_runs",
         filter: `flow_id=eq.${flowId}`,
+      },
+      schedule,
+    )
+    // Assigned To cells live in workspace_values (no flow_id column
+    // to filter on — RLS scopes by account). Same debounce, so an
+    // Inbox-side reassign refreshes the column it mirrors.
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "workspace_values",
       },
       schedule,
     )

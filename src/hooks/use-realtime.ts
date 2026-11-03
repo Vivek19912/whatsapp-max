@@ -15,6 +15,17 @@ interface UseRealtimeOptions {
   channelName: string;
   onMessageEvent?: (event: RealtimeEvent<Message>) => void;
   onConversationEvent?: (event: RealtimeEvent<Conversation>) => void;
+  /**
+   * Fires (debounced with the same coalescing as other events is left
+   * to the caller) when any workspace_values row changes. Used by the
+   * Inbox to converge assignment state that realtime postgres_changes
+   * on conversations may suppress: when a thread is reassigned AWAY
+   * from the viewer, RLS hides the new row version, so no
+   * conversation UPDATE arrives — the workspace_values change is the
+   * only signal. The caller typically refetches the list (RLS-scoped)
+   * and re-checks the active thread.
+   */
+  onWorkspaceValuesEvent?: () => void;
   enabled?: boolean;
 }
 
@@ -22,6 +33,7 @@ export function useRealtime({
   channelName,
   onMessageEvent,
   onConversationEvent,
+  onWorkspaceValuesEvent,
   enabled = true,
 }: UseRealtimeOptions) {
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -34,9 +46,11 @@ export function useRealtime({
   // callbacks, which always run after the render that updates it.
   const onMessageRef = useRef(onMessageEvent);
   const onConversationRef = useRef(onConversationEvent);
+  const onWorkspaceValuesRef = useRef(onWorkspaceValuesEvent);
   useEffect(() => {
     onMessageRef.current = onMessageEvent;
     onConversationRef.current = onConversationEvent;
+    onWorkspaceValuesRef.current = onWorkspaceValuesEvent;
   });
 
   useEffect(() => {
@@ -66,6 +80,13 @@ export function useRealtime({
             new: payload.new as Conversation,
             old: payload.old as Partial<Conversation>,
           });
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "workspace_values" },
+        () => {
+          onWorkspaceValuesRef.current?.();
         }
       )
       .subscribe((status) => {

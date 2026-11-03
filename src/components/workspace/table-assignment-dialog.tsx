@@ -112,6 +112,52 @@ export function AssignmentDeliveryDetailCell({
 }
 
 /**
+ * Maximum WhatsApp numbers per assignee in the editor (mirrors the
+ * server cap in table-validation.ts — the server re-validates).
+ */
+export const MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE = 10;
+
+/**
+ * Normalize a phone input the same way the server does (strip
+ * spaces/dashes/parens; require leading + with 7–15 digits).
+ * Returns the E.164 number or null. Pure.
+ */
+export function normalizeWhatsappNumberInput(raw: string): string | null {
+  const stripped = raw.replace(/[\s\-().]/g, "");
+  if (/^\+\d{7,15}$/.test(stripped)) return stripped;
+  return null;
+}
+
+/**
+ * Validate an assignee draft's extra WhatsApp numbers: cap, E.164
+ * shape, and no duplicates (including against the draft's legacy
+ * `phone` field). Returns the first problem or null. Pure.
+ */
+export function validateWhatsappNumberDrafts(
+  numbers: ReadonlyArray<{ phone: string }>,
+  legacyPhone: string,
+  displayName: string,
+): string | null {
+  if (numbers.length > MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE) {
+    return `${displayName}: at most ${MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} WhatsApp numbers per assignee.`;
+  }
+  const seen = new Set<string>();
+  const legacy = normalizeWhatsappNumberInput(legacyPhone);
+  if (legacy) seen.add(legacy);
+  for (let i = 0; i < numbers.length; i++) {
+    const normalized = normalizeWhatsappNumberInput(numbers[i]?.phone ?? "");
+    if (!normalized) {
+      return `${displayName}: WhatsApp number ${i + 1} is invalid. Use international format with country code, e.g. +911234567890.`;
+    }
+    if (seen.has(normalized)) {
+      return `${displayName}: ${normalized} is already configured for this assignee.`;
+    }
+    seen.add(normalized);
+  }
+  return null;
+}
+
+/**
  * Saved assignees for per-row lookups. The unconfigured-table GET
  * response omits `assignees`; anything iterating it must go
  * through here instead of crashing the render the moment a local
@@ -156,6 +202,15 @@ interface AssigneeView {
   display_name: string;
   email: string | null;
   phone: string | null;
+  /**
+   * Extra WhatsApp recipients, each with its own template.
+   * Empty = legacy single-number behavior.
+   */
+  whatsapp_numbers: Array<{
+    phone: string;
+    template_name: string | null;
+    template_language: string;
+  }>;
   position: number;
   weight: number;
   is_active: boolean;
@@ -214,6 +269,15 @@ type Draft = {
   display_name: string;
   email: string;
   phone: string;
+  /**
+   * Extra WhatsApp numbers for this assignee. `template_name`
+   * empty = this table's default WhatsApp template at send time.
+   */
+  whatsapp_numbers: Array<{
+    phone: string;
+    template_name: string;
+    template_language: string;
+  }>;
   weight: string;
   is_active: boolean;
   notify_email: boolean;
@@ -271,6 +335,7 @@ const emptyDraft = (): Draft => ({
   display_name: "",
   email: "",
   phone: "",
+  whatsapp_numbers: [],
   weight: "0",
   is_active: true,
   notify_email: true,
@@ -362,6 +427,11 @@ export function TableAssignmentDialog({
       display_name: a.display_name,
       email: a.email ?? "",
       phone: a.phone ?? "",
+      whatsapp_numbers: (Array.isArray(a.whatsapp_numbers) ? a.whatsapp_numbers : []).map((n) => ({
+        phone: n.phone,
+        template_name: n.template_name ?? "",
+        template_language: n.template_language || "en_US",
+      })),
       weight: String(a.weight ?? 0),
       is_active: a.is_active,
       notify_email: a.notify_email,
@@ -861,6 +931,22 @@ export function TableAssignmentDialog({
         return;
       }
     }
+    // Extra WhatsApp numbers are validated client-side the same
+    // way the server validates them (E.164, cap, no duplicates);
+    // the server re-validates and rejects the whole save on any
+    // problem. Email behavior is untouched.
+    for (const d of drafts) {
+      const numbersError = validateWhatsappNumberDrafts(
+        d.whatsapp_numbers,
+        d.phone,
+        d.display_name.trim() || "Unnamed assignee",
+      );
+      if (numbersError) {
+        setSaveError(numbersError);
+        toast.error(numbersError);
+        return;
+      }
+    }
     // Client-side sequence guard (the server re-validates templates,
     // mappings, and delay): a malformed delay must never be sent.
     if (isMetaTable) {
@@ -891,6 +977,11 @@ export function TableAssignmentDialog({
               display_name: d.display_name.trim(),
               email: d.email.trim() || null,
               phone: d.phone.trim() || null,
+              whatsapp_numbers: d.whatsapp_numbers.map((n) => ({
+                phone: n.phone.trim(),
+                template_name: n.template_name.trim() || null,
+                template_language: n.template_language.trim() || "en_US",
+              })),
               weight: Number.parseInt(d.weight, 10) || 0,
               is_active: d.is_active,
               notify_email: d.notify_email,
@@ -1251,6 +1342,11 @@ export function TableAssignmentDialog({
                             <TableCell>
                               <p className="text-xs">{d.email || "—"}</p>
                               <p className="text-muted-foreground text-xs">{d.phone || ""}</p>
+                              {d.whatsapp_numbers.length > 0 ? (
+                                <p className="text-muted-foreground text-xs">
+                                  +{d.whatsapp_numbers.length} WhatsApp number{d.whatsapp_numbers.length === 1 ? "" : "s"}
+                                </p>
+                              ) : null}
                               <p className="text-muted-foreground text-xs">
                                 {d.notify_email ? "Email on" : "Email off"} ·{" "}
                                 {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
@@ -1382,6 +1478,9 @@ export function TableAssignmentDialog({
                               <dt className="w-16 shrink-0 text-muted-foreground">Contact</dt>
                               <dd className="min-w-0 flex-1 truncate text-foreground">
                                 {[d.email, d.phone].filter(Boolean).join(" · ") || "—"}
+                                {d.whatsapp_numbers.length > 0
+                                  ? ` (+${d.whatsapp_numbers.length} WhatsApp)`
+                                  : ""}
                               </dd>
                             </div>
                             {mode === "percentage" ? (
@@ -1537,6 +1636,119 @@ export function TableAssignmentDialog({
                             placeholder="+911234567890"
                             inputMode="tel"
                           />
+                        </div>
+                        <div className="flex flex-col gap-1.5 sm:col-span-2">
+                          <Label>
+                            Extra WhatsApp numbers
+                            {form.whatsapp_numbers.length > 0
+                              ? ` (${form.whatsapp_numbers.length})`
+                              : ""}
+                          </Label>
+                          <p className="text-xs leading-snug text-muted-foreground">
+                            Each number gets its own template below. Empty template =
+                            this table&apos;s default WhatsApp template. The main phone
+                            above stays the primary number.
+                          </p>
+                          {form.whatsapp_numbers.map((n, i) => {
+                            const numberKey =
+                              n.template_name.trim() === ""
+                                ? ""
+                                : encodeTemplateKey({
+                                    name: n.template_name.trim(),
+                                    language: n.template_language.trim() || "en_US",
+                                  });
+                            return (
+                              <div
+                                key={i}
+                                className="flex flex-col gap-2 rounded-lg border border-border p-2 sm:flex-row sm:items-start"
+                              >
+                                <Input
+                                  value={n.phone}
+                                  onChange={(e) =>
+                                    setForm((f) => ({
+                                      ...f,
+                                      whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
+                                        j === i ? { ...m, phone: e.target.value } : m,
+                                      ),
+                                    }))
+                                  }
+                                  placeholder="+911234567891"
+                                  inputMode="tel"
+                                  aria-label={`Extra WhatsApp number ${i + 1}`}
+                                  className="sm:max-w-44"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <SearchableSelect
+                                    value={numberKey}
+                                    options={templateOptions}
+                                    onChange={(v) => {
+                                      const parsed = decodeTemplateKey(v);
+                                      setForm((f) => ({
+                                        ...f,
+                                        whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
+                                          j === i
+                                            ? {
+                                                ...m,
+                                                template_name: parsed ? parsed.name : "",
+                                                template_language: parsed
+                                                  ? parsed.language
+                                                  : "en_US",
+                                              }
+                                            : m,
+                                        ),
+                                      }));
+                                    }}
+                                    placeholder="Table default template"
+                                    searchPlaceholder="Search templates…"
+                                    emptyText={
+                                      templatesError
+                                        ? "Could not load templates."
+                                        : "No approved templates found."
+                                    }
+                                    ariaLabel={`Template for extra WhatsApp number ${i + 1}`}
+                                    disabled={readOnly}
+                                  />
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  aria-label={`Remove extra WhatsApp number ${i + 1}`}
+                                  onClick={() =>
+                                    setForm((f) => ({
+                                      ...f,
+                                      whatsapp_numbers: f.whatsapp_numbers.filter((_, j) => j !== i),
+                                    }))
+                                  }
+                                >
+                                  <Trash2 className="size-4" aria-hidden />
+                                </Button>
+                              </div>
+                            );
+                          })}
+                          {form.whatsapp_numbers.length < MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="self-start"
+                              onClick={() =>
+                                setForm((f) => ({
+                                  ...f,
+                                  whatsapp_numbers: [
+                                    ...f.whatsapp_numbers,
+                                    { phone: "", template_name: "", template_language: "en_US" },
+                                  ],
+                                }))
+                              }
+                            >
+                              <Plus className="mr-1.5 size-4" aria-hidden /> Add WhatsApp number
+                            </Button>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              Maximum {MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} numbers per assignee.
+                            </p>
+                          )}
                         </div>
                       </div>
                       {form.user_id && (

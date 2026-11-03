@@ -31,6 +31,7 @@ import {
   AlertTriangle,
   Loader2,
   Plus,
+  ShieldCheck,
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
@@ -79,6 +80,10 @@ import {
 } from '@/components/presence/presence-dot';
 import { AddUserDialog } from './add-user-dialog';
 import {
+  AgentPermissionsDialog,
+  type AgentInboxPermissions,
+} from './agent-permissions-dialog';
+import {
   RecordingConfigDialog,
   type RecordingConfigPatch,
 } from './recording-config-dialog';
@@ -95,6 +100,9 @@ interface Member {
   whatsapp_recording_source: string;
   phone_recording_source: string;
   phone_recording_number: string | null;
+  /** Inbox grants (owner view only; absent = no grants). */
+  can_manage_assignments?: boolean;
+  can_view_all?: boolean;
 }
 
 // Readable display for the stored normalized digits. Indian
@@ -150,6 +158,7 @@ export function TeamMembersView() {
   const [addUserOpen, setAddUserOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
   const [configMember, setConfigMember] = useState<Member | null>(null);
+  const [permMember, setPermMember] = useState<Member | null>(null);
   const [pendingMemberAction, setPendingMemberAction] = useState<string | null>(
     null,
   );
@@ -234,6 +243,22 @@ export function TeamMembersView() {
   ) {
     setMembers((prev) =>
       prev.map((m) => (m.user_id === userId ? { ...m, ...patch } : m)),
+    );
+  }
+
+  // Permission edits merge the same way so the row badges update
+  // without a full reload.
+  function handlePermSaved(userId: string, flags: AgentInboxPermissions) {
+    setMembers((prev) =>
+      prev.map((m) =>
+        m.user_id === userId
+          ? {
+              ...m,
+              can_manage_assignments: flags.can_manage_assignments,
+              can_view_all: flags.can_view_all,
+            }
+          : m,
+      ),
     );
   }
 
@@ -391,6 +416,18 @@ export function TeamMembersView() {
                             You
                           </Badge>
                         )}
+                        {/* Active Inbox grants (owner view only — the
+                            flags only arrive on the owner response). */}
+                        {member.role === 'agent' && member.can_manage_assignments ? (
+                          <Badge className="bg-primary/10 text-primary border-primary/30 text-[10px] uppercase tracking-wide">
+                            Can assign
+                          </Badge>
+                        ) : null}
+                        {member.role === 'agent' && member.can_view_all ? (
+                          <Badge className="bg-primary/10 text-primary border-primary/30 text-[10px] uppercase tracking-wide">
+                            Views all
+                          </Badge>
+                        ) : null}
                       </div>
                       {member.email && (
                         <p className="truncate text-xs text-muted-foreground">
@@ -482,6 +519,23 @@ export function TeamMembersView() {
                         Configure
                       </Button>
                     ) : null}
+                    {/* Inbox access (owner-only, agents only — owners
+                        and admins already have full access by role, and
+                        viewers keep read-only. Opens the permissions
+                        dialog; distinct from CallVault Configure above. */}
+                    {isOwner && member.role === 'agent' && !isSelf ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isBusy}
+                        onClick={() => setPermMember(member)}
+                        aria-label={`Inbox permissions for ${member.full_name || 'agent'}`}
+                        title="Inbox permissions"
+                      >
+                        <ShieldCheck className="size-4" />
+                        Access
+                      </Button>
+                    ) : null}
 
                     {/* Remove. Admin+ only; never on the owner row;
                         never on yourself. Pre-polish styling was
@@ -513,6 +567,12 @@ export function TeamMembersView() {
         open={addUserOpen}
         onOpenChange={setAddUserOpen}
         onCreated={loadEverything}
+      />
+
+      <AgentPermissionsDialog
+        member={permMember}
+        onClose={() => setPermMember(null)}
+        onSaved={handlePermSaved}
       />
 
       <RecordingConfigDialog

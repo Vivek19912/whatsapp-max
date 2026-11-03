@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireAuthenticatedUser } from '@/lib/auth/account'
+import { canViewConversation, resolveViewerCaps } from '@/lib/inbox/assignment-access'
 import { getMediaUrl, downloadMediaStream } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { fetchArchivedInboundMedia } from '@/lib/whatsapp/inbound-media'
@@ -66,15 +67,52 @@ export async function GET(
     // not their personal (non-existent) row.
     const { data: profile } = await supabase
       .from('profiles')
-      .select('account_id')
+      .select('account_id, account_role')
       .eq('user_id', userId)
       .maybeSingle()
     const accountId = profile?.account_id as string | undefined
+    const callerRole = (profile as { account_role?: string } | null)?.account_role ?? null
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
         { status: 403 },
       )
+    }
+
+    // Assignment gate: an inbound media URL belongs to a message in a
+    // thread. Agents may only fetch media from threads assigned to
+    // them (owner/admin: anywhere; viewers: legacy read parity). The
+    // media row is located by its exact stored proxy URL. No row
+    // match (e.g. template header art) keeps the legacy behavior.
+    // A row whose thread is outside this account 404s instead of
+    // falling through, so a known media id can never cross accounts.
+    {
+      const { data: msg } = await supabase
+        .from('messages')
+        .select('conversation_id')
+        .eq('media_url', `/api/whatsapp/media/${mediaId}`)
+        .limit(1)
+        .maybeSingle()
+      const threadId = (msg as { conversation_id: string } | null)?.conversation_id
+      if (threadId) {
+        const { data: conv } = await supabase
+          .from('conversations')
+          .select('assigned_agent_id')
+          .eq('id', threadId)
+          .eq('account_id', accountId)
+          .maybeSingle()
+        if (!conv) {
+          return NextResponse.json({ error: 'Media not found' }, { status: 404 })
+        }
+        // View-all agents pass via caps; everyone else follows the
+        // base assignment rule. Caps resolve server-side from the
+        // permissions table (never from client claims).
+        const caps = await resolveViewerCaps(supabase, accountId, userId, callerRole)
+        const assigned = (conv as { assigned_agent_id: string | null }).assigned_agent_id ?? null
+        if (!canViewConversation({ role: callerRole, userId }, assigned, caps)) {
+          return NextResponse.json({ error: 'Media not found' }, { status: 404 })
+        }
+      }
     }
 
     // Storage-first: inbound bytes archived at webhook time live in the

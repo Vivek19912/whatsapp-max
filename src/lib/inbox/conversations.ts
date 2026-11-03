@@ -54,6 +54,88 @@ export function isSourceFilterBlocked(
 }
 
 /**
+ * A Meta Instant Form available in the Inbox Form filter.
+ * `id` is the raw Meta form id (submissions.form_id); `name` is the
+ * display label (submissions.form_name, falling back to the id).
+ */
+export interface MetaFormOption {
+  id: string;
+  name: string;
+}
+
+/**
+ * Whether a conversation matches the Inbox read-status filter.
+ * "all" is a no-op; "unread" keeps only threads with unread messages.
+ */
+export function matchesStatusFilter(
+  conversation: Pick<Conversation, "unread_count">,
+  filter: "all" | "unread"
+): boolean {
+  if (filter === "all") return true;
+  return (conversation.unread_count ?? 0) > 0;
+}
+
+/**
+ * Whether a conversation matches the Team filter.
+ * Empty `memberIds` is a no-op (All team members). Otherwise the
+ * thread matches when its assignee is selected; unassigned threads
+ * match only via the explicit "unassigned" sentinel (same value the
+ * sidebar uses for the empty state).
+ */
+export function matchesTeamFilter(
+  conversation: Pick<Conversation, "assigned_agent_id">,
+  memberIds: readonly string[]
+): boolean {
+  if (memberIds.length === 0) return true;
+  return memberIds.includes(conversation.assigned_agent_id ?? "unassigned");
+}
+
+/**
+ * Build the Form dropdown options from raw submission rows.
+ * Pure and unit-testable: the component only fetches + passes rows.
+ * - Skips rows without a form id (unfilterable server-side, since
+ *   `s.form_id = p_form_id` never matches NULL).
+ * - Dedupes by form id, keeping the first non-blank form_name seen.
+ * - Falls back to the raw id when the name is blank/missing.
+ * - Returns options sorted by display name (stable dropdown order
+ *   regardless of fetch order or pagination).
+ */
+export function buildFormOptions(
+  rows: ReadonlyArray<{ form_id: string | null; form_name: string | null }>
+): MetaFormOption[] {
+  const byId = new Map<string, string>();
+  for (const row of rows) {
+    if (!row.form_id || byId.has(row.form_id)) continue;
+    const label = (row.form_name ?? "").trim();
+    byId.set(row.form_id, label || row.form_id);
+  }
+  return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+}
+
+/**
+ * Whether a conversation matches the selected Meta Instant Form.
+ *
+ * `formId` null (All Forms) always matches. Otherwise the
+ * conversation's contact must have at least one `processed`
+ * submission carrying that exact form id. `submissionForms` maps
+ * contact id → the set of form ids from its processed submissions
+ * (loaded in ONE batched query, never N+1). Account scoping rides
+ * on both inputs: the map is built from RLS-scoped rows for this
+ * account's contacts only, and the server enforces the same via
+ * `s.account_id = v_account_id` in the RPC.
+ */
+export function matchesFormFilter(
+  conversation: Pick<Conversation, "contact_id">,
+  formId: string | null,
+  submissionForms: ReadonlyMap<string, ReadonlySet<string>>
+): boolean {
+  if (formId === null) return true;
+  return submissionForms.get(conversation.contact_id)?.has(formId) ?? false;
+}
+
+/**
  * Whether a conversation matches the Lead Source filter.
  *
  * Classification rules (identical to the server-side `p_source` facet):
@@ -62,11 +144,10 @@ export function isSourceFilterBlocked(
  *   `processed` Meta Instant Form submission. The caller passes the set
  *   of contact ids with such submissions (loaded in ONE batched query,
  *   never N+1); repeat submissions never duplicate the thread.
- * - "ctwa": the contact carries valid CTWA attribution (either field).
+ * - "ctwa": the contact carries valid CTWA attribution (either field)
+ *   AND has no processed Instant Form submission. Instant Form takes
+ *   precedence: a dual-source contact is a Meta lead, not a CTWA lead.
  * - "other": NEITHER signal.
- *
- * Overlap is intentional: a conversation with both signals matches BOTH
- * the "instant_form" and "ctwa" filters — no precedence is forced.
  */
 export function matchesLeadSource(
   conversation: Pick<Conversation, "contact_id"> & {
@@ -79,7 +160,10 @@ export function matchesLeadSource(
   const hasSubmission = submissionContactIds.has(conversation.contact_id);
   const hasCtwa = hasValidCtwaAttribution(conversation.contact ?? null);
   if (source === "instant_form") return hasSubmission;
-  if (source === "ctwa") return hasCtwa;
+  // Instant Form precedence: a contact with a processed submission is
+  // excluded even when CTWA fields are populated. Metadata is
+  // preserved — only bucket membership changes.
+  if (source === "ctwa") return hasCtwa && !hasSubmission;
   // "other"
   return !hasSubmission && !hasCtwa;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { contactFlowRunsQuery, pickContactFlow, pickContactFlowRun, type ContactFlowRun } from "./contact-flow";
+import { contactFlowRunsQuery, isMetaLeadFlowRun, pickContactFlow, pickContactFlowRun, type ContactFlowRun } from "./contact-flow";
 
 // ------------------------------------------------------------
 // Fixtures
@@ -112,6 +112,55 @@ describe("pickContactFlowRun", () => {
   });
 });
 
+describe("isMetaLeadFlowRun", () => {
+  const metaFlow = (name: string) => ({
+    id: "vf-1",
+    name,
+    kind: "meta_lead_ads",
+  });
+
+  it("is true for a Meta virtual-flow run (object shape)", () => {
+    expect(
+      isMetaLeadFlowRun(
+        makeRun({
+          status: "completed",
+          flow: metaFlow("Meta Lead Ads · Kashmir Couple Lead Form - 29 Oct"),
+        })
+      )
+    ).toBe(true);
+  });
+
+  it("is true for the PostgREST array shape", () => {
+    expect(
+      isMetaLeadFlowRun(
+        makeRun({
+          flow: [metaFlow("Meta Lead Ads · Kashmir Couple Lead Form - 29 Oct")],
+        })
+      )
+    ).toBe(true);
+  });
+
+  it("is false for regular Flow Table runs", () => {
+    expect(isMetaLeadFlowRun(makeRun())).toBe(false);
+    expect(
+      isMetaLeadFlowRun(
+        makeRun({
+          flow: { id: "f2", name: "Bali Automation", kind: "whatsapp_flow" },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it("is false when kind is absent, flow is missing, or run is null", () => {
+    expect(isMetaLeadFlowRun(makeRun())).toBe(false);
+    expect(isMetaLeadFlowRun(makeRun({ flow: null }))).toBe(false);
+    expect(isMetaLeadFlowRun(null)).toBe(false);
+    expect(
+      isMetaLeadFlowRun(makeRun({ flow: [{ id: "f3", name: "X" }] }))
+    ).toBe(false);
+  });
+});
+
 // ------------------------------------------------------------
 // contactFlowRunsQuery — single bounded, account-scoped query
 // ------------------------------------------------------------
@@ -168,7 +217,7 @@ describe("contactFlowRunsQuery", () => {
     expect(queries).toHaveLength(1);
     const q = queries[0];
     expect(q.table).toBe("flow_runs");
-    expect(q.selectedCols).toBe("id, status, started_at, flow:flows(id, name)");
+    expect(q.selectedCols).toBe("id, status, started_at, flow:flows(id, name, kind)");
     expect(q.filters).toContain("eq:contact_id=contact-1");
     expect(q.orderArgs).toEqual(["started_at", { ascending: false }]);
     expect(q.limitArg).toBe(5);

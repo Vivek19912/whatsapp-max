@@ -158,6 +158,8 @@ export function buildSearchKey(parts: {
   from: string | null;
   to: string | null;
   source: string;
+  /** Selected Meta form id (instant_form source only), or null. */
+  metaFormId: string | null;
 }): string {
   return JSON.stringify({
     q: parts.q,
@@ -169,6 +171,7 @@ export function buildSearchKey(parts: {
     from: parts.from,
     to: parts.to,
     source: parts.source,
+    metaFormId: parts.metaFormId,
   });
 }
 
@@ -183,6 +186,12 @@ export interface ParsedSearchRequest {
   to: string | null;
   /** Lead Source facet; always a validated InboxLeadSource. */
   source: InboxLeadSource;
+  /**
+   * Meta Instant Form id facet (meaningful only with
+   * source=instant_form). Raw Meta string id — validated as a
+   * non-blank string, never trusted as a UUID.
+   */
+  metaFormId: string | null;
   cursor: SearchCursor | null;
   limit: number;
 }
@@ -242,6 +251,12 @@ export function parseSearchRequestParams(
     throw new SearchParamsError(`Invalid source: ${source}`);
   }
 
+  // Meta form facet. Raw Meta string id (NOT a UUID — never validated
+  // as one). Blank means "All Forms". Enforced server-side only in
+  // combination with source=instant_form; anything else ignores it.
+  const metaFormRaw = (params.get("meta_form") ?? "").trim();
+  const metaFormId = metaFormRaw ? metaFormRaw.slice(0, 128) : null;
+
   const parseDate = (v: string | null, name: string): string | null => {
     if (v === null || v === "") return null;
     const t = Date.parse(v);
@@ -267,6 +282,7 @@ export function parseSearchRequestParams(
     from,
     to,
     source: source as InboxLeadSource,
+    metaFormId,
     cursor: decodeSearchCursor(params.get("cursor")),
     limit,
   };

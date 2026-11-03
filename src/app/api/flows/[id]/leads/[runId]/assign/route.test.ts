@@ -36,6 +36,7 @@ const h = vi.hoisted(() => ({
   configs: [] as Array<Record<string, unknown>>,
   assignees: [] as Array<Record<string, unknown>>,
   submissions: [] as Array<Record<string, unknown>>,
+  perms: [] as Array<Record<string, unknown>>,
   handoffCalls: [] as Array<Record<string, unknown>>,
   reconcileCalls: [] as Array<Record<string, unknown>>,
   reconcileResult: { cancelled: 0, sent: 0, sending: 0 } as Record<string, unknown>,
@@ -145,6 +146,7 @@ function fakeSupabase() {
       case "lead_assignment_table_configs": return h.configs;
       case "lead_assignment_table_assignees": return h.assignees;
       case "meta_lead_submissions": return h.submissions;
+      case "agent_inbox_permissions": return h.perms;
       case "lead_assignment_rules": return h.rules;
       case "lead_assignment_rule_tables": return h.ruleTables;
       case "lead_assignment_rule_members": return h.ruleMembers;
@@ -327,6 +329,7 @@ beforeEach(() => {
   h.configs = [];
   h.assignees = [];
   h.submissions = [];
+  h.perms = [];
   h.handoffCalls = [];
   h.reconcileCalls = [];
   h.reconcileResult = { cancelled: 0, sent: 0, sending: 0 };
@@ -356,13 +359,30 @@ describe("POST assign (manual)", () => {
     });
   });
 
-  it("rejects agents: reassignment is admin-only", async () => {
+  it("rejects agents without the Manage Assignments grant", async () => {
     h.role = "agent";
     h.userId = "agent-1";
     const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
     expect(res.status).toBe(403);
     expect(h.values).toHaveLength(0);
     expect(h.events).toHaveLength(0);
+  });
+
+  it("lets agents with the Manage Assignments grant assign and clear", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    h.perms = [
+      { account_id: "acct-1", user_id: "agent-1", can_manage_assignments: true, can_view_all: false },
+    ];
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.values).toMatchObject([{ value_text: "u-mohan" }]);
+    // A grant for a *different* account does not transfer.
+    h.perms = [
+      { account_id: "other-acct", user_id: "agent-1", can_manage_assignments: true, can_view_all: true },
+    ];
+    const cross = await assignPOST(assignBody({ user_id: "u-sohan" }), ASSIGN_PARAMS);
+    expect(cross.status).toBe(403);
   });
 
   it("clears on null and rejects strangers, Flow Tables, and viewers", async () => {

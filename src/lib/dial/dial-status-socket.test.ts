@@ -4,6 +4,7 @@ import {
   __resetDialStatusSocketForTest,
   subscribeDialStatus,
 } from './dial-status-socket';
+import type { DialSocketSupabase } from './dial-status-socket';
 
 vi.mock('@/lib/supabase/client', () => ({
   createClient: () => ({
@@ -132,6 +133,145 @@ describe('browser dial status socket (no polling)', () => {
         requests: [{ id: 'req-1', status: 'delivered', expires_at: null, created_at: 'x' }],
       });
       expect(seen.at(-1)).toMatchObject({ requestId: 'req-1', status: 'delivered' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth-recovery tests (MOCKED supabase clients — no network, no live server).
+// The shared-client mock above only stubs getSession; these tests inject
+// per-test clients via the subscribe() options seam to cover the
+// getSession→getUser fallback and the onAuthStateChange lifecycle.
+// ---------------------------------------------------------------------------
+
+function stubBrowserGlobals(): void {
+  vi.stubGlobal('WebSocket', FakeSocket as unknown as typeof WebSocket);
+  vi.stubGlobal('window', {
+    location: { protocol: 'https:', host: 'app.test', hostname: 'app.test' },
+  } as unknown as Window & typeof globalThis);
+}
+
+describe('dial status socket auth recovery (mocked)', () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    stubBrowserGlobals();
+    __resetDialStatusSocketForTest();
+  });
+
+  afterEach(() => {
+    __resetDialStatusSocketForTest();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('falls back to a bounded getUser() refresh when getSession() is empty', async () => {
+    let refreshed = false;
+    const getUser = vi.fn(async () => {
+      refreshed = true;
+      return { data: { user: { id: 'u-1' } } };
+    });
+    const client: DialSocketSupabase = {
+      auth: {
+        getSession: async () =>
+          refreshed
+            ? { data: { session: { access_token: 'fresh-token' } } }
+            : { data: { session: null } },
+        getUser,
+      },
+    };
+    subscribeDialStatus('req-1', () => {}, { supabase: client });
+    await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(1));
+    expect(getUser).toHaveBeenCalledTimes(1);
+    expect(FakeSocket.instances[0]!.url).toContain('access_token=fresh-token');
+  });
+
+  it('reconnects with the rotated token on TOKEN_REFRESHED', async () => {
+    let currentToken = 'token-a';
+    const authCbs: Array<(event: string) => void> = [];
+    const client: DialSocketSupabase = {
+      auth: {
+        getSession: async () => ({
+          data: { session: { access_token: currentToken } },
+        }),
+        onAuthStateChange: (cb) => {
+          authCbs.push(cb);
+          return { data: { subscription: { unsubscribe: () => {} } } };
+        },
+      },
+    };
+    subscribeDialStatus('req-1', () => {}, { supabase: client });
+    await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(1));
+    expect(FakeSocket.instances[0]!.url).toContain('access_token=token-a');
+
+    currentToken = 'token-b';
+    authCbs.forEach((cb) => cb('TOKEN_REFRESHED'));
+    await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(2));
+    expect(FakeSocket.instances[0]!.closed).toBe(true);
+    expect(FakeSocket.instances[1]!.url).toContain('access_token=token-b');
+  });
+
+  it('closes and stops reconnecting on SIGNED_OUT', async () => {
+    vi.useFakeTimers();
+    try {
+      const authCbs: Array<(event: string) => void> = [];
+      const client: DialSocketSupabase = {
+        auth: {
+          getSession: async () => ({
+            data: { session: { access_token: 'token-a' } },
+          }),
+          onAuthStateChange: (cb) => {
+            authCbs.push(cb);
+            return { data: { subscription: { unsubscribe: () => {} } } };
+          },
+        },
+      };
+      subscribeDialStatus('req-1', () => {}, { supabase: client });
+      await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(1));
+
+      authCbs.forEach((cb) => cb('SIGNED_OUT'));
+      expect(FakeSocket.instances[0]!.closed).toBe(true);
+      // Parked: no retry loop against the dead session.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(FakeSocket.instances.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-verifies the token (one getUser check) before backing off on 4401', async () => {
+    vi.useFakeTimers();
+    try {
+      const getUser = vi.fn(async () => ({ data: { user: { id: 'u-1' } } }));
+      let reads = 0;
+      const client: DialSocketSupabase = {
+        auth: {
+          getSession: async () => {
+            reads += 1;
+            // Stale local session keeps returning the rejected token;
+            // the getUser() round-trip is what lets rotation recover.
+            return { data: { session: { access_token: 'stale-token' } } };
+          },
+          getUser,
+        },
+      };
+      subscribeDialStatus('req-1', () => {}, { supabase: client });
+      await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(1));
+      const readsAfterConnect = reads;
+
+      const sock = FakeSocket.instances[0]!;
+      (sock.onclose as unknown as ((e: { code: number }) => void) | null)?.({
+        code: 4401,
+      });
+      // One extra verify, then the normal 1s backoff lane (no hot retry).
+      await vi.waitFor(() =>
+        expect(reads).toBeGreaterThan(readsAfterConnect),
+      );
+      expect(getUser).toHaveBeenCalledTimes(1);
+      expect(FakeSocket.instances.length).toBe(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(FakeSocket.instances.length).toBe(2));
     } finally {
       vi.useRealTimers();
     }

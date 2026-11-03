@@ -895,6 +895,26 @@ async function processMessage(
   if (!convResult) return
   const conversation = convResult.conversation
 
+  // Adopt-on-thread-open: a lead assigned in the Workspace (manual or
+  // auto-assign at ingestion) whose thread only opens now must show
+  // the same owner in the Inbox. Only on creation, only a real member
+  // UUID, best-effort — never fails message processing.
+  if (convResult.created) {
+    try {
+      const { adoptContactAssignmentForConversation } = await import(
+        '@/lib/inbox/assignment-sync'
+      )
+      await adoptContactAssignmentForConversation(
+        supabaseAdmin(),
+        accountId,
+        contactRecord.id,
+        conversation.id
+      )
+    } catch {
+      // Adopt-only; the thread already exists.
+    }
+  }
+
   // Auto-assign. For an unassigned conversation this picks an agent; for
   // one that's already assigned the engine only returns a new agent when
   // reassign-on-offline is enabled and the current owner has gone offline.

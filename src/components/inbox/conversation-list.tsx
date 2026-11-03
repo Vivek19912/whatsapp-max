@@ -10,9 +10,14 @@ import {
   isSourceFilterBlocked,
   matchesContactFilters,
   matchesConversationDateFilter,
+  matchesFormFilter,
   matchesLeadSource,
+  matchesStatusFilter,
+  matchesTeamFilter,
   normalizeConversations,
   type LeadSourceFilter,
+  type MetaFormOption,
+  buildFormOptions,
 } from "@/lib/inbox/conversations";
 import {
   addPin,
@@ -22,11 +27,14 @@ import {
   pinnedAtMapFromRecords,
   removePin,
 } from "@/lib/inbox/pins";
+import { NO_INBOX_CAPS, type InboxViewerCaps } from "@/lib/inbox/assignment-access";
 import {
   filterHidden,
   getHiddenConversationIds,
 } from "@/lib/inbox/hidden";
 import { cn } from "@/lib/utils";
+import { AssignDialog } from "./assign-dialog";
+import { useAuth } from "@/hooks/use-auth";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   buildSearchKey,
@@ -44,7 +52,7 @@ import type {
   Conversation,
   Tag,
 } from "@/types";
-import { Search, ChevronDown, Users, X, Pin, Loader2, Workflow } from "lucide-react";
+import { Search, ChevronDown, Users, UserCog, X, Pin, Loader2, Workflow } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
 import { Input } from "@/components/ui/input";
@@ -80,6 +88,19 @@ interface ConversationListProps {
    * for egress). Optional so existing callers keep working.
    */
   resyncToken?: number;
+  /**
+   * Called after the cross-thread Assign dialog changes an owner, so
+   * the parent list state converges immediately (RLS already replays
+   * the same value on refetch/realtime — this just skips the wait).
+   */
+  onAssignChange?: (conversationId: string, agentId: string | null) => void;
+  /**
+   * The viewer's granted Inbox permissions (fetched once by the
+   * parent). Agents with View All see the full team roster and every
+   * matching thread; agents with Manage Assignments get the
+   * cross-thread Assign entry point. Defaults deny both.
+   */
+  viewerCaps?: InboxViewerCaps;
 }
 
 type InboxFilter = "all" | "unread";
@@ -107,6 +128,8 @@ export function ConversationList({
   conversations,
   onConversationsLoaded,
   resyncToken = 0,
+  onAssignChange,
+  viewerCaps = NO_INBOX_CAPS,
 }: ConversationListProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<InboxFilter>("all");
@@ -150,6 +173,16 @@ export function ConversationList({
     string | null
   >(null);
   const [submissionLinksRetry, setSubmissionLinksRetry] = useState(0);
+  // Form filter (visible only when Lead Source is Instant Form).
+  // `submissionForms` maps contact id -> the set of Meta form ids
+  // from its processed submissions; `availableForms` is the distinct
+  // form list for the dropdown, drawn from this account's actual
+  // submission records (never hardcoded, never cross-account).
+  const [selectedFormId, setSelectedFormId] = useState<string | null>(null);
+  const [submissionForms, setSubmissionForms] = useState<
+    Map<string, Set<string>>
+  >(new Map());
+  const [availableForms, setAvailableForms] = useState<MetaFormOption[]>([]);
 
   // Server-side search state — deliberately separate from the normal
   // `conversations` list so entering/leaving search, paging, or a
@@ -331,14 +364,17 @@ export function ConversationList({
 
   // Processed Meta Instant Form submissions for the loaded contacts —
   // the client-side half of the Lead Source filter. One batched query
-  // per conversation list (chunked .in(), never per-row). Readiness is
-  // explicit: a new lookup starts not-ready; only a success (even with
-  // zero rows) marks it ready, and a failure retains an error state
-  // that is never confused with an empty result. The cleanup cancels
-  // the superseded run, so retries and rapid list changes cannot apply
-  // stale results (no duplicate application). An account switch yields
-  // a new conversations array, which restarts the lookup and drops
-  // the previous account's set via the not-ready gate below.
+  // per conversation list (chunked .in(), never per-row), plus one
+  // account-wide distinct-form scan for the Form dropdown (paginated,
+  // single-shot — never per conversation). Readiness is explicit: a
+  // new lookup starts not-ready; only a success (even with zero rows)
+  // marks it ready, and a failure retains an error state that is never
+  // confused with an empty result. The cleanup cancels the superseded
+  // run, so retries and rapid list changes cannot apply stale results
+  // (no duplicate application). An account switch yields a new
+  // conversations array, which restarts the lookup and drops the
+  // previous account's data via the not-ready gate below. Both queries
+  // ride RLS, so forms and links can never leak across accounts.
   useEffect(() => {
     const supabase = createClient();
     let cancelled = false;
@@ -351,27 +387,60 @@ export function ConversationList({
       if (ids.length === 0) {
         if (!cancelled) {
           setSubmissionContactIds(new Set());
+          setSubmissionForms(new Map());
           setSubmissionLinksReady(true);
         }
         return;
       }
       const found = new Set<string>();
+      const formsByContact = new Map<string, Set<string>>();
       try {
         for (let i = 0; i < ids.length; i += 500) {
           const { data, error } = await supabase
             .from("meta_lead_submissions")
-            .select("contact_id")
+            .select("contact_id, form_id")
             .eq("status", "processed")
             .in("contact_id", ids.slice(i, i + 500));
           if (error || cancelled) return;
           for (const row of (data ?? []) as {
             contact_id: string | null;
+            form_id: string | null;
           }[]) {
-            if (row.contact_id) found.add(row.contact_id);
+            if (!row.contact_id) continue;
+            found.add(row.contact_id);
+            if (row.form_id) {
+              let set = formsByContact.get(row.contact_id);
+              if (!set) {
+                set = new Set<string>();
+                formsByContact.set(row.contact_id, set);
+              }
+              set.add(row.form_id);
+            }
           }
+        }
+        if (cancelled) return;
+        // Distinct forms with actual records in this account (RLS
+        // scoped) — the Form dropdown options. Small two-column rows,
+        // paginated to completion; deduped/sorted by buildFormOptions.
+        const allFormRows: Array<{ form_id: string | null; form_name: string | null }> = [];
+        for (let offset = 0; ; offset += 1000) {
+          const { data, error } = await supabase
+            .from("meta_lead_submissions")
+            .select("form_id, form_name")
+            .order("form_id", { ascending: true })
+            .range(offset, offset + 999);
+          if (error || cancelled) return;
+          const rows = (data ?? []) as {
+            form_id: string | null;
+            form_name: string | null;
+          }[];
+          allFormRows.push(...rows);
+          if (rows.length < 1000) break;
         }
         if (!cancelled) {
           setSubmissionContactIds(found);
+          setSubmissionForms(formsByContact);
+          setAvailableForms(buildFormOptions(allFormRows));
           setSubmissionLinksReady(true);
         }
       } catch (err) {
@@ -388,7 +457,7 @@ export function ConversationList({
     return () => {
       cancelled = true;
     };
-  }, [conversations, submissionLinksRetry]);
+  }, [conversations, resyncToken, submissionLinksRetry]);
 
   // Server-side search: debounced query + every active filter become
   // ONE request per settled state (Contacts-style sequence guard, so
@@ -413,6 +482,7 @@ export function ConversationList({
         from: searchDateRange?.from.toISOString() ?? null,
         to: searchDateRange?.to.toISOString() ?? null,
         source: selectedSource ?? "all",
+        metaFormId: selectedSource === "instant_form" ? selectedFormId : null,
       })
     : "";
 
@@ -439,6 +509,9 @@ export function ConversationList({
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
     if (selectedSource) params.set("source", selectedSource);
+    if (selectedSource === "instant_form" && selectedFormId) {
+      params.set("meta_form", selectedFormId);
+    }
     if (searchDateRange) {
       params.set("from", searchDateRange.from.toISOString());
       params.set("to", searchDateRange.to.toISOString());
@@ -507,6 +580,52 @@ export function ConversationList({
     return m;
   }, [tags]);
 
+  // Assignee names for the conversation rows — same roster as the
+  // Team filter, so row labels can never disagree with it. Missing
+  // ids (removed member) fall back to null = unassigned row state.
+  const assigneeNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const member of members) {
+      m.set(member.user_id, member.full_name || "Unnamed member");
+    }
+    return m;
+  }, [members]);
+  const assigneeNameFor = useCallback(
+    (c: Conversation) =>
+      c.assigned_agent_id
+        ? (assigneeNameById.get(c.assigned_agent_id) ?? null)
+        : null,
+    [assigneeNameById]
+  );
+
+  // Agents see only their own threads (RLS), so the Team filter offers
+  // no other options: just themselves, no Unassigned checkbox (always
+  // empty for them) — UNLESS they hold View All, which restores the
+  // full roster. Owners/admins/viewers keep the full roster.
+  const { user: authUser, accountRole } = useAuth();
+  const canViewAllThreads =
+    accountRole === "owner" ||
+    accountRole === "admin" ||
+    accountRole === "viewer" ||
+    (accountRole === "agent" && viewerCaps.canViewAll);
+  const teamOptions =
+    accountRole === "agent" && !viewerCaps.canViewAll
+      ? members.filter((m) => m.user_id === authUser?.id)
+      : members;
+  const showUnassignedOption =
+    accountRole !== "agent" || viewerCaps.canViewAll;
+
+  // Cross-thread assignment entry point: owners/admins always;
+  // agents only with the Manage Assignments grant (their own threads
+  // are assignable from the thread header regardless). Opens the
+  // Assign dialog, which lists threads by name/assignee only — no
+  // message content ever crosses the visibility boundary.
+  const canAssignAnywhere =
+    accountRole === "owner" ||
+    accountRole === "admin" ||
+    (accountRole === "agent" && viewerCaps.canManageAssignments);
+  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
+
   // Whether the normal list may apply the Instant Form / Other filter
   // right now (see isSourceFilterBlocked). Server-side search never
   // waits on the client lookup (its EXISTS runs in Postgres); ctwa/all
@@ -540,7 +659,7 @@ export function ConversationList({
     }
 
     if (filter === "unread") {
-      result = result.filter((c) => c.unread_count > 0);
+      result = result.filter((c) => matchesStatusFilter(c, filter));
     }
 
     // Contact-based filters (tags via OR logic, exact company match,
@@ -566,10 +685,24 @@ export function ConversationList({
       );
     }
 
-    if (selectedMemberIds.length > 0) {
+    // Meta Form filter (Instant Form source only — the Form dropdown
+    // replaces Flow there, and changing source resets the pick). A
+    // specific form narrows to conversations whose contact has a
+    // processed submission for that exact form; All Forms (null)
+    // disables it. Gated on the same lookup readiness as the source
+    // filter above, so no silent wrong results while loading.
+    if (
+      selectedSource === "instant_form" &&
+      selectedFormId !== null &&
+      !sourceLinksBlocked
+    ) {
       result = result.filter((c) =>
-        selectedMemberIds.includes(c.assigned_agent_id ?? "unassigned")
+        matchesFormFilter(c, selectedFormId, submissionForms)
       );
+    }
+
+    if (selectedMemberIds.length > 0) {
+      result = result.filter((c) => matchesTeamFilter(c, selectedMemberIds));
     }
 
     // NOTE: no client-side text search here — all text matching runs
@@ -590,7 +723,9 @@ export function ConversationList({
     selectedFlowId,
     selectedMemberIds,
     selectedSource,
+    selectedFormId,
     submissionContactIds,
+    submissionForms,
     sourceLinksBlocked,
   ]);
 
@@ -672,6 +807,9 @@ export function ConversationList({
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
     if (selectedSource) params.set("source", selectedSource);
+    if (selectedSource === "instant_form" && selectedFormId) {
+      params.set("meta_form", selectedFormId);
+    }
     if (searchDateRange) {
       params.set("from", searchDateRange.from.toISOString());
       params.set("to", searchDateRange.to.toISOString());
@@ -730,6 +868,7 @@ export function ConversationList({
     selectedFlowId,
     selectedMemberIds,
     selectedSource,
+    selectedFormId,
     searchDateRange,
   ]);
 
@@ -820,10 +959,22 @@ export function ConversationList({
     );
   }, []);
 
+  // Lead Source selection always resets the dependent Form/Flow picks:
+  // the Flow list is meaningless under Instant Form (and hidden), and
+  // a Form pick is meaningless under any other source. Resetting both
+  // keeps stale, incompatible selections from silently narrowing the
+  // list — and the search key changes, so no stale page survives.
+  const handleSourceSelect = useCallback((next: LeadSourceFilter) => {
+    setSelectedSource(next);
+    setSelectedFlowId(null);
+    setSelectedFormId(null);
+  }, []);
+
   const clearContactFilters = useCallback(() => {
     setSelectedTagIds([]);
     setSelectedCompany(null);
     setSelectedFlowId(null);
+    setSelectedFormId(null);
     setSelectedMemberIds([]);
     setSelectedSource(null);
   }, []);
@@ -833,7 +984,8 @@ export function ConversationList({
     selectedCompany !== null ||
     selectedFlowId != null ||
     selectedMemberIds.length > 0 ||
-    selectedSource !== null;
+    selectedSource !== null ||
+    selectedFormId !== null;
 
   const toggleMember = useCallback((id: string) => {
     setSelectedMemberIds((prev) =>
@@ -988,6 +1140,61 @@ export function ConversationList({
             </DropdownMenuContent>
           </DropdownMenu>
 
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={cn(
+                "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                selectedSource
+                  ? "text-primary"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span className="truncate">
+                {selectedSource
+                  ? LEAD_SOURCE_LABELS[selectedSource]
+                  : "Lead Source"}
+              </span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="border-border bg-popover max-h-64 w-56"
+            >
+              <DropdownMenuItem
+                onClick={() => handleSourceSelect(null)}
+                className={cn(
+                  "text-sm",
+                  selectedSource === null
+                    ? "text-primary"
+                    : "text-popover-foreground"
+                )}
+              >
+                All Sources
+              </DropdownMenuItem>
+              {(
+                LEAD_SOURCES.filter((v) => v !== "all") as Exclude<
+                  InboxLeadSource,
+                  "all"
+                >[]
+              ).map((value) => (
+                <DropdownMenuItem
+                  key={value}
+                  onClick={() => handleSourceSelect(value)}
+                  className={cn(
+                    "text-sm",
+                    selectedSource === value
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  <span className="truncate">
+                    {LEAD_SOURCE_LABELS[value]}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <div className="flex items-center gap-1">
             <Popover open={customDateOpen} onOpenChange={setCustomDateOpen}>
               <PopoverTrigger
@@ -1080,61 +1287,6 @@ export function ConversationList({
             </Popover>
           </div>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              className={cn(
-                "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
-                selectedSource
-                  ? "text-primary"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              <span className="truncate">
-                {selectedSource
-                  ? LEAD_SOURCE_LABELS[selectedSource]
-                  : "Lead Source"}
-              </span>
-              <ChevronDown className="h-3 w-3 shrink-0" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              className="border-border bg-popover max-h-64 w-56"
-            >
-              <DropdownMenuItem
-                onClick={() => setSelectedSource(null)}
-                className={cn(
-                  "text-sm",
-                  selectedSource === null
-                    ? "text-primary"
-                    : "text-popover-foreground"
-                )}
-              >
-                All Sources
-              </DropdownMenuItem>
-              {(
-                LEAD_SOURCES.filter((v) => v !== "all") as Exclude<
-                  InboxLeadSource,
-                  "all"
-                >[]
-              ).map((value) => (
-                <DropdownMenuItem
-                  key={value}
-                  onClick={() => setSelectedSource(value)}
-                  className={cn(
-                    "text-sm",
-                    selectedSource === value
-                      ? "text-primary"
-                      : "text-popover-foreground"
-                  )}
-                >
-                  <span className="truncate">
-                    {LEAD_SOURCE_LABELS[value]}
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
           {tags.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -1223,7 +1375,62 @@ export function ConversationList({
             </DropdownMenu>
           )}
 
-          {flows.length > 0 && (
+          {/* Instant Form source: the Form filter replaces Flow (WhatsApp
+              automation flows never apply to Meta leads). The options
+              come from this account's actual submission records —
+              never hardcoded, never cross-account — and refresh with
+              the list, so newly received forms appear automatically. */}
+          {selectedSource === "instant_form" ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className={cn(
+                  "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                  selectedFormId
+                    ? "text-primary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <span className="truncate">
+                  {selectedFormId
+                    ? (availableForms.find((f) => f.id === selectedFormId)
+                        ?.name ?? "Form")
+                    : "Form"}
+                </span>
+                <ChevronDown className="h-3 w-3 shrink-0" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                className="border-border bg-popover max-h-64 w-56"
+              >
+                <DropdownMenuItem
+                  onClick={() => setSelectedFormId(null)}
+                  className={cn(
+                    "text-sm",
+                    selectedFormId === null
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  All Forms
+                </DropdownMenuItem>
+                {availableForms.map((form) => (
+                  <DropdownMenuItem
+                    key={form.id}
+                    onClick={() => setSelectedFormId(form.id)}
+                    className={cn(
+                      "text-sm",
+                      selectedFormId === form.id
+                        ? "text-primary"
+                        : "text-popover-foreground"
+                    )}
+                  >
+                    <span className="truncate">{form.name}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            flows.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 className={cn(
@@ -1281,9 +1488,10 @@ export function ConversationList({
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
+            )
           )}
 
-          {members.length > 0 && (
+          {teamOptions.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 className={cn(
@@ -1306,14 +1514,16 @@ export function ConversationList({
                 align="start"
                 className="border-border bg-popover max-h-64 w-56"
               >
-                <DropdownMenuCheckboxItem
-                  checked={selectedMemberIds.includes("unassigned")}
-                  onCheckedChange={() => toggleMember("unassigned")}
-                  className="text-popover-foreground text-sm"
-                >
-                  Unassigned
-                </DropdownMenuCheckboxItem>
-                {members.map((member) => (
+                {showUnassignedOption && (
+                  <DropdownMenuCheckboxItem
+                    checked={selectedMemberIds.includes("unassigned")}
+                    onCheckedChange={() => toggleMember("unassigned")}
+                    className="text-popover-foreground text-sm"
+                  >
+                    Unassigned
+                  </DropdownMenuCheckboxItem>
+                )}
+                {teamOptions.map((member) => (
                   <DropdownMenuCheckboxItem
                     key={member.user_id}
                     checked={selectedMemberIds.includes(member.user_id)}
@@ -1326,7 +1536,31 @@ export function ConversationList({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
+
+          {/* Cross-thread assignment (owners/admins, plus agents holding
+              the Manage Assignments permission). Opens the assign dialog
+              for threads the viewer may not be able to open — names and
+              current assignees only, never message content. */}
+          {canAssignAnywhere && (
+            <button
+              type="button"
+              onClick={() => setAssignDialogOpen(true)}
+              title="Assign conversations"
+              aria-label="Assign conversations"
+              className="text-muted-foreground hover:text-foreground hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs"
+            >
+              <UserCog className="h-3 w-3" />
+              <span className="hidden xl:inline">Assign</span>
+            </button>
+          )}
         </div>
+
+        <AssignDialog
+          open={assignDialogOpen}
+          onClose={() => setAssignDialogOpen(false)}
+          members={members}
+          onAssigned={(conversationId, agentId) => onAssignChange?.(conversationId, agentId)}
+        />
 
         {hasContactFilters && (
           <div className="flex flex-wrap items-center gap-1">
@@ -1374,11 +1608,23 @@ export function ConversationList({
             )}
             {selectedSource && (
               <button
-                onClick={() => setSelectedSource(null)}
+                onClick={() => handleSourceSelect(null)}
                 className="bg-muted text-foreground hover:bg-muted/70 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
               >
                 <span className="max-w-40 truncate">
                   {LEAD_SOURCE_LABELS[selectedSource]}
+                </span>
+                <X className="h-3 w-3" />
+              </button>
+            )}
+            {selectedSource === "instant_form" && selectedFormId && (
+              <button
+                onClick={() => setSelectedFormId(null)}
+                className="bg-muted text-foreground hover:bg-muted/70 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
+              >
+                <span className="max-w-40 truncate">
+                  {availableForms.find((f) => f.id === selectedFormId)?.name ??
+                    "Form"}
                 </span>
                 <X className="h-3 w-3" />
               </button>
@@ -1512,6 +1758,7 @@ export function ConversationList({
                     isPinned
                     isPinBusy={pinBusyIds.has(conv.id)}
                     onTogglePin={handleTogglePin}
+                    assigneeName={assigneeNameFor(conv)}
                   />
                 ))}
                 {regular.length > 0 && (
@@ -1529,6 +1776,7 @@ export function ConversationList({
                 isPinned={false}
                 isPinBusy={pinBusyIds.has(conv.id)}
                 onTogglePin={handleTogglePin}
+                assigneeName={assigneeNameFor(conv)}
               />
             ))}
 
@@ -1580,11 +1828,14 @@ interface ConversationItemProps {
   isPinned: boolean;
   isPinBusy: boolean;
   onTogglePin: (conversation: Conversation, nextPinned: boolean) => void;
+  /** Resolved assignee display name (null/undefined = unassigned). */
+  assigneeName?: string | null;
 }
 
 function ConversationItem({
   conversation,
   isActive,
+  assigneeName,
   onSelect,
   isPinned,
   isPinBusy,
@@ -1719,6 +1970,15 @@ function ConversationItem({
             </Tooltip>
           </div>
         </div>
+
+        {/* Assignee — only rendered when the thread has an owner.
+            Mirrors the header Assign control and the Workspace
+            Assigned To cell (same underlying assignment). */}
+        {assigneeName ? (
+          <p className="text-muted-foreground mt-1 truncate px-0 text-[11px]">
+            Assigned to {assigneeName}
+          </p>
+        ) : null}
 
         {/* Tag pill(s) — only rendered when the contact has at least one
             tag. Matches the screenshot: a small rounded label sitting

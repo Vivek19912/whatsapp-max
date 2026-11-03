@@ -103,9 +103,11 @@ export async function PUT(
     }
 
     // Agents on Meta Lead Ads Tables may only write their own
-    // assigned leads — and never the Assigned To cell itself
-    // (reassignment is admin-only). Owners/admins and every Flow
-    // Table keep existing behavior exactly.
+    // assigned leads — and never the Assigned To cell itself, unless
+    // they hold the Manage Assignments permission (which grants
+    // cross-lead assignment from Workspace exactly like the Inbox
+    // assign API). Owners/admins and every Flow Table keep existing
+    // behavior exactly.
     if (role === "agent") {
       const { data: kindRow } = await supabase
         .from("flows")
@@ -114,20 +116,26 @@ export async function PUT(
         .eq("account_id", accountId)
         .maybeSingle();
       if ((kindRow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
-        const owned = await isRunOwnedByUser(supabase, {
-          accountId,
-          flowId: id,
-          runId,
-          userId,
-        });
-        if (!owned) {
-          return NextResponse.json({ error: "Run not found." }, { status: 404 });
-        }
-        if (isAssigneeField(field)) {
-          return NextResponse.json(
-            { error: "Only admins can reassign leads." },
-            { status: 403 },
-          );
+        const { resolveViewerCaps } = await import(
+          "@/lib/inbox/assignment-access"
+        );
+        const caps = await resolveViewerCaps(supabase, accountId, userId, role);
+        if (!caps.canManageAssignments) {
+          const owned = await isRunOwnedByUser(supabase, {
+            accountId,
+            flowId: id,
+            runId,
+            userId,
+          });
+          if (!owned) {
+            return NextResponse.json({ error: "Run not found." }, { status: 404 });
+          }
+          if (isAssigneeField(field)) {
+            return NextResponse.json(
+              { error: "Only admins can reassign leads." },
+              { status: 403 },
+            );
+          }
         }
       }
     }
@@ -221,6 +229,18 @@ export async function PUT(
       } catch (err) {
         console.error("[meta-sheets] cell-clear enqueue failed:", err);
       }
+      // ADDITIVE Inbox mirror — clearing the Assigned To cell clears
+      // the linked thread's assignee the same way. Best-effort.
+      if (isAssigneeField(field)) {
+        try {
+          const { mirrorRunAssignmentToConversation } = await import(
+            "@/lib/inbox/assignment-sync"
+          );
+          await mirrorRunAssignmentToConversation(supabase, accountId, runId, null);
+        } catch (err) {
+          console.error("[inbox/workspace-values] mirror failed:", err);
+        }
+      }
       return NextResponse.json({ value: null, sheetsSync });
     }
 
@@ -294,6 +314,26 @@ export async function PUT(
     } catch (err) {
       console.error("[meta-sheets] cell-save enqueue failed:", err);
       sheetsSync = 'failed';
+    }
+
+    // ADDITIVE Inbox mirror — an Assigned To edit (any Workspace
+    // table, Meta or Flow) applies the same owner to the linked
+    // thread so the conversation header/list match the Workspace
+    // column. Best-effort: never fails the save.
+    if (isAssigneeField(field)) {
+      try {
+        const { mirrorRunAssignmentToConversation } = await import(
+          "@/lib/inbox/assignment-sync"
+        );
+        await mirrorRunAssignmentToConversation(
+          supabase,
+          accountId,
+          runId,
+          storedValue,
+        );
+      } catch (err) {
+        console.error("[inbox/workspace-values] mirror failed:", err);
+      }
     }
 
     return NextResponse.json({ value: storedValue, sheetsSync });

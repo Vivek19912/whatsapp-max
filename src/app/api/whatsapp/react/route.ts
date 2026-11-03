@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireAuthenticatedUser } from '@/lib/auth/account';
+import { canActOnConversation } from '@/lib/inbox/assignment-access';
 import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
@@ -35,10 +36,11 @@ export async function POST(request: Request) {
      // lookups work for teammates who didn't author the rows directly.
      const { data: profile } = await supabase
        .from('profiles')
-       .select('account_id')
+       .select('account_id, account_role')
        .eq('user_id', userId)
        .maybeSingle();
     const accountId = profile?.account_id as string | undefined;
+    const callerRole = (profile as { account_role?: string } | null)?.account_role ?? null;
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
@@ -81,7 +83,7 @@ export async function POST(request: Request) {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, account_id, contact:contacts(phone)')
+      .select('id, account_id, assigned_agent_id, contact:contacts(phone)')
       .eq('id', targetMessage.conversation_id)
       .eq('account_id', accountId)
       .maybeSingle();
@@ -91,6 +93,19 @@ export async function POST(request: Request) {
         { error: 'Conversation not found' },
         { status: 404 },
       );
+    }
+
+    // Assignment gate: agents may only react in threads assigned to
+    // them; owner/admin anywhere. 404 (not 403) to avoid confirming
+    // an invisible thread exists.
+    {
+      const assigned = (conversation as { assigned_agent_id: string | null }).assigned_agent_id ?? null;
+      if (!canActOnConversation({ role: callerRole, userId }, assigned)) {
+        return NextResponse.json(
+          { error: 'Conversation not found' },
+          { status: 404 },
+        );
+      }
     }
 
     const contact = Array.isArray(conversation.contact)

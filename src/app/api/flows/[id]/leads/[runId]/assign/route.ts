@@ -19,11 +19,12 @@ import { supabaseAdmin } from "@/lib/flows/admin-client";
 
 /**
  * POST /api/flows/[id]/leads/[runId]/assign — manually assign (or
- * clear) one Meta lead. Admin+.
+ * clear) one Meta lead. Owner/admin, plus agents holding the Manage
+ * Assignments permission (verified server-side).
  *
- * Reassignment is an admin-only operation: agents work their own
- * assigned leads but cannot move leads between members (that would
- * bypass per-agent ownership). Meta-gated: the service rejects
+ * Reassignment is owner/admin-only for plain agents: they work their
+ * own assigned leads but cannot move leads between members (that
+ * would bypass per-agent ownership). Meta-gated: the service rejects
  * non-Meta flows outright, so Flow Tables can never reach this
  * path. Writes the same Assigned To workspace cell the table
  * displays, and records an audit event (actor, previous, new).
@@ -38,7 +39,23 @@ export async function POST(
 ) {
   try {
     const { id, runId } = await params;
-    const { supabase, accountId, userId } = await requireRole("admin");
+    // Owners/admins always; agents only with the Manage Assignments
+    // permission (resolved server-side). Viewers are blocked by the
+    // agent floor below.
+    const auth = await requireRole("agent");
+    const { supabase, accountId, userId, role } = auth;
+    if (role === "agent") {
+      const { resolveViewerCaps } = await import(
+        "@/lib/inbox/assignment-access"
+      );
+      const caps = await resolveViewerCaps(supabase, accountId, userId, role);
+      if (!caps.canManageAssignments) {
+        return NextResponse.json(
+          { error: "Only admins or agents with Manage Assignments can assign leads." },
+          { status: 403 }
+        );
+      }
+    }
     const body = (await request.json().catch(() => null)) as Record<
       string,
       unknown
@@ -243,6 +260,27 @@ export async function POST(
       // post-response drain. Tracked `after()`, never detached; the
       // cron remains the fallback. Never fails the assignment.
       scheduleSheetsDrainSoon({ accountId });
+      // ADDITIVE Inbox mirror — the same owner on the linked thread so
+      // the conversation header/list match the Workspace column.
+      // Best-effort: never fails the assignment.
+      try {
+        const { mirrorRunAssignmentToConversation } = await import(
+          "@/lib/inbox/assignment-sync"
+        );
+        const mirrored = await mirrorRunAssignmentToConversation(
+          supabase,
+          accountId,
+          runId,
+          result.current,
+        );
+        if (!mirrored) {
+          console.error("[inbox/assign] mirror skipped (no linked thread yet)", {
+            runId: String(runId).slice(0, 8),
+          });
+        }
+      } catch (err) {
+        console.error("[inbox/assign] mirror failed:", err);
+      }
       return NextResponse.json({ assignment: result, customer_sequence: customerSequence });
     } catch (err) {
       const raw =

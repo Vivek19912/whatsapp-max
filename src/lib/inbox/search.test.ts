@@ -137,6 +137,7 @@ describe("buildSearchKey", () => {
       from: null,
       to: null,
       source: "all",
+      metaFormId: null,
     };
     expect(buildSearchKey(base)).toBe(
       buildSearchKey({ ...base, tagIds: ["t1", "t2"] }),
@@ -158,6 +159,7 @@ describe("buildSearchKey", () => {
       from: null,
       to: null,
       source: "all",
+      metaFormId: null,
     };
     expect(buildSearchKey(base)).not.toBe(
       buildSearchKey({ ...base, source: "instant_form" }),
@@ -170,6 +172,30 @@ describe("buildSearchKey", () => {
     );
     expect(buildSearchKey({ ...base, source: "ctwa" })).toBe(
       buildSearchKey({ ...base, source: "ctwa" }),
+    );
+  });
+
+  it("distinguishes Meta Form selections within Instant Form", () => {
+    const base = {
+      q: "john",
+      status: "all",
+      tagIds: [],
+      company: null,
+      flowId: null,
+      memberIds: [],
+      from: null,
+      to: null,
+      source: "instant_form",
+      metaFormId: null,
+    };
+    expect(buildSearchKey(base)).not.toBe(
+      buildSearchKey({ ...base, metaFormId: "form-1" }),
+    );
+    expect(buildSearchKey({ ...base, metaFormId: "form-1" })).toBe(
+      buildSearchKey({ ...base, metaFormId: "form-1" }),
+    );
+    expect(buildSearchKey({ ...base, metaFormId: "form-1" })).not.toBe(
+      buildSearchKey({ ...base, metaFormId: "form-2" }),
     );
   });
 });
@@ -202,6 +228,22 @@ describe("parseSearchRequestParams", () => {
     ]);
     expect(p.limit).toBe(10);
     expect(p.cursor).toBeNull();
+    expect(p.metaFormId).toBeNull();
+  });
+
+  it("parses the Meta Form facet and defaults it to All Forms", () => {
+    expect(parseSearchRequestParams(params("x")).metaFormId).toBeNull();
+    expect(
+      parseSearchRequestParams(params("x", { meta_form: "" })).metaFormId,
+    ).toBeNull();
+    expect(
+      parseSearchRequestParams(params("x", { meta_form: "  " })).metaFormId,
+    ).toBeNull();
+    // Raw Meta string id — trimmed, never UUID-validated.
+    expect(
+      parseSearchRequestParams(params("x", { meta_form: "  form-abc-123  " }))
+        .metaFormId,
+    ).toBe("form-abc-123");
   });
 
   it("defaults Lead Source to all and parses each valid option", () => {

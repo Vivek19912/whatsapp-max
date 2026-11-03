@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -15,6 +15,8 @@ import {
   isHidden,
 } from "@/lib/inbox/hidden";
 import { useRealtime } from "@/hooks/use-realtime";
+import { useAuth } from "@/hooks/use-auth";
+import { canViewConversation, NO_INBOX_CAPS, type InboxViewerCaps } from "@/lib/inbox/assignment-access";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
@@ -34,6 +36,7 @@ const SIDEBAR_DEFAULT = 320;
 export default function InboxPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { user, accountRole } = useAuth();
   /**
    * `?c=<id>` deep-link support. Used when landing here from the
    * dashboard's recent-conversations list so the right thread opens
@@ -153,6 +156,56 @@ export default function InboxPage() {
   // new conversation even when both events arrive within milliseconds.
   const hydratingConvIdsRef = useRef<Set<string>>(new Set());
 
+  // Assignment-scoped visibility for this viewer. Owners/admins see
+  // every thread; agents see only their own assigned threads (never
+  // unassigned ones) unless granted View All; viewers keep legacy
+  // read-all. Mirrors the RLS policy in 148_inbox_assignment_access.sql
+  // (+ the 149 view_all branch) — realtime payloads and hydrate
+  // results are filtered through this before entering state, so a
+  // revoked thread can never linger on screen. Caps come from the
+  // server (/me); the empty default denies everything extra.
+  // The viewer's granted Inbox permissions (View All / Manage
+  // Assignments). Fetched once here (re-fetched on manual resync and
+  // on any assignment-affecting realtime signal via the resync they
+  // trigger) and handed to the list for Team gating, the Assign
+  // entry point, and the Form-filter lookups below. Defaults deny.
+  const [viewerCaps, setViewerCaps] = useState<InboxViewerCaps>(NO_INBOX_CAPS);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/account/agent-permissions/me", {
+          cache: "no-store",
+        });
+        const data = (await res.json().catch(() => null)) as {
+          can_view_all?: boolean;
+          can_manage_assignments?: boolean;
+        } | null;
+        if (!cancelled && res.ok && data) {
+          setViewerCaps({
+            canViewAll: data.can_view_all === true,
+            canManageAssignments: data.can_manage_assignments === true,
+          });
+        }
+      } catch {
+        // Fail closed (deny extra access); RLS still enforces server-side.
+        if (!cancelled) setViewerCaps(NO_INBOX_CAPS);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [resyncToken]);
+  const viewer = useMemo(
+    () => ({ role: accountRole, userId: user?.id ?? null }),
+    [accountRole, user?.id]
+  );
+  const isVisibleConv = useCallback(
+    (c: { assigned_agent_id?: string | null } | null | undefined) =>
+      !!c && canViewConversation(viewer, c?.assigned_agent_id ?? null, viewerCaps),
+    [viewer, viewerCaps]
+  );
+
   /**
    * Synchronous mirror of the conversation ids currently in `conversations`
    * state. Event handlers need to know "do we already have this conv?"
@@ -241,6 +294,9 @@ export default function InboxPage() {
       }
       if (!data) return;
       const fetched = normalizeConversation(data);
+      // Assignment gate (defense in depth — RLS already filters, but a
+      // revoked thread must never re-enter through a stale event).
+      if (!isVisibleConv(fetched)) return;
       setConversations((prev) => {
         const existing = prev.find((c) => c.id === fetched.id);
         if (existing) {
@@ -260,7 +316,7 @@ export default function InboxPage() {
     } finally {
       hydratingConvIdsRef.current.delete(convId);
     }
-  }, []);
+  }, [isVisibleConv]);
 
   // Check WhatsApp connection status on mount
   useEffect(() => {
@@ -384,7 +440,10 @@ export default function InboxPage() {
         // already have the row — that shouldn't happen normally, but
         // out-of-order delivery would have us prepending a duplicate.
         // Hidden threads never enter state (see hiddenConvIdsRef).
+        // Assignment gate: an INSERT the viewer may not see (RLS
+        // usually suppresses it first) is dropped, never rendered.
         if (isHidden(hiddenConvIdsRef.current, conv.id)) return;
+        if (!isVisibleConv(conv)) return;
         if (!knownConvIdsRef.current.has(conv.id)) {
           setConversations((prev) => {
             if (prev.some((c) => c.id === conv.id)) return prev;
@@ -396,6 +455,21 @@ export default function InboxPage() {
 
       if (event.eventType === "UPDATE") {
         if (knownConvIdsRef.current.has(conv.id)) {
+          // Assignment gate FIRST: if this update revoked the viewer's
+          // access (reassigned away, or unassigned for an agent), drop
+          // the row instead of patching it — RLS usually suppresses
+          // the event itself, but a racing payload must never linger.
+          if (!isVisibleConv(conv)) {
+            setConversations((prev) => prev.filter((c) => c.id !== conv.id));
+            if (activeConversation?.id === conv.id) {
+              setActiveConversation(null);
+              setActiveContact(null);
+              setMessages([]);
+              router.replace("/inbox", { scroll: false });
+              toast.info("This conversation is no longer assigned to you.");
+            }
+            return;
+          }
           // If this UPDATE is for the conv the user is currently viewing,
           // suppress the incoming unread_count — the user is reading it
           // RIGHT NOW, so any positive value would just flicker the badge
@@ -441,8 +515,46 @@ export default function InboxPage() {
         }
       }
     },
-    [activeConversation, hydrateConversation]
+    [activeConversation, hydrateConversation, isVisibleConv, router]
   );
+
+  // Re-checks the open thread against current visibility (RLS +
+  // granted permissions). Used after any signal that may have moved
+  // access: workspace_values writes (assignment changes whose
+  // conversations UPDATE is RLS-suppressed for the loser) and
+  // agent_inbox_permissions writes (grant/revocation of View All or
+  // Manage Assignments). On invisibility the thread is closed with
+  // notice; the parallel resyncToken bump re-fetches the list under
+  // RLS so revoked rows vanish and granted rows appear.
+  const reverifyActiveThread = useCallback(() => {
+    const activeId = activeConversation?.id;
+    if (!activeId) return;
+    const supabase = createClient();
+    supabase
+      .from("conversations")
+      .select("id, assigned_agent_id")
+      .eq("id", activeId)
+      .maybeSingle()
+      .then(({ data }) => {
+        const row = data as { assigned_agent_id: string | null } | null;
+        const assigned = row?.assigned_agent_id ?? null;
+        if (
+          !row ||
+          !canViewConversation(
+            { role: accountRole, userId: user?.id ?? null },
+            assigned,
+            viewerCaps
+          )
+        ) {
+          setActiveConversation(null);
+          setActiveContact(null);
+          setMessages([]);
+          setConversations((prev) => prev.filter((c) => c.id !== activeId));
+          router.replace("/inbox", { scroll: false });
+          toast.info("This conversation is no longer assigned to you.");
+        }
+      });
+  }, [activeConversation?.id, accountRole, user?.id, viewerCaps, router]);
 
   // Subscribe to realtime. `isConnected` is tracked below for the
   // offline indicator only — reconnect no longer triggers a full
@@ -452,8 +564,48 @@ export default function InboxPage() {
     channelName: "inbox-realtime",
     onMessageEvent: handleMessageEvent,
     onConversationEvent: handleConversationEvent,
+    // Assignment changes land as workspace_values writes (both
+    // Workspace- and Inbox-initiated). The conversations UPDATE that
+    // mirrors them is RLS-suppressed for viewers who just lost
+    // access, so without this the revoked thread would linger until
+    // a refresh. Converge deterministically: resync the list (RLS
+    // reapplies) and re-check the open thread right now.
+    onWorkspaceValuesEvent: () => {
+      setResyncToken((n) => n + 1);
+      reverifyActiveThread();
+    },
     enabled: true,
   });
+
+  // Permission changes land in agent_inbox_permissions (grant AND
+  // revoke). The viewer can always read their own row (RLS), so this
+  // fires for them personally. Converge immediately: re-pull caps
+  // (via the resyncToken-keyed fetch above), re-fetch the list under
+  // the new RLS truth, and re-check the open thread — no logout or
+  // manual refresh required in either direction.
+  useEffect(() => {
+    if (!user?.id) return;
+    const supabase = createClient();
+    const channel = supabase
+      .channel("inbox-permissions")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "agent_inbox_permissions",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          setResyncToken((n) => n + 1);
+          reverifyActiveThread();
+        }
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user?.id, reverifyActiveThread]);
 
   // Realtime connection tracking — no automatic full refetch.
   // Previously we bumped `resyncToken` on both WS reconnect and
@@ -636,8 +788,31 @@ export default function InboxPage() {
             : prev
         );
       }
+      // Assignment gate: an agent who just unassigned (or reassigned
+      // away) their own thread must lose it immediately — the RLS
+      // policy already hides it from refetches, so drop it from state
+      // too instead of waiting for a refresh. Owners/admins — and
+      // agents holding View All — always keep full visibility.
+      if (
+        !canViewConversation(
+          { role: accountRole, userId: user?.id ?? null },
+          assignedAgentId,
+          viewerCaps
+        )
+      ) {
+        setConversations((prev) =>
+          prev.filter((c) => c.id !== conversationId)
+        );
+        if (activeConversation?.id === conversationId) {
+          setActiveConversation(null);
+          setActiveContact(null);
+          setMessages([]);
+          router.replace("/inbox", { scroll: false });
+          toast.info("This conversation is no longer assigned to you.");
+        }
+      }
     },
-    [activeConversation]
+    [activeConversation, accountRole, user?.id, viewerCaps, router]
   );
 
   // On mobile (<lg) we show a SINGLE pane — either the list or the
@@ -677,6 +852,8 @@ export default function InboxPage() {
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
+            onAssignChange={handleAssignChange}
+            viewerCaps={viewerCaps}
           />
         </div>
 

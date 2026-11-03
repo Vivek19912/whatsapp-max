@@ -15,6 +15,10 @@ describe("inbox search route Lead Source handoff", () => {
     expect(routeSrc).toContain("p_source: params.source");
   });
 
+  it("passes the Meta Form id to the RPC", () => {
+    expect(routeSrc).toContain("p_form_id: params.metaFormId");
+  });
+
   it("keeps every existing RPC argument (no dropped facet)", () => {
     for (const arg of [
       "p_search: params.q",

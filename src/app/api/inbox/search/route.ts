@@ -74,6 +74,7 @@ export async function GET(request: Request) {
       p_cur_id: params.cursor?.id ?? null,
       p_limit: params.limit,
       p_source: params.source,
+      p_form_id: params.metaFormId,
     },
   );
 

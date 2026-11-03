@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   roster: [] as string[],
   profileEqFilters: [] as Array<[string, unknown]>,
   triggers: [] as Array<Record<string, unknown>>,
+  perms: [] as Array<Record<string, unknown>>,
 }));
 
 function statusError(status: number, message: string) {
@@ -124,6 +125,14 @@ function fakeSupabase() {
         error: null,
       };
     }
+    if (state.table === "agent_inbox_permissions") {
+      // Honor the account_id + user_id equality filters so
+      // cross-account grants never leak across tests.
+      const list = h.perms.filter((r) =>
+        state.filters.every(([c, v]) => r[c] === v)
+      );
+      return { data: list[0] ?? null, error: null };
+    }
     return { data: h.run, error: null };
   };
   chain.then = (resolve: (v: unknown) => void) => {
@@ -176,6 +185,7 @@ beforeEach(() => {
   h.roster = [];
   h.profileEqFilters = [];
   h.triggers = [];
+  h.perms = [];
   h.field = {
     id: "field-1",
     account_id: "acct-1",
@@ -513,6 +523,51 @@ describe("agent ownership on Meta Lead Ads Tables", () => {
       params,
     );
     expect(res.status).toBe(403);
+    expect(h.upserts).toHaveLength(0);
+  });
+
+  it("lets an agent WITH Manage Assignments edit Assigned To on any Meta lead", async () => {
+    seedMetaOwned();
+    h.perms = [
+      { account_id: "acct-1", user_id: AGENT, can_manage_assignments: true, can_view_all: false },
+    ];
+    h.field = { ...ASSIGN_FIELD };
+    // Another agent's lead — normally 404 for plain agents.
+    h.run = {
+      id: "run-1",
+      account_id: "acct-1",
+      flow_id: "flow-1",
+      value_text: OTHER,
+    };
+    h.roster = [AGENT, OTHER];
+    const res = await PUT(
+      put({ field_id: "f-assign", flow_run_id: "run-1", value: OTHER }),
+      params,
+    );
+    expect(res.status).toBe(200);
+    expect(h.upserts).toHaveLength(1);
+  });
+
+  it("manage grant from another account does not transfer", async () => {
+    seedMetaOwned();
+    h.perms = [
+      { account_id: "other-acct", user_id: AGENT, can_manage_assignments: true, can_view_all: true },
+    ];
+    h.field = { ...ASSIGN_FIELD };
+    h.run = {
+      id: "run-1",
+      account_id: "acct-1",
+      flow_id: "flow-1",
+      value_text: OTHER,
+    };
+    h.roster = [AGENT, OTHER];
+    const res = await PUT(
+      put({ field_id: "f-assign", flow_run_id: "run-1", value: OTHER }),
+      params,
+    );
+    // Falls back to the plain-agent rules: not their lead, and the
+    // assignee field is off-limits.
+    expect([403, 404]).toContain(res.status);
     expect(h.upserts).toHaveLength(0);
   });
 

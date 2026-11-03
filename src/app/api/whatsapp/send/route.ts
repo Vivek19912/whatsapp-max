@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { requireAuthenticatedUser } from '@/lib/auth/account'
+import { canActOnConversation, isAgentOrAbove } from '@/lib/inbox/assignment-access'
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -43,10 +44,11 @@ export async function POST(request: Request) {
     // returned nothing for teammates who didn't author the row.
     const { data: profile } = await supabase
       .from('profiles')
-      .select('account_id')
+      .select('account_id, account_role')
       .eq('user_id', userId)
       .maybeSingle()
     const accountId = profile?.account_id as string | undefined
+    const callerRole = (profile as { account_role?: string } | null)?.account_role ?? null
     if (!accountId) {
       return NextResponse.json(
         { error: 'Your profile is not linked to an account.' },
@@ -108,7 +110,7 @@ export async function POST(request: Request) {
     if (conversationIdInput) {
       const { data, error: convError } = await supabase
         .from('conversations')
-        .select('id')
+        .select('id, assigned_agent_id')
         .eq('id', conversationIdInput)
         .eq('account_id', accountId)
         .single()
@@ -119,8 +121,27 @@ export async function POST(request: Request) {
           { status: 404 }
         )
       }
+      // Assignment gate: agents may only send into threads assigned
+      // to them; owner/admin may send anywhere. 404 (not 403) to
+      // avoid confirming an invisible thread exists.
+      const assigned = (data as { assigned_agent_id: string | null }).assigned_agent_id ?? null
+      if (!canActOnConversation({ role: callerRole, userId }, assigned)) {
+        return NextResponse.json(
+          { error: 'Conversation not found' },
+          { status: 404 }
+        )
+      }
       conversationId = data.id
     } else {
+      // contact_id path: opening a brand-new thread has no assignee
+      // yet, so the assignment gate cannot apply — but only agents
+      // and above may initiate (viewers stay read-only).
+      if (!isAgentOrAbove(callerRole)) {
+        return NextResponse.json(
+          { error: 'Only team members can start a conversation.' },
+          { status: 403 }
+        )
+      }
       // contact_id path: verify the contact is in this account first so a
       // caller can't open a conversation against someone else's contact.
       const { data: contactRow, error: contactErr } = await supabase

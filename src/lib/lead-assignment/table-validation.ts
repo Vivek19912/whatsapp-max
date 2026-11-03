@@ -33,10 +33,26 @@ export interface TableAssigneeInput {
   display_name?: unknown;
   email?: unknown;
   phone?: unknown;
+  /**
+   * Extra WhatsApp notification recipients for this assignee.
+   * Array of { phone, template_name?, template_language? }.
+   * Empty/absent = legacy single-number behavior (the `phone`
+   * column with the config-level template). At least 5 numbers
+   * are supported (cap is MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE).
+   */
+  whatsapp_numbers?: unknown;
   weight?: unknown;
   is_active?: unknown;
   notify_email?: unknown;
   notify_whatsapp?: unknown;
+}
+
+export interface ValidWhatsappRecipient {
+  /** Normalized E.164 number, e.g. +911234567890. */
+  phone: string;
+  /** Per-number template override; null = config-level template. */
+  template_name: string | null;
+  template_language: string;
 }
 
 export interface ValidTableAssignee {
@@ -44,6 +60,7 @@ export interface ValidTableAssignee {
   display_name: string;
   email: string | null;
   phone: string | null;
+  whatsapp_numbers: ValidWhatsappRecipient[];
   weight: number;
   is_active: boolean;
   notify_email: boolean;
@@ -256,6 +273,13 @@ function cleanOptionalString(value: unknown, max: number): string | null {
   return trimmed.length > max ? null : trimmed;
 }
 
+/**
+ * Maximum WhatsApp notification numbers per assignee. The feature
+ * requires a minimum capacity of 5; 10 leaves headroom without
+ * bloating the outbox fan-out per assignment.
+ */
+export const MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE = 10;
+
 export function validateTableAssignee(
   entry: TableAssigneeInput,
   index: number,
@@ -305,6 +329,7 @@ export function validateTableAssignee(
       `${where} needs an email address because Email alerts are on for this assignee.`,
     );
   }
+  const whatsappNumbers = validateWhatsappNumbers(entry.whatsapp_numbers, where, phone);
   const weightRaw = entry.weight;
   const weight =
     typeof weightRaw === "number" && Number.isFinite(weightRaw)
@@ -320,12 +345,71 @@ export function validateTableAssignee(
     display_name: displayName,
     email,
     phone,
+    whatsapp_numbers: whatsappNumbers,
     weight,
     is_active: entry.is_active === undefined ? true : entry.is_active === true,
     notify_email: notifyEmail,
     notify_whatsapp:
       entry.notify_whatsapp === undefined ? false : entry.notify_whatsapp === true,
   };
+}
+
+/**
+ * Validate one assignee's extra WhatsApp recipient list. Each entry
+ * needs a valid E.164 number; each may carry its own template
+ * (absent/blank = the table's config-level template at send
+ * time). Numbers must be unique within the assignee — including
+ * against the legacy `phone` column value passed in — so one
+ * number can never receive the same alert twice from one
+ * assignment. Pure.
+ */
+export function validateWhatsappNumbers(
+  value: unknown,
+  where: string,
+  legacyPhone: string | null = null,
+): ValidWhatsappRecipient[] {
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new AssignmentValidationError(
+      `${where} has invalid WhatsApp numbers (expected a list).`,
+    );
+  }
+  if (value.length > MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE) {
+    throw new AssignmentValidationError(
+      `${where} supports at most ${MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} WhatsApp numbers.`,
+    );
+  }
+  const seen = new Set<string>();
+  if (legacyPhone) seen.add(legacyPhone);
+  return value.map((entry, i) => {
+    const label = `${where} WhatsApp number ${i + 1}`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new AssignmentValidationError(`${label} is invalid.`);
+    }
+    const raw = (entry as { phone?: unknown }).phone;
+    const normalized =
+      typeof raw === "string" ? normalizeAssigneePhone(raw) : null;
+    if (!normalized) {
+      throw new AssignmentValidationError(
+        `${label} is invalid. Use international format with country code, e.g. +911234567890.`,
+      );
+    }
+    if (seen.has(normalized)) {
+      throw new AssignmentValidationError(
+        `${label} (${normalized}) is already configured for this assignee.`,
+      );
+    }
+    seen.add(normalized);
+    const rec = entry as { template_name?: unknown; template_language?: unknown };
+    const templateName = cleanOptionalString(rec.template_name, 120);
+    const templateLanguage =
+      cleanOptionalString(rec.template_language, 32) ?? "en_US";
+    return {
+      phone: normalized,
+      template_name: templateName,
+      template_language: templateLanguage,
+    };
+  });
 }
 
 /**

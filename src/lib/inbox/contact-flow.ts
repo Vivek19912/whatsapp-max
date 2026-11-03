@@ -12,13 +12,17 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 /** Minimal shape of a flow_run row joined with its flow's id + name.
  * Supabase may return `flow` as object or single-element array depending on
- * PostgREST inference; handle both.
+ * PostgREST inference; handle both. `kind` is present when the caller
+ * selects it (flows.kind: 'whatsapp_flow' | 'meta_lead_ads').
  */
 export interface ContactFlowRun {
   id: string;
   status: string;
   started_at: string;
-  flow: { id: string; name: string } | { id: string; name: string }[] | null;
+  flow:
+    | { id: string; name: string; kind?: string | null }
+    | { id: string; name: string; kind?: string | null }[]
+    | null;
 }
 
 /**
@@ -67,6 +71,23 @@ export function pickContactFlow(runs: ContactFlowRun[]): string | null {
 }
 
 /**
+ * Whether the picked run represents a genuine Meta Instant Form
+ * submission. Virtual Meta flows carry kind = 'meta_lead_ads'
+ * (migration 119) and are created only by the Lead Ads ingestion
+ * (`process-lead.ts` → `ensureVirtualFlow`), so the kind marker on
+ * the DISPLAYED run is the authoritative signal — no extra query,
+ * no name-prefix guessing. Regular Flow Tables keep kind
+ * 'whatsapp_flow' (or an absent kind on older selects) and are
+ * never relabeled.
+ */
+export function isMetaLeadFlowRun(run: ContactFlowRun | null): boolean {
+  const f = run?.flow;
+  if (!f) return false;
+  const kind = Array.isArray(f) ? f[0]?.kind : f.kind;
+  return kind === "meta_lead_ads";
+}
+
+/**
  * Query for the contact's recent flow runs with the flow name embedded.
  * One bounded query — no per-message round-trips. Account-scoped both
  * by the explicit `account_id` filter and by RLS (`is_account_member`),
@@ -79,7 +100,7 @@ export function contactFlowRunsQuery(
 ) {
   let query = supabase
     .from("flow_runs")
-    .select("id, status, started_at, flow:flows(id, name)")
+    .select("id, status, started_at, flow:flows(id, name, kind)")
     .eq("contact_id", contactId)
     .order("started_at", { ascending: false })
     .limit(5);

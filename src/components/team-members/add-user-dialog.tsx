@@ -3,10 +3,12 @@
 // ============================================================
 // AddUserDialog — owner creates a user directly.
 //
-// Single-step modal: Email + Password + Role →
-// POST /api/account/members. The user exists (confirmed, member
-// of this account) when the call returns — no invitation link,
-// no email verification step.
+// Single-step modal: Name + Email + Password →
+// POST /api/account/members. Every user created here is an
+// Agent (no role picker — the server enforces this too, so a
+// crafted request cannot escalate). The user exists
+// (confirmed, member of this account) when the call returns —
+// no invitation link, no email verification step.
 //
 // Only rendered for owners (the server re-verifies anyway).
 // ============================================================
@@ -26,15 +28,6 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-
-type CreatableRole = 'admin' | 'agent' | 'viewer';
 
 interface AddUserDialogProps {
   open: boolean;
@@ -42,14 +35,6 @@ interface AddUserDialogProps {
   /** Called after a successful create so the parent re-fetches the roster. */
   onCreated: () => void;
 }
-
-const ROLE_DESCRIPTIONS: Record<CreatableRole, string> = {
-  admin:
-    'Can invite teammates, manage settings, send messages, and edit data.',
-  agent:
-    'Can use the inbox, contacts, broadcasts, automations, and flows. No settings or member access.',
-  viewer: 'Read-only access across every page. Cannot send or edit anything.',
-};
 
 // Mirrors the signup-page policy (min 6 chars) and the server's
 // name ceiling (80). The server re-validates — these only
@@ -66,7 +51,6 @@ export function AddUserDialog({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [role, setRole] = useState<CreatableRole>('agent');
   const [submitting, setSubmitting] = useState(false);
 
   function reset() {
@@ -74,7 +58,6 @@ export function AddUserDialog({
     setEmail('');
     setPassword('');
     setShowPassword(false);
-    setRole('agent');
     setSubmitting(false);
   }
 
@@ -102,11 +85,12 @@ export function AddUserDialog({
       const res = await fetch('/api/account/members', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // No role is sent: the server pins every new user to the
+        // agent role and rejects any other role value outright.
         body: JSON.stringify({
           name: trimmedName,
           email: trimmedEmail,
           password,
-          role,
         }),
       });
       const payload = (await res.json().catch(() => null)) as {
@@ -202,29 +186,8 @@ export function AddUserDialog({
                 )}
               </button>
             </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="add-user-role" className="text-muted-foreground">
-              Role
-            </Label>
-            <Select
-              value={role}
-              onValueChange={(v) => setRole(v as CreatableRole)}
-            >
-              <SelectTrigger id="add-user-role">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(['admin', 'agent', 'viewer'] as const).map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r[0].toUpperCase() + r.slice(1)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
             <p className="text-muted-foreground text-xs">
-              {ROLE_DESCRIPTIONS[role]}
+              New users are created as Agents.
             </p>
           </div>
         </div>

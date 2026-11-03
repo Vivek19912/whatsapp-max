@@ -122,7 +122,8 @@ function fakeSupabase() {
                 r.account_id === withId.account_id &&
                 r.flow_run_id === withId.flow_run_id &&
                 r.assignee_id === withId.assignee_id &&
-                r.channel === withId.channel,
+                r.channel === withId.channel &&
+                (r.recipient_key ?? "") === (withId.recipient_key ?? ""),
             );
             if (dup) return resolve({ data: null, error: { code: "23505", message: "dup" } });
           }
@@ -184,6 +185,7 @@ function externalAssignee(extra: Partial<TableAssigneeRow> = {}): TableAssigneeR
     display_name: "External Seller",
     email: "ext@example.com",
     phone: "+15551234567",
+    whatsapp_numbers: [],
     position: 0,
     weight: 0,
     is_active: true,
@@ -282,6 +284,7 @@ describe("lead snapshot resolution at enqueue time", () => {
       display_name: "Asha",
       email: null,
       phone: "+15550001111",
+      whatsapp_numbers: [],
       position: 0,
       weight: 0,
       is_active: true,
@@ -941,6 +944,199 @@ describe("drainTableAssignmentNotifications", () => {
     const row = h.notifications.find((n) => n.flow_run_id === "run-1")!;
     expect(row.failed_at).not.toBeNull();
     expect(row.next_attempt_at).toBeNull();
+  });
+});
+
+describe("multiple WhatsApp numbers per assignee", () => {
+  const multiAssignee = (extra: Partial<TableAssigneeRow> = {}): TableAssigneeRow =>
+    externalAssignee({
+      notify_email: false,
+      notify_whatsapp: true,
+      whatsapp_numbers: [
+        { phone: "+911234567890", template_name: "new_lead_notification1", template_language: "en_US" },
+        { phone: "+911234567891", template_name: "new_lead_notification2", template_language: "en_US" },
+        { phone: "+911234567892", template_name: "travel_lead_alert", template_language: "en" },
+        { phone: "+911234567893", template_name: "new_lead_notification1", template_language: "en_US" },
+        { phone: "+911234567894", template_name: null, template_language: "en_US" },
+      ],
+      ...extra,
+    });
+
+  it("fans out to every configured number with its own template", async () => {
+    const db = fakeSupabase();
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: multiAssignee(),
+      runId: "run-1",
+      formId: null,
+    });
+    expect(out.whatsapp).toMatchObject({ enqueued: true, reason: "enqueued" });
+    expect(out.whatsapp.recipients).toHaveLength(5);
+    // The same template may repeat across numbers; each number
+    // still gets its own row and template.
+    const rows = h.notifications.filter((n) => n.channel === "whatsapp");
+    expect(rows).toHaveLength(5);
+    expect(rows.map((n) => n.to_phone)).toEqual([
+      "+911234567890",
+      "+911234567891",
+      "+911234567892",
+      "+911234567893",
+      "+911234567894",
+    ]);
+    expect(rows.map((n) => n.template_name)).toEqual([
+      "new_lead_notification1",
+      "new_lead_notification2",
+      "travel_lead_alert",
+      "new_lead_notification1",
+      // Blank per-number template falls back to the config template.
+      "new_lead_assigned",
+    ]);
+    // Status is tracked separately per recipient number.
+    expect(new Set(rows.map((n) => n.recipient_key as string)).size).toBe(5);
+  });
+
+  it("retries and duplicate events collapse per recipient, not per assignee", async () => {
+    const db = fakeSupabase();
+    await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: multiAssignee(),
+      runId: "run-1",
+      formId: null,
+    });
+    const second = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: multiAssignee(),
+      runId: "run-1",
+      formId: null,
+    });
+    expect(second.whatsapp).toMatchObject({ enqueued: false });
+    expect(second.whatsapp.recipients?.every((r) => r.reason === "duplicate")).toBe(true);
+    expect(h.notifications.filter((n) => n.channel === "whatsapp")).toHaveLength(5);
+  });
+
+  it("removing one number leaves the others intact on the next assignment", async () => {
+    const db = fakeSupabase();
+    await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: multiAssignee(),
+      runId: "run-1",
+      formId: null,
+    });
+    // Owner removes the second number; the next lead still reaches
+    // the remaining four (new run = new alert set).
+    const trimmed = multiAssignee({
+      whatsapp_numbers: [
+        { phone: "+911234567890", template_name: "new_lead_notification1", template_language: "en_US" },
+        { phone: "+911234567892", template_name: "travel_lead_alert", template_language: "en" },
+        { phone: "+911234567893", template_name: "new_lead_notification1", template_language: "en_US" },
+        { phone: "+911234567894", template_name: null, template_language: "en_US" },
+      ],
+    });
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: trimmed,
+      runId: "run-2",
+      formId: null,
+    });
+    expect(out.whatsapp.recipients).toHaveLength(4);
+    expect(
+      h.notifications
+        .filter((n) => n.channel === "whatsapp" && n.flow_run_id === "run-2")
+        .map((n) => n.to_phone),
+    ).toEqual(["+911234567890", "+911234567892", "+911234567893", "+911234567894"]);
+  });
+
+  it("one recipient's send failure does not stop the other numbers", async () => {
+    const db = fakeSupabase();
+    h.whatsappConfigs = [
+      { account_id: "acct-1", access_token: encrypt("token-1"), phone_number_id: "pn-1" },
+    ];
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "ok_template",
+        language: "en_US",
+        status: "APPROVED",
+        body_text: "Hi {{1}}",
+      },
+    ];
+    // One row per recipient, as the fan-out enqueues them.
+    const queueRow = (row: Record<string, unknown>) =>
+      h.notifications.push({
+        id: `n-${++h.seq}`,
+        account_id: "acct-1",
+        status: "queued",
+        attempt: 0,
+        max_attempts: 5,
+        next_attempt_at: new Date(0).toISOString(),
+        ...row,
+      });
+    queueRow({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      recipient_key: "+911234567890",
+      to_phone: "+911234567890",
+      flow_run_id: "run-1",
+      template_name: "missing_template",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    queueRow({
+      channel: "whatsapp",
+      assignee_id: "assignee-ext",
+      recipient_key: "+911234567891",
+      to_phone: "+911234567891",
+      flow_run_id: "run-1",
+      template_name: "ok_template",
+      template_language: "en_US",
+      lead_name: "Asha",
+    });
+    const result = await drainTableAssignmentNotifications(db as never);
+    expect(result).toMatchObject({ sent: 1, failed: 1 });
+    const byPhone = new Map(h.notifications.map((n) => [n.to_phone as string, n]));
+    expect(byPhone.get("+911234567890")?.status).toBe("failed");
+    expect(byPhone.get("+911234567891")?.status).toBe("sent");
+    expect(h.sentWhatsapp).toHaveLength(1);
+    expect(h.sentWhatsapp[0]).toMatchObject({ to: "911234567891" });
+  });
+
+  it("legacy single-number configs keep working unchanged", async () => {
+    const db = fakeSupabase();
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: externalAssignee({ notify_email: false, notify_whatsapp: true }),
+      runId: "run-1",
+      formId: null,
+    });
+    expect(out.whatsapp).toMatchObject({ enqueued: true, reason: "enqueued" });
+    const rows = h.notifications.filter((n) => n.channel === "whatsapp");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      to_phone: "+15551234567",
+      template_name: "new_lead_assigned",
+      template_language: "en_US",
+    });
+  });
+
+  it("leaves the email path exactly as it was", async () => {
+    const db = fakeSupabase();
+    const out = await enqueueTableAssignmentNotifications(db as never, {
+      accountId: "acct-1",
+      detail: DETAIL,
+      assignee: externalAssignee(),
+      runId: "run-1",
+      formId: null,
+    });
+    expect(out.email).toMatchObject({ enqueued: true, reason: "enqueued" });
+    const rows = h.notifications.filter((n) => n.channel === "email");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ to_email: "ext@example.com", recipient_key: "" });
   });
 });
 

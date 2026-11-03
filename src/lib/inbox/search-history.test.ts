@@ -82,10 +82,10 @@ describe("inbox search history migration", () => {
   it("preserves signature, filters, ordering, and keyset pagination", () => {
     const { sql } = latestSearchMigration();
     // Signature: the 11 original params in the same order, plus the
-    // trailing p_source Lead Source facet (DEFAULT 'all', so every
-    // existing caller keeps working unchanged).
+    // trailing Lead Source facet (DEFAULT 'all') and Meta Form facet
+    // (DEFAULT NULL), so every existing caller keeps working unchanged.
     expect(sql).toMatch(
-      /search_inbox_conversations\(\s*p_search TEXT,\s*p_status TEXT[^)]*p_limit INT DEFAULT 25\s*,\s*p_source TEXT DEFAULT 'all'\s*\)/i,
+      /search_inbox_conversations\(\s*p_search TEXT,\s*p_status TEXT[^)]*p_limit INT DEFAULT 25\s*,\s*p_source TEXT DEFAULT 'all'\s*,\s*p_form_id TEXT DEFAULT NULL\s*\)/i,
     );
     for (const facet of [
       "p_status",
@@ -96,6 +96,7 @@ describe("inbox search history migration", () => {
       "p_from",
       "p_to",
       "p_source",
+      "p_form_id",
     ]) {
       expect(sql).toContain(facet);
     }
@@ -129,13 +130,13 @@ describe("inbox search Lead Source facet (147)", () => {
     );
   });
 
-  it("keeps grants on the 12-arg signature: authenticated only, revoked from PUBLIC", () => {
+  it("keeps grants on the 13-arg signature: authenticated only, revoked from PUBLIC", () => {
     const { sql } = latestSearchMigration();
     expect(sql).toMatch(
-      /GRANT EXECUTE ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT\s*\)[\s\S]*?TO authenticated/i,
+      /GRANT EXECUTE ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT,\s*TEXT\s*\)[\s\S]*?TO authenticated/i,
     );
     expect(sql).toMatch(
-      /REVOKE ALL ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT\s*\)[\s\S]*?FROM PUBLIC/i,
+      /REVOKE ALL ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT,\s*TEXT\s*\)[\s\S]*?FROM PUBLIC/i,
     );
   });
 
@@ -152,7 +153,7 @@ describe("inbox search Lead Source facet (147)", () => {
     expect(sql).not.toMatch(/JOIN meta_lead_submissions/i);
   });
 
-  it("matches CTWA via non-blank source_url OR ctwa_clid (btrim parity)", () => {
+  it("matches CTWA via non-blank source_url OR ctwa_clid, excluding Instant Form contacts", () => {
     const { sql } = latestSearchMigration();
     expect(sql).toMatch(/p_source = 'ctwa'/i);
     expect(sql).toMatch(
@@ -161,6 +162,23 @@ describe("inbox search Lead Source facet (147)", () => {
     expect(sql).toMatch(
       /btrim\(ct\.ctwa_clid\) <> ''/i,
     );
+    // Instant Form precedence: the ctwa branch carries its own
+    // processed-submission NOT EXISTS, so dual-source threads are
+    // excluded even with populated CTWA fields.
+    expect(sql).toMatch(
+      /p_source = 'ctwa'[\s\S]*?NOT EXISTS\s*\(\s*SELECT 1 FROM meta_lead_submissions s[\s\S]*?s\.status = 'processed'/i,
+    );
+  });
+
+  it("scopes every submission check to the caller account (no cross-account matching)", () => {
+    const { sql } = latestSearchMigration();
+    // instant_form EXISTS, ctwa NOT EXISTS, other NOT EXISTS — each
+    // carries the explicit s.account_id predicate, so the same phone
+    // in another account never matches.
+    const scoped =
+      sql.match(/s\.account_id = v_account_id/gi) ?? [];
+    expect(scoped.length).toBeGreaterThanOrEqual(3);
+    expect(sql).not.toMatch(/JOIN meta_lead_submissions/i);
   });
 
   it("matches Other only when NEITHER signal exists", () => {
@@ -177,6 +195,29 @@ describe("inbox search Lead Source facet (147)", () => {
     expect(sql).toMatch(/p_source IS NULL OR p_source = 'all'/i);
     // No ELSE branch — any other non-null value falls through every OR.
     expect(sql).not.toMatch(/ELSE\s+TRUE/i);
+  });
+
+  it("filters by Meta Form with an account-scoped EXISTS (never JOIN)", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(/p_form_id IS NULL/i);
+    expect(sql).toMatch(
+      /AND s\.form_id = p_form_id/i,
+    );
+    expect(sql).toMatch(
+      /p_form_id[\s\S]*?s\.account_id = v_account_id[\s\S]*?s\.contact_id = c\.contact_id[\s\S]*?s\.status = 'processed'/i,
+    );
+    expect(sql).not.toMatch(/JOIN meta_lead_submissions/i);
+  });
+
+  it("form filtering is ANDed with source (both must hold, one row per thread)", () => {
+    const { sql } = latestSearchMigration();
+    // Own AND group: selecting a form narrows within the source
+    // bucket instead of replacing it; EXISTS keeps row cardinality.
+    expect(sql).toMatch(/AND \(\s*p_form_id IS NULL/i);
+    expect(sql).toMatch(/LIMIT v_limit \+ 1/i);
+    expect(sql).toMatch(
+      /ORDER BY c\.last_message_at DESC NULLS FIRST, c\.id DESC/i,
+    );
   });
 
   it("does not touch attribution data or historical records", () => {

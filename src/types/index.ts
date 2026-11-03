@@ -74,6 +74,13 @@ export interface AccountMember {
   phone_recording_source: string;
   /** Owner-configured phone number, normalized digits (null = none). */
   phone_recording_number: string | null;
+  /**
+   * Inbox grant flags. Present ONLY for the owner caller (merged
+   * server-side from agent_inbox_permissions); absent for everyone
+   * else. True = the agent holds that grant right now.
+   */
+  can_manage_assignments?: boolean;
+  can_view_all?: boolean;
 }
 
 /**

@@ -8,12 +8,12 @@ import { PresenceDot } from "@/components/presence/presence-dot";
 import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
 import type {
+  AccountMember,
   Conversation,
   Message,
   MessageReaction,
   Contact,
   MessageTemplate,
-  Profile,
 } from "@/types";
 import {
   MessageSquare,
@@ -161,7 +161,7 @@ export function MessageThread({
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profiles, setProfiles] = useState<AccountMember[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
   // Approved-template header metadata for rendering template bubbles.
   // Outbound template rows persist content_type/template_name/content_text
@@ -218,24 +218,27 @@ export function MessageThread({
   }, [isRefreshing, onRefresh]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
 
-  // Profiles are bounded by RLS to rows the current user is allowed to
-  // see — today that's just the current user, but the dropdown keeps the
-  // shape ready for shared-team workspaces without a refactor.
+  // Team roster for the Assign dropdown and the header assignee name.
+  // Loaded from GET /api/account/members (full account team) instead
+  // of a direct profiles read: RLS bounds the direct read to rows the
+  // current user may see (just themselves), so other assignees would
+  // render as a generic "Assigned" and never appear as options. The
+  // members endpoint is the same source the Inbox Team filter uses.
   useEffect(() => {
     let cancelled = false;
-    const supabase = createClient();
-    supabase
-      .from("profiles")
-      .select("*")
-      .order("full_name")
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          console.error("Failed to fetch profiles:", error);
-          return;
+    (async () => {
+      try {
+        const res = await fetch("/api/account/members");
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok && Array.isArray(data.members)) {
+          setProfiles(data.members as AccountMember[]);
         }
-        setProfiles((data as Profile[]) ?? []);
-      });
+      } catch {
+        // Best-effort: an empty roster renders "No teammates available"
+        // and the header falls back to "Assigned".
+        if (!cancelled) setProfiles([]);
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -795,15 +798,22 @@ export function MessageThread({
     async (agentId: string | null) => {
       if (!conversation) return;
 
-      const supabase = createClient();
-      const { error } = await supabase
-        .from("conversations")
-        .update({ assigned_agent_id: agentId })
-        .eq("id", conversation.id);
-
-      if (error) {
-        console.error("Failed to update assignment:", error);
-        toast.error("Failed to update assignment");
+      // Single server call writes BOTH the conversation assignee and
+      // the linked Workspace Assigned To cell (validated, account-
+      // scoped). The parent's onAssignChange mirrors it optimistically;
+      // realtime postgres_changes converges every other tab.
+      const res = await fetch(
+        `/api/inbox/conversations/${conversation.id}/assign`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: agentId }),
+        }
+      );
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        console.error("Failed to update assignment:", payload);
+        toast.error(payload?.error || "Failed to update assignment");
         return;
       }
 
@@ -962,7 +972,7 @@ export function MessageThread({
                   const presence = getPresence(p.user_id);
                   return (
                     <DropdownMenuItem
-                      key={p.id}
+                      key={p.user_id}
                       onClick={() => handleAssignChange(p.user_id)}
                       className={cn(
                         "text-sm",

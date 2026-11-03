@@ -55,6 +55,37 @@ export async function GET() {
 
     const canSeeEmails = canManageMembers(ctx.role);
 
+    // Inbox permission flags for the Team Members Access UI. Owner-only:
+    // agents must not learn who else holds grants. Single batched
+    // lookup, merged below; absent row = no grants.
+    let grantsByUser = new Map<string, { can_manage_assignments: boolean; can_view_all: boolean }>();
+    if (ctx.role === "owner") {
+      const { data: grants, error: grantsError } = await ctx.supabase
+        .from("agent_inbox_permissions")
+        .select("user_id, can_manage_assignments, can_view_all")
+        .eq("account_id", ctx.accountId);
+      if (grantsError) {
+        console.error("[GET /api/account/members] grants fetch error:", grantsError);
+        return NextResponse.json(
+          { error: "Failed to load members" },
+          { status: 500 },
+        );
+      }
+      grantsByUser = new Map(
+        ((grants ?? []) as Array<{
+          user_id: string;
+          can_manage_assignments: boolean;
+          can_view_all: boolean;
+        }>).map((g) => [
+          g.user_id,
+          {
+            can_manage_assignments: g.can_manage_assignments === true,
+            can_view_all: g.can_view_all === true,
+          },
+        ]),
+      );
+    }
+
     // Effective recording sources in one batched lookup (absent
     // row = 'none'). Same request, never N+1.
     const { data: settings, error: settingsError } = await ctx.supabase
@@ -103,6 +134,15 @@ export async function GET() {
           phone_recording_source:
             phone === "sim1" || phone === "sim2" ? phone : "none",
           phone_recording_number: phoneNumber,
+          // Inbox grants ride along for owners only (see fetch above);
+          // agents/viewers never receive other members' flags.
+          ...(ctx.role === "owner"
+            ? {
+                can_manage_assignments:
+                  grantsByUser.get(row.user_id)?.can_manage_assignments ?? false,
+                can_view_all: grantsByUser.get(row.user_id)?.can_view_all ?? false,
+              }
+            : {}),
         },
       ];
     });
@@ -117,9 +157,9 @@ export async function GET() {
 // POST /api/account/members — owner creates a user directly.
 //
 // Replaces invitation links for new users: the OWNER supplies
-// name + email + password + role, and the user exists (confirmed,
-// member of this account, profile full_name set) when the call
-// returns.
+// name + email + password, and the user exists (confirmed,
+// member of this account, profile full_name set, role agent)
+// when the call returns.
 //
 // Server-side, all derived from the session — never trusted
 // from the browser:
@@ -127,8 +167,8 @@ export async function GET() {
 //   2. account = caller's account (ctx.accountId).
 //   3. email trimmed + lowercased; format-checked.
 //   4. password ≥ 6 chars (matches the signup-page policy).
-//   5. role ∈ admin/agent/viewer (existing vocabulary, never
-//      owner — ownership moves only via transfer).
+//   5. role is always agent — an explicit non-agent role value
+//      is rejected, so crafted requests cannot escalate.
 //   6. admin.createUser({ email_confirm: true }) — no verification
 //      mail, immediate login. Duplicate email → 409, existing
 //      user untouched.
@@ -149,8 +189,9 @@ const MIN_PASSWORD_LEN = 6;
 // never truncated: silently shortening someone's name would store
 // a value they didn't enter.
 const MAX_NAME_LEN = 80;
-// Creatable roles: the existing vocabulary minus owner.
-const CREATABLE_ROLES: AccountRole[] = ["admin", "agent", "viewer"];
+// Add User always creates Agents — there is no role picker in the
+// UI, and any client-supplied role is rejected below so a crafted
+// request cannot escalate to admin/viewer/owner.
 
 export async function POST(request: Request) {
   try {
@@ -196,13 +237,17 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    const role = body?.role;
-    if (!isAccountRole(role) || !(CREATABLE_ROLES as string[]).includes(role)) {
+    // Add User always creates Agents. An explicit "agent" (what the
+    // UI sends) or an absent role is accepted; anything else —
+    // admin, viewer, owner, or garbage — is rejected so a crafted
+    // request can never mint a privileged or unknown role.
+    if (body?.role !== undefined && body.role !== "agent") {
       return NextResponse.json(
-        { error: "Role must be admin, agent, or viewer." },
+        { error: "New users are always created as agents." },
         { status: 400 }
       );
     }
+    const role: AccountRole = "agent";
 
     const admin = supabaseAdmin();
 

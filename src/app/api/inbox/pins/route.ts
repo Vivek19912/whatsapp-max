@@ -17,6 +17,7 @@ import { NextResponse } from "next/server";
 import type { PostgrestError } from "@supabase/supabase-js";
 
 import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
+import { canViewConversation, resolveViewerCaps } from "@/lib/inbox/assignment-access";
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from "@/lib/rate-limit";
 import { MAX_PINNED_CHATS } from "@/lib/inbox/pins";
 
@@ -114,6 +115,41 @@ export async function POST(request: Request) {
         { error: "'conversationId' must be a valid UUID" },
         { status: 400 },
       );
+    }
+
+    // Assignment gate: pinning is a per-thread action, so the thread
+    // must be visible to the caller (owner/admin: any; agent: own
+    // assigned threads or view-all grants; viewer: legacy read-all).
+    // Unpin is intentionally ungated — deleting only the caller's own
+    // rows must always succeed so stale pins can be cleaned up after
+    // access is revoked. For agents a missing row is indistinguishable
+    // from an invisible one, so fail closed: no pin is created.
+    // Owners/admins fall through to the RPC, which 404s
+    // genuinely-missing threads through its own checks.
+    {
+      const { data: conv } = await ctx.supabase
+        .from("conversations")
+        .select("assigned_agent_id")
+        .eq("id", conversationId)
+        .maybeSingle();
+      const assigned =
+        (conv as { assigned_agent_id: string | null } | null)
+          ?.assigned_agent_id ?? null;
+      const caps = await resolveViewerCaps(
+        ctx.supabase,
+        ctx.accountId,
+        ctx.userId,
+        ctx.role
+      );
+      const visible =
+        !!conv &&
+        canViewConversation({ role: ctx.role, userId: ctx.userId }, assigned, caps);
+      if (!visible && ctx.role !== "owner" && ctx.role !== "admin") {
+        return NextResponse.json(
+          { error: "Conversation not found." },
+          { status: 404 },
+        );
+      }
     }
 
     const { data, error } = await ctx.supabase.rpc("pin_conversation", {

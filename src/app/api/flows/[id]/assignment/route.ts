@@ -97,6 +97,7 @@ export async function GET(_request: Request, { params }: Ctx) {
         ...a,
         email: privileged ? a.email : null,
         phone: privileged ? a.phone : null,
+        whatsapp_numbers: privileged ? a.whatsapp_numbers : [],
         available: unavailable_reason === null,
         unavailable_reason,
         status_label,

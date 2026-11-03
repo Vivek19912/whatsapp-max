@@ -17,20 +17,17 @@
 --   - 'instant_form' — a processed Meta Instant Form submission is linked
 --                      to the conversation's contact (EXISTS, dedup-safe:
 --                      repeat submissions never duplicate the thread).
---   - 'ctwa'         — the contact carries valid CTWA attribution:
---                      non-blank source_url OR non-blank ctwa_clid
---                      (btrim <> '' mirrors the client classifier exactly;
---                      interior whitespace never occurs in practice, and
---                      for the emptiness check trimming all spaces is
---                      equivalent to btrim).
+--   - 'ctwa'         — the contact carries valid CTWA attribution
+--                      (non-blank source_url OR non-blank ctwa_clid) AND
+--                      has NO processed Instant Form submission. Instant
+--                      Form takes precedence: a dual-source contact is a
+--                      Meta lead, excluded here even when CTWA fields are
+--                      populated (metadata itself is never modified).
 --   - 'other'        — NEITHER signal (NOT EXISTS + NOT valid-CTWA).
--- Overlap is intentional: a conversation whose contact has BOTH signals
--- (96 in production at audit time) matches BOTH the instant_form and
--- the ctwa filters. No precedence is forced here.
 --
 -- What is NOT changed: signature order of the 11 existing parameters
--- (p_source is appended last with a default), all existing facets
--- (status/tags/company/flow/team/date), the text-match branches
+-- (p_source and p_form_id are appended last with defaults), all
+-- existing facets (status/tags/company/flow/team/date), the text-match branches
 -- (including the 085 messages EXISTS), ordering (last_message_at DESC
 -- NULLS FIRST, id DESC), keyset pagination, response envelope,
 -- SECURITY INVOKER, grants. Unknown p_source values match nothing
@@ -65,12 +62,19 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_messages_content_text_trgm
   ON messages USING gin (content_text gin_trgm_ops);
 
--- New 12-arg overload. The old 11-arg version is dropped first so
+-- New 13-arg overload. The old 11-arg version is dropped first so
 -- PostgREST never sees an ambiguous overload; all 11 existing
--- parameters keep their positions, types, and defaults.
+-- parameters keep their positions, types, and defaults. p_source and
+-- p_form_id are appended last with defaults, so every existing caller
+-- keeps working unchanged.
 DROP FUNCTION IF EXISTS public.search_inbox_conversations(
   TEXT, TEXT, UUID[], TEXT, TEXT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ,
   TIMESTAMPTZ, UUID, INT
+);
+
+DROP FUNCTION IF EXISTS public.search_inbox_conversations(
+  TEXT, TEXT, UUID[], TEXT, TEXT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ,
+  TIMESTAMPTZ, UUID, INT, TEXT
 );
 
 CREATE FUNCTION public.search_inbox_conversations(
@@ -85,7 +89,8 @@ CREATE FUNCTION public.search_inbox_conversations(
   p_cur_ts TIMESTAMPTZ DEFAULT NULL,
   p_cur_id UUID DEFAULT NULL,
   p_limit INT DEFAULT 25,
-  p_source TEXT DEFAULT 'all'
+  p_source TEXT DEFAULT 'all',
+  p_form_id TEXT DEFAULT NULL
 ) RETURNS JSONB
 LANGUAGE plpgsql
 STABLE
@@ -189,9 +194,9 @@ BEGIN
       AND (p_from IS NULL OR c.last_message_at >= p_from)
       AND (p_to IS NULL OR c.last_message_at <= p_to)
       -- Lead Source facet (mirrors matchesLeadSource in
-      -- src/lib/inbox/conversations.ts exactly). Overlap is
-      -- intentional: both-signals threads match BOTH the
-      -- instant_form and ctwa branches.
+      -- src/lib/inbox/conversations.ts exactly). Instant Form takes
+      -- precedence: dual-signal threads match instant_form only, never
+      -- ctwa. EXISTS (never JOIN) keeps one row per conversation.
       AND (
         p_source IS NULL OR p_source = 'all'
         OR (
@@ -205,6 +210,12 @@ BEGIN
         )
         OR (
           p_source = 'ctwa'
+          AND NOT EXISTS (
+            SELECT 1 FROM meta_lead_submissions s
+            WHERE s.account_id = v_account_id
+              AND s.contact_id = c.contact_id
+              AND s.status = 'processed'
+          )
           AND (
             (ct.source_url IS NOT NULL AND btrim(ct.source_url) <> '')
             OR (ct.ctwa_clid IS NOT NULL AND btrim(ct.ctwa_clid) <> '')
@@ -222,6 +233,21 @@ BEGIN
             (ct.source_url IS NOT NULL AND btrim(ct.source_url) <> '')
             OR (ct.ctwa_clid IS NOT NULL AND btrim(ct.ctwa_clid) <> '')
           )
+        )
+      )
+      -- Meta Form facet (the API sends p_form_id only when
+      -- source=instant_form with a specific form selected; All Forms
+      -- sends NULL and disables it). The contact must have a
+      -- processed submission carrying this exact form id. EXISTS,
+      -- never JOIN, so one conversation yields one row.
+      AND (
+        p_form_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM meta_lead_submissions s
+          WHERE s.account_id = v_account_id
+            AND s.contact_id = c.contact_id
+            AND s.status = 'processed'
+            AND s.form_id = p_form_id
         )
       )
       -- Text match: name / raw phone / normalized phone / last message /
@@ -278,15 +304,15 @@ $$;
 
 ALTER FUNCTION public.search_inbox_conversations(
   TEXT, TEXT, UUID[], TEXT, TEXT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ,
-  TIMESTAMPTZ, UUID, INT, TEXT
+  TIMESTAMPTZ, UUID, INT, TEXT, TEXT
 ) OWNER TO postgres;
 
 REVOKE ALL ON FUNCTION public.search_inbox_conversations(
   TEXT, TEXT, UUID[], TEXT, TEXT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ,
-  TIMESTAMPTZ, UUID, INT, TEXT
+  TIMESTAMPTZ, UUID, INT, TEXT, TEXT
 ) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION public.search_inbox_conversations(
   TEXT, TEXT, UUID[], TEXT, TEXT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ,
-  TIMESTAMPTZ, UUID, INT, TEXT
+  TIMESTAMPTZ, UUID, INT, TEXT, TEXT
 ) TO authenticated;

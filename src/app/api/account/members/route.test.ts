@@ -256,12 +256,39 @@ describe("POST /api/account/members (owner creates user)", () => {
     expect(h.createdWith).toBeNull();
   });
 
-  it("5/14. invalid and owner roles are rejected", async () => {
-    for (const role of ["owner", "superadmin", "", undefined]) {
+  it("5/14. non-agent and invalid roles are rejected (always-agent creation)", async () => {
+    for (const role of ["owner", "admin", "viewer", "superadmin", ""]) {
+      const res = await post({ email: "a@x.com", password: "secret123", role });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toBe("New users are always created as agents.");
+    }
+    expect(h.createdWith).toBeNull();
+    expect(h.profileWrites).toEqual([]);
+  });
+
+  it("crafted admin/viewer requests create nothing", async () => {
+    for (const role of ["admin", "viewer"]) {
+      h.createdWith = null;
       const res = await post({ email: "a@x.com", password: "secret123", role });
       expect(res.status).toBe(400);
     }
     expect(h.createdWith).toBeNull();
+    expect(h.profileWrites).toEqual([]);
+    expect(h.deletedUsers).toEqual([]);
+  });
+
+  it("omitted role still creates an agent", async () => {
+    const res = await POST(
+      new Request("https://app.test/api/account/members", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Vikas Sahni", email: "a@x.com", password: "secret123" }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const json = (await res.json()) as { member: { role: string } };
+    expect(json.member.role).toBe("agent");
   });
 
   it("6/7/8/15. duplicate email fails cleanly with existing user untouched", async () => {
@@ -279,11 +306,11 @@ describe("POST /api/account/members (owner creates user)", () => {
     expect(h.deletedAccounts).toEqual([]);
   });
 
-  it("11/12. membership and role land in the caller's account", async () => {
-    await post({ email: "a@x.com", password: "secret123", role: "viewer" });
+  it("11/12. membership and role land in the caller's account, always as agent", async () => {
+    await post({ email: "a@x.com", password: "secret123", role: "agent" });
     expect(h.profileWrites).toContainEqual({
       op: "update",
-      row: { account_id: "acct-1", account_role: "viewer", full_name: "Vikas Sahni" },
+      row: { account_id: "acct-1", account_role: "agent", full_name: "Vikas Sahni" },
     });
   });
 
