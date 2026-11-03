@@ -664,6 +664,7 @@ describe("renamed business fields and Travel CRM compatibility", () => {
       "Cancelled",
       "Invalid",
       "On Hold",
+      "Not connected",
     ]);
     expect(json.options.leadStage[0]).toEqual({ value: "NEW_LEAD", label: "New Lead" });
   });

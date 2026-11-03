@@ -886,6 +886,12 @@ describe("canonicalizeOptionLabel (Workspace business defaults)", () => {
     expect(canonicalizeOptionLabel("FRESH", typeOptions)).toBe("FRESH");
   });
 
+  it("resolves 'Not connected' to NOT_CONNECTED regardless of label casing", () => {
+    const live = [{ value: "NOT_CONNECTED", label: "Not Connected" }];
+    expect(canonicalizeOptionLabel("Not connected", live)).toBe("NOT_CONNECTED");
+    expect(canonicalizeOptionLabel("NOT_CONNECTED", live)).toBe("NOT_CONNECTED");
+  });
+
   it("returns null when unmatched or options are absent", () => {
     expect(canonicalizeOptionLabel("Fresh", [{ value: "HOT", label: "Hot" }])).toBeNull();
     expect(canonicalizeOptionLabel("Fresh", null)).toBeNull();

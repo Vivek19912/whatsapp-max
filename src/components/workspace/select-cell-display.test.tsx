@@ -70,6 +70,7 @@ const STAGE_OPTIONS = [
   "Cancelled",
   "Invalid",
   "On Hold",
+  "Not connected",
 ];
 
 describe("1–5. selected and empty cells show no visible arrow", () => {

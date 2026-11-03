@@ -75,6 +75,7 @@ const CHIP_MAP: Readonly<Record<string, Readonly<Record<string, SelectChip>>>> =
     cancelled: { background: "#57534c", color: "#ffffff" },
     invalid: { background: "#fce7f3", color: "#9d174d" },
     "on hold": { background: "#92400e", color: "#ffffff" },
+    "not connected": { background: "#e2e8f0", color: "#334155" },
   },
   "lead received": {
     website: GRAY_LIGHT,

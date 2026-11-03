@@ -118,6 +118,7 @@ export const STAGE_OPTIONS: readonly string[] = [
   "Cancelled",
   "Invalid",
   "On Hold",
+  "Not connected",
 ];
 
 /** Exact dropdown options for "Lead Received", in order. */

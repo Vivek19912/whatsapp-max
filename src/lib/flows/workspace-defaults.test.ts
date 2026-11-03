@@ -212,6 +212,7 @@ describe("default business column spec", () => {
       "Cancelled",
       "Invalid",
       "On Hold",
+      "Not connected",
     ]);
     expect(byName.get("Lead Received")?.options).toEqual([
       "Website",
@@ -289,7 +290,7 @@ describe("default business column spec", () => {
     });
   });
 
-  it("Stage is single-select with exactly the 14 options", () => {
+  it("Stage is single-select with exactly the 15 options", () => {
     expect([...STAGE_OPTIONS]).toEqual([
       "New Lead",
       "Contacted",
@@ -305,6 +306,7 @@ describe("default business column spec", () => {
       "Cancelled",
       "Invalid",
       "On Hold",
+      "Not connected",
     ]);
     const byName = new Map(WORKSPACE_DEFAULT_FIELDS.map((f) => [f.name, f]));
     expect(byName.get("Stage")).toMatchObject({

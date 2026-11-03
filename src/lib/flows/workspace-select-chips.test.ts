@@ -97,6 +97,7 @@ describe("2. one mapping serves values and options (never random)", () => {
       ["Stage", "Cancelled"],
       ["Stage", "Invalid"],
       ["Stage", "On Hold"],
+      ["Stage", "Not connected"],
       ["Lead Received", "Website"],
       ["Lead Received", "Social Media"],
       ["Lead Received", "Facebook Ads"],
@@ -404,7 +405,7 @@ describe("Lead Type / Stage / Lead Received: exact option sets, distinct chips",
     expect(bgs.size).toBe(5);
   });
 
-  it("Stage maps its 14 options to distinct backgrounds", () => {
+  it("Stage maps its 15 options to distinct backgrounds", () => {
     const options = [
       "New Lead",
       "Contacted",
@@ -420,6 +421,7 @@ describe("Lead Type / Stage / Lead Received: exact option sets, distinct chips",
       "Cancelled",
       "Invalid",
       "On Hold",
+      "Not connected",
     ];
     const bgs = new Set(
       options.map((o) => {
@@ -428,7 +430,7 @@ describe("Lead Type / Stage / Lead Received: exact option sets, distinct chips",
         return chip!.background;
       }),
     );
-    expect(bgs.size).toBe(14);
+    expect(bgs.size).toBe(15);
   });
 
   it("Lead Received maps its 12 options to distinct backgrounds", () => {

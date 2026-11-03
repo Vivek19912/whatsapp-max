@@ -7,6 +7,8 @@ import {
   validateWorkspaceFieldDef,
   validateWorkspaceValue,
 } from "./workspace-fields";
+import { STAGE_OPTIONS } from "./workspace-defaults";
+import { getSelectChip } from "./workspace-select-chips";
 
 describe("workspace field definitions", () => {
   it("accepts all nine phase-1 types", () => {
@@ -213,6 +215,18 @@ describe("workspace cell values", () => {
     expect(() =>
       validateWorkspaceValue("multi_select", opts, ["New", "Lost"]),
     ).toThrow(/options/i);
+  });
+
+  it("accepts the Not connected stage and round-trips it verbatim", () => {
+    const opts = [...STAGE_OPTIONS];
+    expect(opts).toContain("Not connected");
+    // Save path: exact-match validation passes for the new option.
+    expect(validateWorkspaceValue("single_select", opts, "Not connected")).toBe("Not connected");
+    // Refresh path: the stored value still matches the column options.
+    expect(opts.some((o) => o === "Not connected")).toBe(true);
+    // Badge path: a chip resolves (never null) with a distinct color.
+    const chip = getSelectChip("Stage", "Not connected");
+    expect(chip).not.toBeNull();
   });
 
   it("normalizes checkbox values", () => {

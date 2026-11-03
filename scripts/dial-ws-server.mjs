@@ -37,6 +37,16 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { createClient } from '@supabase/supabase-js';
 
+// Node 20 ships no global WebSocket, but the bundled realtime client
+// requires a constructor at SupabaseClient construction time — even
+// though this process only ever uses REST + auth (never realtime).
+// Provide the installed `ws` package as the constructor. No-op on
+// Node 22+, where the native WebSocket already exists.
+if (typeof globalThis.WebSocket === 'undefined') {
+  const { default: NodeWebSocket } = await import('ws');
+  globalThis.WebSocket = NodeWebSocket;
+}
+
 const PORT = Number(process.env.DIAL_WS_PORT || 3001);
 const HOST = process.env.DIAL_WS_HOST || '127.0.0.1';
 const INTERNAL_SECRET = process.env.DIAL_WS_INTERNAL_SECRET || '';
