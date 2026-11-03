@@ -7,9 +7,12 @@ import {
   NO_FLOW_FILTER_ID,
   type ConversationDateFilter,
   getConversationDateRange,
+  isSourceFilterBlocked,
   matchesContactFilters,
   matchesConversationDateFilter,
+  matchesLeadSource,
   normalizeConversations,
+  type LeadSourceFilter,
 } from "@/lib/inbox/conversations";
 import {
   addPin,
@@ -24,10 +27,13 @@ import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   buildSearchKey,
   canLoadMoreSearch,
+  LEAD_SOURCE_LABELS,
+  LEAD_SOURCES,
   mergeSearchPage,
   normalizeSearchQuery,
   SEARCH_PAGE_SIZE,
   SearchRequestGate,
+  type InboxLeadSource,
 } from "@/lib/inbox/search";
 import type {
   AccountMember,
@@ -118,6 +124,28 @@ export function ConversationList({
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
   const [members, setMembers] = useState<AccountMember[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  // Lead Source filter (null = All Sources). The Instant-Form half of
+  // the classification needs the set of contact ids with at least one
+  // processed Meta submission — loaded in ONE batched query per
+  // conversation list below, never N+1. Server-side search derives the
+  // same signal via EXISTS inside the RPC, so both paths classify
+  // identically.
+  const [selectedSource, setSelectedSource] =
+    useState<LeadSourceFilter>(null);
+  const [submissionContactIds, setSubmissionContactIds] = useState<
+    Set<string>
+  >(new Set());
+  // Readiness of the submission-contact lookup above. False from the
+  // first render until the first successful lookup (including a
+  // successful lookup that returns zero rows). While false, the
+  // Instant Form / Other options must not filter on the incomplete
+  // set — the list shows a loading or error/retry state instead.
+  const [submissionLinksReady, setSubmissionLinksReady] = useState(false);
+  // Retained failure — never mistaken for a successful empty result.
+  const [submissionLinksError, setSubmissionLinksError] = useState<
+    string | null
+  >(null);
+  const [submissionLinksRetry, setSubmissionLinksRetry] = useState(0);
 
   // Server-side search state — deliberately separate from the normal
   // `conversations` list so entering/leaving search, paging, or a
@@ -289,6 +317,67 @@ export function ConversationList({
     };
   }, [resyncToken]);
 
+  // Processed Meta Instant Form submissions for the loaded contacts —
+  // the client-side half of the Lead Source filter. One batched query
+  // per conversation list (chunked .in(), never per-row). Readiness is
+  // explicit: a new lookup starts not-ready; only a success (even with
+  // zero rows) marks it ready, and a failure retains an error state
+  // that is never confused with an empty result. The cleanup cancels
+  // the superseded run, so retries and rapid list changes cannot apply
+  // stale results (no duplicate application). An account switch yields
+  // a new conversations array, which restarts the lookup and drops
+  // the previous account's set via the not-ready gate below.
+  useEffect(() => {
+    const supabase = createClient();
+    let cancelled = false;
+    setSubmissionLinksReady(false);
+    setSubmissionLinksError(null);
+    (async () => {
+      const ids = Array.from(
+        new Set(conversations.map((c) => c.contact_id).filter(Boolean))
+      );
+      if (ids.length === 0) {
+        if (!cancelled) {
+          setSubmissionContactIds(new Set());
+          setSubmissionLinksReady(true);
+        }
+        return;
+      }
+      const found = new Set<string>();
+      try {
+        for (let i = 0; i < ids.length; i += 500) {
+          const { data, error } = await supabase
+            .from("meta_lead_submissions")
+            .select("contact_id")
+            .eq("status", "processed")
+            .in("contact_id", ids.slice(i, i + 500));
+          if (error || cancelled) return;
+          for (const row of (data ?? []) as {
+            contact_id: string | null;
+          }[]) {
+            if (row.contact_id) found.add(row.contact_id);
+          }
+        }
+        if (!cancelled) {
+          setSubmissionContactIds(found);
+          setSubmissionLinksReady(true);
+        }
+      } catch (err) {
+        // Keep the previous set but stay not-ready with a visible
+        // error — a failed lookup must not reclassify anything, and
+        // must not look like a successful empty result either.
+        if (!cancelled) {
+          setSubmissionLinksError(
+            err instanceof Error ? err.message : "Lookup failed."
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversations, submissionLinksRetry]);
+
   // Server-side search: debounced query + every active filter become
   // ONE request per settled state (Contacts-style sequence guard, so
   // a slow "abc" response can never overwrite "abcd"). Clearing the
@@ -311,6 +400,7 @@ export function ConversationList({
         memberIds: selectedMemberIds,
         from: searchDateRange?.from.toISOString() ?? null,
         to: searchDateRange?.to.toISOString() ?? null,
+        source: selectedSource ?? "all",
       })
     : "";
 
@@ -336,6 +426,7 @@ export function ConversationList({
     if (selectedFlowId) params.set("flow", selectedFlowId);
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
+    if (selectedSource) params.set("source", selectedSource);
     if (searchDateRange) {
       params.set("from", searchDateRange.from.toISOString());
       params.set("to", searchDateRange.to.toISOString());
@@ -404,6 +495,18 @@ export function ConversationList({
     return m;
   }, [tags]);
 
+  // Whether the normal list may apply the Instant Form / Other filter
+  // right now (see isSourceFilterBlocked). Server-side search never
+  // waits on the client lookup (its EXISTS runs in Postgres); ctwa/all
+  // never need it (contact fields are already inline). While blocked,
+  // the list renders a loading or error/retry state instead of
+  // silently wrong results.
+  const sourceLinksBlocked = isSourceFilterBlocked(
+    searching,
+    selectedSource,
+    submissionLinksReady
+  );
+
   const filtered = useMemo(() => {
     // Search mode: the server already applied the text match AND every
     // active filter (status/tags/company/flow/team/date). Applying them
@@ -429,7 +532,8 @@ export function ConversationList({
     }
 
     // Contact-based filters (tags via OR logic, exact company match,
-    // flow via the contact's active/most-recent flow run).
+    // flow via the contact's active/most-recent flow run, lead source
+    // via CTWA fields + the batched processed-submission set above).
     if (
       selectedTagIds.length > 0 ||
       selectedCompany !== null ||
@@ -441,6 +545,12 @@ export function ConversationList({
           company: selectedCompany,
           flowId: selectedFlowId,
         })
+      );
+    }
+
+    if (selectedSource !== null && !sourceLinksBlocked) {
+      result = result.filter((c) =>
+        matchesLeadSource(c, selectedSource, submissionContactIds)
       );
     }
 
@@ -467,6 +577,9 @@ export function ConversationList({
     selectedCompany,
     selectedFlowId,
     selectedMemberIds,
+    selectedSource,
+    submissionContactIds,
+    sourceLinksBlocked,
   ]);
 
   // Split the (already filtered/searched) list into pinned + regular.
@@ -546,6 +659,7 @@ export function ConversationList({
     if (selectedFlowId) params.set("flow", selectedFlowId);
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
+    if (selectedSource) params.set("source", selectedSource);
     if (searchDateRange) {
       params.set("from", searchDateRange.from.toISOString());
       params.set("to", searchDateRange.to.toISOString());
@@ -603,6 +717,7 @@ export function ConversationList({
     selectedCompany,
     selectedFlowId,
     selectedMemberIds,
+    selectedSource,
     searchDateRange,
   ]);
 
@@ -698,7 +813,15 @@ export function ConversationList({
     setSelectedCompany(null);
     setSelectedFlowId(null);
     setSelectedMemberIds([]);
+    setSelectedSource(null);
   }, []);
+
+  const hasContactFilters =
+    selectedTagIds.length > 0 ||
+    selectedCompany !== null ||
+    selectedFlowId != null ||
+    selectedMemberIds.length > 0 ||
+    selectedSource !== null;
 
   const toggleMember = useCallback((id: string) => {
     setSelectedMemberIds((prev) =>
@@ -707,12 +830,6 @@ export function ConversationList({
         : [...prev, id]
     );
   }, []);
-
-  const hasContactFilters =
-    selectedTagIds.length > 0 ||
-    selectedCompany !== null ||
-    selectedFlowId != null ||
-    selectedMemberIds.length > 0;
 
   const handleSearchChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -951,6 +1068,61 @@ export function ConversationList({
             </Popover>
           </div>
 
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={cn(
+                "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                selectedSource
+                  ? "text-primary"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span className="truncate">
+                {selectedSource
+                  ? LEAD_SOURCE_LABELS[selectedSource]
+                  : "Lead Source"}
+              </span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="border-border bg-popover max-h-64 w-56"
+            >
+              <DropdownMenuItem
+                onClick={() => setSelectedSource(null)}
+                className={cn(
+                  "text-sm",
+                  selectedSource === null
+                    ? "text-primary"
+                    : "text-popover-foreground"
+                )}
+              >
+                All Sources
+              </DropdownMenuItem>
+              {(
+                LEAD_SOURCES.filter((v) => v !== "all") as Exclude<
+                  InboxLeadSource,
+                  "all"
+                >[]
+              ).map((value) => (
+                <DropdownMenuItem
+                  key={value}
+                  onClick={() => setSelectedSource(value)}
+                  className={cn(
+                    "text-sm",
+                    selectedSource === value
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  <span className="truncate">
+                    {LEAD_SOURCE_LABELS[value]}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           {tags.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -1188,6 +1360,17 @@ export function ConversationList({
                 <X className="h-3 w-3" />
               </button>
             )}
+            {selectedSource && (
+              <button
+                onClick={() => setSelectedSource(null)}
+                className="bg-muted text-foreground hover:bg-muted/70 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
+              >
+                <span className="max-w-40 truncate">
+                  {LEAD_SOURCE_LABELS[selectedSource]}
+                </span>
+                <X className="h-3 w-3" />
+              </button>
+            )}
             {selectedMemberIds.map((id) => {
               const member = members.find((item) => item.user_id === id);
               return (
@@ -1240,6 +1423,31 @@ export function ConversationList({
         {loading || (searching && searchLoading && filtered.length === 0) ? (
           <div className="flex items-center justify-center py-12">
             <div className="border-primary h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
+          </div>
+        ) : sourceLinksBlocked ? (
+          <div className="px-4 py-12 text-center">
+            {submissionLinksError ? (
+              <>
+                <p className="text-muted-foreground text-sm">
+                  Could not load lead source data. The list is paused to
+                  avoid showing wrong results.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setSubmissionLinksRetry((n) => n + 1)}
+                  className="text-primary mt-2 text-xs hover:underline"
+                >
+                  Retry
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="border-primary mx-auto h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
+                <p className="text-muted-foreground mt-2 text-sm">
+                  Loading lead source data…
+                </p>
+              </>
+            )}
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center">

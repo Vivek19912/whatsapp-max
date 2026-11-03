@@ -14,6 +14,25 @@ const UUID_RE =
 
 export const NO_FLOW_SENTINEL = "__no_flow__";
 
+export type InboxLeadSource = "all" | "instant_form" | "ctwa" | "other";
+
+export const LEAD_SOURCES: InboxLeadSource[] = [
+  "all",
+  "instant_form",
+  "ctwa",
+  "other",
+];
+
+/** Toolbar labels for the Lead Source dropdown (value → display). */
+export const LEAD_SOURCE_LABELS: Record<InboxLeadSource, string> = {
+  all: "All Sources",
+  instant_form: "Meta Lead Ads (Instant Form)",
+  // "Click-to-WhatsApp" without "Ads": the predicate also matches organic
+  // Facebook Page-post referrals (source_type 'post'), not only paid ads.
+  ctwa: "Click-to-WhatsApp",
+  other: "Other / Unknown",
+};
+
 export type InboxSearchStatus =
   | "all"
   | "unread"
@@ -138,6 +157,7 @@ export function buildSearchKey(parts: {
   memberIds: string[];
   from: string | null;
   to: string | null;
+  source: string;
 }): string {
   return JSON.stringify({
     q: parts.q,
@@ -148,6 +168,7 @@ export function buildSearchKey(parts: {
     memberIds: [...parts.memberIds].sort(),
     from: parts.from,
     to: parts.to,
+    source: parts.source,
   });
 }
 
@@ -160,6 +181,8 @@ export interface ParsedSearchRequest {
   memberIds: string[];
   from: string | null;
   to: string | null;
+  /** Lead Source facet; always a validated InboxLeadSource. */
+  source: InboxLeadSource;
   cursor: SearchCursor | null;
   limit: number;
 }
@@ -214,6 +237,11 @@ export function parseSearchRequestParams(
     }
   }
 
+  const source = params.get("source") ?? "all";
+  if (!(LEAD_SOURCES as string[]).includes(source)) {
+    throw new SearchParamsError(`Invalid source: ${source}`);
+  }
+
   const parseDate = (v: string | null, name: string): string | null => {
     if (v === null || v === "") return null;
     const t = Date.parse(v);
@@ -238,6 +266,7 @@ export function parseSearchRequestParams(
     memberIds,
     from,
     to,
+    source: source as InboxLeadSource,
     cursor: decodeSearchCursor(params.get("cursor")),
     limit,
   };
