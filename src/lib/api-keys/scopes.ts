@@ -22,7 +22,6 @@ export const API_SCOPES = [
   'broadcasts:send',
   'webhooks:manage',
   'recordings:write',
-  'crm-mappings:manage',
 ] as const;
 
 export type ApiScope = (typeof API_SCOPES)[number];
@@ -37,7 +36,6 @@ export const SCOPE_DESCRIPTIONS: Record<ApiScope, string> = {
   'broadcasts:send': 'Launch broadcast campaigns',
   'webhooks:manage': 'Register and manage outbound event webhooks',
   'recordings:write': 'Upload phone call recordings',
-  'crm-mappings:manage': 'Manage CRM user mappings (Travel Agency CRM integration)',
 };
 
 /** Type-narrow an unknown value into a valid `ApiScope`. */

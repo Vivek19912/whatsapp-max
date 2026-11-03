@@ -22,6 +22,7 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { SettingsPanelHead } from "./settings-panel-head";
+import { CrmUserMappingSection } from "./crm-user-mapping-section";
 
 /**
  * Travel CRM link — the URL opened (new tab) by the "Travel CRM"
@@ -92,7 +93,7 @@ export function TravelCrmSettings() {
   const isDefault = effective === DEFAULT_TRAVEL_CRM_URL;
 
   return (
-    <section className="max-w-2xl animate-in fade-in-50 duration-200">
+    <section className="max-w-4xl animate-in fade-in-50 duration-200 space-y-6">
       <SettingsPanelHead
         title="Travel Agency CRM"
         description="Cross-app navigation for your team — the sidebar card that opens your Travel Agency CRM in a new tab."
@@ -158,6 +159,11 @@ export function TravelCrmSettings() {
           )}
         </CardContent>
       </Card>
+
+      {/* Section 2: CRM User Mapping — which workspace member's leads go
+          to which CRM salesperson. Managed here with the account's own
+          session; no API keys involved. */}
+      <CrmUserMappingSection />
     </section>
   );
 }
