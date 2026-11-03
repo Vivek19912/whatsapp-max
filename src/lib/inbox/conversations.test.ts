@@ -3,8 +3,11 @@ import {
   NO_FLOW_FILTER_ID,
   getConversationDateRange,
   hasNewerConversationActivity,
+  hasValidCtwaAttribution,
+  isSourceFilterBlocked,
   matchesConversationDateFilter,
   matchesContactFilters,
+  matchesLeadSource,
   normalizeConversation,
 } from "./conversations";
 import type { Conversation } from "@/types";
@@ -467,5 +470,186 @@ describe("hasNewerConversationActivity", () => {
         { last_message_at: "not-a-date" }
       )
     ).toBe(false);
+  });
+});
+
+describe("matchesLeadSource", () => {
+  const sub = (ids: string[]) => new Set(ids);
+
+  it("matches everything when the filter is All Sources", () => {
+    const conv = makeConversation({
+      source_url: "https://fb.me/x",
+      ctwa_clid: "clid",
+    });
+    expect(matchesLeadSource(conv, null, sub(["ct1"]))).toBe(true);
+    expect(matchesLeadSource(conv, "all", sub(["ct1"]))).toBe(true);
+    expect(
+      matchesLeadSource(makeConversation(null), "all", sub([])),
+    ).toBe(true);
+  });
+
+  it("matches Instant Form only via a processed-submission link", () => {
+    const conv = makeConversation({ company: "Acme" });
+    expect(matchesLeadSource(conv, "instant_form", sub(["ct1"]))).toBe(true);
+    // Repeat submissions for the same contact are one set entry — the
+    // thread still matches exactly once.
+    expect(
+      matchesLeadSource(conv, "instant_form", sub(["ct1", "ct1"])),
+    ).toBe(true);
+    expect(matchesLeadSource(conv, "instant_form", sub([]))).toBe(false);
+    expect(matchesLeadSource(conv, "instant_form", sub(["other"]))).toBe(
+      false,
+    );
+    // Submission link is by contact_id, not by CTWA fields.
+    const ctwaOnly = makeConversation({ source_url: "https://fb.me/x" });
+    expect(matchesLeadSource(ctwaOnly, "instant_form", sub([]))).toBe(false);
+  });
+
+  it("matches CTWA via source_url or ctwa_clid independently", () => {
+    expect(
+      matchesLeadSource(
+        makeConversation({ source_url: "https://fb.me/x" }),
+        "ctwa",
+        sub([]),
+      ),
+    ).toBe(true);
+    expect(
+      matchesLeadSource(
+        makeConversation({ ctwa_clid: "12345" }),
+        "ctwa",
+        sub([]),
+      ),
+    ).toBe(true);
+    expect(
+      matchesLeadSource(makeConversation({ company: "Acme" }), "ctwa", sub([])),
+    ).toBe(false);
+    expect(matchesLeadSource(makeConversation(null), "ctwa", sub([]))).toBe(
+      false,
+    );
+  });
+
+  it("lets both-signals conversations match BOTH filters (no precedence)", () => {
+    const conv = makeConversation({
+      source_url: "https://fb.me/x",
+      ctwa_clid: "12345",
+    });
+    expect(matchesLeadSource(conv, "instant_form", sub(["ct1"]))).toBe(true);
+    expect(matchesLeadSource(conv, "ctwa", sub(["ct1"]))).toBe(true);
+    expect(matchesLeadSource(conv, "other", sub(["ct1"]))).toBe(false);
+  });
+
+  it("matches Other only when NEITHER signal exists", () => {
+    expect(
+      matchesLeadSource(makeConversation({ company: "Acme" }), "other", sub([])),
+    ).toBe(true);
+    expect(matchesLeadSource(makeConversation(null), "other", sub([]))).toBe(
+      true,
+    );
+    expect(
+      matchesLeadSource(
+        makeConversation({ source_url: "https://fb.me/x" }),
+        "other",
+        sub([]),
+      ),
+    ).toBe(false);
+    expect(
+      matchesLeadSource(
+        makeConversation({ ctwa_clid: "12345" }),
+        "other",
+        sub([]),
+      ),
+    ).toBe(false);
+    expect(
+      matchesLeadSource(makeConversation(null), "other", sub(["ct1"])),
+    ).toBe(false);
+  });
+
+  it("treats missing and empty attribution as absent (btrim parity)", () => {
+    for (const contact of [
+      {},
+      { source_url: "", ctwa_clid: "" },
+      { source_url: "   ", ctwa_clid: "   " },
+      { source_url: undefined, ctwa_clid: undefined },
+    ]) {
+      const conv = makeConversation(contact);
+      expect(matchesLeadSource(conv, "ctwa", sub([]))).toBe(false);
+      expect(matchesLeadSource(conv, "other", sub([]))).toBe(true);
+    }
+    // DB NULLs arrive as null at runtime (the Contact type narrows to
+    // string|undefined); the guards handle them without throwing.
+    const dbNull = { source_url: null, ctwa_clid: null } as unknown as {
+      source_url?: string;
+      ctwa_clid?: string;
+    };
+    expect(hasValidCtwaAttribution(dbNull)).toBe(false);
+    expect(hasValidCtwaAttribution(null)).toBe(false);
+    expect(hasValidCtwaAttribution(undefined)).toBe(false);
+    expect(
+      matchesLeadSource(
+        { contact_id: "ct1", contact: dbNull },
+        "other",
+        sub([]),
+      ),
+    ).toBe(true);
+  });
+
+  it("counts tab/newline-only values as valid (SQL btrim strips spaces only)", () => {
+    const conv = makeConversation({ source_url: "\t" });
+    expect(matchesLeadSource(conv, "ctwa", sub([]))).toBe(true);
+    expect(matchesLeadSource(conv, "other", sub([]))).toBe(false);
+  });
+
+  it("combines with Date, Tags, Flow, Team and Lead Source filters", () => {    const conv = makeConversation({
+      company: "Acme",
+      tags: [tag("t1")],
+      source_url: "https://fb.me/x",
+    });
+    const contactOk = matchesContactFilters(conv, {
+      tagIds: ["t1"],
+      company: "Acme",
+      flowId: null,
+    });
+    expect(contactOk).toBe(true);
+    expect(matchesLeadSource(conv, "ctwa", sub([]))).toBe(true);
+    // Same thread under the wrong source is excluded while the
+    // contact filters still pass — filters stay independent.
+    expect(matchesLeadSource(conv, "instant_form", sub([]))).toBe(false);
+    expect(matchesLeadSource(conv, "other", sub([]))).toBe(false);
+  });
+});
+
+describe("isSourceFilterBlocked", () => {
+  it("starts blocked: initially not ready", () => {
+    expect(isSourceFilterBlocked(false, "instant_form", false)).toBe(true);
+    expect(isSourceFilterBlocked(false, "other", false)).toBe(true);
+  });
+
+  it("never blocks CTWA or All Sources (no lookup needed)", () => {
+    for (const ready of [false, true]) {
+      expect(isSourceFilterBlocked(false, "ctwa", ready)).toBe(false);
+      expect(isSourceFilterBlocked(false, "all", ready)).toBe(false);
+      expect(isSourceFilterBlocked(false, null, ready)).toBe(false);
+    }
+  });
+
+  it("unblocks Instant Form and Other once the lookup succeeds", () => {
+    expect(isSourceFilterBlocked(false, "instant_form", true)).toBe(false);
+    expect(isSourceFilterBlocked(false, "other", true)).toBe(false);
+  });
+
+  it("never blocks server-side search (SQL EXISTS classifies independently)", () => {
+    // Even with the lookup pending or failed, search results — already
+    // classified by the RPC — render untouched.
+    for (const source of ["instant_form", "other", "ctwa", "all", null] as const) {
+      expect(isSourceFilterBlocked(true, source, false)).toBe(false);
+    }
+  });
+
+  it("stays blocked after a failed lookup until retry succeeds", () => {
+    // Failure keeps ready=false, so both lookup-dependent options stay
+    // gated; the retry path flips ready on success.
+    expect(isSourceFilterBlocked(false, "instant_form", false)).toBe(true);
+    expect(isSourceFilterBlocked(false, "other", false)).toBe(true);
+    expect(isSourceFilterBlocked(false, "instant_form", true)).toBe(false);
   });
 });

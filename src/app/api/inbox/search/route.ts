@@ -73,6 +73,7 @@ export async function GET(request: Request) {
       p_cur_ts: params.cursor?.ts ?? null,
       p_cur_id: params.cursor?.id ?? null,
       p_limit: params.limit,
+      p_source: params.source,
     },
   );
 

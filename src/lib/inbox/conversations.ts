@@ -1,5 +1,88 @@
 import type { Conversation, Contact, Tag } from "@/types";
 import { pickContactFlowRun, type ContactFlowRun } from "./contact-flow";
+import type { InboxLeadSource } from "./search";
+
+/**
+ * Lead Source filter values. `null` (component state) means "All Sources";
+ * the validated `InboxLeadSource` union is what travels in the search key
+ * and the `source` API param.
+ */
+export type LeadSourceFilter = InboxLeadSource | null;
+
+/**
+ * Whether a contact carries valid Click-to-WhatsApp attribution.
+ *
+ * Mirrors the RPC facet in 147_inbox_search_lead_source.sql exactly:
+ * non-blank `source_url` OR non-blank `ctwa_clid`, where "blank" is
+ * SQL `btrim(value) = ''` (spaces only). Removing every ASCII space and
+ * comparing against '' is equivalent for the emptiness check, including
+ * for tabs/newlines (which btrim does NOT strip, so they count as
+ * valid in both implementations).
+ */
+export function hasValidCtwaAttribution(
+  contact:
+    | Pick<Contact, "source_url" | "ctwa_clid">
+    | null
+    | undefined
+): boolean {
+  if (!contact) return false;
+  const url = contact.source_url;
+  const clid = contact.ctwa_clid;
+  return (
+    (typeof url === "string" && url.replace(/ /g, "") !== "") ||
+    (typeof clid === "string" && clid.replace(/ /g, "") !== "")
+  );
+}
+
+/**
+ * Whether the normal Inbox list must withhold the Lead Source filter
+ * right now instead of filtering on an incomplete submission set.
+ *
+ * Server-side search never waits (its EXISTS runs in Postgres and its
+ * results bypass client filtering); ctwa/all never need the lookup
+ * (contact fields are already inline). Only instant_form/other on the
+ * normal list block while the lookup is loading or failed.
+ */
+export function isSourceFilterBlocked(
+  searching: boolean,
+  source: LeadSourceFilter,
+  submissionLinksReady: boolean
+): boolean {
+  if (searching) return false;
+  if (source !== "instant_form" && source !== "other") return false;
+  return !submissionLinksReady;
+}
+
+/**
+ * Whether a conversation matches the Lead Source filter.
+ *
+ * Classification rules (identical to the server-side `p_source` facet):
+ * - "all" (or null): everything matches.
+ * - "instant_form": the conversation's contact has at least one
+ *   `processed` Meta Instant Form submission. The caller passes the set
+ *   of contact ids with such submissions (loaded in ONE batched query,
+ *   never N+1); repeat submissions never duplicate the thread.
+ * - "ctwa": the contact carries valid CTWA attribution (either field).
+ * - "other": NEITHER signal.
+ *
+ * Overlap is intentional: a conversation with both signals matches BOTH
+ * the "instant_form" and "ctwa" filters — no precedence is forced.
+ */
+export function matchesLeadSource(
+  conversation: Pick<Conversation, "contact_id"> & {
+    contact?: Pick<Contact, "source_url" | "ctwa_clid"> | null;
+  },
+  source: LeadSourceFilter,
+  submissionContactIds: ReadonlySet<string>
+): boolean {
+  if (source === null || source === "all") return true;
+  const hasSubmission = submissionContactIds.has(conversation.contact_id);
+  const hasCtwa = hasValidCtwaAttribution(conversation.contact ?? null);
+  if (source === "instant_form") return hasSubmission;
+  if (source === "ctwa") return hasCtwa;
+  // "other"
+  return !hasSubmission && !hasCtwa;
+}
 
 /**
  * Conversation select that embeds the contact plus its tags, so the Inbox

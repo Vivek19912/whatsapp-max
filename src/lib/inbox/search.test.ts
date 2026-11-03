@@ -136,6 +136,7 @@ describe("buildSearchKey", () => {
       memberIds: ["m1"],
       from: null,
       to: null,
+      source: "all",
     };
     expect(buildSearchKey(base)).toBe(
       buildSearchKey({ ...base, tagIds: ["t1", "t2"] }),
@@ -143,6 +144,32 @@ describe("buildSearchKey", () => {
     expect(buildSearchKey(base)).not.toBe(buildSearchKey({ ...base, q: "rahul" }));
     expect(buildSearchKey(base)).not.toBe(
       buildSearchKey({ ...base, status: "open" }),
+    );
+  });
+
+  it("distinguishes Lead Source selections so stale results are never shown", () => {
+    const base = {
+      q: "john",
+      status: "all",
+      tagIds: [],
+      company: null,
+      flowId: null,
+      memberIds: [],
+      from: null,
+      to: null,
+      source: "all",
+    };
+    expect(buildSearchKey(base)).not.toBe(
+      buildSearchKey({ ...base, source: "instant_form" }),
+    );
+    expect(buildSearchKey(base)).not.toBe(
+      buildSearchKey({ ...base, source: "ctwa" }),
+    );
+    expect(buildSearchKey(base)).not.toBe(
+      buildSearchKey({ ...base, source: "other" }),
+    );
+    expect(buildSearchKey({ ...base, source: "ctwa" })).toBe(
+      buildSearchKey({ ...base, source: "ctwa" }),
     );
   });
 });
@@ -177,6 +204,22 @@ describe("parseSearchRequestParams", () => {
     expect(p.cursor).toBeNull();
   });
 
+  it("defaults Lead Source to all and parses each valid option", () => {
+    expect(parseSearchRequestParams(params("x")).source).toBe("all");
+    expect(parseSearchRequestParams(params("x", { source: "all" })).source).toBe(
+      "all",
+    );
+    expect(
+      parseSearchRequestParams(params("x", { source: "instant_form" })).source,
+    ).toBe("instant_form");
+    expect(
+      parseSearchRequestParams(params("x", { source: "ctwa" })).source,
+    ).toBe("ctwa");
+    expect(
+      parseSearchRequestParams(params("x", { source: "other" })).source,
+    ).toBe("other");
+  });
+
   it("rejects empty queries, bad enums, and malformed ids/dates", () => {
     expect(() => parseSearchRequestParams(params("   "))).toThrow(
       SearchParamsError,
@@ -195,6 +238,9 @@ describe("parseSearchRequestParams", () => {
     ).toThrow(SearchParamsError);
     expect(() =>
       parseSearchRequestParams(params("x", { from: "not-a-date" })),
+    ).toThrow(SearchParamsError);
+    expect(() =>
+      parseSearchRequestParams(params("x", { source: "bogus" })),
     ).toThrow(SearchParamsError);
   });
 
