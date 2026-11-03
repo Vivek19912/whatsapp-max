@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Phone } from 'lucide-react';
 
 import {
@@ -30,9 +30,6 @@ type DialState =
   | { kind: 'queued'; requestId: string; expiresAt?: string | null }
   // Delivered: the phone acknowledged receipt (server-persisted).
   | { kind: 'delivered'; requestId: string; expiresAt?: string | null }
-  // Opened: the native dialer was launched (server-persisted).
-  // Dialing is human-confirmed only; Opened is not proof of a call.
-  | { kind: 'opened'; requestId: string }
   // Expired: TTL passed without consumption — re-dial to start over.
   | { kind: 'expired'; requestId: string }
   | { kind: 'failed'; reason: string };
@@ -48,10 +45,11 @@ type DialState =
 export function dialIdempotencyKey(
   runId: string | null | undefined,
   normalizedPhone: string,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  cycle = 0
 ): string {
   const bucket = Math.floor(nowMs / 30000);
-  return `${runId ?? 'row'}:${normalizedPhone}:${bucket}`.slice(0, 128);
+  return `${runId ?? 'row'}:${normalizedPhone}:${bucket}:${cycle}`.slice(0, 128);
 }
 
 /**
@@ -154,7 +152,7 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
   const normalized = dialable ? normalizeDialNumber(phone) : '';
 
   async function handleDesktopDial() {
-    if (!dialable || state.kind === 'queueing' || state.kind === 'queued' || state.kind === 'delivered' || state.kind === 'opened') return;
+    if (!dialable || state.kind === 'queueing' || state.kind === 'queued' || state.kind === 'delivered') return;
     setState({ kind: 'queueing' });
     try {
       const res = await fetch('/api/dial-requests', {
@@ -165,7 +163,12 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
           contact_id: contactId ?? undefined,
           flow_id: flowId ?? undefined,
           run_id: runId ?? undefined,
-          idempotency_key: dialIdempotencyKey(runId, normalized),
+          // Fresh salt per dial cycle: a deliberate re-dial after a
+          // completed/expired/failed request always creates a NEW
+          // server row (never replays the old one), while rapid
+          // double-clicks within one cycle still collapse into the
+          // same row via the UNIQUE constraint.
+          idempotency_key: dialIdempotencyKey(runId, normalized, Date.now(), cycleRef.current),
         }),
       });
       if (!res.ok) throw new Error(`create ${res.status}`);
@@ -191,30 +194,49 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
     }
   }
 
+  // Dial-cycle salt for the idempotency key. Bumped every time a
+  // tracked request reaches a terminal state (opened / expired /
+  // failed), so the next deliberate click always creates a FRESH
+  // server row with a fresh id — never reusing or replaying the
+  // previous request. Within one cycle the key is stable, so
+  // double-clicks (and two tabs clicking at once) still collapse
+  // into the same row via UNIQUE(account_id, idempotency_key).
+  // Bumping inside the setState updater is intentionally idempotent:
+  // a double-invoked updater only skips a salt value, which has no
+  // observable effect beyond keeping keys unique.
+  const cycleRef = useRef(0);
+
   // Live status subscription: active only while this cell tracks a
   // request. Server events are idempotent per (request id, status),
   // so reconnect snapshots and duplicate frames converge safely and
   // multiple tabs never double-act (display only, no side effects).
   const trackedId =
-    state.kind === 'queued' || state.kind === 'delivered' || state.kind === 'opened'
+    state.kind === 'queued' || state.kind === 'delivered'
       ? state.requestId
       : null;
   useEffect(() => {
     if (!trackedId) return;
     return subscribeDialStatus(trackedId, (update) => {
       setState((prev) => {
-        if (prev.kind !== 'queued' && prev.kind !== 'delivered' && prev.kind !== 'opened') {
-          return prev;
-        }
+        if (prev.kind !== 'queued' && prev.kind !== 'delivered') return prev;
         if ((prev as { requestId?: string }).requestId !== update.requestId) return prev;
         const next = dialDisplayState(update.status, update.expiresAt);
         if (next === 'delivered') return { kind: 'delivered', requestId: update.requestId };
-        if (next === 'opened') return { kind: 'opened', requestId: update.requestId };
-        if (next === 'expired') return { kind: 'expired', requestId: update.requestId };
+        if (next === 'opened') {
+          // Dialer opened on the phone: reset to a clickable Dial so
+          // the next click starts a completely new request.
+          cycleRef.current += 1;
+          return { kind: 'idle' };
+        }
+        if (next === 'expired') {
+          cycleRef.current += 1;
+          return { kind: 'expired', requestId: update.requestId };
+        }
         if (next === 'failed') {
+          cycleRef.current += 1;
           return {
             kind: 'failed',
-            reason: 'Delivery failed. Retry the dial or use this phone instead.',
+            reason: 'Delivery failed. Dial again to retry.',
           };
         }
         return prev;
@@ -225,7 +247,8 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
   // Local expiry flip: no polling, just the server-issued TTL the
   // cell already holds. The server is the source of truth on
   // reconnect (snapshot), this only keeps the label honest while
-  // the TTL passes with no further events.
+  // the TTL passes with no further events. Bumping the cycle keeps
+  // the retry key fresh, same as a server-sent expiry.
   useEffect(() => {
     if (state.kind !== 'queued' && state.kind !== 'delivered') return;
     const expiresAt = (state as { expiresAt?: string | null }).expiresAt;
@@ -234,10 +257,12 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
     if (!Number.isFinite(ms)) return;
     const delay = ms - Date.now();
     if (delay <= 0) {
+      cycleRef.current += 1;
       setState({ kind: 'expired', requestId: (state as { requestId: string }).requestId });
       return;
     }
     const timer = setTimeout(() => {
+      cycleRef.current += 1;
       setState((prev) =>
         prev.kind === 'queued' || prev.kind === 'delivered'
           ? { kind: 'expired', requestId: (prev as { requestId: string }).requestId }
@@ -279,8 +304,7 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
   const busy =
     state.kind === 'queueing' ||
     state.kind === 'queued' ||
-    state.kind === 'delivered' ||
-    state.kind === 'opened';
+    state.kind === 'delivered';
   const label =
     state.kind === 'queueing'
       ? 'Queueing…'
@@ -288,25 +312,21 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
         ? 'Queued'
         : state.kind === 'delivered'
           ? 'Delivered'
-          : state.kind === 'opened'
-            ? 'Opened'
-            : state.kind === 'expired'
-              ? 'Expired'
-              : state.kind === 'failed'
-                ? 'Retry'
-                : 'Dial';
+          : state.kind === 'expired'
+            ? 'Expired'
+            : state.kind === 'failed'
+              ? 'Retry'
+              : 'Dial';
   const title =
     state.kind === 'queued'
       ? 'Dial request queued — your phone opens the dialer automatically'
       : state.kind === 'delivered'
         ? 'Phone received the dial request'
-        : state.kind === 'opened'
-          ? 'Dialer opened on your phone (not proof of a call)'
-          : state.kind === 'expired'
-            ? 'Dial request expired — dial again to retry'
-            : state.kind === 'failed'
-              ? state.reason
-              : `Send dial request for ${normalized} to your phone`;
+        : state.kind === 'expired'
+          ? 'Dial request expired — dial again to retry'
+          : state.kind === 'failed'
+            ? state.reason
+            : `Send dial request for ${normalized} to your phone`;
 
   return (
     <span className="inline-flex items-center gap-1.5">

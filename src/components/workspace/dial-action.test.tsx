@@ -100,6 +100,49 @@ describe('dial action column (every Workspace table, handoff + tel:)', () => {
     expect(dialIdempotencyKey('run-1', '+14155552672', base)).not.toBe(k1);
   });
 
+  it('issues a fresh idempotency key per dial cycle after a terminal state', () => {
+    const base = 1_700_000_020_000;
+    const first = dialIdempotencyKey('run-1', '+14155552671', base, 0);
+    // Same cycle + same bucket: stable, so cross-tab double clicks
+    // still collapse into one row.
+    expect(dialIdempotencyKey('run-1', '+14155552671', base + 5_000, 0)).toBe(first);
+    // Next cycle (after opened/expired/failed): a brand-new key, so a
+    // deliberate re-dial always creates a fresh server row.
+    const second = dialIdempotencyKey('run-1', '+14155552671', base + 5_000, 1);
+    expect(second).not.toBe(first);
+    expect(dialIdempotencyKey('run-1', '+14155552671', base + 5_000, 2)).not.toBe(second);
+  });
+
+  it('resets to a clickable Dial on opened and never replays from duplicates', () => {
+    // Opened maps through the display helper, and the component turns
+    // that into an idle reset (not a stuck Opened cell).
+    expect(dialDisplayState('opened', '2030-01-01T00:00:00Z', 0)).toBe('opened');
+    // Every terminal path (server event or local TTL expiry) bumps
+    // the dial-cycle salt so the next click mints a fresh key.
+    expect(dialSrc.match(/cycleRef\.current \+= 1/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // Duplicate/foreign status frames only ever change the label for
+    // their own request id; they never trigger a fetch or a dial.
+    // (No fetch/POST besides the single creation call.)
+    const fetches = (dialSrc.match(/fetch\('/g) ?? []).length;
+    expect(fetches).toBe(1);
+    expect(dialSrc).toContain("'/api/dial-requests'");
+    // The subscription ignores other requests' events.
+    expect(dialSrc).toContain('requestId !== update.requestId');
+  });
+
+  it('shows Dial (clickable) on a fresh mount — including after a refresh post-open', () => {
+    const html = renderToStaticMarkup(
+      <DialAction phone="+14155552671" runId="r1" />
+    );
+    // Fresh mount is idle: clickable Dial, no disabled attribute and
+    // no leftover in-flight label. (The word "disabled" appears in
+    // Tailwind variants; the attribute itself must be absent.)
+    expect(html).toContain('>Dial</span>');
+    expect(html).not.toContain('disabled=""');
+    expect(html).not.toContain('>Queued</span>');
+    expect(html).not.toContain('>Delivered</span>');
+  });
+
   it('maps server states without inventing delivery (reserved for WS status events)', () => {
     expect(interpretDialStatus('delivered')).toBe('delivered');
     expect(interpretDialStatus('opened')).toBe('delivered');
@@ -129,8 +172,9 @@ describe('dial action column (every Workspace table, handoff + tel:)', () => {
   it('subscribes to live status updates without polling', () => {
     expect(dialSrc).toContain('subscribeDialStatus');
     expect(dialSrc).toContain("'Delivered'");
-    expect(dialSrc).toContain("'Opened'");
-    expect(dialSrc).toContain("'Expired'");
+    // Opened resets straight to a clickable Dial (no stuck label).
+    expect(dialSrc).not.toContain("'Opened'");
+    expect(dialSrc).toContain('cycleRef');
     expect(dialSrc).not.toContain('setInterval');
     expect(dialSrc).not.toContain('clearInterval');
     expect(dialSrc).not.toContain('/api/dial-requests?id=');
