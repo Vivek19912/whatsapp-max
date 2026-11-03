@@ -10,6 +10,10 @@ import {
 } from "@/lib/inbox/conversations";
 import type { Conversation, Message, Contact } from "@/types";
 import { isForwardMessageStatus } from "@/lib/whatsapp/message-status";
+import {
+  getHiddenConversationIds,
+  isHidden,
+} from "@/lib/inbox/hidden";
 import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
@@ -167,6 +171,25 @@ export default function InboxPage() {
     knownConvIdsRef.current = next;
   }, [conversations]);
 
+  // Tenant-scoped hidden threads (Inbox display rule only — see
+  // lib/inbox/hidden). Loaded once on mount; realtime INSERTs and
+  // hydrates consult the ref so hidden threads never enter state.
+  const hiddenConvIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ids = await getHiddenConversationIds(createClient());
+        if (!cancelled) hiddenConvIdsRef.current = ids;
+      } catch {
+        // Best-effort: a failed fetch renders a normal inbox.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Moves a conversation to the front of the list while patching its
   // fields — realtime UPDATE/message events must bubble the touched
   // conversation back to the top of the list, same as a brand-new
@@ -195,6 +218,8 @@ export default function InboxPage() {
   // this whenever they reference a conversation id they don't recognise.
   const hydrateConversation = useCallback(async (convId: string) => {
     if (hydratingConvIdsRef.current.has(convId)) return;
+    // Hidden threads (deep links included) never enter Inbox state.
+    if (isHidden(hiddenConvIdsRef.current, convId)) return;
     hydratingConvIdsRef.current.add(convId);
     try {
       const supabase = createClient();
@@ -358,6 +383,8 @@ export default function InboxPage() {
         // (realtime payloads never include joins). Skip both if we
         // already have the row — that shouldn't happen normally, but
         // out-of-order delivery would have us prepending a duplicate.
+        // Hidden threads never enter state (see hiddenConvIdsRef).
+        if (isHidden(hiddenConvIdsRef.current, conv.id)) return;
         if (!knownConvIdsRef.current.has(conv.id)) {
           setConversations((prev) => {
             if (prev.some((c) => c.id === conv.id)) return prev;

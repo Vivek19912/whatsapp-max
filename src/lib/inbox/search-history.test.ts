@@ -81,9 +81,11 @@ describe("inbox search history migration", () => {
 
   it("preserves signature, filters, ordering, and keyset pagination", () => {
     const { sql } = latestSearchMigration();
-    // Signature identical to 078 (11 params, same order).
+    // Signature: the 11 original params in the same order, plus the
+    // trailing p_source Lead Source facet (DEFAULT 'all', so every
+    // existing caller keeps working unchanged).
     expect(sql).toMatch(
-      /search_inbox_conversations\(\s*p_search TEXT,\s*p_status TEXT[^)]*p_limit INT DEFAULT 25\s*\)/i,
+      /search_inbox_conversations\(\s*p_search TEXT,\s*p_status TEXT[^)]*p_limit INT DEFAULT 25\s*,\s*p_source TEXT DEFAULT 'all'\s*\)/i,
     );
     for (const facet of [
       "p_status",
@@ -93,6 +95,7 @@ describe("inbox search history migration", () => {
       "p_member_ids",
       "p_from",
       "p_to",
+      "p_source",
     ]) {
       expect(sql).toContain(facet);
     }
@@ -115,5 +118,71 @@ describe("inbox search history migration", () => {
     const { sql } = latestSearchMigration();
     expect(sql).not.toMatch(/JOIN messages/i);
     expect(sql).not.toMatch(/FROM messages m,/i);
+  });
+});
+
+describe("inbox search Lead Source facet (147)", () => {
+  it("replaces the 11-arg overload instead of leaving an ambiguous one", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(
+      /DROP FUNCTION IF EXISTS public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT\s*\)/i,
+    );
+  });
+
+  it("keeps grants on the 12-arg signature: authenticated only, revoked from PUBLIC", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT\s*\)[\s\S]*?TO authenticated/i,
+    );
+    expect(sql).toMatch(
+      /REVOKE ALL ON FUNCTION public\.search_inbox_conversations\(\s*TEXT,\s*TEXT,\s*UUID\[\],\s*TEXT,\s*TEXT,\s*TEXT\[\],\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*TIMESTAMPTZ,\s*UUID,\s*INT,\s*TEXT\s*\)[\s\S]*?FROM PUBLIC/i,
+    );
+  });
+
+  it("matches Instant Form via processed-submission EXISTS (dedup-safe)", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(/p_source = 'instant_form'/i);
+    expect(sql).toMatch(
+      /EXISTS\s*\(\s*SELECT 1 FROM meta_lead_submissions s[\s\S]*?s\.contact_id = c\.contact_id[\s\S]*?s\.status = 'processed'/i,
+    );
+    // Account-scoped twice: explicit submission predicate on top of the
+    // contact join.
+    expect(sql).toMatch(/s\.account_id = v_account_id/i);
+    // No JOIN — repeat submissions from one contact never duplicate rows.
+    expect(sql).not.toMatch(/JOIN meta_lead_submissions/i);
+  });
+
+  it("matches CTWA via non-blank source_url OR ctwa_clid (btrim parity)", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(/p_source = 'ctwa'/i);
+    expect(sql).toMatch(
+      /btrim\(ct\.source_url\) <> ''/i,
+    );
+    expect(sql).toMatch(
+      /btrim\(ct\.ctwa_clid\) <> ''/i,
+    );
+  });
+
+  it("matches Other only when NEITHER signal exists", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(/p_source = 'other'/i);
+    expect(sql).toMatch(/NOT EXISTS\s*\(\s*SELECT 1 FROM meta_lead_submissions s/i);
+    expect(sql).toMatch(
+      /NOT\s*\(\s*\(ct\.source_url IS NOT NULL AND btrim\(ct\.source_url\) <> ''\)/i,
+    );
+  });
+
+  it("is fail-closed: unknown source values match nothing, all/null disables", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).toMatch(/p_source IS NULL OR p_source = 'all'/i);
+    // No ELSE branch — any other non-null value falls through every OR.
+    expect(sql).not.toMatch(/ELSE\s+TRUE/i);
+  });
+
+  it("does not touch attribution data or historical records", () => {
+    const { sql } = latestSearchMigration();
+    expect(sql).not.toMatch(/UPDATE\s+(contacts|meta_lead_submissions)/i);
+    expect(sql).not.toMatch(/INSERT INTO\s+(contacts|meta_lead_submissions)/i);
+    expect(sql).not.toMatch(/ALTER TABLE/i);
   });
 });

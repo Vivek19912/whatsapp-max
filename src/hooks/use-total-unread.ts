@@ -3,6 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  getHiddenConversationIds,
+  isHidden,
+} from "@/lib/inbox/hidden";
 import type { Conversation } from "@/types";
 
 /**
@@ -34,9 +38,21 @@ export function useTotalUnread(): number {
 
     const supabase = createClient();
     let cancelled = false;
+    // Tenant-scoped hidden threads never count toward the badge
+    // (Inbox display rule only). Loaded once per session alongside
+    // the initial counts.
+    const hiddenIds = new Set<string>();
 
     // Initial load. RLS scopes this to the signed-in user automatically.
     (async () => {
+      try {
+        for (const id of await getHiddenConversationIds(supabase)) {
+          hiddenIds.add(id);
+        }
+      } catch {
+        // Best-effort: a failed fetch counts a normal inbox.
+      }
+      if (cancelled) return;
       const { data, error } = await supabase
         .from("conversations")
         .select("id, unread_count");
@@ -45,6 +61,7 @@ export function useTotalUnread(): number {
       const map = new Map<string, number>();
       let sum = 0;
       for (const row of data as { id: string; unread_count: number }[]) {
+        if (isHidden(hiddenIds, row.id)) continue;
         const n = row.unread_count ?? 0;
         map.set(row.id, n);
         if (n > 0) sum += 1;
@@ -65,7 +82,11 @@ export function useTotalUnread(): number {
             if (oldRow.id) map.delete(oldRow.id);
           } else {
             const row = payload.new as Conversation;
-            map.set(row.id, row.unread_count ?? 0);
+            if (isHidden(hiddenIds, row.id)) {
+              map.delete(row.id);
+            } else {
+              map.set(row.id, row.unread_count ?? 0);
+            }
           }
           let sum = 0;
           for (const n of map.values()) if (n > 0) sum += 1;
