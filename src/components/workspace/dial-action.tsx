@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Phone } from 'lucide-react';
 
 import {
@@ -8,6 +8,7 @@ import {
   normalizeDialNumber,
   toTelUri,
 } from '@/lib/dial/validation';
+import { subscribeDialStatus } from '@/lib/dial/dial-status-socket';
 
 interface DialActionProps {
   /** Raw phone value from the current table row (row.phone). */
@@ -23,14 +24,17 @@ interface DialActionProps {
 type DialState =
   | { kind: 'idle' }
   | { kind: 'queueing' }
-  // `queued` is terminal in the browser: there is deliberately no
-  // status polling (no repeated status reads). The
-  // request is delivered over the authenticated WebSocket and the
-  // phone opens the native dialer itself; the browser leaves the
-  // cell at Queued until a WebSocket status event arrives (not yet
-  // implemented) rather than re-asking the server. Delivered is never
-  // shown unless a device acknowledgement is observed.
-  | { kind: 'queued'; requestId: string }
+  // Queued: the server accepted the request. A live WebSocket status
+  // subscription (see subscribeDialStatus) flips the cell when the
+  // server confirms a persisted transition — never optimistically.
+  | { kind: 'queued'; requestId: string; expiresAt?: string | null }
+  // Delivered: the phone acknowledged receipt (server-persisted).
+  | { kind: 'delivered'; requestId: string; expiresAt?: string | null }
+  // Opened: the native dialer was launched (server-persisted).
+  // Dialing is human-confirmed only; Opened is not proof of a call.
+  | { kind: 'opened'; requestId: string }
+  // Expired: TTL passed without consumption — re-dial to start over.
+  | { kind: 'expired'; requestId: string }
   | { kind: 'failed'; reason: string };
 
 /**
@@ -52,9 +56,10 @@ export function dialIdempotencyKey(
 
 /**
  * Terminal server states mapped onto the cell's user-facing status.
- * Reserved for future WebSocket status events (`delivered`/`opened`/
- * `failed` pushed to the browser). Nothing calls this yet: the cell
- * stays at Queued rather than polling the server for status.
+ * Reserved for WebSocket status events (`delivered`/`opened`/
+ * `failed` pushed by the sidecar after the database confirms the
+ * transition). These states only ever arrive from the server — the
+ * cell never invents them.
  */
 export function interpretDialStatus(status: string | null | undefined): 'delivered' | 'failed' | null {
   if (status === 'delivered' || status === 'opened' || status === 'completed') {
@@ -68,6 +73,33 @@ export function interpretDialStatus(status: string | null | undefined): 'deliver
     return 'failed';
   }
   return null; // still pending — no status event yet.
+}
+
+/**
+ * Display state for a persisted server status plus the request's
+ * expiry. Opened is shown as its own state (the dialer launched);
+ * it is explicitly not proof that a call was placed. A pending or
+ * delivered row past its server-issued TTL reads as expired —
+ * no polling, just the timestamps the server already sent.
+ */
+export function dialDisplayState(
+  status: string | null | undefined,
+  expiresAt: string | null | undefined,
+  nowMs: number = Date.now()
+): 'delivered' | 'opened' | 'expired' | 'failed' | null {
+  if (status === 'opened' || status === 'completed') return 'opened';
+  if (status === 'cancelled' || status === 'failed') return 'failed';
+  if (status === 'expired') return 'expired';
+  // Pending or delivered past the server-issued TTL reads as expired
+  // (mirrors the GET lazy-expiry rule); no polling involved.
+  if (status === 'pending' || status === 'delivered' || status == null) {
+    if (typeof expiresAt === 'string' && expiresAt) {
+      const ms = Date.parse(expiresAt);
+      if (Number.isFinite(ms) && ms <= nowMs) return 'expired';
+    }
+    return status === 'delivered' ? 'delivered' : null;
+  }
+  return null;
 }
 
 /**
@@ -122,7 +154,7 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
   const normalized = dialable ? normalizeDialNumber(phone) : '';
 
   async function handleDesktopDial() {
-    if (!dialable || state.kind === 'queueing' || state.kind === 'queued') return;
+    if (!dialable || state.kind === 'queueing' || state.kind === 'queued' || state.kind === 'delivered' || state.kind === 'opened') return;
     setState({ kind: 'queueing' });
     try {
       const res = await fetch('/api/dial-requests', {
@@ -138,14 +170,19 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
       });
       if (!res.ok) throw new Error(`create ${res.status}`);
       const json = (await res.json()) as {
-        dial_request?: { id?: string };
+        dial_request?: { id?: string; expires_at?: string };
       };
       const requestId = json.dial_request?.id;
       if (!requestId) throw new Error('no id');
-      // Terminal UI state: no polling follows. The phone receives
-      // the request over its WebSocket and opens the dialer; the
-      // cell stays Queued.
-      setState({ kind: 'queued', requestId });
+      // Live updates follow over the browser WebSocket (no polling):
+      // the sidecar pushes the persisted status for this request id
+      // and the cell flips Queued → Delivered → Opened. Displayed
+      // states below come only from those server events.
+      setState({
+        kind: 'queued',
+        requestId,
+        expiresAt: json.dial_request?.expires_at ?? null,
+      });
     } catch {
       setState({
         kind: 'failed',
@@ -153,6 +190,62 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
       });
     }
   }
+
+  // Live status subscription: active only while this cell tracks a
+  // request. Server events are idempotent per (request id, status),
+  // so reconnect snapshots and duplicate frames converge safely and
+  // multiple tabs never double-act (display only, no side effects).
+  const trackedId =
+    state.kind === 'queued' || state.kind === 'delivered' || state.kind === 'opened'
+      ? state.requestId
+      : null;
+  useEffect(() => {
+    if (!trackedId) return;
+    return subscribeDialStatus(trackedId, (update) => {
+      setState((prev) => {
+        if (prev.kind !== 'queued' && prev.kind !== 'delivered' && prev.kind !== 'opened') {
+          return prev;
+        }
+        if ((prev as { requestId?: string }).requestId !== update.requestId) return prev;
+        const next = dialDisplayState(update.status, update.expiresAt);
+        if (next === 'delivered') return { kind: 'delivered', requestId: update.requestId };
+        if (next === 'opened') return { kind: 'opened', requestId: update.requestId };
+        if (next === 'expired') return { kind: 'expired', requestId: update.requestId };
+        if (next === 'failed') {
+          return {
+            kind: 'failed',
+            reason: 'Delivery failed. Retry the dial or use this phone instead.',
+          };
+        }
+        return prev;
+      });
+    });
+  }, [trackedId]);
+
+  // Local expiry flip: no polling, just the server-issued TTL the
+  // cell already holds. The server is the source of truth on
+  // reconnect (snapshot), this only keeps the label honest while
+  // the TTL passes with no further events.
+  useEffect(() => {
+    if (state.kind !== 'queued' && state.kind !== 'delivered') return;
+    const expiresAt = (state as { expiresAt?: string | null }).expiresAt;
+    if (!expiresAt) return;
+    const ms = Date.parse(expiresAt);
+    if (!Number.isFinite(ms)) return;
+    const delay = ms - Date.now();
+    if (delay <= 0) {
+      setState({ kind: 'expired', requestId: (state as { requestId: string }).requestId });
+      return;
+    }
+    const timer = setTimeout(() => {
+      setState((prev) =>
+        prev.kind === 'queued' || prev.kind === 'delivered'
+          ? { kind: 'expired', requestId: (prev as { requestId: string }).requestId }
+          : prev
+      );
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [state]);
 
   if (!dialable || !telUri) {
     return (
@@ -183,21 +276,37 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
     );
   }
 
-  const busy = state.kind === 'queueing' || state.kind === 'queued';
+  const busy =
+    state.kind === 'queueing' ||
+    state.kind === 'queued' ||
+    state.kind === 'delivered' ||
+    state.kind === 'opened';
   const label =
     state.kind === 'queueing'
       ? 'Queueing…'
       : state.kind === 'queued'
         ? 'Queued'
-        : state.kind === 'failed'
-          ? 'Retry'
-          : 'Dial';
+        : state.kind === 'delivered'
+          ? 'Delivered'
+          : state.kind === 'opened'
+            ? 'Opened'
+            : state.kind === 'expired'
+              ? 'Expired'
+              : state.kind === 'failed'
+                ? 'Retry'
+                : 'Dial';
   const title =
     state.kind === 'queued'
       ? 'Dial request queued — your phone opens the dialer automatically'
-      : state.kind === 'failed'
-        ? state.reason
-        : `Send dial request for ${normalized} to your phone`;
+      : state.kind === 'delivered'
+        ? 'Phone received the dial request'
+        : state.kind === 'opened'
+          ? 'Dialer opened on your phone (not proof of a call)'
+          : state.kind === 'expired'
+            ? 'Dial request expired — dial again to retry'
+            : state.kind === 'failed'
+              ? state.reason
+              : `Send dial request for ${normalized} to your phone`;
 
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -206,9 +315,9 @@ export function DialAction({ phone, contactId, flowId, runId }: DialActionProps)
         disabled={busy}
         onClick={(e) => {
           e.stopPropagation();
-          // Idle or failed only — never while queueing or queued.
-          // A queued cell stays queued (no status polling) until a
-          // WebSocket status event arrives.
+          // Idle, failed, or expired only — never while a request is
+          // in flight. Live WebSocket status events (not polling)
+          // move the cell between queued, delivered and opened.
           if (!busy) void handleDesktopDial();
         }}
         title={title}

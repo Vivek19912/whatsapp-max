@@ -21,6 +21,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { bearerToken, requireDeviceUser } from '@/lib/auth/device';
 import { requireApiKey } from '@/lib/auth/api-context';
 import { looksLikeApiKey } from '@/lib/api-keys/keys';
+import { notifyDialStatus } from '@/lib/dial/notify-ws';
 import { ok, fail, toApiErrorResponse } from '@/lib/api/v1/respond';
 
 const TRANSITIONS: Record<string, string[]> = {
@@ -131,7 +132,7 @@ async function handleAck(request: Request, id: string, method: string) {
 
     let readQuery = db
       .from('dial_requests')
-      .select('id, account_id, status, expires_at, consumed_at')
+      .select('id, account_id, requested_by, status, expires_at, consumed_at')
       .eq('id', id)
       .eq('account_id', accountId);
     if (userId) readQuery = readQuery.eq('requested_by', userId);
@@ -183,6 +184,21 @@ async function handleAck(request: Request, id: string, method: string) {
     }
     // Sanitized: transition + id prefix only, never the number.
     console.log(`[api/v1/dial-requests] ack ${String(id).slice(0, 8)} ${current}->${next} via ${method}`);
+    // Fan the persisted transition out to the user's browser tabs.
+    // Fire-and-forget: the database update above is the source of
+    // truth; the sidecar only broadcasts what it re-reads.
+    const requestedBy =
+      typeof (row as Record<string, unknown>).requested_by === 'string'
+        ? ((row as Record<string, unknown>).requested_by as string)
+        : userId;
+    if (requestedBy) {
+      void notifyDialStatus({
+        id,
+        account_id: accountId,
+        requested_by: requestedBy,
+        status: next,
+      });
+    }
     return ok({ dial_request: updated });
   } catch (err) {
     return toApiErrorResponse(err);

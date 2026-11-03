@@ -77,3 +77,55 @@ export async function notifyDialRequest(
     return false;
   }
 }
+
+export interface DialStatusTarget {
+  id: string;
+  account_id: string;
+  requested_by: string;
+  status: string;
+}
+
+/**
+ * Tells the sidecar about a transition the app just persisted
+ * (opened / failed / cancelled / completed from the v1 ack path).
+ * The sidecar re-reads the row and broadcasts only the persisted
+ * status to the user's browser sockets — browser cells therefore
+ * never display Delivered/Opened before the database confirms it.
+ *
+ * Same fire-and-forget discipline as the dial nudge: never throws,
+ * never logs phone numbers or ids beyond a prefix.
+ */
+export async function notifyDialStatus(
+  target: DialStatusTarget
+): Promise<boolean> {
+  const secret = process.env.DIAL_WS_INTERNAL_SECRET;
+  if (!secret) {
+    return false;
+  }
+
+  try {
+    const res = await fetch(`${internalUrl()}/internal/status-event`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dial-internal-secret': secret,
+      },
+      body: JSON.stringify({
+        request_id: target.id,
+        account_id: target.account_id,
+        user_id: target.requested_by,
+        status: target.status,
+      }),
+      signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.warn(`[dial-ws] sidecar status event rejected: HTTP ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    const name = err instanceof Error ? err.name : 'Error';
+    console.warn(`[dial-ws] sidecar status unreachable (${name})`);
+    return false;
+  }
+}

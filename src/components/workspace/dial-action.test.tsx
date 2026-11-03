@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   DialAction,
+  dialDisplayState,
   dialIdempotencyKey,
   interpretDialStatus,
   isAndroidDialSupported,
@@ -108,6 +109,45 @@ describe('dial action column (every Workspace table, handoff + tel:)', () => {
     expect(interpretDialStatus('failed')).toBe('failed');
     expect(interpretDialStatus('pending')).toBeNull();
     expect(interpretDialStatus(null)).toBeNull();
+  });
+
+  it('maps persisted statuses to distinct display states (Opened is not proof of a call)', () => {
+    expect(dialDisplayState('delivered', '2030-01-01T00:00:00Z', 0)).toBe('delivered');
+    expect(dialDisplayState('opened', '2030-01-01T00:00:00Z', 0)).toBe('opened');
+    expect(dialDisplayState('completed', '2030-01-01T00:00:00Z', 0)).toBe('opened');
+    expect(dialDisplayState('expired', '2030-01-01T00:00:00Z', 0)).toBe('expired');
+    expect(dialDisplayState('cancelled', '2030-01-01T00:00:00Z', 0)).toBe('failed');
+    expect(dialDisplayState('failed', '2030-01-01T00:00:00Z', 0)).toBe('failed');
+    expect(dialDisplayState('pending', '2030-01-01T00:00:00Z', 0)).toBeNull();
+    expect(dialDisplayState(null, null, 0)).toBeNull();
+    // TTL already passed: pending/delivered reads as expired without polling.
+    expect(dialDisplayState('pending', '2000-01-01T00:00:00Z', 1_700_000_000_000)).toBe('expired');
+    expect(dialDisplayState('delivered', '2000-01-01T00:00:00Z', 1_700_000_000_000)).toBe('expired');
+    expect(dialDisplayState('pending', 'not-a-date', 1_700_000_000_000)).toBeNull();
+  });
+
+  it('subscribes to live status updates without polling', () => {
+    expect(dialSrc).toContain('subscribeDialStatus');
+    expect(dialSrc).toContain("'Delivered'");
+    expect(dialSrc).toContain("'Opened'");
+    expect(dialSrc).toContain("'Expired'");
+    expect(dialSrc).not.toContain('setInterval');
+    expect(dialSrc).not.toContain('clearInterval');
+    expect(dialSrc).not.toContain('/api/dial-requests?id=');
+  });
+
+  it('maps persisted statuses to distinct display states (Opened is not proof of a call)', () => {
+    expect(dialDisplayState('delivered', '2030-01-01T00:00:00Z', 0)).toBe('delivered');
+    expect(dialDisplayState('opened', '2030-01-01T00:00:00Z', 0)).toBe('opened');
+    expect(dialDisplayState('completed', '2030-01-01T00:00:00Z', 0)).toBe('opened');
+    expect(dialDisplayState('expired', '2030-01-01T00:00:00Z', 0)).toBe('expired');
+    expect(dialDisplayState('cancelled', '2030-01-01T00:00:00Z', 0)).toBe('failed');
+    expect(dialDisplayState('failed', '2030-01-01T00:00:00Z', 0)).toBe('failed');
+    expect(dialDisplayState('pending', '2030-01-01T00:00:00Z', 0)).toBeNull();
+    expect(dialDisplayState(null, null, 0)).toBeNull();
+    expect(dialDisplayState('pending', '2000-01-01T00:00:00Z', 1_700_000_000_000)).toBe('expired');
+    expect(dialDisplayState('delivered', '2000-01-01T00:00:00Z', 1_700_000_000_000)).toBe('expired');
+    expect(dialDisplayState('pending', 'not-a-date', 1_700_000_000_000)).toBeNull();
   });
 
   it('detects Android browsers for same-device dialing', () => {

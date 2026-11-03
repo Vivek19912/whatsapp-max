@@ -107,6 +107,7 @@ export async function POST(request: Request) {
     void RATE_LIMITS;
 
     const expiresAt = new Date(Date.now() + DIAL_TTL_MS).toISOString();
+    const tInsertStart = Date.now();
     const { data: created, error: insertError } = await ctx.supabase
       .from('dial_requests')
       .insert({
@@ -122,6 +123,7 @@ export async function POST(request: Request) {
       })
       .select('id, phone_number, status, expires_at, created_at')
       .single();
+    const tInsertMs = Date.now() - tInsertStart;
 
     if (insertError || !created) {
       // Duplicate click with the same key → return the existing row
@@ -140,8 +142,12 @@ export async function POST(request: Request) {
 
     // Wake the requesting user's connected device over the local
     // WebSocket sidecar. Fire-and-forget: the durable row is the
-    // source of truth, and a sidecar outage must not fail the click.
-    // The event carries ids only — never the phone number.
+    // source of truth, and a sidecar outage must not fail or slow
+    // the click. The event carries ids only — never the phone number.
+    // Timing (no PII) pairs with the phone's signal_to_dialer_ms log
+    // to split desktop-side vs device-side latency.
+    const tNotifyStart = Date.now();
+    const createdId = String(created.id);
     void notifyDialRequest({
       id: created.id,
       account_id: ctx.accountId,
@@ -149,7 +155,15 @@ export async function POST(request: Request) {
       status: created.status,
       expires_at: created.expires_at,
       created_at: created.created_at,
+    }).then((notified) => {
+      console.log(
+        `[dial-requests] notified ${createdId.slice(0, 8)} ` +
+          `notify_ms=${Date.now() - tNotifyStart} notified=${notified}`
+      );
     });
+    console.log(
+      `[dial-requests] created ${createdId.slice(0, 8)} insert_ms=${tInsertMs}`
+    );
 
     return NextResponse.json(
       {
