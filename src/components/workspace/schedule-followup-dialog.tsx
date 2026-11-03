@@ -94,6 +94,15 @@ export function ScheduleFollowupDialog({
   // never leak one lead's/user's number into the next session
   // (reset on every open).
   const recipientDirtyRef = useRef(false);
+  // Tracks whether the dialog is editing the caller's own linked
+  // reminder (GET returned one) or creating a new one. A previous
+  // owner's open reminder is intentionally invisible to a salesperson
+  // (the per-creator API returns null), so the dialog opens in create
+  // mode — saving never touches that reminder and never triggers the
+  // old creator-only red warning.
+  const [linkedReminderId, setLinkedReminderId] = useState<string | null>(
+    null,
+  );
   // True only when the visible value was defaulted from Settings
   // (drives the helper copy below).
   const [recipientFromSettings, setRecipientFromSettings] = useState(false);
@@ -118,6 +127,7 @@ export function ScheduleFollowupDialog({
     setRecipient("");
     recipientDirtyRef.current = false;
     setRecipientFromSettings(false);
+    setLinkedReminderId(null);
     setSaving(false);
     setClearing(false);
     setError(null);
@@ -136,6 +146,7 @@ export function ScheduleFollowupDialog({
       );
     })();
     const fetchLinked = (async (): Promise<{
+      id?: unknown;
       message_text?: unknown;
       recipient_phone?: unknown;
     } | null> => {
@@ -146,7 +157,11 @@ export function ScheduleFollowupDialog({
         );
         if (!res.ok) return null;
         const json = (await res.json().catch(() => null)) as {
-          reminder?: { message_text?: unknown; recipient_phone?: unknown } | null;
+          reminder?: {
+            id?: unknown;
+            message_text?: unknown;
+            recipient_phone?: unknown;
+          } | null;
         } | null;
         return json?.reminder ?? null;
       } catch {
@@ -155,6 +170,9 @@ export function ScheduleFollowupDialog({
     })();
     void Promise.all([fetchProfileNumber, fetchLinked]).then(([profileNumber, linked]) => {
       if (cancelled) return;
+      setLinkedReminderId(
+        typeof linked?.id === "string" && linked.id !== "" ? linked.id : null,
+      );
       const linkedMessage =
         typeof linked?.message_text === "string" && linked.message_text !== ""
           ? linked.message_text
@@ -230,7 +248,11 @@ export function ScheduleFollowupDialog({
         error?: string;
       } | null;
       if (!cellRes.ok) {
-        throw new Error(cellJson?.error ?? "Could not save the follow-up date.");
+        throw new Error(
+          cellRes.status === 404
+            ? "This lead is not assigned to you, so you can't schedule a follow-up."
+            : cellJson?.error ?? "Could not save the follow-up date.",
+        );
       }
       const res = await fetch(`/api/flows/${flowId}/followup-reminder`, {
         method: "POST",
@@ -247,7 +269,14 @@ export function ScheduleFollowupDialog({
       const json = (await res.json().catch(() => null)) as {
         error?: string;
       } | null;
-      if (!res.ok) throw new Error(json?.error ?? "Could not save the reminder.");
+      if (!res.ok) {
+        throw new Error(
+          json?.error ??
+            (res.status === 403
+              ? "You can only schedule follow-ups for leads assigned to you."
+              : "Could not save the reminder."),
+        );
+      }
       toast.success("Follow-up saved.");
       onOpenChange(false);
       onSaved();
@@ -313,6 +342,14 @@ export function ScheduleFollowupDialog({
             receive the reminder, edit the message if needed, and save —
             the reminder never goes to the lead.
           </DialogDescription>
+          <p
+            className="text-muted-foreground text-xs"
+            data-reminder-mode={linkedReminderId ? "edit" : "create"}
+          >
+            {linkedReminderId
+              ? "You are updating an existing reminder for this lead."
+              : "Saving will create your reminder for this lead. A reminder scheduled by someone else is not changed."}
+          </p>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="grid gap-4">
           <dl className="space-y-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">

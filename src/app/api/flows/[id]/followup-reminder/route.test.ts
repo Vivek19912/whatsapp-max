@@ -107,6 +107,10 @@ function fakeSupabase() {
       state.filters.push({ col, op: "in", val: vals });
       return api;
     },
+    // Stable-row selection for the admin any-creator lookup; the
+    // fake returns the first match regardless.
+    order: () => api,
+    limit: () => api,
     insert: (obj: Record<string, unknown>) => {
       state.insertObj = obj;
       return api;
@@ -499,7 +503,60 @@ describe("POST followup-reminder", () => {
     expect(h.reminders).toHaveLength(0);
   });
 
-  it("blocks teammates from a linked reminder but allows admins", async () => {
+  it("keeps the previous owner's reminder when a newly assigned salesperson schedules", async () => {
+    h.reminders.push({
+      id: "fu-mate",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "teammate-9",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Mate",
+      recipient_phone: "919000000009",
+      recipient_custom: true,
+    });
+    // The lead is now assigned to user-2, but the open reminder
+    // above still belongs to the previous owner.
+    h.values["f-assign:run-1"] = "user-2";
+    h.userId = "user-2";
+
+    const own = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "Mine" }),
+      PARAMS,
+    );
+    expect(own.status).toBe(201);
+    expect(h.reminders).toHaveLength(2);
+    // Previous owner's reminder is untouched — same row, message,
+    // recipient, and status.
+    expect(h.reminders[0]).toMatchObject({
+      id: "fu-mate",
+      created_by: "teammate-9",
+      message_text: "Mate",
+      recipient_phone: "919000000009",
+      recipient_custom: true,
+      status: "scheduled",
+    });
+    // The salesperson's reminder is their own.
+    expect(h.reminders[1]).toMatchObject({
+      created_by: "user-2",
+      message_text: "Mine",
+      source_run_id: "run-1",
+      status: "scheduled",
+    });
+
+    // Re-saving only updates the salesperson's own row.
+    const again = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "Mine v2" }),
+      PARAMS,
+    );
+    expect(again.status).toBe(200);
+    expect(h.reminders).toHaveLength(2);
+    expect(h.reminders[0].message_text).toBe("Mate");
+    expect(h.reminders[1].message_text).toBe("Mine v2");
+  });
+
+  it("keeps the admin any-owner override", async () => {
     h.reminders.push({
       id: "fu-mate",
       account_id: "acct-1",
@@ -510,22 +567,15 @@ describe("POST followup-reminder", () => {
       scheduled_for: FUTURE,
       message_text: "Mate",
     });
-    // The teammate owns the lead (passes the lead-ownership gate)
-    // but not the reminder, so the creator-ownership 403 stands.
-    h.values["f-assign:run-1"] = "user-2";
-    h.userId = "user-2";
-    const blocked = await POST(
-      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
-      PARAMS,
-    );
-    expect(blocked.status).toBe(403);
-    expect(h.reminders[0].message_text).toBe("Mate");
     h.role = "admin";
+    h.userId = "admin-1";
+    h.values["f-assign:run-1"] = "u-teammate";
     const allowed = await POST(
       post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "Admin" }),
       PARAMS,
     );
     expect(allowed.status).toBe(200);
+    expect(h.reminders).toHaveLength(1);
     expect(h.reminders[0].message_text).toBe("Admin");
   });
 });
@@ -545,6 +595,76 @@ describe("DELETE followup-reminder", () => {
     const res = await DELETE(del({ flow_run_id: "run-1" }), PARAMS);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ cancelled: true, id: "fu-1" });
+    expect(h.reminders[0].status).toBe("cancelled");
+  });
+
+  it("cancels only the caller's own reminder when several creators have one", async () => {
+    h.reminders.push(
+      {
+        id: "fu-owner",
+        account_id: "acct-1",
+        status: "scheduled",
+        created_by: "teammate-9",
+        source_kind: "meta_workspace_followup",
+        source_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message_text: "Owner",
+      },
+      {
+        id: "fu-mine",
+        account_id: "acct-1",
+        status: "scheduled",
+        created_by: "user-1",
+        source_kind: "meta_workspace_followup",
+        source_run_id: "run-1",
+        scheduled_for: FUTURE,
+        message_text: "Mine",
+      },
+    );
+    const res = await DELETE(del({ flow_run_id: "run-1" }), PARAMS);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ cancelled: true, id: "fu-mine" });
+    expect(h.reminders.map((r) => [r.id, r.status])).toEqual([
+      ["fu-owner", "scheduled"],
+      ["fu-mine", "cancelled"],
+    ]);
+  });
+
+  it("403s when the only scheduled reminder belongs to someone else", async () => {
+    h.reminders.push({
+      id: "fu-owner",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "teammate-9",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Owner",
+    });
+    const res = await DELETE(del({ flow_run_id: "run-1" }), PARAMS);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /creator or an admin/,
+    );
+    expect(h.reminders[0].status).toBe("scheduled");
+  });
+
+  it("lets an admin cancel another creator's reminder", async () => {
+    h.role = "admin";
+    h.userId = "admin-1";
+    h.reminders.push({
+      id: "fu-owner",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "teammate-9",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Owner",
+    });
+    const res = await DELETE(del({ flow_run_id: "run-1" }), PARAMS);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ cancelled: true, id: "fu-owner" });
     expect(h.reminders[0].status).toBe("cancelled");
   });
 
@@ -591,24 +711,46 @@ describe("DELETE followup-reminder", () => {
 });
 
 describe("agent ownership on Meta Lead Ads Tables", () => {
-  it("404s creating a reminder for another agent's lead", async () => {
+  it("403s creating a reminder for another agent's lead", async () => {
     h.values["f-assign:run-1"] = "u-teammate";
     const res = await POST(
       post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
       PARAMS,
     );
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /assigned to you/,
+    );
     expect(h.reminders).toHaveLength(0);
   });
 
-  it("404s creating a reminder for an unassigned lead", async () => {
+  it("403s creating a reminder for an unassigned lead", async () => {
     delete h.values["f-assign:run-1"];
     const res = await POST(
       post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "x" }),
       PARAMS,
     );
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
     expect(h.reminders).toHaveLength(0);
+  });
+
+  it("lets a salesperson schedule a lead assigned to them by an admin", async () => {
+    // Another admin created the lead and assigned it to user-1; no
+    // reminder exists yet. Ownership comes from the live Assigned To
+    // cell, not from who created/assigned the lead.
+    h.values["f-assign:run-1"] = "user-1";
+    const res = await POST(
+      post({ flow_run_id: "run-1", scheduled_for: FUTURE, message: "Call" }),
+      PARAMS,
+    );
+    expect(res.status).toBe(201);
+    expect(h.reminders).toHaveLength(1);
+    expect(h.reminders[0]).toMatchObject({
+      created_by: "user-1",
+      source_run_id: "run-1",
+      status: "scheduled",
+      recipient_phone: "919876543210",
+    });
   });
 
   it("404s cancelling a reminder for another agent's lead", async () => {
@@ -637,6 +779,24 @@ describe("agent ownership on Meta Lead Ads Tables", () => {
       PARAMS,
     );
     expect(res.status).toBe(201);
+    expect(h.reminders[0]).toMatchObject({ created_by: "admin-1" });
+  });
+
+  it("404s a foreign-tenant lead for every role (account scoping)", async () => {
+    h.runs["run-x"] = {
+      id: "run-x",
+      account_id: "other-acct",
+      flow_id: "flow-meta",
+    };
+    for (const role of ["agent", "admin", "owner"]) {
+      h.role = role;
+      const res = await POST(
+        post({ flow_run_id: "run-x", scheduled_for: FUTURE, message: "x" }),
+        PARAMS,
+      );
+      expect(res.status).toBe(404);
+    }
+    expect(h.reminders).toHaveLength(0);
   });
 });
 
@@ -677,6 +837,43 @@ describe("GET followup-reminder (prefill for the single modal)", () => {
     const res = await get("run-1");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ reminder: null });
+  });
+
+  it("hides a previous owner's reminder from the assigned salesperson", async () => {
+    h.reminders.push({
+      id: "fu-owner",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "teammate-9",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Owner note",
+    });
+    // The lead is assigned to user-1, but the open reminder belongs
+    // to the previous owner: the dialog opens in create mode.
+    const res = await get("run-1");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reminder: null });
+  });
+
+  it("shows another creator's reminder to an admin", async () => {
+    h.role = "admin";
+    h.userId = "admin-1";
+    h.reminders.push({
+      id: "fu-owner",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "teammate-9",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Owner note",
+    });
+    const res = await get("run-1");
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { reminder: Record<string, unknown> };
+    expect(json.reminder).toMatchObject({ id: "fu-owner" });
   });
 
   it("404s another agent's lead and requires a run id", async () => {

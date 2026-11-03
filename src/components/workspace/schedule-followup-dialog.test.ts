@@ -78,6 +78,39 @@ describe("dialog structure (source contract)", () => {
   });
 });
 
+describe("create vs edit mode", () => {
+  it("tracks the caller's own linked reminder and resets per dialog session", () => {
+    expect(SRC).toContain("setLinkedReminderId(null)");
+    expect(SRC).toContain("setLinkedReminderId(");
+    expect(SRC).toContain("linked?.id");
+  });
+
+  it("labels create and edit modes without treating a foreign reminder as an edit", () => {
+    expect(SRC).toContain('data-reminder-mode={linkedReminderId ? "edit" : "create"}');
+    expect(SRC).toContain("Saving will create your reminder for this lead.");
+    expect(SRC).toContain(
+      "A reminder scheduled by someone else is not changed.",
+    );
+    expect(SRC).toContain(
+      "You are updating an existing reminder for this lead.",
+    );
+  });
+
+  it("explains unauthorized scheduling in plain language", () => {
+    expect(SRC).toContain(
+      "This lead is not assigned to you, so you can't schedule a follow-up.",
+    );
+    expect(SRC).toContain(
+      "You can only schedule follow-ups for leads assigned to you.",
+    );
+  });
+
+  it("still surfaces server errors in the red alert", () => {
+    expect(SRC).toContain('role="alert"');
+    expect(SRC).toContain("{error}");
+  });
+});
+
 describe("per-reminder recipient field", () => {
   it("renders an editable recipient input below the lead card", () => {
     expect(SRC).toContain('Label htmlFor="fu-recipient">Send reminder to');

@@ -2,6 +2,43 @@ import { NextResponse } from 'next/server'
 import { requireAuthenticatedUser } from '@/lib/auth/account'
 import { getMediaUrl, downloadMediaStream } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
+import { fetchArchivedInboundMedia } from '@/lib/whatsapp/inbound-media'
+
+/**
+ * Relay an upstream response (archived object or Meta CDN) to the
+ * browser, preserving the headers that PDF/video viewers need.
+ */
+function buildMediaResponse(
+  upstream: Response,
+  request: Request,
+  fallbackContentType?: string,
+) {
+  const headers = new Headers()
+  const contentType =
+    upstream.headers.get('content-type') ||
+    fallbackContentType ||
+    'application/octet-stream'
+  headers.set('Content-Type', contentType)
+  const contentLength = upstream.headers.get('content-length')
+  if (contentLength) headers.set('Content-Length', contentLength)
+  const contentRange = upstream.headers.get('content-range')
+  if (contentRange) headers.set('Content-Range', contentRange)
+  const acceptRanges = upstream.headers.get('accept-ranges')
+  headers.set('Accept-Ranges', acceptRanges || 'bytes')
+  // Inline rendering by default (image/video/audio/PDF preview);
+  // the Inbox Download button passes ?download=1 (or uses the
+  // download attribute) to force an attachment instead.
+  const asAttachment = new URL(request.url).searchParams.get('download') === '1'
+  if (asAttachment) {
+    headers.set('Content-Disposition', 'attachment')
+  }
+  headers.set('Cache-Control', 'public, max-age=86400')
+
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers,
+  })
+}
 
 export async function GET(
   request: Request,
@@ -40,6 +77,19 @@ export async function GET(
       )
     }
 
+    // Storage-first: inbound bytes archived at webhook time live in the
+    // private `inbound-media` bucket. Serve those even after Meta's
+    // 7-day webhook media window has passed. Missing/transient objects
+    // fall through to the live Meta fetch below.
+    const archived = await fetchArchivedInboundMedia({
+      accountId,
+      mediaId,
+      range: request.headers.get('range'),
+    })
+    if (archived) {
+      return buildMediaResponse(archived, request)
+    }
+
     // Fetch and decrypt WhatsApp config
     const { data: config, error: configError } = await supabase
       .from('whatsapp_config')
@@ -70,33 +120,24 @@ export async function GET(
       range: request.headers.get('range'),
     })
 
-    const headers = new Headers()
-    const contentType =
-      upstream.headers.get('content-type') ||
-      mediaInfo.mimeType ||
-      'application/octet-stream'
-    headers.set('Content-Type', contentType)
-    const contentLength = upstream.headers.get('content-length')
-    if (contentLength) headers.set('Content-Length', contentLength)
-    const contentRange = upstream.headers.get('content-range')
-    if (contentRange) headers.set('Content-Range', contentRange)
-    const acceptRanges = upstream.headers.get('accept-ranges')
-    headers.set('Accept-Ranges', acceptRanges || 'bytes')
-    // Inline rendering by default (image/video/audio/PDF preview);
-    // the Inbox Download button passes ?download=1 (or uses the
-    // download attribute) to force an attachment instead.
-    const asAttachment = new URL(request.url).searchParams.get('download') === '1'
-    if (asAttachment) {
-      headers.set('Content-Disposition', 'attachment')
-    }
-    headers.set('Cache-Control', 'public, max-age=86400')
-
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers,
-    })
+    return buildMediaResponse(upstream, request, mediaInfo.mimeType)
   } catch (error) {
     console.error('Error in WhatsApp media GET:', error)
+    const message = error instanceof Error ? error.message : ''
+    // Meta code 100 / subcode 33 ("Unsupported get request ... does not
+    // exist") means the webhook media ID has passed its 7-day window and
+    // no archived copy exists. Return 410 (not a generic 500) so the UI
+    // can explain it is permanently gone instead of "try again".
+    if (
+      message.includes('(code 100') ||
+      message.includes('subcode 33') ||
+      message.toLowerCase().includes('does not exist')
+    ) {
+      return NextResponse.json(
+        { error: 'Attachment expired and not archived' },
+        { status: 410 }
+      )
+    }
     return NextResponse.json(
       { error: 'Failed to fetch media' },
       { status: 500 }

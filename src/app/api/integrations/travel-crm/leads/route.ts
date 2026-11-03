@@ -12,6 +12,7 @@ import {
   type TravelCrmAssignmentIssue,
 } from "@/lib/integrations/travel-crm/lead";
 import { resolveAccountOwnerEmail } from "@/lib/integrations/travel-crm/account-owner";
+import { resolveMappedCrmUserId } from "@/lib/integrations/travel-crm/user-mapping";
 import {
   buildReceivedOptions,
   canonicalizeLeadSource,
@@ -394,22 +395,32 @@ export async function POST(request: Request) {
       console.error("[travel-crm] link read failed:", err);
     }
 
-    // --- Travel CRM assignment: ALWAYS the WACRM workspace owner. ---
-    // Business rule: the Travel CRM lead must be assigned to the OWNER of
-    // the WACRM workspace (resolved server-side from the authenticated
-    // account's own rows — never request input). The WACRM lead's
-    // Workspace "Assigned To" value and the dialog's assignedUserId
-    // override are intentionally NEVER used for Travel CRM assignment:
-    // the creation payload is pinned to the owner email, so Travel CRM
-    // finds the owner's matching user and assigns there. Unresolvable
-    // owner email gates creation with "assignment-required" instead of
-    // sending null (Travel CRM would never silently pick another user).
+    // --- Travel CRM assignment: mapped salesperson, else the owner. ---
+    // Business rule: the Travel CRM lead is assigned to the salesperson
+    // mapped to the CREATING WACRM user (CRM User Mapping, resolved
+    // server-side from the authenticated session — never request
+    // input, so an agent cannot spoof another user's mapping). When
+    // the creator has no mapping, or the lookup fails, the payload
+    // falls back to the WACRM workspace OWNER (ownerEmail), preserving
+    // the pre-mapping behavior exactly. Unresolvable owner email gates
+    // creation with "assignment-required" instead of sending null
+    // (Travel CRM would never silently pick another user).
     // (ownerEmail itself is resolved above, before the link check, so
     // stale-link verification can scope to the correct tenant.)
     const overrideEmail: string | null = ownerEmail;
     const overrideIssue: TravelCrmAssignmentIssue | null = ownerEmail
       ? null
       : "assignment-required";
+    // Mapped salesperson id for the creator. Null = unmapped → owner
+    // fallback. Invalid/stale ids are NOT rejected here: Travel CRM
+    // validates authoritatively and the create call below retries
+    // unmapped on ASSIGNED_USER_NOT_FOUND, so lead creation is never
+    // blocked by a stale mapping.
+    const mappedCrmUserId: string | null = await resolveMappedCrmUserId(
+      supabase,
+      accountId,
+      userId,
+    );
 
     // --- Overrides: free inputs become extra mapping candidates. ---
     // --- NOTE: services bypasses this path (dedicated override
@@ -1215,35 +1226,63 @@ export async function POST(request: Request) {
     } catch (err) {
       console.error("[travel-crm] link upsert failed:", err);
     }
+    const basePayload = {
+      wacrmAccountId: accountId,
+      flowRunId: runId,
+      customerName: draft.customerName as string,
+      phone: draft.phone as string,
+      email: draft.email,
+      leadSource: funnel.leadSource as string,
+      leadType: funnel.leadType as string,
+      leadStage: funnel.leadStage as string,
+      assignedToEmail: overrideEmail as string,
+      dateOfBirth: draft.dateOfBirth,
+      travelStartDate: draft.travelStartDate,
+      travelMonth: draft.travelMonth,
+      travelYear: draft.travelYear,
+      departureCountry: draft.departureCountry,
+      departureCity: draft.departureCity,
+      rooms: draft.rooms,
+      adults: draft.adults,
+      childrenWithBed: draft.childrenWithBed,
+      childrenWithoutBed: draft.childrenWithoutBed,
+      infants: draft.infants,
+      childrenWithBedAges: draft.childrenWithBedAges,
+      childrenWithoutBedAges: draft.childrenWithoutBedAges,
+      infantAges: draft.infantAges,
+      services: sendServices,
+      itinerary: resolveItineraryForSend(draft.itinerary, itineraryLookups),
+    };
     let result;
     try {
-      result = await createTravelCrmLead(baseUrl, secret, {
-        wacrmAccountId: accountId,
-        flowRunId: runId,
-        customerName: draft.customerName as string,
-        phone: draft.phone as string,
-        email: draft.email,
-        leadSource: funnel.leadSource as string,
-        leadType: funnel.leadType as string,
-        leadStage: funnel.leadStage as string,
-        assignedToEmail: overrideEmail as string,
-        dateOfBirth: draft.dateOfBirth,
-        travelStartDate: draft.travelStartDate,
-        travelMonth: draft.travelMonth,
-        travelYear: draft.travelYear,
-        departureCountry: draft.departureCountry,
-        departureCity: draft.departureCity,
-        rooms: draft.rooms,
-        adults: draft.adults,
-        childrenWithBed: draft.childrenWithBed,
-        childrenWithoutBed: draft.childrenWithoutBed,
-        infants: draft.infants,
-        childrenWithBedAges: draft.childrenWithBedAges,
-        childrenWithoutBedAges: draft.childrenWithoutBedAges,
-        infantAges: draft.infantAges,
-        services: sendServices,
-        itinerary: resolveItineraryForSend(draft.itinerary, itineraryLookups),
-      });
+      try {
+        result = await createTravelCrmLead(baseUrl, secret, {
+          ...basePayload,
+          // Mapped salesperson when the creator has one; undefined keeps
+          // the owner-email assignee. Server-resolved above — never
+          // caller-supplied.
+          assignedToUserId: mappedCrmUserId ?? undefined,
+        });
+      } catch (err) {
+        // Stale/invalid mapping (salesperson left the CRM account):
+        // retry once unmapped so the lead still lands on the owner
+        // instead of failing. Any other error (or a second
+        // ASSIGNED_USER_NOT_FOUND) falls through to the normal mapping
+        // below — creation is never blocked by a bad mapping.
+        if (
+          err instanceof TravelCrmError &&
+          err.code === "ASSIGNED_USER_NOT_FOUND" &&
+          mappedCrmUserId
+        ) {
+          console.error(
+            "[travel-crm] mapped salesperson invalid, retrying with owner fallback:",
+            JSON.stringify({ accountId, mappedCrmUserId }),
+          );
+          result = await createTravelCrmLead(baseUrl, secret, basePayload);
+        } else {
+          throw err;
+        }
+      }
     } catch (err) {
       await markLinkFailed(supabase, accountId, runId, err);
       if (err instanceof TravelCrmError) {

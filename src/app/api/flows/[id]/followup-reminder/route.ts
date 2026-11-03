@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
+import { hasMinRole, type AccountRole } from "@/lib/auth/roles";
 import { canManageReminder } from "@/lib/followups/ownership";
 import {
   normalizeAgentWhatsappNumber,
@@ -28,10 +29,13 @@ import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
  * delivery (which sends to the creator's WhatsApp number, never
  * to the lead).
  *
- * Idempotent per lead: an open linked reminder (scheduled, or a
- * failed one being re-armed) is updated in place; sent/cancelled
- * history is never rewritten. A unique-violation race between two
- * concurrent inserts falls back to updating the winner's row.
+ * Idempotent per lead AND creator: each member has at most one open
+ * linked reminder for a lead (scheduled, or a failed one being
+ * re-armed), updated in place. A newly assigned salesperson may
+ * create their own reminder without taking over, editing, or
+ * cancelling a previous owner's reminder. Sent/cancelled history is
+ * never rewritten. A unique-violation race between two concurrent
+ * inserts falls back to updating the winner's row.
  *
  * Per-reminder recipient: an optional `recipient_phone` body field
  * overrides the destination for THIS reminder only (validated with
@@ -140,14 +144,27 @@ async function findOpenLink(
   supabase: SupabaseClient,
   accountId: string,
   runId: string,
+  createdBy?: string | null,
+  statuses: string[] = ["scheduled", "failed", "processing"],
 ): Promise<LinkRow | null> {
-  const { data, error } = await supabase
+  let query = supabase
     .from("whatsapp_followups")
     .select("id, status, created_by, recipient_phone, recipient_custom")
     .eq("account_id", accountId)
     .eq("source_kind", WORKSPACE_FOLLOWUP_SOURCE_KIND)
     .eq("source_run_id", runId)
-    .in("status", ["scheduled", "failed", "processing"])
+    .in("status", statuses);
+  // Salespeople only ever load/update their OWN open reminder. The
+  // previous owner's row is left untouched for its creator. Admins
+  // omit this filter (any row is manageable under the admin
+  // override, preserving existing admin behaviour).
+  if (createdBy) query = query.eq("created_by", createdBy);
+  // An admin may see several creators' open reminders for the same
+  // lead (per-creator linkage): pick a stable row instead of letting
+  // maybeSingle fail on multiple matches.
+  const { data, error } = await query
+    .order("created_at", { ascending: true })
+    .limit(1)
     .maybeSingle();
   if (error) throw error;
   const found = (data as Record<string, unknown> | null) ?? null;
@@ -159,6 +176,34 @@ async function findOpenLink(
     recipient_phone: (found.recipient_phone as string | null) ?? null,
     recipient_custom: (found.recipient_custom as boolean | null) ?? false,
   };
+}
+
+/**
+ * The open linked reminder this caller may manage right now:
+ * a salesperson gets ONLY their own row (a previous owner's row is
+ * never taken over); an admin gets their own first, else any open
+ * row (the existing admin override).
+ */
+async function findManageableOpenLink(
+  supabase: SupabaseClient,
+  args: {
+    accountId: string;
+    runId: string;
+    role: AccountRole;
+    userId: string;
+  },
+): Promise<LinkRow | null> {
+  const own = await findOpenLink(
+    supabase,
+    args.accountId,
+    args.runId,
+    args.userId,
+  );
+  if (own) return own;
+  if (hasMinRole(args.role, "admin")) {
+    return findOpenLink(supabase, args.accountId, args.runId);
+  }
+  return null;
 }
 
 /**
@@ -196,7 +241,12 @@ export async function GET(
       });
       if (!owned) return bad("Run not found.", 404);
     }
-    const linked = await findOpenLink(supabase, accountId, runId);
+    const linked = await findManageableOpenLink(supabase, {
+      accountId,
+      runId,
+      role,
+      userId,
+    });
     if (!linked) {
       return NextResponse.json({ reminder: null });
     }
@@ -262,8 +312,11 @@ export async function POST(
         "The Next Follow-up Date & Time column is not available on this table.",
       );
     }
-    // Agents may only manage reminders for their own assigned
-    // leads (same not-found shape as a foreign run).
+    // Salespeople may only schedule reminders for leads currently
+    // assigned to them. This is the live assignment check (the
+    // Assigned To cell), so a lead handed over by another creator or
+    // admin is allowed — the reminder is linked to the caller, never
+    // to the previous owner. Foreign-tenant runs already 404 above.
     if (role === "agent") {
       const owned = await isRunOwnedByUser(supabase, {
         accountId,
@@ -271,7 +324,12 @@ export async function POST(
         runId,
         userId,
       });
-      if (!owned) return bad("Run not found.", 404);
+      if (!owned) {
+        return bad(
+          "You can only schedule follow-ups for leads assigned to you.",
+          403,
+        );
+      }
     }
 
     // The reminder must match the persisted cell value — never a
@@ -336,7 +394,12 @@ export async function POST(
       explicitRecipient = normalized;
     }
 
-    const existing = await findOpenLink(supabase, accountId, runId);
+    const existing = await findManageableOpenLink(supabase, {
+      accountId,
+      runId,
+      role,
+      userId,
+    });
     if (existing) {
       if (existing.status === "processing") {
         return bad(
@@ -419,47 +482,65 @@ export async function POST(
       // link target — update it instead of duplicating.
       const code = (error as { code?: unknown }).code;
       if (code === "23505") {
-        const winner = await findOpenLink(supabase, accountId, runId);
-        if (winner && winner.status !== "processing") {
-          if (!canManageReminder(role, winner, userId)) {
-            return bad(
-              "Only the reminder creator or an admin can change it.",
-              403,
-            );
-          }
-          const raced = resolveRecipientUpdate(
-            { recipient_phone: winner.recipient_phone, recipient_custom: winner.recipient_custom },
-            explicitRecipient,
-            profile_phone,
+        const winner = await findManageableOpenLink(supabase, {
+          accountId,
+          runId,
+          role,
+          userId,
+        });
+        if (!winner) {
+          // Lost the race to a row this caller cannot manage (for
+          // example the legacy per-lead index is still in place).
+          // Never surface a raw DB error.
+          return bad(
+            "A reminder for this lead was just created by someone else. Refresh the table and try again.",
+            409,
           );
-          const { data: updated, error: updateErr } = await supabase
-            .from("whatsapp_followups")
-            .update({
-              scheduled_for: input.scheduled_for,
-              message_text: input.message_text,
-              status: "scheduled",
-              failure_reason: null,
-              failed_at: null,
-              recipient_phone: raced.recipient_phone,
-              recipient_custom: raced.recipient_custom,
-            })
-            .eq("id", winner.id)
-            .eq("account_id", accountId)
-            .select("id, scheduled_for, message_text, status, recipient_phone")
-            .single();
-          if (updateErr) throw updateErr;
-          const row = updated as Record<string, unknown>;
-          return NextResponse.json({
-            reminder: {
-              id: row.id,
-              scheduled_for: row.scheduled_for,
-              message_text: row.message_text,
-              status: row.status,
-              recipient_phone: row.recipient_phone ?? null,
-              created: false,
-            },
-          });
         }
+        if (winner.status === "processing") {
+          return bad(
+            "The reminder is being sent right now. Try again in a moment.",
+            409,
+          );
+        }
+        if (!canManageReminder(role, winner, userId)) {
+          return bad(
+            "Only the reminder creator or an admin can change it.",
+            403,
+          );
+        }
+        const raced = resolveRecipientUpdate(
+          { recipient_phone: winner.recipient_phone, recipient_custom: winner.recipient_custom },
+          explicitRecipient,
+          profile_phone,
+        );
+        const { data: updated, error: updateErr } = await supabase
+          .from("whatsapp_followups")
+          .update({
+            scheduled_for: input.scheduled_for,
+            message_text: input.message_text,
+            status: "scheduled",
+            failure_reason: null,
+            failed_at: null,
+            recipient_phone: raced.recipient_phone,
+            recipient_custom: raced.recipient_custom,
+          })
+          .eq("id", winner.id)
+          .eq("account_id", accountId)
+          .select("id, scheduled_for, message_text, status, recipient_phone")
+          .single();
+        if (updateErr) throw updateErr;
+        const row = updated as Record<string, unknown>;
+        return NextResponse.json({
+          reminder: {
+            id: row.id,
+            scheduled_for: row.scheduled_for,
+            message_text: row.message_text,
+            status: row.status,
+            recipient_phone: row.recipient_phone ?? null,
+            created: false,
+          },
+        });
       }
       throw error;
     }
@@ -529,16 +610,19 @@ export async function DELETE(
       if (!owned) return bad("Run not found.", 404);
     }
 
-    const { data, error } = await supabase
-      .from("whatsapp_followups")
-      .select("id, status, created_by")
-      .eq("account_id", accountId)
-      .eq("source_kind", WORKSPACE_FOLLOWUP_SOURCE_KIND)
-      .eq("source_run_id", runId)
-      .eq("status", "scheduled")
-      .maybeSingle();
-    if (error) throw error;
-    const row = (data as LinkRow | null) ?? null;
+    // Salespeople only cancel their OWN scheduled linked reminder: a
+    // previous owner's reminder survives a handover untouched, but
+    // clearing the cell must never silently cancel it (the ownership
+    // check below returns 403 instead). Admins keep the any-owner
+    // override — own reminder first, otherwise any scheduled one.
+    const own = await findOpenLink(supabase, accountId, runId, userId, [
+      "scheduled",
+    ]);
+    const row =
+      own ??
+      (await findOpenLink(supabase, accountId, runId, undefined, [
+        "scheduled",
+      ]));
     if (!row) {
       return NextResponse.json({ cancelled: false });
     }

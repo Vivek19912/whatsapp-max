@@ -67,6 +67,14 @@ export interface TravelCrmCreatePayload {
   leadType: string;
   leadStage: string;
   assignedToEmail: string;
+  /**
+   * Mapped Travel CRM salesperson id (CRM User Mapping). Resolved
+   * server-side from the creating user's mapping — never request
+   * input. Travel CRM assigns to this user when it belongs to the
+   * linked account, else fails with ASSIGNED_USER_NOT_FOUND so the
+   * caller can retry unmapped (owner fallback).
+   */
+  assignedToUserId?: string | null;
   dateOfBirth?: string | null;
   travelStartDate?: string | null;
   /** Month-based timing (both set or both null; never with a date). */

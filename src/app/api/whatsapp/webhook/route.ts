@@ -2,6 +2,7 @@ import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl } from '@/lib/whatsapp/meta-api'
+import { archiveInboundMedia } from '@/lib/whatsapp/inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { getOrCreateConversation } from '@/lib/conversations/get-or-create'
@@ -968,7 +969,7 @@ async function processMessage(
 
   // Parse message content based on type
   const { contentText, mediaUrl, mediaType, mediaFileName, interactiveReplyId } =
-    await parseMessageContent(message, accessToken)
+    await parseMessageContent(message, accessToken, accountId)
 
   // Resolve swipe-reply context if present. A missing parent is fine —
   // we just store NULL and the UI renders the message without a quote.
@@ -1261,7 +1262,8 @@ await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
 
 async function parseMessageContent(
   message: WhatsAppMessage,
-  accessToken: string
+  accessToken: string,
+  accountId: string
 ): Promise<{
   contentText: string | null
   mediaUrl: string | null
@@ -1282,11 +1284,40 @@ async function parseMessageContent(
   // the args swapped, so every verification hit an invalid Meta URL and
   // fell through to the catch block, leaving mediaUrl as null. That's
   // why images showed up as empty bubbles in the inbox.
+  //
+  // Archival: after verification, the bytes are downloaded from Meta and
+  // stored in the private `inbound-media` bucket (`{accountId}/{mediaId}`)
+  // so the inbox keeps working after Meta's 7-day webhook media window.
+  // Archival is best-effort — it never blocks the message insert and never
+  // changes the stored `media_url`.
   const verifyAndBuildUrl = async (
-    mediaId: string
+    mediaId: string,
+    opts?: { mimeType?: string | null; fileName?: string | null }
   ): Promise<string | null> => {
     try {
-      await getMediaUrl({ mediaId, accessToken })
+      const mediaInfo = await getMediaUrl({ mediaId, accessToken })
+      const receivedAt = (() => {
+        const ts = Number(message.timestamp)
+        return Number.isFinite(ts) && ts > 0
+          ? new Date(ts * 1000).toISOString()
+          : null
+      })()
+      // Awaited (not fire-and-forget): archiveInboundMedia is bounded
+      // (~20 s budget, 3 attempts) and never throws, and we are already
+      // inside the route's `after()` block, so awaiting cannot freeze the
+      // webhook response. Awaiting guarantees the archive lands before a
+      // redelivery/duplicate can race it, and a 409 on duplicates is
+      // treated as success inside archiveInboundMedia.
+      await archiveInboundMedia({
+        accountId,
+        mediaId,
+        accessToken,
+        mimeType: opts?.mimeType ?? mediaInfo.mimeType ?? null,
+        fileName: opts?.fileName ?? null,
+        downloadUrl: mediaInfo.url,
+        whatsappMessageId: message.id,
+        receivedAt,
+      })
       return `/api/whatsapp/media/${mediaId}`
     } catch (error) {
       console.error(
@@ -1316,7 +1347,9 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.image.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.image.id),
+          mediaUrl: await verifyAndBuildUrl(message.image.id, {
+            mimeType: message.image.mime_type,
+          }),
           mediaType: message.image.mime_type,
         }
       }
@@ -1327,7 +1360,9 @@ async function parseMessageContent(
         return {
           ...empty,
           contentText: message.video.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.video.id),
+          mediaUrl: await verifyAndBuildUrl(message.video.id, {
+            mimeType: message.video.mime_type,
+          }),
           mediaType: message.video.mime_type,
         }
       }
@@ -1339,7 +1374,10 @@ async function parseMessageContent(
           ...empty,
           contentText:
             message.document.caption || message.document.filename || null,
-          mediaUrl: await verifyAndBuildUrl(message.document.id),
+          mediaUrl: await verifyAndBuildUrl(message.document.id, {
+            mimeType: message.document.mime_type,
+            fileName: message.document.filename ?? null,
+          }),
           mediaType: message.document.mime_type,
           mediaFileName: message.document.filename || null,
         }
@@ -1350,7 +1388,9 @@ async function parseMessageContent(
       if (message.audio?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.audio.id),
+          mediaUrl: await verifyAndBuildUrl(message.audio.id, {
+            mimeType: message.audio.mime_type,
+          }),
           mediaType: message.audio.mime_type,
         }
       }
@@ -1363,7 +1403,9 @@ async function parseMessageContent(
       if (message.sticker?.id) {
         return {
           ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.sticker.id),
+          mediaUrl: await verifyAndBuildUrl(message.sticker.id, {
+            mimeType: message.sticker.mime_type,
+          }),
           mediaType: message.sticker.mime_type,
         }
       }
