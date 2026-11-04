@@ -606,6 +606,19 @@ export async function manualAssign(
     reason: null,
     createdBy: args.actorUserId,
   });
+  // ADDITIVE Inbox mirror — a manual (re)assignment or clear applies
+  // the same owner to the linked thread so the conversation
+  // header/list match the Workspace column. Lives here (not only
+  // in the route) so EVERY caller of manualAssign converges both
+  // surfaces. Best-effort: never fails the assignment.
+  try {
+    const { mirrorRunAssignmentToConversation } = await import(
+      "@/lib/inbox/assignment-sync"
+    );
+    await mirrorRunAssignmentToConversation(db, accountId, runId, stored);
+  } catch {
+    // Mirror-only; the assignment above already succeeded.
+  }
   // ADDITIVE Meta Sheets sync — manual assignment/clear changes the
   // sheet's Assigned To cell. Best-effort; never fails assignment.
   try {

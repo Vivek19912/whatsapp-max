@@ -107,4 +107,35 @@ describe("assignment enforcement on conversation actions", () => {
     expect(media()).toContain("requireAuthenticatedUser");
     expect(pins()).toContain("ctx.supabase");
   });
+
+  it("every Workspace assignment write converges the linked thread (no silent drift)", () => {
+    // Regression: Workspace showed an owner while the Inbox thread
+    // stayed unassigned (agent saw 1 of 20 threads). All four
+    // Workspace-side writers must mirror to conversations:
+    //   1. Workspace cell edits (clear + set) via the service role
+    //      (caller RLS would deny cross-assignee updates),
+    //   2. manual (re)assignments via the shared service,
+    //   3. per-table auto-assignments,
+    //   4. legacy global auto-assignments (already mirrored).
+    const ws = src(
+      "src", "app", "api", "flows", "[id]", "workspace-values", "route.ts"
+    );
+    const wsMirrors = ws.match(/mirrorRunAssignmentToConversation\(\s*supabaseAdmin\(\)/g) ?? [];
+    expect(wsMirrors.length).toBe(2);
+
+    // The manual assign route mirrors with the service role AFTER
+    // the service validated everything (owner/manage gate,
+    // same-account roster, run in this account+flow) — a caller
+    // client would be RLS-denied on others' threads.
+    const manual = src(
+      "src", "app", "api", "flows", "[id]", "leads", "[runId]", "assign", "route.ts"
+    );
+    const routeMirrors = manual.match(/mirrorRunAssignmentToConversation\(\s*supabaseAdmin\(\)/g) ?? [];
+    expect(routeMirrors.length).toBe(1);    const service = src("src", "lib", "lead-assignment", "service.ts");
+    expect(service).toContain("manualAssign");
+    const manualBlock = service.slice(service.indexOf("export async function manualAssign"));
+    expect(manualBlock).toContain("mirrorRunAssignmentToConversation");
+    const engine = src("src", "lib", "lead-assignment", "table-assignment.ts");
+    expect(engine).toContain("mirrorRunAssignmentToConversation(db, accountId, runId, selected.user_id)");
+  });
 });

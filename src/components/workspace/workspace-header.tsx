@@ -75,6 +75,13 @@ function norm(s: string): string {
  * existing Select contract (value/onValueChange, placeholder,
  * aria-label) and the established trigger widths; adds a filter
  * field so long Instant-Form lists stay navigable.
+ *
+ * Wide (Meta) menus size to their content: the popup renders at
+ * `max-content` width with the trigger width as the floor, capped
+ * at the viewport, so long table names display in full. Names
+ * that still exceed the cap wrap instead of clipping. The popup
+ * is portaled, so no `overflow: hidden` ancestor can clip it, and
+ * Base UI collision handling keeps it inside the viewport.
  */
 export function WorkspaceTableSelector({
   flows,
@@ -129,7 +136,22 @@ export function WorkspaceTableSelector({
           )}
         </SelectValue>
       </SelectTrigger>
-      <SelectContent className={wide ? "max-w-[calc(100vw-2rem)]" : undefined}>
+      <SelectContent
+        className={wide ? "max-w-[calc(100vw-2rem)]" : undefined}
+        style={
+          wide
+            ? {
+                // Size to the longest table name instead of the
+                // trigger: never narrower than the trigger, never
+                // wider than the viewport. Inline style wins over
+                // the base `w-(--anchor-width)` class deterministically.
+                width: "max-content",
+                minWidth: "var(--anchor-width)",
+                maxWidth: "calc(100vw - 2rem)",
+              }
+            : undefined
+        }
+      >
         <div className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-border bg-popover px-2 py-1.5">
           <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
           <Input
@@ -153,7 +175,10 @@ export function WorkspaceTableSelector({
               title={wide ? displayName(f.name) : undefined}
               className={
                 wide
-                  ? "[&>span]:min-w-0 [&>span]:shrink [&>span]:truncate"
+                  ? // Wrap instead of ellipsis: names that exceed the
+                    // viewport-capped menu flow onto multiple lines.
+                    // (The trigger above keeps its single-line ellipsis.)
+                    "[&>span]:min-w-0 [&>span]:shrink [&>span]:whitespace-normal [&>span]:break-words"
                   : undefined
               }
             >

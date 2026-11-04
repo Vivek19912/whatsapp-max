@@ -407,6 +407,18 @@ export async function assignTableLead(
       throw ownerErr;
     }
     ownerUserId = selected.user_id;
+    // ADDITIVE Inbox mirror — the auto-assigned owner applies to the
+    // linked thread (when it exists yet) so the Inbox list matches
+    // the Workspace column immediately. Best-effort: never fails
+    // the assignment.
+    try {
+      const { mirrorRunAssignmentToConversation } = await import(
+        "@/lib/inbox/assignment-sync"
+      );
+      await mirrorRunAssignmentToConversation(db, accountId, runId, selected.user_id);
+    } catch {
+      // Mirror-only; the assignment above already succeeded.
+    }
   }
 
   await recordTableEvent(db, {

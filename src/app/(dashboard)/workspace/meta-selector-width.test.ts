@@ -31,11 +31,27 @@ describe("workspace header — Meta table selector width", () => {
     expect(header()).toContain("max-w-[calc(100vw-2rem)]");
   });
 
-  it("exposes full names via tooltip and ellipsizes instead of clipping", () => {
+  it("exposes full names via tooltip; menu items wrap instead of clipping", () => {
     const src = header();
     expect(src).toContain('<span className="block min-w-0 truncate" title={displayName(active.name)}>');
     expect(src).toContain("title={wide ? displayName(f.name) : undefined}");
-    expect(src).toContain("[&>span]:min-w-0 [&>span]:shrink [&>span]:truncate");
+    // Exceptionally long names wrap onto multiple lines in the menu…
+    expect(src).toContain("[&>span]:whitespace-normal");
+    expect(src).toContain("[&>span]:break-words");
+    // …instead of truncating. Single-line ellipsis stays on the
+    // trigger only.
+    expect(src).not.toContain("[&>span]:truncate");
+  });
+
+  it("sizes the wide menu to its content, floored at the trigger and capped at the viewport", () => {
+    const src = header();
+    expect(src).toContain('width: "max-content"');
+    expect(src).toContain('minWidth: "var(--anchor-width)"');
+    expect(src).toContain('maxWidth: "calc(100vw - 2rem)"');
+    // The content sizing is applied once, in the wide (Meta) branch
+    // only — the narrow (Flow) menu passes `undefined` and keeps
+    // the trigger-matched width.
+    expect(src.match(/minWidth: "var\(--anchor-width\)"/g)).toHaveLength(1);
   });
 
   it("preserves selection behavior, value, and placeholder", () => {

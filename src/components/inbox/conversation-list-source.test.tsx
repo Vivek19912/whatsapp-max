@@ -28,7 +28,7 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("setSelectedSource");
   });
 
-  it("places Lead Source second: All, Lead Source, Date, Tags, Company, Flow/Form, Team", () => {
+  it("places Lead Source second: All, Lead Source, Date, Tags, Company, Flow, Form, Team", () => {
     // Source-order assertion on the toolbar: each marker must appear
     // after the previous one. Markers are code tokens unique to their
     // dropdown in render order (searched strictly forward).
@@ -38,9 +38,9 @@ describe("ConversationList Lead Source wiring", () => {
       "customDateOpen", // 3. Date popover (first toolbar use is after Lead Source)
       "tags.map((t)", // 4. Tags
       "companies.map((co)", // Company (kept in relative place; not reordered)
-      "availableForms.map((form)", // 5a. Form (Instant Form source)
-      "flows.map((flow)", // 5b. Flow (all other sources)
-      "teamOptions.map((member)", // 6. Team
+      "flows.map((flow)", // 5. Flow (always visible)
+      "availableForms.map((form)", // 6. Form (always visible)
+      "teamOptions.map((member)", // 7. Team
     ];
     let from = 0;
     const positions: number[] = [];
@@ -96,15 +96,23 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("[conversations, resyncToken, submissionLinksRetry]");
   });
 
-  it("replaces the Flow filter with a Form filter under Instant Form", () => {
-    expect(listSrc).toContain("selectedSource === \"instant_form\"");
+  it("keeps Flow and Form always visible and independent", () => {
+    // Both dropdowns render unconditionally — no source gating on
+    // either. Form options come from this account's submissions;
+    // Flow options from the workspace flows.
     expect(listSrc).toContain("All Forms");
+    expect(listSrc).toContain("All flows");
     expect(listSrc).toContain("setSelectedFormId(");
-    // Source changes reset the incompatible Form/Flow pick wholesale.
+    expect(listSrc).toContain("setSelectedFlowId(");
+    // Source changes never reset the Form/Flow picks (independent
+    // facets); Clear-all still resets everything (see below).
     expect(listSrc).toContain("handleSourceSelect");
-    expect(listSrc).toContain("setSelectedFlowId(null)");
-    // The form facet travels in the key and both fetch builds.
-    expect(listSrc).toContain("metaFormId: selectedSource");
+    expect(listSrc).toMatch(
+      /const handleSourceSelect = useCallback\(\(next: LeadSourceFilter\) => \{\s+setSelectedSource\(next\);\s+\}, \[\]\);/
+    );
+    // The form facet travels in the key and both fetch builds,
+    // independent of the selected source.
+    expect(listSrc).toContain("metaFormId: selectedFormId");
     const formSends = listSrc.match(/params\.set\("meta_form", selectedFormId\)/g) ?? [];
     expect(formSends.length).toBe(2);
     // Client filtering uses the per-contact form map, never N+1.
@@ -139,9 +147,26 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("availableForms.find((f) => f.id === selectedFormId)");
   });
 
-  it("hides the Flow filter while Instant Form is selected (Form takes its place)", () => {
-    // Single ternary: Form dropdown when instant_form, Flow dropdown
-    // otherwise — never both at once.
-    expect(listSrc).toMatch(/selectedSource === "instant_form" \? \(/);
+  it("applies the Form filter for any Lead Source (AND semantics)", () => {
+    // Client filtering narrows by the form whenever one is picked,
+    // with no source precondition — the source facet (above) and the
+    // form facet (below) compose by intersection.
+    expect(listSrc).toContain(
+      "if (selectedFormId !== null && !formLinksBlocked) {"
+    );
+    expect(listSrc).not.toContain('selectedSource === "instant_form"');
+    // Server-side parity: the form param travels for every source.
+    expect(listSrc).not.toContain(
+      'selectedSource === "instant_form" && selectedFormId'
+    );
+  });
+
+  it("shows Flow and Form side by side for every Lead Source", () => {
+    // No source-conditional ternary around the two dropdowns: both
+    // render for all sources, including Instant Form.
+    expect(listSrc).not.toMatch(/selectedSource === "instant_form" \? \(/);
+    // The Flow dropdown still gates on having flows to offer; the
+    // Form dropdown is unconditional (All Forms is always valid).
+    expect(listSrc).toContain("flows.length > 0 && (");
   });
 });

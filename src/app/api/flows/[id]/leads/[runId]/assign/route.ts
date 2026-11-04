@@ -260,24 +260,30 @@ export async function POST(
       // post-response drain. Tracked `after()`, never detached; the
       // cron remains the fallback. Never fails the assignment.
       scheduleSheetsDrainSoon({ accountId });
-      // ADDITIVE Inbox mirror — the same owner on the linked thread so
-      // the conversation header/list match the Workspace column.
-      // Best-effort: never fails the assignment.
+      // ADDITIVE Inbox mirror (authoritative) — the same owner on the
+      // linked thread so the conversation header/list match the
+      // Workspace column. Uses the service-role client: the
+      // conversations RLS update gate requires the old row to be
+      // visible, so a caller-scoped client would be denied for
+      // threads assigned to someone else (and the UI would falsely
+      // look synced). The service already validated everything
+      // above (owner-only/manage gate, same-account roster, run in
+      // this account+flow), and the mirror re-scopes every
+      // statement by account — so no other tenant is reachable and
+      // no message history is exposed. Best-effort: never fails
+      // the assignment. (manualAssign also mirrors best-effort with
+      // its own client for non-route callers; both writes are
+      // idempotent.)
       try {
         const { mirrorRunAssignmentToConversation } = await import(
           "@/lib/inbox/assignment-sync"
         );
-        const mirrored = await mirrorRunAssignmentToConversation(
-          supabase,
+        await mirrorRunAssignmentToConversation(
+          supabaseAdmin(),
           accountId,
           runId,
           result.current,
         );
-        if (!mirrored) {
-          console.error("[inbox/assign] mirror skipped (no linked thread yet)", {
-            runId: String(runId).slice(0, 8),
-          });
-        }
       } catch (err) {
         console.error("[inbox/assign] mirror failed:", err);
       }

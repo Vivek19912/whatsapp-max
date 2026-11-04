@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   assigneeItems: [] as Array<Record<string, unknown>>,
   queue: [] as Array<Record<string, unknown>>,
   drainScheduled: [] as Array<Record<string, unknown>>,
+  mirrorCalls: [] as Array<unknown[]>,
   seq: 0,
   bumpVersionOnStateRead: false,
 }));
@@ -29,6 +30,15 @@ vi.mock("@/lib/meta-lead-whatsapp/trigger", () => ({
   scheduleWhatsappDrainSoon: (args: Record<string, unknown>) => {
     h.drainScheduled.push(args ?? {});
   },
+}));
+
+vi.mock("@/lib/inbox/assignment-sync", () => ({
+  mirrorRunAssignmentToConversation: async (...args: unknown[]) => {
+    h.mirrorCalls.push(args);
+    return true;
+  },
+  mirrorConversationAssignmentToWorkspace: async () => true,
+  adoptContactAssignmentForConversation: async () => true,
 }));
 
 type Filter = { col: string; op: "eq" | "in"; val: unknown };
@@ -312,6 +322,7 @@ function seedBase() {
   h.assigneeItems = [];
   h.queue = [];
   h.drainScheduled = [];
+  h.mirrorCalls = [];
   h.seq = 0;
   h.bumpVersionOnStateRead = false;
 }
@@ -598,6 +609,33 @@ describe("distribution", () => {
       got.push(r.userId);
     }
     expect(got).toEqual(["u-asha", "u-ravi", "u-owner", "u-asha"]);
+  });
+
+  it("mirrors every auto-assignment to the linked thread (Inbox convergence)", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-plain-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+    for (let i = 0; i < 2; i++) {
+      run(`run-${i}`, "flow-plain-1");
+      await engine.assignTableLead(db as never, {
+        accountId: "acct-1",
+        flowId: "flow-plain-1",
+        runId: `run-${i}`,
+        formId: null,
+      });
+    }
+    // Regression: per-table auto-assignments wrote Workspace but
+    // left conversations unassigned, hiding threads from the new
+    // owner. Each assignment must converge the linked thread.
+    expect(h.mirrorCalls).toHaveLength(2);
+    expect(h.mirrorCalls[0].slice(1)).toEqual(["acct-1", "run-0", "u-asha"]);
+    expect(h.mirrorCalls[1].slice(1)).toEqual(["acct-1", "run-1", "u-ravi"]);
   });
 
   it("distributes percentages 60/40 over ten leads", async () => {

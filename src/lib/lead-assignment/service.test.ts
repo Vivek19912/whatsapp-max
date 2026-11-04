@@ -21,12 +21,22 @@ const h = vi.hoisted(() => ({
   drainScheduled: [] as Array<Record<string, unknown>>,
   seq: 0,
   bumpVersionOnStateRead: false,
+  mirrorCalls: [] as Array<unknown[]>,
 }));
 
 vi.mock("@/lib/meta-lead-whatsapp/trigger", () => ({
   scheduleWhatsappDrainSoon: (args: Record<string, unknown>) => {
     h.drainScheduled.push(args ?? {});
   },
+}));
+
+vi.mock("@/lib/inbox/assignment-sync", () => ({
+  mirrorRunAssignmentToConversation: async (...args: unknown[]) => {
+    h.mirrorCalls.push(args);
+    return true;
+  },
+  mirrorConversationAssignmentToWorkspace: async () => true,
+  adoptContactAssignmentForConversation: async () => true,
 }));
 
 function uid(prefix: string) {
@@ -262,6 +272,7 @@ function seedBase() {
   h.drainScheduled = [];
   h.seq = 0;
   h.bumpVersionOnStateRead = false;
+  h.mirrorCalls = [];
 }
 
 function seedRule(opts?: {
@@ -483,6 +494,39 @@ describe("manualAssign", () => {
     });
     expect(cleared).toEqual({ previous: "u-mohan", current: null });
     expect(h.values).toHaveLength(0);
+  });
+
+  it("mirrors manual assignments and clears to the linked thread", async () => {
+    seedBase();
+    const db = fakeSupabase();
+    await service.manualAssign(db as never, {
+      accountId: "acct-1", flowId: "flow-1", runId: "run-1",
+      formId: null, newUserId: "u-mohan", actorUserId: "actor-1",
+    });
+    // Regression: Workspace showed the owner while the Inbox thread
+    // stayed unassigned. The mirror carries the same stored value.
+    expect(h.mirrorCalls).toHaveLength(1);
+    expect(h.mirrorCalls[0].slice(1)).toEqual(["acct-1", "run-1", "u-mohan"]);
+
+    await service.manualAssign(db as never, {
+      accountId: "acct-1", flowId: "flow-1", runId: "run-1",
+      formId: null, newUserId: null, actorUserId: "actor-1",
+    });
+    expect(h.mirrorCalls).toHaveLength(2);
+    expect(h.mirrorCalls[1].slice(1)).toEqual(["acct-1", "run-1", null]);
+  });
+
+  it("mirrors legacy auto-assignments to the linked thread", async () => {
+    seedBase();
+    seedRule();
+    const db = fakeSupabase();
+    const res = await service.assignLead(db as never, {
+      accountId: "acct-1", flowId: "flow-1", runId: "run-1",
+      formId: "form-1", createdBy: null,
+    });
+    expect(res.outcome).toBe("assigned");
+    expect(h.mirrorCalls).toHaveLength(1);
+    expect(h.mirrorCalls[0].slice(1)).toEqual(["acct-1", "run-1", res.userId]);
   });
 });
 

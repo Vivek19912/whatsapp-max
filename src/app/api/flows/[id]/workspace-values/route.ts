@@ -231,12 +231,19 @@ export async function PUT(
       }
       // ADDITIVE Inbox mirror — clearing the Assigned To cell clears
       // the linked thread's assignee the same way. Best-effort.
+      // Uses the service-role client (like the Sheets sync above):
+      // the conversations RLS update gate requires the old row to
+      // be visible, so an authorized agent's user-scoped client
+      // would be denied on threads assigned to someone else (and
+      // the UI would falsely look synced). The (account, run) pair
+      // is already server-side validated above, and the mirror
+      // re-scopes every statement by account.
       if (isAssigneeField(field)) {
         try {
           const { mirrorRunAssignmentToConversation } = await import(
             "@/lib/inbox/assignment-sync"
           );
-          await mirrorRunAssignmentToConversation(supabase, accountId, runId, null);
+          await mirrorRunAssignmentToConversation(supabaseAdmin(), accountId, runId, null);
         } catch (err) {
           console.error("[inbox/workspace-values] mirror failed:", err);
         }
@@ -319,14 +326,15 @@ export async function PUT(
     // ADDITIVE Inbox mirror — an Assigned To edit (any Workspace
     // table, Meta or Flow) applies the same owner to the linked
     // thread so the conversation header/list match the Workspace
-    // column. Best-effort: never fails the save.
+    // column. Best-effort: never fails the save. Service-role
+    // client (same RLS rationale as the clear path above).
     if (isAssigneeField(field)) {
       try {
         const { mirrorRunAssignmentToConversation } = await import(
           "@/lib/inbox/assignment-sync"
         );
         await mirrorRunAssignmentToConversation(
-          supabase,
+          supabaseAdmin(),
           accountId,
           runId,
           storedValue,

@@ -173,11 +173,11 @@ export function ConversationList({
     string | null
   >(null);
   const [submissionLinksRetry, setSubmissionLinksRetry] = useState(0);
-  // Form filter (visible only when Lead Source is Instant Form).
-  // `submissionForms` maps contact id -> the set of Meta form ids
-  // from its processed submissions; `availableForms` is the distinct
-  // form list for the dropdown, drawn from this account's actual
-  // submission records (never hardcoded, never cross-account).
+  // Form filter (always visible, independent of Lead Source and
+  // Flow). `submissionForms` maps contact id -> the set of Meta form
+  // ids from its processed submissions; `availableForms` is the
+  // distinct form list for the dropdown, drawn from this account's
+  // actual submission records (never hardcoded, never cross-account).
   const [selectedFormId, setSelectedFormId] = useState<string | null>(null);
   const [submissionForms, setSubmissionForms] = useState<
     Map<string, Set<string>>
@@ -482,7 +482,7 @@ export function ConversationList({
         from: searchDateRange?.from.toISOString() ?? null,
         to: searchDateRange?.to.toISOString() ?? null,
         source: selectedSource ?? "all",
-        metaFormId: selectedSource === "instant_form" ? selectedFormId : null,
+        metaFormId: selectedFormId,
       })
     : "";
 
@@ -509,7 +509,7 @@ export function ConversationList({
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
     if (selectedSource) params.set("source", selectedSource);
-    if (selectedSource === "instant_form" && selectedFormId) {
+    if (selectedFormId) {
       params.set("meta_form", selectedFormId);
     }
     if (searchDateRange) {
@@ -638,6 +638,13 @@ export function ConversationList({
     submissionLinksReady
   );
 
+  // The Form filter needs the same lookup as the source facets.
+  // Server-side search never waits (its EXISTS runs in Postgres);
+  // the normal list blocks on it while a specific form is picked so
+  // a half-loaded map can never silently empty the list.
+  const formLinksBlocked =
+    selectedFormId !== null && !searching && !submissionLinksReady;
+
   const filtered = useMemo(() => {
     // Search mode: the server already applied the text match AND every
     // active filter (status/tags/company/flow/team/date). Applying them
@@ -685,17 +692,15 @@ export function ConversationList({
       );
     }
 
-    // Meta Form filter (Instant Form source only — the Form dropdown
-    // replaces Flow there, and changing source resets the pick). A
+    // Meta Form filter — independent of Lead Source and Flow. A
     // specific form narrows to conversations whose contact has a
     // processed submission for that exact form; All Forms (null)
-    // disables it. Gated on the same lookup readiness as the source
-    // filter above, so no silent wrong results while loading.
-    if (
-      selectedSource === "instant_form" &&
-      selectedFormId !== null &&
-      !sourceLinksBlocked
-    ) {
+    // disables it. ANDed with every other facet on both surfaces:
+    // an incompatible simultaneous Lead Source (e.g. ctwa) yields
+    // the intersection, never unrelated conversations. Gated on
+    // the submission lookup readiness so no silent wrong results
+    // while loading.
+    if (selectedFormId !== null && !formLinksBlocked) {
       result = result.filter((c) =>
         matchesFormFilter(c, selectedFormId, submissionForms)
       );
@@ -727,6 +732,7 @@ export function ConversationList({
     submissionContactIds,
     submissionForms,
     sourceLinksBlocked,
+    formLinksBlocked,
   ]);
 
   // Split the (already filtered/searched) list into pinned + regular.
@@ -807,7 +813,7 @@ export function ConversationList({
     if (selectedMemberIds.length > 0)
       params.set("members", selectedMemberIds.join(","));
     if (selectedSource) params.set("source", selectedSource);
-    if (selectedSource === "instant_form" && selectedFormId) {
+    if (selectedFormId) {
       params.set("meta_form", selectedFormId);
     }
     if (searchDateRange) {
@@ -959,15 +965,12 @@ export function ConversationList({
     );
   }, []);
 
-  // Lead Source selection always resets the dependent Form/Flow picks:
-  // the Flow list is meaningless under Instant Form (and hidden), and
-  // a Form pick is meaningless under any other source. Resetting both
-  // keeps stale, incompatible selections from silently narrowing the
-  // list — and the search key changes, so no stale page survives.
+  // Lead Source, Flow, and Form are independent facets: changing
+  // one never resets the others. A stale combination simply
+  // narrows the list (AND semantics) — and the search key changes,
+  // so no stale page survives.
   const handleSourceSelect = useCallback((next: LeadSourceFilter) => {
     setSelectedSource(next);
-    setSelectedFlowId(null);
-    setSelectedFormId(null);
   }, []);
 
   const clearContactFilters = useCallback(() => {
@@ -1375,62 +1378,15 @@ export function ConversationList({
             </DropdownMenu>
           )}
 
-          {/* Instant Form source: the Form filter replaces Flow (WhatsApp
-              automation flows never apply to Meta leads). The options
-              come from this account's actual submission records —
-              never hardcoded, never cross-account — and refresh with
-              the list, so newly received forms appear automatically. */}
-          {selectedSource === "instant_form" ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className={cn(
-                  "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
-                  selectedFormId
-                    ? "text-primary"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                <span className="truncate">
-                  {selectedFormId
-                    ? (availableForms.find((f) => f.id === selectedFormId)
-                        ?.name ?? "Form")
-                    : "Form"}
-                </span>
-                <ChevronDown className="h-3 w-3 shrink-0" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="start"
-                className="border-border bg-popover max-h-64 w-56"
-              >
-                <DropdownMenuItem
-                  onClick={() => setSelectedFormId(null)}
-                  className={cn(
-                    "text-sm",
-                    selectedFormId === null
-                      ? "text-primary"
-                      : "text-popover-foreground"
-                  )}
-                >
-                  All Forms
-                </DropdownMenuItem>
-                {availableForms.map((form) => (
-                  <DropdownMenuItem
-                    key={form.id}
-                    onClick={() => setSelectedFormId(form.id)}
-                    className={cn(
-                      "text-sm",
-                      selectedFormId === form.id
-                        ? "text-primary"
-                        : "text-popover-foreground"
-                    )}
-                  >
-                    <span className="truncate">{form.name}</span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            flows.length > 0 && (
+          {/* Flow and Form are independent, always-visible filters.
+              Flow narrows by the contact's WhatsApp automation flow;
+              Form narrows by the Meta Instant Form submission. Either,
+              both, or neither may be set — they never reset each other.
+              Form options come from this account's actual submission
+              records — never hardcoded, never cross-account — and
+              refresh with the list, so newly received forms appear
+              automatically. */}
+          {flows.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 className={cn(
@@ -1488,8 +1444,56 @@ export function ConversationList({
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
-            )
           )}
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className={cn(
+                "hover:bg-muted inline-flex h-7 max-w-44 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                selectedFormId
+                  ? "text-primary"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span className="truncate">
+                {selectedFormId
+                  ? (availableForms.find((f) => f.id === selectedFormId)
+                      ?.name ?? "Form")
+                  : "Form"}
+              </span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="border-border bg-popover max-h-64 w-56"
+            >
+              <DropdownMenuItem
+                onClick={() => setSelectedFormId(null)}
+                className={cn(
+                  "text-sm",
+                  selectedFormId === null
+                    ? "text-primary"
+                    : "text-popover-foreground"
+                )}
+              >
+                All Forms
+              </DropdownMenuItem>
+              {availableForms.map((form) => (
+                <DropdownMenuItem
+                  key={form.id}
+                  onClick={() => setSelectedFormId(form.id)}
+                  className={cn(
+                    "text-sm",
+                    selectedFormId === form.id
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  <span className="truncate">{form.name}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           {teamOptions.length > 0 && (
             <DropdownMenu>
@@ -1617,7 +1621,7 @@ export function ConversationList({
                 <X className="h-3 w-3" />
               </button>
             )}
-            {selectedSource === "instant_form" && selectedFormId && (
+            {selectedFormId && (
               <button
                 onClick={() => setSelectedFormId(null)}
                 className="bg-muted text-foreground hover:bg-muted/70 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
@@ -1682,7 +1686,7 @@ export function ConversationList({
           <div className="flex items-center justify-center py-12">
             <div className="border-primary h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           </div>
-        ) : sourceLinksBlocked ? (
+        ) : sourceLinksBlocked || formLinksBlocked ? (
           <div className="px-4 py-12 text-center">
             {submissionLinksError ? (
               <>

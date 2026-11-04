@@ -33,6 +33,8 @@ const h = vi.hoisted(() => ({
   tableNotifyCalls: [] as Array<Record<string, unknown>>,
   assigneeEnqueueCalls: [] as Array<Record<string, unknown>>,
   drainScheduled: [] as Array<Record<string, unknown>>,
+  conversations: [] as Array<Record<string, unknown>>,
+  contacts: [] as Array<Record<string, unknown>>,
   configs: [] as Array<Record<string, unknown>>,
   assignees: [] as Array<Record<string, unknown>>,
   submissions: [] as Array<Record<string, unknown>>,
@@ -147,6 +149,8 @@ function fakeSupabase() {
       case "lead_assignment_table_assignees": return h.assignees;
       case "meta_lead_submissions": return h.submissions;
       case "agent_inbox_permissions": return h.perms;
+      case "conversations": return h.conversations;
+      case "contacts": return h.contacts;
       case "lead_assignment_rules": return h.rules;
       case "lead_assignment_rule_tables": return h.ruleTables;
       case "lead_assignment_rule_members": return h.ruleMembers;
@@ -182,6 +186,7 @@ function fakeSupabase() {
       state.orderCol = col;
       return api;
     },
+    limit: () => api,
     insert: (obj: Record<string, unknown>) => {
       state.insertObj = obj;
       return api;
@@ -322,6 +327,8 @@ beforeEach(() => {
   h.ruleMembers = [];
   h.states = [];
   h.seq = 0;
+  h.conversations = [];
+  h.contacts = [];
   h.enqueued = [];
   h.tableNotifyCalls = [];
   h.assigneeEnqueueCalls = [];
@@ -340,6 +347,8 @@ beforeEach(() => {
     cancelled: 0,
     sent: 0,
   };
+  h.conversations = [];
+  h.contacts = [];
 });
 
 describe("POST assign (manual)", () => {
@@ -638,6 +647,43 @@ describe("POST assign (manual)", () => {
     expect(h.enqueued).toHaveLength(1);
     expect(h.assigneeEnqueueCalls).toHaveLength(1);
     expect(h.assigneeEnqueueCalls[0]).toMatchObject({ formId: "form-1", assigneeKey: "user:u-mohan" });
+  });
+
+  it("mirrors manual assignment onto the linked thread via the admin client", async () => {
+    // Regression: Workspace showed the new owner while the Inbox
+    // thread stayed unassigned. The route mirror runs with the
+    // service role (caller RLS would deny cross-assignee updates),
+    // after the service already validated everything.
+    h.profiles.push({ user_id: "11111111-1111-4111-8111-111111111111", account_id: "acct-1", account_role: "agent" });
+    h.runs = [{ id: "run-1", account_id: "acct-1", flow_id: "flow-1", contact_id: "ct-1" }];
+    h.contacts = [{ id: "ct-1", account_id: "acct-1", name: "Vignesh", phone: "+911234567890" }];
+    h.conversations = [{ id: "conv-1", account_id: "acct-1", contact_id: "ct-1", assigned_agent_id: null }];
+    const res = await assignPOST(assignBody({ user_id: "11111111-1111-4111-8111-111111111111" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.conversations[0]).toMatchObject({ assigned_agent_id: "11111111-1111-4111-8111-111111111111" });
+  });
+
+  it("mirrors manual clear onto the linked thread", async () => {
+    h.values.push({
+      id: "wv-0", account_id: "acct-1", field_id: "f-assign",
+      flow_run_id: "run-1", value_text: "11111111-1111-4111-8111-111111111111",
+    });
+    h.runs = [{ id: "run-1", account_id: "acct-1", flow_id: "flow-1", contact_id: "ct-1" }];
+    h.contacts = [{ id: "ct-1", account_id: "acct-1", name: "Vignesh", phone: "+911234567890" }];
+    h.conversations = [{ id: "conv-1", account_id: "acct-1", contact_id: "ct-1", assigned_agent_id: "11111111-1111-4111-8111-111111111111" }];
+    const res = await assignPOST(assignBody({ user_id: null }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.conversations[0]).toMatchObject({ assigned_agent_id: null });
+  });
+
+  it("never overwrites another account's thread", async () => {
+    h.runs = [{ id: "run-1", account_id: "acct-1", flow_id: "flow-1", contact_id: "ct-1" }];
+    h.contacts = [{ id: "ct-1", account_id: "acct-1", name: "Vignesh", phone: "+911234567890" }];
+    // Same contact id, foreign account: account scoping must not match it.
+    h.conversations = [{ id: "conv-x", account_id: "acct-evil", contact_id: "ct-1", assigned_agent_id: null }];
+    const res = await assignPOST(assignBody({ user_id: "u-mohan" }), ASSIGN_PARAMS);
+    expect(res.status).toBe(200);
+    expect(h.conversations[0]).toMatchObject({ assigned_agent_id: null });
   });
 });
 
