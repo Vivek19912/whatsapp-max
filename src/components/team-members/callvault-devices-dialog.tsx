@@ -5,12 +5,23 @@
 // device list with remote logout.
 //
 // The owner sees every registered device of the selected agent:
-// name / model / status / last seen / login date / session
-// expiry / app version. Status is Active, Logout Pending (revoked,
-// phone hasn't confirmed yet), or Logged Out (phone acked). "Log
-// out" revokes one device session; "Log out all" revokes every
-// session of the agent. Both ask for confirmation first and report
-// success/failure via toasts.
+// name / model / presence / last seen / login date / session
+// expiry / app version. Presence is Connected, Disconnected
+// (with an alert banner: agent, device, last seen,
+// disconnected-since, and a live-ticking offline duration),
+// Remote Logout (owner-revoked — never shown as an ordinary
+// disconnect), Session Expired (60d, history only), plus the
+// legacy Active / Logout Pending / Logged Out logout states.
+// "Log out" revokes one device session; "Log out all" revokes
+// every session of the agent. Both ask for confirmation first
+// and report success/failure via toasts.
+//
+// The list refetches every 15s while the dialog is open (one
+// unified poller — the old 5s-while-pending poller was folded
+// into it), quietly (no spinner, no error toasts; a failed
+// poll retries on the next tick). The poller and the 1s
+// banner-duration ticker both stop when the dialog closes or
+// unmounts.
 //
 // Revocation is session-scoped (the row's current session is
 // banned; other sessions keep working) and never touches GoTrue
@@ -45,10 +56,22 @@ interface CallvaultDevice {
   device_model: string | null;
   app_version: string | null;
   status: string;
+  /** Server-computed presence (see src/lib/callvault/presence.ts). */
+  presence: string;
+  /** Open disconnect episode start, if any. */
+  disconnected_since: string | null;
   logout_ack_at: string | null;
   last_seen_at: string | null;
   created_at: string;
   session_expires_at: string | null;
+}
+
+interface CallvaultDeviceHistoryEvent {
+  id: string;
+  device_id: string;
+  disconnected_at: string;
+  reconnected_at: string | null;
+  reason: string;
 }
 
 function fmtDate(iso: string | null): string {
@@ -75,6 +98,48 @@ function fmtDateTime(iso: string | null): string {
   });
 }
 
+/** Compact offline duration for the ticking banner ("3m 12s"). */
+function fmtDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function presenceBadge(presence: string): { label: string; className: string } {
+  switch (presence) {
+    case 'disconnected':
+      return {
+        label: 'Disconnected',
+        className:
+          'bg-red-500/10 text-red-300 border-red-500/30 text-[10px] uppercase tracking-wide',
+      };
+    case 'remote_logout':
+      return {
+        label: 'Remote logout',
+        className:
+          'bg-muted text-muted-foreground border-border text-[10px] uppercase tracking-wide',
+      };
+    case 'session_expired':
+      return {
+        label: 'Session expired',
+        className:
+          'bg-amber-500/10 text-amber-300 border-amber-500/30 text-[10px] uppercase tracking-wide',
+      };
+    default:
+      return {
+        label: 'Connected',
+        className:
+          'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 text-[10px] uppercase tracking-wide',
+      };
+  }
+}
+
 export function CallvaultDevicesDialog({
   member,
   onClose,
@@ -83,41 +148,80 @@ export function CallvaultDevicesDialog({
   onClose: () => void;
 }) {
   const [devices, setDevices] = useState<CallvaultDevice[]>([]);
+  const [history, setHistory] = useState<CallvaultDeviceHistoryEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [confirmDevice, setConfirmDevice] = useState<CallvaultDevice | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
+  // Ticking clock for the live "offline for …" banner durations.
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
-  const loadDevices = useCallback(async (userId: string) => {
-    setLoading(true);
+  const loadDevices = useCallback(async (userId: string, opts?: { quiet?: boolean }) => {
+    const quiet = opts?.quiet === true;
+    if (!quiet) setLoading(true);
     try {
       const res = await fetch(
         `/api/callvault/devices?user_id=${encodeURIComponent(userId)}`,
         { cache: 'no-store' },
       );
       if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        toast.error(payload.error || 'Failed to load devices');
+        if (!quiet) {
+          const payload = await res.json().catch(() => ({}));
+          toast.error(payload.error || 'Failed to load devices');
+        }
         return;
       }
-      const data = (await res.json()) as { devices: CallvaultDevice[] };
+      const data = (await res.json()) as {
+        devices: CallvaultDevice[];
+        history?: CallvaultDeviceHistoryEvent[];
+      };
       setDevices(data.devices ?? []);
+      setHistory(data.history ?? []);
     } catch (err) {
-      console.error('[CallvaultDevices] load error:', err);
-      toast.error('Could not reach the server');
+      if (!quiet) {
+        console.error('[CallvaultDevices] load error:', err);
+        toast.error('Could not reach the server');
+      }
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (member) {
       setDevices([]);
+      setHistory([]);
       setConfirmDevice(null);
       setConfirmAll(false);
       void loadDevices(member.user_id);
     }
   }, [member, loadDevices]);
+
+  // Unified poller: refetch every 15s while the dialog is open so
+  // disconnect banners, ack flips (Pending → Logged Out), and
+  // history stay fresh without reopening. This replaces the old
+  // 5s-while-pending poller — one cadence for every state, quiet
+  // (no spinner, no error toasts; failures retry next tick).
+  // Stops when the dialog closes or unmounts (cleanup below).
+  useEffect(() => {
+    if (!member) return;
+    const userId = member.user_id;
+    const timer = setInterval(() => {
+      void loadDevices(userId, { quiet: true });
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [member, loadDevices]);
+
+  const disconnected = devices.filter((d) => d.presence === 'disconnected');
+
+  // 1s ticker drives the live "offline for …" durations. Runs
+  // only while a disconnected device is shown; stops with the
+  // dialog (cleanup) like the poller above.
+  useEffect(() => {
+    if (!member || disconnected.length === 0) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [member, disconnected.length]);
 
   async function handleRevokeOne() {
     if (!member || !confirmDevice) return;
@@ -212,12 +316,48 @@ export function CallvaultDevicesDialog({
             </p>
           ) : (
             <div className="space-y-3">
+              {disconnected.length > 0 && (
+                <p className="text-xs font-medium text-red-300">
+                  {disconnected.length} of {devices.length} device
+                  {devices.length === 1 ? '' : 's'} disconnected
+                </p>
+              )}
+              {disconnected.map((d) => {
+                const sinceMs = d.disconnected_since
+                  ? Date.parse(d.disconnected_since)
+                  : NaN;
+                return (
+                  <div
+                    key={`offline-${d.device_id}`}
+                    role="alert"
+                    className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2.5"
+                  >
+                    <AlertTriangle className="mt-0.5 size-4 shrink-0 text-red-300" />
+                    <div className="min-w-0 text-xs">
+                      <p className="font-semibold uppercase tracking-wide text-red-200">
+                        Disconnected — {member?.full_name || 'Agent'} ·{' '}
+                        {d.device_name || d.device_id}
+                      </p>
+                      <p className="mt-0.5 text-red-200/80">
+                        Last seen {fmtDateTime(d.last_seen_at)} · Disconnected
+                        since {fmtDateTime(d.disconnected_since)}
+                        {Number.isFinite(sinceMs) &&
+                          ` · Offline for ${fmtDuration(nowMs - sinceMs)}`}
+                      </p>
+                      <p className="mt-0.5 text-red-200/80">
+                        App may be offline, stopped, or uninstalled.
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
               <ul className="divide-y divide-border rounded-md border border-border">
                 {devices.map((d) => {
                   const loggedOut = d.status === 'logged_out';
                   const pendingLogout = d.status === 'pending';
                   const settled = loggedOut || pendingLogout;
                   const busy = pending === d.device_id;
+                  const badge = presenceBadge(d.presence);
                   return (
                     <li
                       key={d.device_id}
@@ -228,21 +368,12 @@ export function CallvaultDevicesDialog({
                           <span className="truncate text-sm font-medium text-foreground">
                             {d.device_name || d.device_id}
                           </span>
-                          <Badge
-                            className={
-                              loggedOut
-                                ? 'bg-muted text-muted-foreground border-border text-[10px] uppercase tracking-wide'
-                                : pendingLogout
-                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 text-[10px] uppercase tracking-wide'
-                                  : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 text-[10px] uppercase tracking-wide'
-                            }
-                          >
-                            {loggedOut
-                              ? 'Logged out'
-                              : pendingLogout
-                                ? 'Logout pending'
-                                : 'Active'}
-                          </Badge>
+                          <Badge className={badge.className}>{badge.label}</Badge>
+                          {settled && (
+                            <Badge className="bg-muted text-muted-foreground border-border text-[10px] uppercase tracking-wide">
+                              {loggedOut ? 'Logged out' : 'Logout pending'}
+                            </Badge>
+                          )}
                         </div>
                         <p className="truncate text-xs text-muted-foreground">
                           {[d.device_model, d.app_version].filter(Boolean).join(' · ') ||
@@ -252,6 +383,8 @@ export function CallvaultDevicesDialog({
                           Last seen {fmtDateTime(d.last_seen_at)} · Login{' '}
                           {fmtDate(d.created_at)} · Session expires{' '}
                           {fmtDate(d.session_expires_at)}
+                          {d.presence === 'disconnected' &&
+                            ` · Disconnected since ${fmtDateTime(d.disconnected_since)}`}
                         </p>
                       </div>
                       {!settled && (
@@ -289,6 +422,37 @@ export function CallvaultDevicesDialog({
                   )}
                   Log out all CallVault devices
                 </Button>
+              )}
+              {history.length > 0 && (
+                <div className="rounded-md border border-border px-3 py-2.5">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Recent disconnects
+                  </p>
+                  <ul className="mt-1.5 space-y-1">
+                    {history.map((e) => {
+                      const start = Date.parse(e.disconnected_at);
+                      const end = e.reconnected_at
+                        ? Date.parse(e.reconnected_at)
+                        : nowMs;
+                      return (
+                        <li
+                          key={e.id}
+                          className="text-xs text-muted-foreground"
+                        >
+                          {e.device_id} · {fmtDateTime(e.disconnected_at)} →{' '}
+                          {e.reconnected_at
+                            ? fmtDateTime(e.reconnected_at)
+                            : 'still offline'}{' '}
+                          ({fmtDuration(end - start)}
+                          {e.reason === 'session_expired'
+                            ? ', session expired'
+                            : ''}
+                          )
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
               )}
             </div>
           )}

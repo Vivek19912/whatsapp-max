@@ -7,7 +7,16 @@
 // existence leak). Rows map to { device_id, device_name,
 // device_model, app_version, status, logout_ack_at, last_seen_at,
 // created_at, session_expires_at } where session_expires_at is
-// created_at + 60 days (computed, display-only).
+// created_at + 60 days (computed, display-only), plus presence
+// ('connected' | 'disconnected' | 'remote_logout' |
+// 'session_expired', computed server-side with server now via
+// src/lib/callvault/presence.ts — revoked/expired NEVER read
+// as an ordinary disconnect) and disconnected_since (the open
+// callvault_device_events row's disconnected_at, if any).
+//
+// `history` carries the agent's last 5 RESOLVED disconnect
+// episodes (reconnected, newest first) for the dialog's
+// "recent disconnects" section.
 //
 // Status is computed: 'logged_out' when the phone acknowledged
 // the logout (logout_ack_at set), 'pending' when revoked but not
@@ -18,6 +27,7 @@ import { NextResponse } from 'next/server';
 
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { classifyPresence, isRevokedDevice } from '@/lib/callvault/presence';
 
 /** CallVault sessions live 60 days (display-only computation). */
 export const CALLVAULT_SESSION_TTL_MS = 60 * 24 * 60 * 60 * 1000;
@@ -81,23 +91,87 @@ export async function GET(request: Request) {
       .order('created_at', { ascending: true });
     if (error) throw error;
 
+    // Open disconnect episodes (reconnected_at IS NULL), keyed
+    // by device for disconnected_since. A missing events table
+    // (pre-migration 153 rollout) degrades to "no open events"
+    // rather than failing the whole list — presence still
+    // computes from the 120s rule on last_seen_at.
+    const nowMs = Date.now();
+    const openSince = new Map<string, string>();
+    try {
+      const { data: openRows, error: openError } = await admin
+        .from('callvault_device_events')
+        .select('device_id, disconnected_at')
+        .eq('account_id', ctx.accountId)
+        .eq('user_id', targetUserId)
+        .is('reconnected_at', null);
+      if (openError) throw openError;
+      for (const event of (openRows ?? []) as Array<{
+        device_id: unknown;
+        disconnected_at: unknown;
+      }>) {
+        if (
+          typeof event.device_id === 'string' &&
+          typeof event.disconnected_at === 'string'
+        ) {
+          openSince.set(event.device_id, event.disconnected_at);
+        }
+      }
+    } catch {
+      // Degraded: disconnected_since stays null; presence below
+      // still reflects staleness. Never fail the list over this.
+    }
+
+    // Last 5 resolved episodes for the dialog's history section.
+    // Same degradation: history gaps never fail the list.
+    let history: Array<{
+      id: unknown;
+      device_id: unknown;
+      disconnected_at: unknown;
+      reconnected_at: unknown;
+      reason: unknown;
+    }> = [];
+    try {
+      const { data: historyRows, error: historyError } = await admin
+        .from('callvault_device_events')
+        .select('id, device_id, disconnected_at, reconnected_at, reason')
+        .eq('account_id', ctx.accountId)
+        .eq('user_id', targetUserId)
+        .not('reconnected_at', 'is', null)
+        .order('disconnected_at', { ascending: false })
+        .limit(5);
+      if (historyError) throw historyError;
+      history = (historyRows ?? []) as typeof history;
+    } catch {
+      history = [];
+    }
+
     const devices = ((rows ?? []) as DeviceRow[]).map((row) => {
       // Revocation-scoped: a stale ack on a healed (active) row
       // never reads logged_out — register clears logout_ack_at
       // on session change, and this mapping requires revoked.
       const acked =
         typeof row.logout_ack_at === 'string' && row.logout_ack_at !== '';
-      const revoked =
-        (typeof row.revoked_at === 'string' && row.revoked_at !== '') ||
-        (typeof row.revoked_session_id === 'string' &&
-          row.revoked_session_id !== '' &&
-          row.revoked_session_id === row.session_id);
+      const revoked = isRevokedDevice({
+        revokedAt: row.revoked_at,
+        revokedSessionId: row.revoked_session_id,
+        sessionId: row.session_id,
+      });
       return {
         device_id: row.device_id,
         device_name: row.device_name,
         device_model: row.device_model,
         app_version: row.app_version,
         status: !revoked ? 'active' : acked ? 'logged_out' : 'pending',
+        // Server-side presence (server now): revoked/expired
+        // never surface as an ordinary disconnect.
+        presence: classifyPresence({
+          lastSeenAt: row.last_seen_at,
+          revoked,
+          sessionCreatedAt: row.created_at,
+          now: nowMs,
+        }),
+        disconnected_since: openSince.get(row.device_id) ?? null,
         logout_ack_at: row.logout_ack_at,
         last_seen_at: row.last_seen_at,
         created_at: row.created_at,
@@ -105,7 +179,7 @@ export async function GET(request: Request) {
       };
     });
 
-    return NextResponse.json({ devices });
+    return NextResponse.json({ devices, history });
   } catch (err) {
     return toErrorResponse(err);
   }
