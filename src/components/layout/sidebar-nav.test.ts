@@ -18,18 +18,21 @@ describe('Features removal — sidebar', () => {
     );
   });
 
-  it('closes the gap: Dashboard is followed directly by Inbox', () => {
+  it('places Meta Lead Ads immediately below Dashboard', () => {
     expect(navItems[0]).toMatchObject({ href: '/dashboard' });
-    expect(navItems[1]).toMatchObject({ href: '/inbox' });
+    expect(navItems[1]).toMatchObject({ href: '/meta-lead-ads/dashboard', label: 'Meta Lead Ads' });
+    expect(navItems[2]).toMatchObject({ href: '/inbox' });
   });
 
-  it('places Calls immediately after Inbox', () => {
-    expect(navItems[2]).toMatchObject({ href: '/calls', label: 'Calls' });
+  it('places Calls after the Meta Lead Ads entry and Inbox', () => {
+    expect(navItems[2]).toMatchObject({ href: '/inbox' });
+    expect(navItems[3]).toMatchObject({ href: '/calls', label: 'Calls' });
   });
 
   it('keeps every other entry in the required order', () => {
     expect(navItems.map((i) => i.href)).toEqual([
       '/dashboard',
+      '/meta-lead-ads/dashboard',
       '/inbox',
       '/calls',
       '/recordings',
@@ -50,9 +53,9 @@ describe('Features removal — sidebar', () => {
     ]);
   });
 
-  it('places Workspace seventh with no Beta badge', () => {
-    expect(navItems[6]).toMatchObject({ href: '/workspace' });
-    expect(navItems[6].beta ?? false).toBe(false);
+  it('places Workspace eighth with no Beta badge', () => {
+    expect(navItems[7]).toMatchObject({ href: '/workspace' });
+    expect(navItems[7].beta ?? false).toBe(false);
   });
 
   it('places Chat Assignment after the Google Sheets children', () => {

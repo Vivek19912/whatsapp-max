@@ -1,0 +1,26 @@
+-- ============================================================
+-- 154_drop_callvault_device_events.sql — remove the CallVault
+-- device disconnection/uninstallation alert feature.
+--
+-- Drops ONLY the presence-monitoring table created by
+-- migration 153 (callvault_device_events) and its indexes
+-- (indexes die with the table; listed explicitly for review).
+--
+-- Deliberately PRESERVED (shared with Owner remote logout):
+--   public.callvault_devices (registry, revocation, last_seen_at)
+--   public.callvault_device_audit (revocation audit log)
+--   all RLS settings on the shared tables
+--   device registration / revocation / acknowledgment data
+--
+-- Forward-only, idempotent (IF EXISTS throughout).
+-- LOCAL ONLY: do not apply in production without review
+-- (do NOT db push).
+-- ============================================================
+
+DROP TABLE IF EXISTS public.callvault_device_events;
+-- Indexes owned by the table (dropped automatically with it,
+-- named here so reviewers can confirm nothing else goes away):
+--   callvault_device_events_open_unique
+--     UNIQUE (account_id, device_id) WHERE reconnected_at IS NULL
+--   callvault_device_events_account_user_idx
+--   callvault_device_events_disconnected_idx

@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   MessageSquareText,
+  Megaphone,
   Mic,
   Phone,
   ChevronDown,
@@ -56,6 +57,7 @@ interface NavItem {
 
 export const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/meta-lead-ads/dashboard", label: "Meta Lead Ads", icon: Megaphone },
   { href: "/inbox", label: "Inbox", icon: MessageSquare },
   { href: "/calls", label: "Calls", icon: Phone },
   { href: "/recordings", label: "Recordings", icon: Mic },

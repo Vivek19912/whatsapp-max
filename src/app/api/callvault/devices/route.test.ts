@@ -10,8 +10,6 @@ const h = vi.hoisted(() => ({
   accountId: "acct-A",
   member: { user_id: "agent-1" } as { user_id: string } | null,
   devices: [] as Array<Record<string, unknown>>,
-  openEvents: [] as Array<Record<string, unknown>>,
-  history: [] as Array<Record<string, unknown>>,
 }));
 
 function statusError(status: number, message: string) {
@@ -64,16 +62,6 @@ vi.mock("@/lib/flows/admin-client", () => ({
         q.order = async () => ({ data: h.devices, error: null });
         return q;
       }
-      if (table === "callvault_device_events") {
-        const q: Record<string, unknown> = {};
-        q.select = () => q;
-        q.eq = () => q;
-        q.order = () => q;
-        q.not = () => q;
-        q.is = async () => ({ data: h.openEvents, error: null });
-        q.limit = async () => ({ data: h.history, error: null });
-        return q;
-      }
       throw new Error(`unexpected table ${table}`);
     },
   }),
@@ -91,8 +79,6 @@ beforeEach(() => {
   h.accountId = "acct-A";
   h.member = { user_id: "agent-1" };
   h.devices = [];
-  h.openEvents = [];
-  h.history = [];
 });
 
 describe("GET /api/callvault/devices", () => {
@@ -143,38 +129,38 @@ describe("GET /api/callvault/devices", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as {
       devices: Array<Record<string, unknown>>;
-      history: Array<Record<string, unknown>>;
     };
     expect(json.devices).toHaveLength(3);
     expect(json.devices[0]).toMatchObject({
       device_id: "phone-1",
       status: "active",
-      presence: "connected",
-      disconnected_since: null,
     });
+    // No presence tracking: the response carries no presence,
+    // disconnected_since, or history fields.
+    expect(json.devices[0]).not.toHaveProperty("presence");
+    expect(json.devices[0]).not.toHaveProperty("disconnected_since");
+    expect(json).not.toHaveProperty("history");
     // 1-day-old session: expires_at = created_at + 60d.
     expect(json.devices[0].session_expires_at).toBe(
       new Date(Date.parse(json.devices[0].created_at as string) + 60 * 24 * 60 * 60 * 1000).toISOString(),
     );
     // Revoked but unacked reads pending; acked reads logged_out.
-    // Both are remote_logout presence — never an ordinary
-    // disconnect, even though last_seen is stale/missing.
     expect(json.devices[1]).toMatchObject({
       device_id: "phone-2",
       status: "pending",
-      presence: "remote_logout",
       logout_ack_at: null,
     });
     expect(json.devices[2]).toMatchObject({
       device_id: "phone-3",
       status: "logged_out",
-      presence: "remote_logout",
     });
     expect(json.devices[0]).toHaveProperty("last_seen_at");
-    expect(json.history).toEqual([]);
   });
 
-  it("marks stale devices disconnected with disconnected_since + history", async () => {
+  it("keeps stale devices active (no presence tracking, no events table reads)", async () => {
+    // A device unseen for hours is still just active: presence
+    // monitoring was removed, and the route must never touch
+    // callvault_device_events (the mock throws on that table).
     const now = Date.now();
     const iso = (ms: number) => new Date(ms).toISOString();
     h.devices = [
@@ -203,37 +189,22 @@ describe("GET /api/callvault/devices", () => {
         created_at: iso(now - 61 * 24 * 60 * 60 * 1000),
       },
     ];
-    h.openEvents = [
-      { device_id: "phone-1", disconnected_at: iso(now - 5 * 60 * 1000) },
-    ];
-    h.history = [
-      {
-        id: "evt-1",
-        device_id: "phone-1",
-        disconnected_at: iso(now - 60 * 60 * 1000),
-        reconnected_at: iso(now - 50 * 60 * 1000),
-        reason: "disconnect",
-      },
-    ];
     const res = await GET(req("agent-1"));
     expect(res.status).toBe(200);
     const json = (await res.json()) as {
       devices: Array<Record<string, unknown>>;
-      history: Array<Record<string, unknown>>;
     };
     expect(json.devices[0]).toMatchObject({
       device_id: "phone-1",
       status: "active",
-      presence: "disconnected",
-      disconnected_since: iso(now - 5 * 60 * 1000),
     });
-    // 61-day-old session: session_expired, never disconnected.
+    // Even a 61-day-old session: no presence field, no expiry
+    // badge state — expiry display is just the date string.
     expect(json.devices[1]).toMatchObject({
       device_id: "phone-old",
-      presence: "session_expired",
+      status: "active",
     });
-    expect(json.history).toHaveLength(1);
-    expect(json.history[0]).toMatchObject({ id: "evt-1", reason: "disconnect" });
+    expect(json.devices[1]).not.toHaveProperty("presence");
   });
 
   it("reads a stale ack on a healed row as active (ack requires revocation)", async () => {

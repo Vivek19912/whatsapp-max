@@ -38,19 +38,6 @@
 //     DIFFERENT devices of the same user coexist — there is no
 //     user-level replacement (no 4001 takeover). Browser tabs are
 //     exempt (display-only, any number per user).
-//   * Presence (no polling): phones send {type:'heartbeat',...}
-//     every HEARTBEAT_INTERVAL_S (30s, mirrored with
-//     src/lib/callvault/presence.ts + the Android client) over
-//     the live socket; the sidecar stamps last_seen_at DIRECTLY
-//     with its service client and resolves open disconnect
-//     events (migration 153). WHY direct instead of a Next.js
-//     internal hop: the socket identity is already authenticated
-//     here and the service client already exists — a hop would
-//     need a new shared secret + URL wired on both sides for
-//     zero benefit. The per-minute presence cron owns the 120s
-//     staleness rule; this process only reports liveness, never
-//     marks disconnects, and all presence writes are best-effort
-//     fail-open (a registry blip must never break dial).
 //
 // Env:
 //   NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY,
@@ -287,10 +274,9 @@ async function checkDeviceRevocation(accountId, userId, deviceId, sessionId) {
 let presenceTableWarned = false;
 
 function presenceWarn(err, what) {
-  // Pre-migration rollout (no callvault_device_events table yet)
-  // warns at most once — heartbeats arrive every 30s per device
-  // and must not spam the log. Any other failure warns every
-  // time (it may be transient and worth seeing).
+  // Missing-table (pre-migration) warns at most once so the log
+  // is not spammed. Any other failure warns every time (it may
+  // be transient and worth seeing).
   const code = err && typeof err === 'object' ? String(err.code || '') : '';
   const message = err?.message || err?.name || 'unknown';
   const missing = code === '42P01' || /does not exist|relation/i.test(String(message));
@@ -305,16 +291,16 @@ function presenceWarn(err, what) {
 }
 
 /**
- * Presence liveness stamp (migration 153): last_seen_at = now
- * for one exact (account, user, device) row.
+ * Presence liveness stamp: last_seen_at = now for one exact
+ * (account, user, device) row. Used by the handshake (a
+ * reconnect proves liveness) and kept fresh by every
+ * authenticated HTTP request via the device gate — the Owner
+ * device list shows "last seen" from this column.
  *
- * Best-effort writes — safe BECAUSE the presence cron
- * reconciles every stale candidate against the sidecar's
- * live-presence snapshot (/internal/presence-snapshot) before
- * opening a disconnect event: a failed touch alone can never
- * produce a false alert. Writes carry no auth decision;
- * refusing sockets over a registry blip would brick live dial
- * delivery for healthy devices.
+ * Best-effort: failures only warn. This write carries no auth
+ * decision and never gates anything; refusing sockets over a
+ * registry blip would brick live dial delivery for healthy
+ * devices.
  */
 function touchDeviceLastSeen(accountId, userId, deviceId) {
   void (async () => {
@@ -328,31 +314,6 @@ function touchDeviceLastSeen(accountId, userId, deviceId) {
       if (error) throw error;
     } catch (err) {
       presenceWarn(err, 'touch');
-    }
-  })();
-}
-
-/**
- * Close any open disconnect episode for one exact device
- * (reconnected_at = now WHERE reconnected_at IS NULL). Called
- * on handshake (reconnect proves liveness) and on every
- * accepted heartbeat. Idempotent: with no open row the update
- * touches zero rows. Same fail-open discipline as the touch.
- */
-function resolveOpenPresenceEvents(accountId, userId, deviceId) {
-  void (async () => {
-    try {
-      const now = new Date().toISOString();
-      const { error } = await admin
-        .from('callvault_device_events')
-        .update({ reconnected_at: now, updated_at: now })
-        .eq('account_id', accountId)
-        .eq('user_id', userId)
-        .eq('device_id', deviceId)
-        .is('reconnected_at', null);
-      if (error) throw error;
-    } catch (err) {
-      presenceWarn(err, 'resolve');
     }
   })();
 }
@@ -567,14 +528,10 @@ const server = createServer(async (req, res) => {
     // The phone will get it on connect if it is pending, otherwise not.
     // Fan-out: every live socket of this (account, user) gets the
     // signal — different devices coexist, each with its own
-    // dedupe set. Sockets flagged revocationUnknown (registry
-    // unreadable at their last check) are skipped: no dial signal
-    // goes to an identity whose revocation state is unestablished.
+    // dedupe set.
     const targets = [];
     for (const c of connections.values()) {
-      if (c.userId === userId && c.accountId === accountId && !c.revocationUnknown) {
-        targets.push(c);
-      }
+      if (c.userId === userId && c.accountId === accountId) targets.push(c);
     }
     if (row && isLive(row) && targets.length > 0) {
       let accepted = 0;
@@ -723,38 +680,6 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ delivered }));
-    return;
-  }
-
-  // Live-presence snapshot for the presence cron (migration
-  // 153 reconciliation). Returns every currently-registered
-  // phone socket with its authed full identity plus the
-  // server-side receipt stamp of its last accepted heartbeat.
-  // The cron suppresses disconnect events for entries whose
-  // heartbeat is fresh even when PostgreSQL last_seen_at is
-  // stale (failed touch writes) — this is what makes a DB-write
-  // outage unable to produce false disconnect alerts.
-  // Loopback-only, same secret as the other internal endpoints.
-  // Minimal fields only: ids + receipt timestamp, never tokens.
-  if (req.method === 'GET' && url.pathname === '/internal/presence-snapshot') {
-    if (!secretMatches(req.headers['x-dial-internal-secret'])) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end('{"error":"unauthorized"}');
-      return;
-    }
-    const live = [];
-    for (const c of connections.values()) {
-      if (!c || c.ws.readyState !== 1) continue;
-      live.push({
-        account_id: c.accountId,
-        user_id: c.userId,
-        device_id: c.deviceId,
-        session_id: c.sessionId || null,
-        last_heartbeat_at: new Date(c.lastHeartbeatAt || 0).toISOString(),
-      });
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ connections: live }));
     return;
   }
 
@@ -916,27 +841,16 @@ wss.on('connection', async (ws, req) => {
     // token only). The logout push + logout_ack handlers verify
     // against it; null for opaque/legacy tokens.
     sessionId: auth.sessionId,
-    // Live-presence receipt stamp (server time, ms): refreshed on
-    // handshake and on every accepted heartbeat. Feeds the
-    // /internal/presence-snapshot used by the presence cron to
-    // suppress false disconnect alerts when a last_seen_at write
-    // failed. Never trusted from the client.
-    lastHeartbeatAt: Date.now(),
-    // Set while the revocation registry is unreadable: dial
-    // fan-out skips such sockets until revalidation. Reset on
-    // every successfully revalidated heartbeat.
-    revocationUnknown: false,
     sent: new Set(),
   };
   connections.set(key, connection);
   log(`connected user ${short(auth.userId)} device ${short(deviceId)}`);
 
-  // Presence (migration 153): a (re)connect proves liveness —
-  // stamp last_seen_at and close any open disconnect episode.
-  // No row is ever INSERTED here (registration owns that);
-  // both writes are best-effort fail-open (see the helpers).
+  // A (re)connect proves liveness — stamp last_seen_at so the
+  // Owner device list shows a fresh login. No row is ever
+  // INSERTED here (registration owns that); the write is
+  // best-effort (see the helper).
   touchDeviceLastSeen(auth.accountId, auth.userId, deviceId);
-  resolveOpenPresenceEvents(auth.accountId, auth.userId, deviceId);
 
   ws.on('message', async (raw) => {
     if (typeof raw !== 'string' && !Buffer.isBuffer(raw)) return;
@@ -946,67 +860,6 @@ wss.on('connection', async (ws, req) => {
     try {
       message = JSON.parse(text);
     } catch {
-      return;
-    }
-    if (message?.type === 'heartbeat') {
-      // Presence heartbeat (frame contract shared with the
-      // Android client — do not deviate):
-      //   {"type":"heartbeat","device_id":"...","session_id":"..."}
-      // Sent every HEARTBEAT_INTERVAL_S (30s). The frame MUST
-      // match THIS connection's authed (device, session) — any
-      // other identity is ignored + logged, never applied (a
-      // socket may only ever report its own liveness). An
-      // accepted frame touches last_seen_at and resolves any
-      // open disconnect event (fail-open helpers above). A
-      // heartbeat from a session revoked AFTER connect gets the
-      // same logout_device + 4403 close as the handshake gate
-      // (idempotent — the phone dedupes the wipe).
-      const hbDevice = String(message.device_id || '')
-        .replace(/[^A-Za-z0-9._-]/g, '')
-        .slice(0, 64);
-      const hbSession =
-        typeof message.session_id === 'string' ? message.session_id : '';
-      if (!hbDevice || hbDevice !== connection.deviceId) {
-        warn(`heartbeat identity mismatch user ${short(connection.userId)} (ignored)`);
-        return;
-      }
-      if (
-        (hbSession && !UUID_RE.test(hbSession)) ||
-        (connection.sessionId && hbSession && hbSession !== connection.sessionId)
-      ) {
-        warn(`heartbeat session mismatch user ${short(connection.userId)} (ignored)`);
-        return;
-      }
-      // Tri-state revocation (see checkDeviceRevocation): a
-      // persisted revocation gets logout_device + 4403; an
-      // unreadable registry suspends with retryable 1012 (no
-      // logout frame, no wipe — the phone reconnects and
-      // revalidates). Dial delivery to this socket stops either
-      // way: closed sockets leave the live map.
-      const revocationAtBeat = await checkDeviceRevocation(
-        connection.accountId,
-        connection.userId,
-        connection.deviceId,
-        connection.sessionId
-      );
-      if (revocationAtBeat === 'revoked') {
-        notifyPhoneLogout(ws, connection.deviceId, connection.sessionId);
-        return;
-      }
-      if (revocationAtBeat === 'unknown') {
-        warn(`suspended socket: revocation registry unreadable user ${short(connection.userId)}`);
-        connection.revocationUnknown = true;
-        ws.close(1012, 'revocation registry unavailable');
-        return;
-      }
-      connection.revocationUnknown = false;
-      connection.lastHeartbeatAt = Date.now();
-      touchDeviceLastSeen(connection.accountId, connection.userId, connection.deviceId);
-      resolveOpenPresenceEvents(
-        connection.accountId,
-        connection.userId,
-        connection.deviceId
-      );
       return;
     }
     if (message?.type === 'received') {
@@ -1113,7 +966,10 @@ wss.on('connection', async (ws, req) => {
   );
 });
 
-const heartbeat = setInterval(() => {
+// Transport-level WebSocket keepalive (NOT presence monitoring):
+// protocol pings keep the remote-logout/dial connection alive
+// through idle NAT timeouts. No identity, no database writes.
+const keepalive = setInterval(() => {
   for (const connection of connections.values()) {
     if (connection.ws.readyState === 1) connection.ws.ping();
   }
@@ -1134,7 +990,7 @@ server.listen(PORT, HOST, () => {
 
 function shutdown(signal) {
   log(`shutting down (${signal})`);
-  clearInterval(heartbeat);
+  clearInterval(keepalive);
   for (const connection of connections.values()) {
     try {
       connection.ws.close(1001, 'server shutdown');
