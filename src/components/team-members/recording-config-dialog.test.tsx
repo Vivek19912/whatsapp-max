@@ -155,8 +155,13 @@ describe("team-members-view recording wiring", () => {
     expect(viewSrc).toContain("WhatsApp:{' '}");
   });
 
-  it("role editing and member removal are untouched", () => {
-    expect(viewSrc).toContain("handleRoleChange");
+  it("role is display-only; member removal is untouched", () => {
+    expect(viewSrc).not.toContain("handleRoleChange");
+    expect(viewSrc).not.toContain("EDITABLE_ROLES");
+    expect(viewSrc).not.toContain("<Select");
+    expect(viewSrc).not.toContain("SelectTrigger");
+    expect(viewSrc).toContain("ROLE_META[member.role]");
+    expect(viewSrc).toContain("roleMeta.label");
     expect(viewSrc).toContain("handleRemove");
     expect(viewSrc).toContain("setRemovingMember(member)");
   });

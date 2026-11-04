@@ -148,8 +148,102 @@ async function authenticate(token) {
     .maybeSingle();
   if (profileError || !profile) return null;
   if (!AGENT_ROLES.has(String(profile.account_role))) return null;
-  return { userId, accountId: String(profile.account_id) };
+  return {
+    userId,
+    accountId: String(profile.account_id),
+    // Session scope for CallVault remote logout (migration 151).
+    // Decoded from the verified bearer only; never logged.
+    sessionId: sessionIdFromToken(token),
+  };
 }
+
+/**
+ * GoTrue session_id of a verified access token (base64url payload
+ * decode, UUID-shape check). Returns null for opaque/legacy
+ * tokens. Mirrors src/lib/auth/callvault-session.ts.
+ */
+function sessionIdFromToken(token) {
+  try {
+    if (typeof token !== 'string') return null;
+    const parts = token.split('.');
+    if (parts.length < 2 || !parts[1]) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = Buffer.from(b64, 'base64').toString('utf8');
+    const sid = JSON.parse(json)?.session_id;
+    return typeof sid === 'string' && UUID_RE.test(sid) ? sid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Server → phone logout signal. Sent when the owner's remote
+ * logout revokes the session this socket holds; the phone signs
+ * itself out locally on receipt. The socket is closed (4403)
+ * right after so a revoked device can never stay registered.
+ */
+function notifyPhoneLogout(ws) {
+  try {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'logout_device' }));
+    }
+  } catch {
+    // ignore — the close below still unenrolls the socket.
+  }
+  try {
+    ws.close(4403, 'device logged out');
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * True when the (user, device) pair is revoked for the session
+ * the socket authenticated with. A row is revoked iff
+ * revoked_session_id equals its session_id. Fail-open with a
+ * warning when the table is missing (pre-migration rollout) or
+ * unreadable — the HTTP API gate still enforces revocation.
+ */
+async function isDeviceRevoked(accountId, userId, deviceId, sessionId) {
+  if (!sessionId && !deviceId) return false;
+  let rows;
+  try {
+    const { data, error } = await admin
+      .from('callvault_devices')
+      .select('device_id, session_id, revoked_session_id')
+      .eq('account_id', accountId)
+      .eq('user_id', userId);
+    if (error) throw error;
+    rows = data || [];
+  } catch (err) {
+    warn(`device revocation read failed: ${err?.message || err?.name || 'unknown'} (allowing)`);
+    return false;
+  }
+  for (const row of rows) {
+    const revoked =
+      typeof row.revoked_session_id === 'string' && row.revoked_session_id;
+    if (!revoked) continue;
+    if (sessionId && row.revoked_session_id === sessionId) return true;
+    if (
+      !sessionId &&
+      deviceId &&
+      row.device_id === deviceId &&
+      row.revoked_session_id === row.session_id
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// NOTE on push: src/lib/dial/notify-ws.ts exposes only
+// /internal/dial-event and /internal/status-event — there is no
+// logout push channel, and none is added. Mid-session enforcement
+// is the HTTP API gate (every device request re-checks) plus the
+// phone's status polling; the sidecar enforces at handshake
+// (4403 + logout_device below) so a revoked device can never
+// (re)register. A future /internal/logout-event could reuse
+// notifyPhoneLogout() against the live socket in `connections`.
 
 function buildEvent(row) {
   return {
@@ -546,6 +640,15 @@ wss.on('connection', async (ws, req) => {
 
   const rawDevice = String(url.searchParams.get('device_id') || 'unknown');
   const deviceId = rawDevice.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) || 'unknown';
+
+  // CallVault remote logout (migration 151): a revoked
+  // (user, device, session) pair never registers. The HTTP API
+  // gate denies the same session even without a device header.
+  if (await isDeviceRevoked(auth.accountId, auth.userId, deviceId, auth.sessionId)) {
+    warn(`rejected socket: revoked device user ${short(auth.userId)}`);
+    notifyPhoneLogout(ws);
+    return;
+  }
 
   const previous = connections.get(auth.userId);
   if (previous && previous.ws !== ws) {

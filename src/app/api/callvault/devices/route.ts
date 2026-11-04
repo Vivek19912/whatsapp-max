@@ -1,0 +1,98 @@
+// ============================================================
+// GET /api/callvault/devices?user_id= — owner lists one member's
+// CallVault devices.
+//
+// OWNER only: agents/admins/viewers get 403. The target must be
+// a member of the caller's account, else 404 (no cross-tenant
+// existence leak). Rows map to { device_id, device_name,
+// device_model, app_version, status, last_seen_at, created_at,
+// session_expires_at } where session_expires_at is
+// created_at + 60 days (computed, display-only).
+// ============================================================
+
+import { NextResponse } from 'next/server';
+
+import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
+import { supabaseAdmin } from '@/lib/flows/admin-client';
+
+/** CallVault sessions live 60 days (display-only computation). */
+export const CALLVAULT_SESSION_TTL_MS = 60 * 24 * 60 * 60 * 1000;
+
+export function sessionExpiresAt(createdAt: string): string | null {
+  const ms = Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms + CALLVAULT_SESSION_TTL_MS).toISOString();
+}
+
+interface DeviceRow {
+  device_id: string;
+  device_name: string | null;
+  device_model: string | null;
+  app_version: string | null;
+  session_id: string | null;
+  revoked_session_id: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+}
+
+export async function GET(request: Request) {
+  try {
+    const ctx = await getCurrentAccount();
+    if (ctx.role !== 'owner') {
+      return NextResponse.json(
+        { error: 'Only the account owner can view CallVault devices' },
+        { status: 403 },
+      );
+    }
+
+    const url = new URL(request.url);
+    const targetUserId = url.searchParams.get('user_id') ?? '';
+    if (!targetUserId) {
+      return NextResponse.json({ error: "'user_id' is required" }, { status: 400 });
+    }
+
+    const admin = supabaseAdmin();
+    // Target must belong to the caller's account — same 404 as a
+    // missing member, never a cross-account signal.
+    const { data: member, error: memberError } = await admin
+      .from('profiles')
+      .select('user_id')
+      .eq('user_id', targetUserId)
+      .eq('account_id', ctx.accountId)
+      .maybeSingle();
+    if (memberError) throw memberError;
+    if (!member) {
+      return NextResponse.json({ error: 'Member not found' }, { status: 404 });
+    }
+
+    const { data: rows, error } = await admin
+      .from('callvault_devices')
+      .select(
+        'device_id, device_name, device_model, app_version, session_id, revoked_session_id, last_seen_at, created_at',
+      )
+      .eq('account_id', ctx.accountId)
+      .eq('user_id', targetUserId)
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+
+    const devices = ((rows ?? []) as DeviceRow[]).map((row) => ({
+      device_id: row.device_id,
+      device_name: row.device_name,
+      device_model: row.device_model,
+      app_version: row.app_version,
+      status:
+        typeof row.revoked_session_id === 'string' &&
+        row.revoked_session_id !== '' &&
+        row.revoked_session_id === row.session_id
+          ? 'logged_out'
+          : 'active',
+      last_seen_at: row.last_seen_at,
+      created_at: row.created_at,
+      session_expires_at: sessionExpiresAt(row.created_at),
+    }));
+
+    return NextResponse.json({ devices });
+  } catch (err) {
+    return toErrorResponse(err);
+  }
+}

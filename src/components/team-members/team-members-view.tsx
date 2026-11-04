@@ -3,10 +3,10 @@
 // ============================================================
 // TeamMembersView — standalone /team-members page content.
 //
-// Member roster — every member of the account. Admin+ can change a
-// teammate's role inline and remove them. Owner row is
-// non-editable everywhere (transfer is its own separate flow,
-// deferred to a later PR).
+// Member roster — every member of the account. Roles are
+// display-only on this page (a static badge per row); roles are
+// never changed here. Owner row was already non-editable
+// (transfer is its own separate flow, deferred to a later PR).
 // Owner direct creation lives in AddUserDialog ("+ Add user",
 // owner-only).
 //
@@ -33,6 +33,7 @@ import {
   Plus,
   ShieldCheck,
   SlidersHorizontal,
+  Smartphone,
   Trash2,
 } from 'lucide-react';
 
@@ -58,13 +59,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { RequireRole } from '@/components/auth/require-role';
 import { useAuth } from '@/hooks/use-auth';
 import { usePresence } from '@/hooks/use-presence';
@@ -79,6 +73,10 @@ import {
   PresenceDot,
 } from '@/components/presence/presence-dot';
 import { AddUserDialog } from './add-user-dialog';
+import {
+  CallvaultDevicesDialog,
+  type CallvaultDeviceMember,
+} from './callvault-devices-dialog';
 import {
   AgentPermissionsDialog,
   type AgentInboxPermissions,
@@ -125,18 +123,11 @@ const RECORDING_SOURCE_LABELS: Record<string, string> = {
   whatsapp_business: 'WhatsApp Business',
 };
 
-// Editable roles in the inline dropdown. Owner is never an option —
-// promotions go through the (deferred) Transfer Ownership flow.
-const EDITABLE_ROLES: { value: AccountRole; label: string; hint: string }[] = [
-  { value: 'admin', label: 'Admin', hint: 'Manage members + everything' },
-  { value: 'agent', label: 'Agent', hint: 'Use features; no settings' },
-  { value: 'viewer', label: 'Viewer', hint: 'Read-only across the app' },
-];
-
 // Per-role chip metadata (icon / label / colour) lives in the shared
 // ROLE_META module so this roster and the Overview identity chip can't
 // drift. The colour scale runs amber (owner — scarce, immutable) →
-// primary (admin) → muted (agent / viewer).
+// primary (admin) → muted (agent / viewer). Roles render as static
+// badges on this page; they are never edited here.
 
 function fmtDate(iso: string): string {
   // Match the rest of the dashboard's locale-light formatting.
@@ -159,6 +150,9 @@ export function TeamMembersView() {
   const [removingMember, setRemovingMember] = useState<Member | null>(null);
   const [configMember, setConfigMember] = useState<Member | null>(null);
   const [permMember, setPermMember] = useState<Member | null>(null);
+  const [devicesMember, setDevicesMember] = useState<CallvaultDeviceMember | null>(
+    null,
+  );
   const [pendingMemberAction, setPendingMemberAction] = useState<string | null>(
     null,
   );
@@ -185,54 +179,6 @@ export function TeamMembersView() {
   useEffect(() => {
     void loadEverything();
   }, [loadEverything]);
-
-  async function handleRoleChange(member: Member, nextRole: AccountRole) {
-    if (member.role === nextRole) return;
-    // Optimistic update — flip the dropdown immediately so the UI
-    // feels snappy. If the server PATCH fails we revert below so
-    // the dropdown doesn't lie about the persisted state.
-    const previousRole = member.role;
-    setPendingMemberAction(member.user_id);
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.user_id === member.user_id ? { ...m, role: nextRole } : m,
-      ),
-    );
-    try {
-      const res = await fetch(`/api/account/members/${member.user_id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: nextRole }),
-      });
-      if (!res.ok) {
-        // Revert the optimistic flip. The toast on its own wasn't
-        // enough — the dropdown was left showing the new role
-        // forever, so the next interaction operated on a wrong
-        // baseline (re-trying the same change would no-op via the
-        // `member.role === nextRole` guard at the top).
-        setMembers((prev) =>
-          prev.map((m) =>
-            m.user_id === member.user_id ? { ...m, role: previousRole } : m,
-          ),
-        );
-        const payload = await res.json().catch(() => ({}));
-        toast.error(payload.error || 'Failed to update role');
-        return;
-      }
-      toast.success(`Updated ${member.full_name || 'member'} to ${nextRole}`);
-    } catch (err) {
-      // Same revert on network failure.
-      setMembers((prev) =>
-        prev.map((m) =>
-          m.user_id === member.user_id ? { ...m, role: previousRole } : m,
-        ),
-      );
-      console.error('[MembersTab] role change error:', err);
-      toast.error('Could not reach the server');
-    } finally {
-      setPendingMemberAction(null);
-    }
-  }
 
   // Recording policy edits happen exclusively in RecordingConfigDialog
   // (owner-only). Its onSaved merges the server-confirmed patch into
@@ -369,10 +315,9 @@ export function TeamMembersView() {
                 <li
                   key={member.user_id}
                   // Mobile: stack identity (avatar+name+email) above the
-                  // role/remove actions so the role dropdown's fixed
-                  // 128px width doesn't force the name into a 50-pixel
-                  // truncation. Desktop (sm+): everything inline as
-                  // before.
+                  // role/actions so the row never forces the name into
+                  // a narrow truncation. Desktop (sm+): everything
+                  // inline as before.
                   className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:gap-4"
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-4">
@@ -446,44 +391,17 @@ export function TeamMembersView() {
                   {/* Actions cluster. On mobile this is its own row
                       below the identity block; on desktop it sits
                       inline. Items align to the start on mobile so the
-                      role dropdown lines up under the avatar. */}
+                      role badge lines up under the avatar. */}
                   <div className="flex items-center gap-2 sm:gap-3">
-                    {/* Role display / editor. Inline Select is admin+
-                        only AND not allowed on the owner row (owner
-                        changes go through transfer, which lands later). */}
-                    {canManageMembers && !isOwnerRow && !isSelf ? (
-                      <Select
-                        value={member.role}
-                        onValueChange={(v) =>
-                          // Base UI Select can emit null on clear. We
-                          // don't expose a clear affordance, so the
-                          // guard is defensive — but the typed
-                          // signature requires it.
-                          v && handleRoleChange(member, v as AccountRole)
-                        }
-                      >
-                        <SelectTrigger
-                          className="w-32 bg-muted border-border text-foreground"
-                          disabled={isBusy}
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {EDITABLE_ROLES.map((r) => (
-                            <SelectItem key={r.value} value={r.value}>
-                              {r.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <span
-                        className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${roleMeta.className}`}
-                      >
-                        <RoleIcon className="size-3.5" />
-                        {roleMeta.label}
-                      </span>
-                    )}
+                    {/* Role badge (read-only). The actual role comes
+                        from the member record; nothing on this page
+                        can change it. */}
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium ${roleMeta.className}`}
+                    >
+                      <RoleIcon className="size-3.5" />
+                      {roleMeta.label}
+                    </span>
 
                     {/* Recording summary + Configure. The row itself
                         carries no editable controls: owners open the
@@ -537,6 +455,29 @@ export function TeamMembersView() {
                       </Button>
                     ) : null}
 
+                    {/* CallVault devices (owner-only, agents only — the
+                        dialog lists registered devices with per-device
+                        and log-out-all remote logout; entirely hidden
+                        for non-owners). */}
+                    {isOwner && member.role === 'agent' ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isBusy}
+                        onClick={() =>
+                          setDevicesMember({
+                            user_id: member.user_id,
+                            full_name: member.full_name,
+                          })
+                        }
+                        aria-label={`CallVault devices for ${member.full_name || 'agent'}`}
+                        title="CallVault devices"
+                      >
+                        <Smartphone className="size-4" />
+                        Devices
+                      </Button>
+                    ) : null}
+
                     {/* Remove. Admin+ only; never on the owner row;
                         never on yourself. Pre-polish styling was
                         neutral-default + red-on-hover — the
@@ -579,6 +520,11 @@ export function TeamMembersView() {
         member={configMember}
         onClose={() => setConfigMember(null)}
         onSaved={handleConfigSaved}
+      />
+
+      <CallvaultDevicesDialog
+        member={devicesMember}
+        onClose={() => setDevicesMember(null)}
       />
 
       <Dialog

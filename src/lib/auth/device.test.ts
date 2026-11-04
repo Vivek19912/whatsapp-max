@@ -13,6 +13,10 @@ const h = vi.hoisted(() => ({
   getUserError: null as { message: string } | null,
   profile: null as Record<string, unknown> | null,
   profileError: null as { message: string } | null,
+  // CallVault device rows for the revocation gate (default: none
+  // registered → gate allows). Tests for revoked sessions live in
+  // device-revocation.test.ts with their own mocks.
+  devices: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("@supabase/supabase-js", () => ({
@@ -30,13 +34,32 @@ vi.mock("@supabase/supabase-js", () => ({
 
 vi.mock("@/lib/flows/admin-client", () => ({
   supabaseAdmin: () => ({
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          maybeSingle: async () => ({ data: h.profile, error: h.profileError }),
+    from: (table: string) => {
+      if (table === "callvault_devices") {
+        // Chainable list query: .select().eq().eq() awaits to the
+        // device rows; .update().eq().eq().eq() awaits to success.
+        const listQuery: Record<string, unknown> = {};
+        listQuery.select = () => listQuery;
+        listQuery.eq = () => listQuery;
+        listQuery.then = (resolve: (v: unknown) => unknown) =>
+          Promise.resolve({ data: h.devices, error: null }).then(resolve);
+        const updateQuery: Record<string, unknown> = {};
+        updateQuery.eq = () => updateQuery;
+        updateQuery.then = (resolve: (v: unknown) => unknown) =>
+          Promise.resolve({ data: null, error: null }).then(resolve);
+        return {
+          select: () => listQuery,
+          update: () => updateQuery,
+        };
+      }
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: h.profile, error: h.profileError }),
+          }),
         }),
-      }),
-    }),
+      };
+    },
   }),
 }));
 
@@ -58,6 +81,7 @@ beforeEach(() => {
     full_name: " Sagar ",
   };
   h.profileError = null;
+  h.devices = [];
   delete process.env.NEXT_PUBLIC_SUPABASE_URL;
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://project.supabase.co";
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-key-fixture";
