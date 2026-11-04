@@ -12,6 +12,7 @@ import { KpiCard } from '@/components/dashboard/kpi-card'
 import { SkeletonCard } from '@/components/dashboard/skeleton'
 import { MetaDailyChart } from '@/components/meta-leads-dashboard/meta-daily-chart'
 import { MetaMonthlyChart } from '@/components/meta-leads-dashboard/meta-monthly-chart'
+import { TeamPerformance } from '@/components/meta-leads-dashboard/team-performance'
 
 /**
  * Standalone Meta Lead Ads dashboard (acquisition analytics only).
@@ -129,6 +130,8 @@ export default function MetaLeadsDashboardPage() {
         onYearChange={handleYearChange}
         loading={loading || monthly == null}
       />
+
+      <TeamPerformance />
     </div>
   )
 }
