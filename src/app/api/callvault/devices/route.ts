@@ -5,9 +5,13 @@
 // OWNER only: agents/admins/viewers get 403. The target must be
 // a member of the caller's account, else 404 (no cross-tenant
 // existence leak). Rows map to { device_id, device_name,
-// device_model, app_version, status, last_seen_at, created_at,
-// session_expires_at } where session_expires_at is
+// device_model, app_version, status, logout_ack_at, last_seen_at,
+// created_at, session_expires_at } where session_expires_at is
 // created_at + 60 days (computed, display-only).
+//
+// Status is computed: 'logged_out' when the phone acknowledged
+// the logout (logout_ack_at set), 'pending' when revoked but not
+// yet acknowledged (revoked_at set, no ack), else 'active'.
 // ============================================================
 
 import { NextResponse } from 'next/server';
@@ -31,6 +35,8 @@ interface DeviceRow {
   app_version: string | null;
   session_id: string | null;
   revoked_session_id: string | null;
+  revoked_at: string | null;
+  logout_ack_at: string | null;
   last_seen_at: string | null;
   created_at: string;
 }
@@ -68,28 +74,36 @@ export async function GET(request: Request) {
     const { data: rows, error } = await admin
       .from('callvault_devices')
       .select(
-        'device_id, device_name, device_model, app_version, session_id, revoked_session_id, last_seen_at, created_at',
+        'device_id, device_name, device_model, app_version, session_id, revoked_session_id, revoked_at, logout_ack_at, last_seen_at, created_at',
       )
       .eq('account_id', ctx.accountId)
       .eq('user_id', targetUserId)
       .order('created_at', { ascending: true });
     if (error) throw error;
 
-    const devices = ((rows ?? []) as DeviceRow[]).map((row) => ({
-      device_id: row.device_id,
-      device_name: row.device_name,
-      device_model: row.device_model,
-      app_version: row.app_version,
-      status:
-        typeof row.revoked_session_id === 'string' &&
-        row.revoked_session_id !== '' &&
-        row.revoked_session_id === row.session_id
-          ? 'logged_out'
-          : 'active',
-      last_seen_at: row.last_seen_at,
-      created_at: row.created_at,
-      session_expires_at: sessionExpiresAt(row.created_at),
-    }));
+    const devices = ((rows ?? []) as DeviceRow[]).map((row) => {
+      // Revocation-scoped: a stale ack on a healed (active) row
+      // never reads logged_out — register clears logout_ack_at
+      // on session change, and this mapping requires revoked.
+      const acked =
+        typeof row.logout_ack_at === 'string' && row.logout_ack_at !== '';
+      const revoked =
+        (typeof row.revoked_at === 'string' && row.revoked_at !== '') ||
+        (typeof row.revoked_session_id === 'string' &&
+          row.revoked_session_id !== '' &&
+          row.revoked_session_id === row.session_id);
+      return {
+        device_id: row.device_id,
+        device_name: row.device_name,
+        device_model: row.device_model,
+        app_version: row.app_version,
+        status: !revoked ? 'active' : acked ? 'logged_out' : 'pending',
+        logout_ack_at: row.logout_ack_at,
+        last_seen_at: row.last_seen_at,
+        created_at: row.created_at,
+        session_expires_at: sessionExpiresAt(row.created_at),
+      };
+    });
 
     return NextResponse.json({ devices });
   } catch (err) {

@@ -83,9 +83,7 @@ export interface DialStatusTarget {
   account_id: string;
   requested_by: string;
   status: string;
-}
-
-/**
+}/**
  * Tells the sidecar about a transition the app just persisted
  * (opened / failed / cancelled / completed from the v1 ack path).
  * The sidecar re-reads the row and broadcasts only the persisted
@@ -126,6 +124,56 @@ export async function notifyDialStatus(
   } catch (err) {
     const name = err instanceof Error ? err.name : 'Error';
     console.warn(`[dial-ws] sidecar status unreachable (${name})`);
+    return false;
+  }
+}
+
+export interface DeviceLogoutTarget {
+  account_id: string;
+  user_id: string;
+  device_id: string;
+  session_id: string | null;
+}
+
+/**
+ * Nudges the sidecar to push a `logout_device` frame to the exact
+ * live phone socket (account + user + device). Persisted-first:
+ * callers invoke this AFTER the DB revocation commit, so an
+ * offline phone still enforces on reconnect/status-poll. Same
+ * fire-and-forget discipline as the dial nudge: never throws,
+ * never logs ids beyond the outcome.
+ */
+export async function notifyDeviceLogout(
+  target: DeviceLogoutTarget
+): Promise<boolean> {
+  const secret = process.env.DIAL_WS_INTERNAL_SECRET;
+  if (!secret) {
+    return false;
+  }
+
+  try {
+    const res = await fetch(`${internalUrl()}/internal/logout-device`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dial-internal-secret': secret,
+      },
+      body: JSON.stringify({
+        account_id: target.account_id,
+        user_id: target.user_id,
+        device_id: target.device_id,
+        session_id: target.session_id,
+      }),
+      signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.warn(`[dial-ws] sidecar logout event rejected: HTTP ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    const name = err instanceof Error ? err.name : 'Error';
+    console.warn(`[dial-ws] sidecar logout unreachable (${name})`);
     return false;
   }
 }

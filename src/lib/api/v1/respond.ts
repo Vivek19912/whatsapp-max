@@ -23,6 +23,7 @@ export type ApiErrorCode =
   | 'rate_limited' // per-key budget exhausted
   | 'bad_request' // malformed input
   | 'not_found'
+  | 'unavailable'
   | 'internal';
 
 /**
@@ -63,6 +64,13 @@ export function forbidden(message: string): ApiError {
 /** 400 — bad input. */
 export function badRequest(message: string): ApiError {
   return new ApiError('bad_request', message, 400);
+}
+
+/** 503 — dependency temporarily unavailable (registry/read failure). */
+export function unavailable(
+  message = 'Service temporarily unavailable'
+): ApiError {
+  return new ApiError('unavailable', message, 503);
 }
 
 /** 429 — built from a `checkRateLimit` miss, with the standard headers. */

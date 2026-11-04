@@ -3,7 +3,7 @@
 // session-scoped logout with audit; other devices untouched.
 // ============================================================
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const SID_1 = "11111111-2222-4333-8444-555555555555";
 const SID_2 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -128,6 +128,13 @@ beforeEach(() => {
   ];
   h.updates = [];
   h.audits = [];
+  delete process.env.DIAL_WS_INTERNAL_SECRET;
+  vi.unstubAllGlobals();
+});
+
+afterEach(() => {
+  delete process.env.DIAL_WS_INTERNAL_SECRET;
+  vi.unstubAllGlobals();
 });
 
 describe("POST /api/callvault/devices/revoke", () => {
@@ -206,5 +213,79 @@ describe("POST /api/callvault/devices/revoke-all", () => {
     );
     expect(res.status).toBe(403);
     expect(h.updates).toHaveLength(0);
+  });
+});
+
+describe("revoke logout push (best-effort, never fails the revocation)", () => {
+  it("notifies the sidecar after a single revoke and still 200s when the sidecar is down", async () => {
+    process.env.DIAL_WS_INTERNAL_SECRET = "test-secret";
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url: String(url), init });
+        return new Response('{"delivered":true}', { status: 200 });
+      }),
+    );
+    const res = await revokeOne(
+      req("/api/callvault/devices/revoke", { user_id: "agent-1", device_id: "phone-1" }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:3001/internal/logout-device");
+    expect(JSON.parse(String((calls[0]!.init as RequestInit).body))).toEqual({
+      account_id: "acct-A",
+      user_id: "agent-1",
+      device_id: "phone-1",
+      session_id: SID_1,
+    });
+
+    // Sidecar unreachable: the revocation still succeeds.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("unreachable");
+      }),
+    );
+    const res2 = await revokeOne(
+      req("/api/callvault/devices/revoke", { user_id: "agent-1", device_id: "phone-2" }),
+    );
+    expect(res2.status).toBe(200);
+  });
+
+  it("notifies once per device on revoke-all, failures swallowed", async () => {
+    process.env.DIAL_WS_INTERNAL_SECRET = "test-secret";
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url: String(url), init });
+        return new Response('{"delivered":true}', { status: 200 });
+      }),
+    );
+    const res = await revokeAll(
+      req("/api/callvault/devices/revoke-all", { user_id: "agent-1" }),
+    );
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(2);
+    const bodies = calls.map((c) => JSON.parse(String((c.init as RequestInit).body)));
+    expect(bodies).toContainEqual({
+      account_id: "acct-A",
+      user_id: "agent-1",
+      device_id: "phone-1",
+      session_id: SID_1,
+    });
+    expect(bodies).toContainEqual({
+      account_id: "acct-A",
+      user_id: "agent-1",
+      device_id: "phone-2",
+      session_id: SID_2,
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 500 })));
+    const res2 = await revokeAll(
+      req("/api/callvault/devices/revoke-all", { user_id: "agent-1" }),
+    );
+    expect(res2.status).toBe(200);
   });
 });

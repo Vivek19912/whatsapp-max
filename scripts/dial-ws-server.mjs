@@ -7,7 +7,8 @@
 //
 // Why a sidecar: Next.js route handlers cannot accept a WebSocket
 // upgrade. This process owns the upgrade, authenticates the
-// Supabase user token, and keeps one live connection per user.
+// Supabase user token, and keeps one live connection per phone
+// device (keyed by account + user + device; browsers separately).
 //
 // Guarantees:
 //   * Auth: the Supabase access token must resolve to a user whose
@@ -32,9 +33,11 @@
 //     `delivered` rows are not replayed, so a reconnect cannot
 //     reopen the dialer on every reconnect. Each socket also
 //     suppresses duplicate ids.
-//   * One device per user: a newer connection replaces the older
-//     one (close 4001 for another device, 4002 for the same device).
-//     Browser tabs are exempt (display-only, any number per user).
+//   * One socket per device: a newer connection for the SAME
+//     (account, user, device) replaces the older one (close 4002).
+//     DIFFERENT devices of the same user coexist — there is no
+//     user-level replacement (no 4001 takeover). Browser tabs are
+//     exempt (display-only, any number per user).
 //
 // Env:
 //   NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY,
@@ -81,8 +84,11 @@ const AGENT_ROLES = new Set(['owner', 'admin', 'agent']);
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** userId -> phone connection { ws, deviceId, accountId, sent:Set<string> }.
- *  At most one live phone per user; a newer connection replaces the older. */
+/** accountId:userId:deviceId -> phone connection
+ *  { ws, userId, accountId, deviceId, sessionId, sent:Set<string> }.
+ *  One live socket per device; different devices of the same user
+ *  coexist. Dial signals fan out to every live socket of the user;
+ *  logout frames target one exact device key. */
 const connections = new Map();
 /**
  * userId -> Set of browser connections { ws, accountId }.
@@ -177,15 +183,28 @@ function sessionIdFromToken(token) {
 }
 
 /**
- * Server → phone logout signal. Sent when the owner's remote
- * logout revokes the session this socket holds; the phone signs
- * itself out locally on receipt. The socket is closed (4403)
- * right after so a revoked device can never stay registered.
+ * Server → phone logout signal. Frame contract (shared with the
+ * Android client — do not deviate):
+ *   {"type":"logout_device","device_id":"...","session_id":"..."}
+ * Duplicate deliveries are idempotent: the phone dedupes by wipe
+ * idempotency, so sending the same frame twice is harmless.
+ *
+ * Handshake path: the socket is closed (4403) right after so a
+ * revoked device can never stay registered. Targeted-push path
+ * (/internal/logout-device) does NOT close: the phone acks over
+ * the same socket ({type:'logout_ack',...}), and the socket is
+ * unenrolled when that ack is recorded (or when the phone
+ * disconnects — HTTP-acked phones may use the ack endpoint
+ * instead). Enforcement for a still-connected revoked socket is
+ * the HTTP API gate (fail-closed) plus the handshake gate on
+ * reconnect; dial pushes to a wiped phone are inert.
  */
-function notifyPhoneLogout(ws) {
+function notifyPhoneLogout(ws, deviceId, sessionId) {
   try {
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'logout_device' }));
+      ws.send(
+        JSON.stringify({ type: 'logout_device', device_id: deviceId, session_id: sessionId })
+      );
     }
   } catch {
     // ignore — the close below still unenrolls the socket.
@@ -200,9 +219,16 @@ function notifyPhoneLogout(ws) {
 /**
  * True when the (user, device) pair is revoked for the session
  * the socket authenticated with. A row is revoked iff
- * revoked_session_id equals its session_id. Fail-open with a
- * warning when the table is missing (pre-migration rollout) or
- * unreadable — the HTTP API gate still enforces revocation.
+ * revoked_session_id equals its session_id.
+ *
+ * Fail-OPEN with a warning when the table is missing
+ * (pre-migration rollout) or unreadable — deliberately, and
+ * differently from the HTTP API gate (fail-closed 503). WHY: a
+ * socket carries ids only and reads no data; every data read the
+ * phone can make goes through the HTTP gate, which denies on
+ * registry outage. Refusing sockets here would brick live dial
+ * delivery for healthy devices during a registry blip, while a
+ * revoked device learns nothing from a socket alone.
  */
 async function isDeviceRevoked(accountId, userId, deviceId, sessionId) {
   if (!sessionId && !deviceId) return false;
@@ -236,14 +262,13 @@ async function isDeviceRevoked(accountId, userId, deviceId, sessionId) {
   return false;
 }
 
-// NOTE on push: src/lib/dial/notify-ws.ts exposes only
-// /internal/dial-event and /internal/status-event — there is no
-// logout push channel, and none is added. Mid-session enforcement
-// is the HTTP API gate (every device request re-checks) plus the
-// phone's status polling; the sidecar enforces at handshake
-// (4403 + logout_device below) so a revoked device can never
-// (re)register. A future /internal/logout-event could reuse
-// notifyPhoneLogout() against the live socket in `connections`.
+// Logout push: POST /internal/logout-device (see the HTTP handler
+// below) sends the logout_device frame to one exact device key.
+// Mid-session enforcement is the HTTP API gate (fail-closed: every
+// device request re-checks) plus the phone's status polling; the
+// sidecar enforces at handshake (4403 + logout_device) so a
+// revoked device can never (re)register, and unenrolls sockets on
+// logout_ack.
 
 function buildEvent(row) {
   return {
@@ -453,9 +478,21 @@ const server = createServer(async (req, res) => {
     }
     // No row / expired / already handled: accepting is still correct.
     // The phone will get it on connect if it is pending, otherwise not.
-    const connection = connections.get(userId);
-    if (row && isLive(row) && connection?.accountId === accountId) {
-      sendRow(connection, row);
+    // Fan-out: every live socket of this (account, user) gets the
+    // signal — different devices coexist, each with its own
+    // dedupe set.
+    const targets = [];
+    for (const c of connections.values()) {
+      if (c.userId === userId && c.accountId === accountId) targets.push(c);
+    }
+    if (row && isLive(row) && targets.length > 0) {
+      let accepted = 0;
+      for (const t of targets) {
+        if (sendRow(t, row)) accepted += 1;
+      }
+      if (accepted === 0) {
+        log(`no live socket for ${short(requestId)} (queued for connect)`);
+      }
     } else {
       log(`no live socket for ${short(requestId)} (queued for connect)`);
     }
@@ -525,6 +562,76 @@ const server = createServer(async (req, res) => {
     }
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end('{"accepted":true}');
+    return;
+  }
+
+  // Targeted remote-logout push for one exact device. The Next.js
+  // revoke routes call this AFTER committing the DB revocation
+  // (persisted-first): an offline phone (no live socket here)
+  // still enforces on reconnect via the handshake gate + status
+  // polling. Duplicate deliveries are idempotent — the phone
+  // dedupes by wipe idempotency, so resending is harmless.
+  //
+  // The socket is NOT closed here: the phone acks over this same
+  // socket ({type:'logout_ack',...}), and unenrolment happens when
+  // that ack is recorded (or on disconnect).
+  if (req.method === 'POST' && url.pathname === '/internal/logout-device') {
+    if (!secretMatches(req.headers['x-dial-internal-secret'])) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end('{"error":"unauthorized"}');
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end('{"error":"bad json"}');
+      return;
+    }
+    const accountId = String(body?.account_id || '');
+    const userId = String(body?.user_id || '');
+    const deviceId = String(body?.device_id || '')
+      .replace(/[^A-Za-z0-9._-]/g, '')
+      .slice(0, 64);
+    const rawSession = body?.session_id;
+    const sessionId =
+      rawSession === null || rawSession === undefined || rawSession === ''
+        ? null
+        : String(rawSession);
+    if (
+      !UUID_RE.test(accountId) ||
+      !UUID_RE.test(userId) ||
+      !deviceId ||
+      (sessionId !== null && !UUID_RE.test(sessionId))
+    ) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end('{"error":"bad ids"}');
+      return;
+    }
+    // Exact-identity lookup only — never match on user alone, or
+    // one device's logout would wipe a sibling device.
+    const connection = connections.get(`${accountId}:${userId}:${deviceId}`);
+    // When the revoked session is known, the live socket must hold
+    // it; a socket on a different (healed) session is left alone.
+    const sessionMatches =
+      sessionId === null ||
+      !connection?.sessionId ||
+      connection.sessionId === sessionId;
+    let delivered = false;
+    if (connection && connection.ws.readyState === 1 && sessionMatches) {
+      try {
+        connection.ws.send(
+          JSON.stringify({ type: 'logout_device', device_id: deviceId, session_id: sessionId })
+        );
+        delivered = true;
+        log(`logout sent to device ${short(deviceId)}`);
+      } catch {
+        delivered = false;
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ delivered }));
     return;
   }
 
@@ -646,16 +753,22 @@ wss.on('connection', async (ws, req) => {
   // gate denies the same session even without a device header.
   if (await isDeviceRevoked(auth.accountId, auth.userId, deviceId, auth.sessionId)) {
     warn(`rejected socket: revoked device user ${short(auth.userId)}`);
-    notifyPhoneLogout(ws);
+    notifyPhoneLogout(ws, deviceId, auth.sessionId);
     return;
   }
 
-  const previous = connections.get(auth.userId);
+  // Per-device replacement: only the SAME (account, user, device)
+  // is taken over (4002). A different device_id coexists — the old
+  // user-level 4001 replacement is gone, so two phones of one user
+  // stay connected at once.
+  const key = `${auth.accountId}:${auth.userId}:${deviceId}`;
+  const previous = connections.get(key);
   if (previous && previous.ws !== ws) {
-    previous.ws.close(
-      previous.deviceId === deviceId ? 4002 : 4001,
-      'replaced by a newer connection'
-    );
+    try {
+      previous.ws.close(4002, 'replaced by a newer connection');
+    } catch {
+      // ignore
+    }
   }
 
   const connection = {
@@ -663,9 +776,13 @@ wss.on('connection', async (ws, req) => {
     userId: auth.userId,
     accountId: auth.accountId,
     deviceId,
+    // GoTrue session this socket authenticated with (verified
+    // token only). The logout push + logout_ack handlers verify
+    // against it; null for opaque/legacy tokens.
+    sessionId: auth.sessionId,
     sent: new Set(),
   };
-  connections.set(auth.userId, connection);
+  connections.set(key, connection);
   log(`connected user ${short(auth.userId)} device ${short(deviceId)}`);
 
   ws.on('message', async (raw) => {
@@ -714,12 +831,51 @@ wss.on('connection', async (ws, req) => {
       if (failed) {
         sendStatusToBrowsers(connection.userId, connection.accountId, requestId, 'failed');
       }
+      return;
+    }
+    if (message?.type === 'logout_ack') {
+      // Phone confirms it honoured the remote logout:
+      // {type:'logout_ack', device_id, session_id}. Validated
+      // against the SENDING connection's identity (device must be
+      // this socket's device; session must match when known), then
+      // stamped on that exact row. Best-effort: failures are
+      // logged, never fatal — the phone may also ack over HTTP.
+      const ackDevice = String(message.device_id || '')
+        .replace(/[^A-Za-z0-9._-]/g, '')
+        .slice(0, 64);
+      const ackSession =
+        typeof message.session_id === 'string' ? message.session_id : '';
+      if (!ackDevice || ackDevice !== connection.deviceId) return;
+      if (!UUID_RE.test(ackSession)) return;
+      if (connection.sessionId && connection.sessionId !== ackSession) return;
+      try {
+        const { error } = await admin
+          .from('callvault_devices')
+          .update({ logout_ack_at: new Date().toISOString() })
+          .eq('account_id', connection.accountId)
+          .eq('user_id', connection.userId)
+          .eq('device_id', connection.deviceId);
+        if (error) {
+          warn(`logout ack store failed: ${error.message}`);
+        } else {
+          log(`logout ack device ${short(connection.deviceId)}`);
+        }
+      } catch (err) {
+        warn(`logout ack store failed: ${err?.message || err?.name || 'unknown'}`);
+      }
+      // Confirmed out: unenroll so the revoked session's socket
+      // can never receive another signal.
+      try {
+        ws.close(4403, 'device logged out');
+      } catch {
+        // ignore
+      }
     }
   });
 
   ws.on('close', (code) => {
-    if (connections.get(auth.userId)?.ws === ws) {
-      connections.delete(auth.userId);
+    if (connections.get(key)?.ws === ws) {
+      connections.delete(key);
     }
     log(`closed user ${short(auth.userId)} code ${code}`);
   });

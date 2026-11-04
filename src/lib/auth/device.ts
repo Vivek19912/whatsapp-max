@@ -29,7 +29,7 @@ import { supabaseAdmin } from '@/lib/flows/admin-client';
 import { sessionIdFromJwt } from '@/lib/auth/callvault-session';
 import { hasMinRole, isAccountRole, type AccountRole } from '@/lib/auth/roles';
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit';
-import { forbidden, rateLimited, unauthorized } from '@/lib/api/v1/respond';
+import { forbidden, rateLimited, unauthorized, unavailable } from '@/lib/api/v1/respond';
 
 /** Sanitize a device id the same way the dial-ws sidecar does. */
 export function sanitizeDeviceId(raw: unknown): string | null {
@@ -89,9 +89,37 @@ export function bearerToken(request: Request): string | null {
  * read-only and must never gain write access merely by logging
  * in. Owner/admin/agent all pass.
  */
-export async function requireDeviceUser(
+export interface DeviceIdentity {
+  /** RLS-scoped client carrying the caller's JWT. */
+  userClient: SupabaseClient;
+  /** Service-role client for privileged reads. */
+  service: SupabaseClient;
+  /** auth.uid() — the actual authenticated user. */
+  userId: string;
+  /** The account this user belongs to (server-derived, never client input). */
+  accountId: string;
+  /** The user's role within their account. */
+  role: AccountRole;
+  /** Display name for attribution surfaces. */
+  fullName: string | null;
+  /** Auth email (may be null for exotic providers). */
+  email: string | null;
+  /** The verified bearer token (never logged, never persisted). */
+  token: string;
+}
+
+/**
+ * Identity-only device verification: bearer → getUser → membership
+ * → role → rate limit, WITHOUT the revocation gate.
+ *
+ * Used by the revocation-status endpoint, which must stay answerable
+ * for revoked sessions: the gate in requireDeviceUser denies them
+ * with 401, so routing status through the gate would make the phone
+ * unable to ever learn it was revoked.
+ */
+export async function requireDeviceIdentity(
   request: Request
-): Promise<DeviceAuthContext> {
+): Promise<DeviceIdentity> {
   const token = bearerToken(request);
   if (!token) {
     throw unauthorized('Missing credentials');
@@ -148,7 +176,25 @@ export async function requireDeviceUser(
     throw rateLimited(limit);
   }
 
-  const fullName = (profile as { full_name?: unknown } | null)?.full_name;
+  const fullNameRaw = (profile as { full_name?: unknown } | null)?.full_name;
+
+  return {
+    userClient,
+    service: supabaseAdmin(),
+    userId,
+    accountId,
+    role,
+    fullName:
+      typeof fullNameRaw === 'string' && fullNameRaw.trim() ? fullNameRaw.trim() : null,
+    email: authEmail,
+    token,
+  };
+}
+
+export async function requireDeviceUser(
+  request: Request
+): Promise<DeviceAuthContext> {
+  const ident = await requireDeviceIdentity(request);
 
   // CallVault remote logout (migration 151). The session comes
   // from the VERIFIED bearer (decoded above via getUser) — never
@@ -157,24 +203,24 @@ export async function requireDeviceUser(
   // revoked iff revoked_session_id equals its session_id; without
   // a session in the token, a device header matching a currently
   // revoked row still denies.
-  const sessionId = sessionIdFromJwt(token);
+  const sessionId = sessionIdFromJwt(ident.token);
   const deviceId = sanitizeDeviceId(request.headers.get('x-callvault-device-id'));
   if (sessionId || deviceId) {
-    await enforceDeviceNotRevoked(accountId, userId, sessionId, deviceId);
+    await enforceDeviceNotRevoked(ident.accountId, ident.userId, sessionId, deviceId);
     if (deviceId) {
-      touchDeviceLastSeen(accountId, userId, deviceId);
+      touchDeviceLastSeen(ident.accountId, ident.userId, deviceId);
     }
   }
 
   return {
     authType: 'user',
-    supabase: userClient,
-    service: supabaseAdmin(),
-    userId,
-    accountId,
-    role,
-    fullName: typeof fullName === 'string' && fullName.trim() ? fullName.trim() : null,
-    email: authEmail,
+    supabase: ident.userClient,
+    service: ident.service,
+    userId: ident.userId,
+    accountId: ident.accountId,
+    role: ident.role,
+    fullName: ident.fullName,
+    email: ident.email,
     deviceId,
     sessionId,
   };
@@ -183,9 +229,11 @@ export async function requireDeviceUser(
 /**
  * Deny (401, same shape as an expired session so probes learn
  * nothing) when any of the caller's device rows is revoked for
- * this session. Best-effort availability: when the table is
- * missing (pre-migration rollout) or otherwise unreadable, allow
- * with a warning — the primary auth above already passed.
+ * this session. Fail-closed: when the table is missing
+ * (pre-migration rollout) or otherwise unreadable, throw 503
+ * `unavailable` — a registry outage must never silently allow a
+ * revoked device through. The status endpoint handles its own
+ * registry errors separately (it reports instead of gating).
  */
 async function enforceDeviceNotRevoked(
   accountId: string,
@@ -208,19 +256,19 @@ async function enforceDeviceNotRevoked(
     const list = data as typeof rows | null;
     rows = list ?? [];
   } catch (err) {
-    // Relation-does-not-exist during rollout, or any transient
-    // read failure: allow, warn, keep serving.
+    // Fail-closed: missing table or any transient read failure
+    // denies with 503 so revocation state is never guessed.
     const message = err instanceof Error ? err.message : String(err);
     const code =
       err !== null && typeof err === 'object' && 'code' in err
         ? String((err as Record<string, unknown>).code)
         : '';
     if (code === '42P01' || /does not exist|relation/i.test(message)) {
-      console.warn('[device-auth] callvault_devices table missing — revocation check skipped');
+      console.warn('[device-auth] callvault_devices table missing — denying (503)');
     } else {
-      console.warn('[device-auth] revocation check failed (fail-open):', message);
+      console.warn('[device-auth] revocation check failed (fail-closed):', message);
     }
-    return;
+    throw unavailable('Device registry temporarily unavailable');
   }
   for (const row of rows) {
     const revoked =

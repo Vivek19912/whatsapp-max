@@ -6,9 +6,11 @@
 //
 // The owner sees every registered device of the selected agent:
 // name / model / status / last seen / login date / session
-// expiry / app version. "Log out" revokes one device session;
-// "Log out all" revokes every session of the agent. Both ask
-// for confirmation first and report success/failure via toasts.
+// expiry / app version. Status is Active, Logout Pending (revoked,
+// phone hasn't confirmed yet), or Logged Out (phone acked). "Log
+// out" revokes one device session; "Log out all" revokes every
+// session of the agent. Both ask for confirmation first and report
+// success/failure via toasts.
 //
 // Revocation is session-scoped (the row's current session is
 // banned; other sessions keep working) and never touches GoTrue
@@ -43,6 +45,7 @@ interface CallvaultDevice {
   device_model: string | null;
   app_version: string | null;
   status: string;
+  logout_ack_at: string | null;
   last_seen_at: string | null;
   created_at: string;
   session_expires_at: string | null;
@@ -134,10 +137,13 @@ export function CallvaultDevicesDialog({
         return;
       }
       toast.success('Device logged out');
+      // Optimistic pending: the revocation is persisted, the phone
+      // confirms asynchronously (push → ack, or status poll → HTTP
+      // ack). The list re-reads the true state on reopen.
       setDevices((prev) =>
         prev.map((d) =>
           d.device_id === confirmDevice.device_id
-            ? { ...d, status: 'logged_out' }
+            ? { ...d, status: 'pending' }
             : d,
         ),
       );
@@ -165,7 +171,7 @@ export function CallvaultDevicesDialog({
         return;
       }
       toast.success('All CallVault devices logged out');
-      setDevices((prev) => prev.map((d) => ({ ...d, status: 'logged_out' })));
+      setDevices((prev) => prev.map((d) => ({ ...d, status: 'pending' })));
       setConfirmAll(false);
     } catch (err) {
       console.error('[CallvaultDevices] revoke-all error:', err);
@@ -209,6 +215,8 @@ export function CallvaultDevicesDialog({
               <ul className="divide-y divide-border rounded-md border border-border">
                 {devices.map((d) => {
                   const loggedOut = d.status === 'logged_out';
+                  const pendingLogout = d.status === 'pending';
+                  const settled = loggedOut || pendingLogout;
                   const busy = pending === d.device_id;
                   return (
                     <li
@@ -224,10 +232,16 @@ export function CallvaultDevicesDialog({
                             className={
                               loggedOut
                                 ? 'bg-muted text-muted-foreground border-border text-[10px] uppercase tracking-wide'
-                                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 text-[10px] uppercase tracking-wide'
+                                : pendingLogout
+                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 text-[10px] uppercase tracking-wide'
+                                  : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 text-[10px] uppercase tracking-wide'
                             }
                           >
-                            {loggedOut ? 'Logged out' : 'Active'}
+                            {loggedOut
+                              ? 'Logged out'
+                              : pendingLogout
+                                ? 'Logout pending'
+                                : 'Active'}
                           </Badge>
                         </div>
                         <p className="truncate text-xs text-muted-foreground">
@@ -240,7 +254,7 @@ export function CallvaultDevicesDialog({
                           {fmtDate(d.session_expires_at)}
                         </p>
                       </div>
-                      {!loggedOut && (
+                      {!settled && (
                         <Button
                           variant="outline"
                           size="sm"
@@ -260,7 +274,7 @@ export function CallvaultDevicesDialog({
                   );
                 })}
               </ul>
-              {devices.some((d) => d.status !== 'logged_out') && (
+              {devices.some((d) => d.status === 'active') && (
                 <Button
                   variant="outline"
                   size="sm"

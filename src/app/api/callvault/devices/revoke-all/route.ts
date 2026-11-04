@@ -8,14 +8,17 @@
 // GoTrue signOut of any scope). Exactly one audit row with
 // device_id = null and action 'revoke_all'.
 //
-// No push channel (see revoke/route.ts): the HTTP gate, the
-// sidecar handshake gate, and status polling enforce it.
+// Persisted-first push (see revoke/route.ts): every row + the
+// audit are committed before any live push; offline phones
+// enforce on reconnect + status polling. Notify failures never
+// fail the revocation (log only).
 // ============================================================
 
 import { NextResponse } from 'next/server';
 
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { notifyDeviceLogout } from '@/lib/dial/notify-ws';
 
 export async function POST(request: Request) {
   try {
@@ -57,6 +60,7 @@ export async function POST(request: Request) {
 
     const now = new Date().toISOString();
     let revoked = 0;
+    const pushed: Array<{ device_id: string; session_id: string | null }> = [];
     for (const row of ((rows ?? []) as Array<{
       device_id?: unknown;
       session_id?: unknown;
@@ -76,6 +80,7 @@ export async function POST(request: Request) {
         .eq('device_id', row.device_id);
       if (updateError) throw updateError;
       revoked += 1;
+      pushed.push({ device_id: row.device_id, session_id: revokedSession });
     }
 
     const { error: auditError } = await admin.from('callvault_device_audit').insert({
@@ -87,6 +92,17 @@ export async function POST(request: Request) {
       action: 'revoke_all',
     });
     if (auditError) throw auditError;
+
+    // Best-effort live push per revoked device, after the commit.
+    // Never throws; the revocation result stands regardless.
+    for (const target of pushed) {
+      await notifyDeviceLogout({
+        account_id: ctx.accountId,
+        user_id: targetUserId,
+        device_id: target.device_id,
+        session_id: target.session_id,
+      });
+    }
 
     return NextResponse.json({ user_id: targetUserId, revoked });
   } catch (err) {

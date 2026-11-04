@@ -82,7 +82,7 @@ beforeEach(() => {
 });
 
 describe("GET /api/callvault/devices", () => {
-  it("lists devices with status + session_expires_at = created_at + 60d", async () => {
+  it("lists devices with active/pending/logged_out status + session_expires_at = created_at + 60d", async () => {
     h.devices = [
       {
         device_id: "phone-1",
@@ -91,6 +91,8 @@ describe("GET /api/callvault/devices", () => {
         app_version: "1.2.3",
         session_id: "11111111-2222-4333-8444-555555555555",
         revoked_session_id: null,
+        revoked_at: null,
+        logout_ack_at: null,
         last_seen_at: "2026-11-01T10:00:00.000Z",
         created_at: "2026-10-01T00:00:00.000Z",
       },
@@ -101,6 +103,56 @@ describe("GET /api/callvault/devices", () => {
         app_version: null,
         session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         revoked_session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        revoked_at: "2026-11-02T00:00:00.000Z",
+        logout_ack_at: null,
+        last_seen_at: null,
+        created_at: "2026-10-01T00:00:00.000Z",
+      },
+      {
+        device_id: "phone-3",
+        device_name: null,
+        device_model: null,
+        app_version: null,
+        session_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        revoked_session_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        revoked_at: "2026-11-02T00:00:00.000Z",
+        logout_ack_at: "2026-11-02T01:00:00.000Z",
+        last_seen_at: "2026-11-02T01:00:00.000Z",
+        created_at: "2026-10-01T00:00:00.000Z",
+      },
+    ];
+    const res = await GET(req("agent-1"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { devices: Array<Record<string, unknown>> };
+    expect(json.devices).toHaveLength(3);
+    expect(json.devices[0]).toMatchObject({ device_id: "phone-1", status: "active" });
+    // 2026-10-01 + 60 days = 2026-11-30.
+    expect(json.devices[0].session_expires_at).toBe("2026-11-30T00:00:00.000Z");
+    // Revoked but unacked reads pending; acked reads logged_out.
+    expect(json.devices[1]).toMatchObject({
+      device_id: "phone-2",
+      status: "pending",
+      logout_ack_at: null,
+    });
+    expect(json.devices[2]).toMatchObject({
+      device_id: "phone-3",
+      status: "logged_out",
+      logout_ack_at: "2026-11-02T01:00:00.000Z",
+    });
+    expect(json.devices[0]).toHaveProperty("last_seen_at", "2026-11-01T10:00:00.000Z");
+  });
+
+  it("reads a stale ack on a healed row as active (ack requires revocation)", async () => {
+    h.devices = [
+      {
+        device_id: "phone-1",
+        device_name: null,
+        device_model: null,
+        app_version: null,
+        session_id: "11111111-2222-4333-8444-555555555555",
+        revoked_session_id: null,
+        revoked_at: null,
+        logout_ack_at: "2026-11-02T01:00:00.000Z",
         last_seen_at: null,
         created_at: "2026-10-01T00:00:00.000Z",
       },
@@ -108,15 +160,10 @@ describe("GET /api/callvault/devices", () => {
     const res = await GET(req("agent-1"));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { devices: Array<Record<string, unknown>> };
-    expect(json.devices).toHaveLength(2);
     expect(json.devices[0]).toMatchObject({ device_id: "phone-1", status: "active" });
-    // 2026-10-01 + 60 days = 2026-11-30.
-    expect(json.devices[0].session_expires_at).toBe("2026-11-30T00:00:00.000Z");
-    expect(json.devices[1]).toMatchObject({ device_id: "phone-2", status: "logged_out" });
   });
 
-  it("403s for agent, admin, and viewer callers", async () => {
-    for (const role of ["agent", "admin", "viewer"]) {
+  it("403s for agent, admin, and viewer callers", async () => {    for (const role of ["agent", "admin", "viewer"]) {
       h.role = role;
       const res = await GET(req("agent-1"));
       expect(res.status).toBe(403);

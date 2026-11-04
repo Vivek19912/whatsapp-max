@@ -7,7 +7,8 @@
 //     device header (bypass-proof), and
 //   - a legacy token (no session claim) whose device header
 //     matches a currently-revoked row.
-// A missing table (pre-migration rollout) allows with a warning.
+// Fail-closed: a missing table (pre-migration rollout) or any
+// read error denies with 503 `unavailable` — never fail-open.
 // ============================================================
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -135,12 +136,25 @@ describe("requireDeviceUser CallVault revocation gate", () => {
     expect(err.status).toBe(401);
   });
 
-  it("allows when the table is missing (rollout safety)", async () => {
+  it("503s (fail-closed) when the table is missing — never fail-open", async () => {
     h.devicesError = { code: "42P01", message: 'relation "callvault_devices" does not exist' };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const ctx = await requireDeviceUser(req(jwtWithSession(SID_A), "phone-1"));
-    expect(ctx.userId).toBe("user-agent-1");
+    const err = await requireDeviceUser(req(jwtWithSession(SID_A), "phone-1")).catch(
+      (e) => e,
+    );
+    expect(err.status).toBe(503);
+    expect(err.code).toBe("unavailable");
     expect(warn).toHaveBeenCalled();
+  });
+
+  it("503s (fail-closed) on any registry read error — revoked sessions stay denied", async () => {
+    h.devicesError = { message: "connection reset" };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const err = await requireDeviceUser(req(jwtWithSession(SID_A), "phone-1")).catch(
+      (e) => e,
+    );
+    expect(err.status).toBe(503);
+    expect(err.code).toBe("unavailable");
   });
 
   it("attaches deviceId + sessionId to the context", async () => {

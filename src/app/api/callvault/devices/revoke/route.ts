@@ -13,17 +13,18 @@
 // the sidecar handshake. GoTrue sessions are untouched (no
 // signOut of any scope — the 60-day non-regression rule).
 //
-// Push: notify-ws.ts exposes only dial-event / status-event
-// channels — there is no logout push channel, so none is added
-// here. Enforcement is the HTTP gate + sidecar handshake gate +
-// the phone's status polling. On failure the revocation still
-// succeeds (best-effort push discipline, same as dial nudges).
+// Push: the revocation above is persisted-first; the live
+// logout_device push below is best-effort. An offline phone
+// enforces on reconnect (sidecar handshake gate 4403) and via
+// status polling. Notify failure never fails the revocation
+// (log only, same fire-and-forget discipline as dial nudges).
 // ============================================================
 
 import { NextResponse } from 'next/server';
 
 import { getCurrentAccount, toErrorResponse } from '@/lib/auth/account';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
+import { notifyDeviceLogout } from '@/lib/dial/notify-ws';
 
 export async function POST(request: Request) {
   try {
@@ -102,6 +103,16 @@ export async function POST(request: Request) {
       action: 'revoke_device',
     });
     if (auditError) throw auditError;
+
+    // Best-effort live push after the persisted commit. Never
+    // throws (notifyDeviceLogout swallows transport failures) so
+    // the revocation result stands regardless.
+    await notifyDeviceLogout({
+      account_id: ctx.accountId,
+      user_id: targetUserId,
+      device_id: deviceId,
+      session_id: revokedSession,
+    });
 
     return NextResponse.json({ device_id: deviceId, status: 'logged_out' });
   } catch (err) {

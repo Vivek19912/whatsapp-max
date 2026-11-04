@@ -124,6 +124,7 @@ describe("POST /api/auth/callvault-devices/register", () => {
       revoked_session_id: null,
       revoked_at: null,
       revoked_by: null,
+      logout_ack_at: null,
     });
   });
 

@@ -100,8 +100,8 @@ export async function POST(request: Request) {
     }
 
     // Fresh login heals: a new session clears the revocation
-    // fields; re-registering the same session preserves them
-    // (that path 403s above when revoked).
+    // fields (and any prior logout ack); re-registering the same
+    // session preserves them (that path 403s above when revoked).
     const sessionChanged =
       !existingRow || existingRow.session_id !== incomingSession;
     const now = new Date().toISOString();
@@ -119,6 +119,7 @@ export async function POST(request: Request) {
       patch.revoked_session_id = null;
       patch.revoked_at = null;
       patch.revoked_by = null;
+      patch.logout_ack_at = null;
     }
 
     const { error: upsertError } = await admin
