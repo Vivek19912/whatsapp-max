@@ -1342,11 +1342,14 @@ export function TableAssignmentDialog({
                             <TableCell>
                               <p className="text-xs">{d.email || "—"}</p>
                               <p className="text-muted-foreground text-xs">{d.phone || ""}</p>
-                              {d.whatsapp_numbers.length > 0 ? (
-                                <p className="text-muted-foreground text-xs">
-                                  +{d.whatsapp_numbers.length} WhatsApp number{d.whatsapp_numbers.length === 1 ? "" : "s"}
+                              {d.whatsapp_numbers.map((n, i) => (
+                                <p
+                                  key={`${n.phone}-${i}`}
+                                  className="text-muted-foreground text-xs break-all"
+                                >
+                                  {n.phone}
                                 </p>
-                              ) : null}
+                              ))}
                               <p className="text-muted-foreground text-xs">
                                 {d.notify_email ? "Email on" : "Email off"} ·{" "}
                                 {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
@@ -1476,11 +1479,18 @@ export function TableAssignmentDialog({
                           <dl className="mt-2 space-y-1 text-xs">
                             <div className="flex gap-1.5">
                               <dt className="w-16 shrink-0 text-muted-foreground">Contact</dt>
-                              <dd className="min-w-0 flex-1 truncate text-foreground">
-                                {[d.email, d.phone].filter(Boolean).join(" · ") || "—"}
-                                {d.whatsapp_numbers.length > 0
-                                  ? ` (+${d.whatsapp_numbers.length} WhatsApp)`
-                                  : ""}
+                              <dd className="min-w-0 flex-1 text-foreground">
+                                <span className="block truncate">
+                                  {[d.email, d.phone].filter(Boolean).join(" · ") || "—"}
+                                </span>
+                                {d.whatsapp_numbers.map((n, i) => (
+                                  <span
+                                    key={`${n.phone}-${i}`}
+                                    className="block break-all"
+                                  >
+                                    {n.phone}
+                                  </span>
+                                ))}
                               </dd>
                             </div>
                             {mode === "percentage" ? (

@@ -493,3 +493,31 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
   });
 });
 
+describe("assignment dialog Contact column (every WhatsApp number shown)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("lists each configured number instead of a generic count label", () => {
+    // Desktop table cell maps over the saved numbers (actual data,
+    // never hardcoded) with wrapping so long numbers are not cut.
+    expect(dialog).toContain("d.whatsapp_numbers.map((n, i) => (");
+    expect(dialog).toContain("{n.phone}");
+    expect(dialog).toContain("break-all");
+    // No generic count labels anywhere in the Contact displays.
+    expect(dialog).not.toContain("WhatsApp number{");
+    expect(dialog).not.toContain("+${d.whatsapp_numbers.length}");
+  });
+
+  it("keeps the primary contact number and email separate", () => {
+    // Primary phone/email render on their own lines above the extras.
+    expect(dialog).toContain("{d.email ||");
+    expect(dialog).toContain("{d.phone ||");
+    // Notification status indicators are untouched.
+    expect(dialog).toContain("Email on");
+    expect(dialog).toContain("WhatsApp on");
+  });
+
+  it("mobile card stacks every number instead of a count suffix", () => {
+    expect(dialog).not.toContain("(+${d.whatsapp_numbers.length} WhatsApp)");
+  });
+});
+
