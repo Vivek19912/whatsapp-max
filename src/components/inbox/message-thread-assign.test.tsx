@@ -17,6 +17,30 @@ const listSrc = readFileSync(
 );
 
 describe("Inbox assignment sync wiring", () => {
+  it("conversation rows show no assignee line (header owns that display)", () => {
+    // The redundant "Assigned to X" row text was removed: rows show
+    // name, preview, timestamp, unread, pins, and tags only. The
+    // header keeps the assignee display (see page test below).
+    expect(listSrc).not.toContain("Assigned to {assigneeName}");
+    expect(listSrc).not.toContain("assigneeName");
+  });
+
+  it("header Assign control is editable only with assignment authority", () => {
+    // Owners/admins/Manage-granted agents get the dropdown; View
+    // All-only and plain agents get a read-only name label (no
+    // chevron, no menu, no Unassign). Caps arrive via prop from the
+    // page, which fetches them once from /me.
+    expect(threadSrc).toContain("viewerCaps");
+    expect(threadSrc).toContain("NO_INBOX_CAPS");
+    expect(threadSrc).toContain("canManageAssignments");
+    expect(threadSrc).toContain("accountRole");
+    // Editable branch keeps the full dropdown + Unassign action.
+    expect(threadSrc).toContain("<DropdownMenu>");
+    expect(threadSrc).toContain("Unassign");
+    // Read-only branch renders a plain label with no menu trigger.
+    expect(threadSrc).toContain("Assigned to ${assignLabel}");
+  });
+
   it("header shows the assignee name (fallback only when unknown)", () => {
     expect(threadSrc).toContain("currentAssignee?.full_name ?? \"Assigned\"");
     expect(threadSrc).toContain("assignedAgentId ?");
@@ -35,11 +59,9 @@ describe("Inbox assignment sync wiring", () => {
     expect(threadSrc).not.toContain("update({ assigned_agent_id: agentId })");
   });
 
-  it("conversation rows display the assignee; unassigned rows show nothing", () => {
-    expect(listSrc).toContain("assigneeName");
-    expect(listSrc).toContain("Assigned to {assigneeName}");
-    expect(listSrc).toContain("assigneeNameById");
-    // Unassigned: prop resolves null, row renders no line.
-    expect(listSrc).toContain("?? null)");
+  it("conversation rows carry no assignee prop (header owns that display)", () => {
+    expect(listSrc).not.toContain("assigneeName");
+    expect(listSrc).not.toContain("assigneeNameById");
+    expect(listSrc).not.toContain("Assigned to {assigneeName}");
   });
 });

@@ -23,10 +23,12 @@ const pins = () =>
   src("src", "app", "api", "inbox", "pins", "route.ts");
 
 describe("assignment enforcement on conversation actions", () => {
-  it("assign route gates on the current assignee (agents: own threads only)", () => {
-    expect(assign()).toContain("canActOnConversation");
-    expect(assign()).toContain("assigned_agent_id");
-    // No oracle: invisible threads 404 like missing ones.
+  it("assign route requires assignment authority (owner/admin/Manage grant)", () => {
+    // No own-thread exception: agents without Manage Assignments —
+    // plain and View All-only alike — are rejected before any write,
+    // exactly like the read-only header dropdown suggests. The UI
+    // hiding is display-only; this gate is the enforcement.
+    expect(assign()).toContain("caps.canManageAssignments");
     expect(assign()).toContain("return notFound()");
     // Still validates the new owner is a same-account member.
     expect(assign()).toContain("Choose a team member from this account.");

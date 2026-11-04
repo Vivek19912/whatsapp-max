@@ -16,16 +16,24 @@ import { mirrorConversationAssignmentToWorkspace } from "@/lib/inbox/assignment-
 // unassign. Validation mirrors the Workspace Assigned To rules:
 // UUID member of this account, or null.
 //
+// Assignment authority: owners/admins, plus agents holding the
+// Manage Assignments permission (resolved server-side). Agents
+// without the grant — including View All-only agents and agents
+// acting on their own threads — are rejected without an oracle
+// (404), exactly like the thread-header dropdown (read-only for
+// them) suggests. Hiding the UI is not the enforcement; this
+// gate is.
+//
 // Writes BOTH stores so the two surfaces can never disagree:
 //   1. conversations.assigned_agent_id (what the Inbox header and
 //      list render; realtime postgres_changes notifies open tabs),
 //   2. the contact's active flow run's Assigned To workspace cell
 //      (what the Workspace table renders; the workspace realtime
 //      hook picks up the change).
-// Agent+ (same bar as the direct client update this replaces, and
-// as workspace_values RLS). The conversation must belong to the
-// caller's account or the request 404s without disclosing
-// cross-tenant existence. Reassignments from the Workspace flow
+// Agent+ entry (viewers 403 via requireRole); the authority gate
+// below admits only owners/admins and Manage Assignments holders.
+// The conversation must belong to the caller's account or the
+// request 404s without disclosing cross-tenant existence. Reassignments from the Workspace flow
 // back through the same columns, so Inbox-initiated changes never
 // fight Workspace-initiated ones — last writer wins per row.
 // ============================================================
@@ -45,11 +53,8 @@ export async function POST(
 ) {
   let ctx;
   try {
-    // Agent+ entry; per-caller gating below decides what each role
-    // may touch. Owners/admins act on any thread; agents act on
-    // their own threads, or on ANY thread with the Manage
-    // Assignments permission (resolved server-side). Viewers and
-    // unassigned-thread access for plain agents are rejected below.
+    // Agent+ entry (viewers 403); the authority gate below admits
+    // only owners/admins and Manage Assignments holders.
     ctx = await requireRole("agent");
   } catch (err) {
     return toErrorResponse(err);
@@ -77,6 +82,25 @@ export async function POST(
   // would otherwise enforce — account scoping on every statement,
   // assignee-gated writes, roster-validated targets.
   const admin = supabaseAdmin();
+  const caps = await resolveViewerCaps(
+    admin,
+    ctx.accountId,
+    ctx.userId,
+    ctx.role
+  );
+  // Assignment authority gate FIRST: only owners/admins and agents
+  // holding Manage Assignments may change assignments at all — no
+  // own-thread exception (the header dropdown is read-only for
+  // everyone else, and the API must not offer a wider path than
+  // the UI). 404 (not 403) avoids confirming an invisible thread
+  // exists, and reveals nothing about which grant is missing.
+  if (
+    ctx.role !== "owner" &&
+    ctx.role !== "admin" &&
+    !(ctx.role === "agent" && caps.canManageAssignments)
+  ) {
+    return notFound();
+  }
   const { data: conv, error: convErr } = await admin
     .from("conversations")
     .select("id, account_id, assigned_agent_id")
@@ -85,20 +109,12 @@ export async function POST(
     .maybeSingle();
   if (convErr || !conv) return notFound();
 
-  // Assignment gate. Owners/admins may touch any thread; agents may
-  // touch only threads assigned to them — unless they hold the Manage
-  // Assignments permission, which grants any-thread assignment (still
-  // never full read access; see the Inbox visibility rules). Viewers
-  // can never assign. 404 (not 403) avoids confirming an invisible
-  // thread exists.
+  // Defense in depth: owners/admins may touch any thread; agents
+  // here always hold Manage Assignments (see the gate above), which
+  // grants any-thread assignment (still never full read access; see
+  // the Inbox visibility rules). Viewers can never assign.
   const assigned =
     (conv as { assigned_agent_id: string | null }).assigned_agent_id ?? null;
-  const caps = await resolveViewerCaps(
-    admin,
-    ctx.accountId,
-    ctx.userId,
-    ctx.role
-  );
   // canActOnConversation covers owner/admin + own threads; the caps
   // argument additionally admits agents holding Manage Assignments.
   if (

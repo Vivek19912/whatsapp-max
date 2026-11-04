@@ -75,18 +75,28 @@ describe("Inbox page assignment enforcement", () => {
     expect(src).toContain("<AssignDialog");
   });
 
-  it("conversation rows render the assignee when one is set", () => {
+  it("conversation rows show no assignee line (header owns that display)", () => {
     const src = listSrc();
-    expect(src).toContain("assigneeName");
-    expect(src).toContain("Assigned to {assigneeName}");
+    expect(src).not.toContain("assigneeName");
+    expect(src).not.toContain("Assigned to {assigneeName}");
   });
 
-  it("thread header keeps the Assign label for unassigned threads", () => {
+  it("thread header keeps the Assign label and gates editing on Manage Assignments", () => {
     const thread = readFileSync(
       join(process.cwd(), "src", "components", "inbox", "message-thread.tsx"),
       "utf8"
     );
     expect(thread).toContain('"Assign"');
     expect(thread).toContain("currentAssignee?.full_name");
+    // Header control: editable dropdown for assignment authorities,
+    // read-only name label otherwise (caps flow from the page).
+    expect(thread).toContain("viewerCaps");
+    expect(thread).toContain("canManageAssignments");
+  });
+
+  it("page passes viewer caps to the thread header control", () => {
+    const src = pageSrc();
+    expect(src).toContain("<MessageThread");
+    expect(src).toContain("viewerCaps={viewerCaps}");
   });
 });

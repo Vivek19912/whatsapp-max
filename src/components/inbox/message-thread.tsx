@@ -7,6 +7,10 @@ import { usePresence } from "@/hooks/use-presence";
 import { PresenceDot } from "@/components/presence/presence-dot";
 import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
+import {
+  NO_INBOX_CAPS,
+  type InboxViewerCaps,
+} from "@/lib/inbox/assignment-access";
 import type {
   AccountMember,
   Conversation,
@@ -104,6 +108,14 @@ interface MessageThreadProps {
    */
   contactPanelOpen?: boolean;
   onToggleContactPanel?: () => void;
+  /**
+   * The viewer's granted Inbox permissions (View All / Manage
+   * Assignments), fetched once by the parent. The header Assign
+   * control is editable only for owners/admins and agents holding
+   * Manage Assignments; everyone else sees the assignee name as
+   * read-only text. Defaults deny both.
+   */
+  viewerCaps?: InboxViewerCaps;
 }
 
 function formatDateSeparator(dateStr: string): string {
@@ -155,8 +167,9 @@ export function MessageThread({
   onRefresh,
   contactPanelOpen,
   onToggleContactPanel,
+  viewerCaps = NO_INBOX_CAPS,
 }: MessageThreadProps) {
-  const { user, profile: authProfile } = useAuth();
+  const { user, profile: authProfile, accountRole } = useAuth();
   const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -848,6 +861,15 @@ export function MessageThread({
   const assignLabel = assignedAgentId
     ? (currentAssignee?.full_name ?? "Assigned")
     : "Assign";
+  // Assignment authority for the header control: owners/admins
+  // always; agents only with the Manage Assignments grant. View
+  // All-only and plain agents get a read-only name label — no
+  // chevron, no menu, no Unassign action. The assign API enforces
+  // the same rule server-side, so this is display-only gating.
+  const canManageAssignments =
+    accountRole === "owner" ||
+    accountRole === "admin" ||
+    (accountRole === "agent" && viewerCaps.canManageAssignments);
 
   return (
     // `min-w-0` is load-bearing: the page already puts min-w-0 on the
@@ -946,7 +968,10 @@ export function MessageThread({
             </button>
           )}
 
-          {/* Assign dropdown */}
+          {/* Assign control: editable dropdown for assignment
+              authorities (owner/admin/Manage Assignments grant);
+              read-only assignee name for everyone else. */}
+          {canManageAssignments ? (
           <DropdownMenu>
             <DropdownMenuTrigger
               className={cn(
@@ -1010,6 +1035,23 @@ export function MessageThread({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+          ) : (
+            <span
+              className={cn(
+                "inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                assignedAgentId ? "text-primary" : "text-muted-foreground"
+              )}
+              title={assignLabel}
+              aria-label={
+                assignedAgentId
+                  ? `Assigned to ${assignLabel}`
+                  : "Unassigned"
+              }
+            >
+              <UserPlus className="h-3 w-3" />
+              <span className="hidden sm:inline">{assignLabel}</span>
+            </span>
+          )}
         </div>
       </div>
 

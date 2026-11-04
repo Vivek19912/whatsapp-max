@@ -580,24 +580,6 @@ export function ConversationList({
     return m;
   }, [tags]);
 
-  // Assignee names for the conversation rows — same roster as the
-  // Team filter, so row labels can never disagree with it. Missing
-  // ids (removed member) fall back to null = unassigned row state.
-  const assigneeNameById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const member of members) {
-      m.set(member.user_id, member.full_name || "Unnamed member");
-    }
-    return m;
-  }, [members]);
-  const assigneeNameFor = useCallback(
-    (c: Conversation) =>
-      c.assigned_agent_id
-        ? (assigneeNameById.get(c.assigned_agent_id) ?? null)
-        : null,
-    [assigneeNameById]
-  );
-
   // Agents see only their own threads (RLS), so the Team filter offers
   // no other options: just themselves, no Unassigned checkbox (always
   // empty for them) — UNLESS they hold View All, which restores the
@@ -1762,7 +1744,6 @@ export function ConversationList({
                     isPinned
                     isPinBusy={pinBusyIds.has(conv.id)}
                     onTogglePin={handleTogglePin}
-                    assigneeName={assigneeNameFor(conv)}
                   />
                 ))}
                 {regular.length > 0 && (
@@ -1780,7 +1761,6 @@ export function ConversationList({
                 isPinned={false}
                 isPinBusy={pinBusyIds.has(conv.id)}
                 onTogglePin={handleTogglePin}
-                assigneeName={assigneeNameFor(conv)}
               />
             ))}
 
@@ -1832,14 +1812,11 @@ interface ConversationItemProps {
   isPinned: boolean;
   isPinBusy: boolean;
   onTogglePin: (conversation: Conversation, nextPinned: boolean) => void;
-  /** Resolved assignee display name (null/undefined = unassigned). */
-  assigneeName?: string | null;
 }
 
 function ConversationItem({
   conversation,
   isActive,
-  assigneeName,
   onSelect,
   isPinned,
   isPinBusy,
@@ -1974,15 +1951,6 @@ function ConversationItem({
             </Tooltip>
           </div>
         </div>
-
-        {/* Assignee — only rendered when the thread has an owner.
-            Mirrors the header Assign control and the Workspace
-            Assigned To cell (same underlying assignment). */}
-        {assigneeName ? (
-          <p className="text-muted-foreground mt-1 truncate px-0 text-[11px]">
-            Assigned to {assigneeName}
-          </p>
-        ) : null}
 
         {/* Tag pill(s) — only rendered when the contact has at least one
             tag. Matches the screenshot: a small rounded label sitting

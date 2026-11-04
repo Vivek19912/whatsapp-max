@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // with granular permissions:
 // - owner/admin: any thread.
 // - agent with Manage Assignments: any thread (read NOT granted).
-// - plain agent: only own assigned threads (404 otherwise, no oracle).
+// - plain agent: never (404, no oracle) — not even own threads.
+// - view-all-only agent: never (404, no oracle).
 // - viewer: never.
 
 const UUID_A = "11111111-1111-4111-8111-111111111111";
@@ -119,17 +120,24 @@ describe("assign route with granular permissions", () => {
     expect(res.status).toBe(404);
   });
 
-  it("plain agent can still reassign their own thread", async () => {
+  it("plain agent gets 404 even on their own thread (no self-assign)", async () => {
     convRow = { id: CONV, account_id: "acc-1", assigned_agent_id: UUID_A };
     permsRow = null;
     const res = await assign(CONV, UUID_B);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(404);
   });
 
   it("view-all-only agent cannot reassign without Manage Assignments", async () => {
     convRow = { id: CONV, account_id: "acc-1", assigned_agent_id: UUID_B };
     permsRow = { can_manage_assignments: false, can_view_all: true };
     const res = await assign(CONV, UUID_A);
+    expect(res.status).toBe(404);
+  });
+
+  it("view-all-only agent cannot reassign even their own thread", async () => {
+    convRow = { id: CONV, account_id: "acc-1", assigned_agent_id: UUID_A };
+    permsRow = { can_manage_assignments: false, can_view_all: true };
+    const res = await assign(CONV, null);
     expect(res.status).toBe(404);
   });
 

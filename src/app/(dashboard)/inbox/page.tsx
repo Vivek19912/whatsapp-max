@@ -894,6 +894,7 @@ export default function InboxPage() {
             onRefresh={handleManualRefresh}
             contactPanelOpen={contactPanelOpen}
             onToggleContactPanel={handleToggleContactPanel}
+            viewerCaps={viewerCaps}
           />
         </div>
 
