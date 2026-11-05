@@ -22,13 +22,13 @@ function statusError(status: number, message: string) {
 vi.mock("@/lib/auth/account", () => ({
   getCurrentAccount: async () => {
     if (!h.authed) throw statusError(401, "Unauthorized");
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId, role: h.role };
   },
   requireRole: async (min: string) => {
     if (!h.authed) throw statusError(401, "Unauthorized");
     const rank: Record<string, number> = { viewer: 1, agent: 2, admin: 3, owner: 4 };
     if ((rank[h.role] ?? 0) < (rank[min] ?? 99)) throw statusError(403, "Forbidden");
-    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: h.userId, role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =
@@ -108,6 +108,7 @@ beforeEach(() => {
 
 describe("GET /api/followups", () => {
   it("lists account-scoped rows for members", async () => {
+    h.role = "owner";
     h.rows = [
       { id: "a", account_id: "acct-1", status: "scheduled" },
       { id: "b", account_id: "acct-2", status: "scheduled" },
@@ -116,6 +117,19 @@ describe("GET /api/followups", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as { followups: Array<{ id: string }> };
     expect(json.followups.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("scopes agents to their own reminders only", async () => {
+    h.role = "agent";
+    h.userId = "user-1";
+    h.rows = [
+      { id: "mine", account_id: "acct-1", status: "scheduled", created_by: "user-1" },
+      { id: "theirs", account_id: "acct-1", status: "scheduled", created_by: "user-2" },
+    ];
+    const res = await GET(new Request("https://app.test/api/followups?status=scheduled"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { followups: Array<{ id: string }> };
+    expect(json.followups.map((r) => r.id)).toEqual(["mine"]);
   });
 
   it("400s on an invalid status filter", async () => {

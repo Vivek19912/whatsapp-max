@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
 import { isWorkspaceFollowupFieldName } from "@/lib/followups/workspace-link";
+import { isAssigneeField } from "@/lib/flows/workspace-assignee";
 
 type Row = Record<string, unknown>;
 
@@ -65,12 +66,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
     const { id: flowId } = await params;
 
     const { data: flow, error: flowErr } = await supabase
       .from("flows")
-      .select("id, account_id")
+      .select("id, account_id, kind")
       .eq("id", flowId)
       .eq("account_id", accountId)
       .maybeSingle();
@@ -100,9 +101,52 @@ export async function GET(
       return NextResponse.json({ overdue: 0, today: 0, tomorrow: 0, upcoming: 0 });
     }
 
-    const runIds = await runIdsForFlow(supabase, accountId, flowId);
+    let runIds = await runIdsForFlow(supabase, accountId, flowId);
     if (runIds.length === 0) {
       return NextResponse.json({ overdue: 0, today: 0, tomorrow: 0, upcoming: 0 });
+    }
+
+    // Agent isolation (Meta Lead Ads tables only — mirrors the
+    // table route's forced assignee): agents count only their OWN
+    // assigned leads (Assigned To cell = authenticated user id),
+    // so workspace-wide totals never leak. Owners, admins,
+    // viewers, and every Flow Table keep existing behavior.
+    // The assignment id is derived server-side from the session —
+    // never a client-supplied value.
+    if (role === "agent" && (flow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
+      const { data: assigneeFields, error: assigneeErr } = await supabase
+        .from("workspace_fields")
+        .select("id, name")
+        .eq("account_id", accountId)
+        .eq("flow_id", flowId);
+      if (assigneeErr) throw assigneeErr;
+      const assigneeField = ((assigneeFields ?? []) as Row[]).find((f) =>
+        isAssigneeField({ name: (f.name as string) ?? "" }),
+      );
+      const assigneeFieldId =
+        typeof assigneeField?.id === "string" ? (assigneeField.id as string) : null;
+      if (!assigneeFieldId) {
+        return NextResponse.json({ overdue: 0, today: 0, tomorrow: 0, upcoming: 0 });
+      }
+      const owned = new Set<string>();
+      const OWNED_CHUNK = 500;
+      for (let i = 0; i < runIds.length; i += OWNED_CHUNK) {
+        const { data, error } = await supabase
+          .from("workspace_values")
+          .select("flow_run_id")
+          .eq("account_id", accountId)
+          .eq("field_id", assigneeFieldId)
+          .eq("value_text", userId)
+          .in("flow_run_id", runIds.slice(i, i + OWNED_CHUNK));
+        if (error) throw error;
+        for (const row of ((data ?? []) as Row[])) {
+          if (typeof row.flow_run_id === "string") owned.add(row.flow_run_id);
+        }
+      }
+      runIds = runIds.filter((id) => owned.has(id));
+      if (runIds.length === 0) {
+        return NextResponse.json({ overdue: 0, today: 0, tomorrow: 0, upcoming: 0 });
+      }
     }
 
     // One value per lead: dedupe by run (the column is unique per

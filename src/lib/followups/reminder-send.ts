@@ -200,8 +200,9 @@ function assertTemplateParamSendable(param: string, templateName: string, langua
 }
 /**
  * Template fallback for closed-window sends: delivers the reminder
- * through the account's configured APPROVED template with the
- * reminder text as `{{1}}`. Same recipient, same sender, same
+ * through the creator's PERSONAL approved template when set
+ * (`profiles.*`), else the account's configured APPROVED template,
+ * with the reminder text as `{{1}}`. Same recipient, same sender, same
  * bookkeeping contract as the text path — no customer
  * conversation, no contact lookup. (Inbox persistence happens in
  * the scheduler with `templateName` set, so the thread shows the
@@ -221,6 +222,7 @@ export async function sendReminderViaTemplate(
   db: SupabaseClient,
   accountId: string,
   params: ReminderSendParams,
+  creatorUserId?: string | null,
 ): Promise<ReminderSendResult> {
   const { to, text } = params;
 
@@ -235,27 +237,61 @@ export async function sendReminderViaTemplate(
     throw new SendMessageError("bad_request", "Reminder text is required.", 400);
   }
 
-  const { data: account, error: accountErr } = await db
-    .from("accounts")
-    .select("reminder_template_name, reminder_template_language")
-    .eq("id", accountId)
-    .maybeSingle();
-  if (accountErr || !account) {
-    throw new SendMessageError(
-      "no_fallback_template",
-      NO_FALLBACK_TEMPLATE_MESSAGE,
-      400,
-    );
+  // Personal-first resolution: the reminder creator's own fallback
+  // template (`profiles.*` for creatorUserId) wins when set; the
+  // account default (`accounts.*`) is the back-compat fallback.
+  // A missing profiles column (pre-migration schema) degrades to
+  // the account default instead of failing the send.
+  let templateName: string | null = null;
+  let language = "en_US";
+  if (creatorUserId) {
+    try {
+      const { data: personal } = await db
+        .from("profiles")
+        .select("reminder_template_name, reminder_template_language")
+        .eq("user_id", creatorUserId)
+        .maybeSingle();
+      if (
+        personal &&
+        Object.prototype.hasOwnProperty.call(personal, "reminder_template_name")
+      ) {
+        const p = personal as {
+          reminder_template_name?: string | null;
+          reminder_template_language?: string | null;
+        };
+        const personalName = p.reminder_template_name?.trim() || null;
+        if (personalName) {
+          templateName = personalName;
+          language = p.reminder_template_language?.trim() || "en_US";
+        }
+      }
+    } catch {
+      // Fall through to the account default below.
+    }
   }
-  const setting = account as {
-    reminder_template_name?: string | null;
-    reminder_template_language?: string | null;
-  };
-  // Exact configured values — no guessing, no second source, no
-  // silent substitution. Language defaults to en_US only when the
-  // setting itself carries none.
-  const templateName = setting.reminder_template_name?.trim() || null;
-  const language = setting.reminder_template_language?.trim() || "en_US";
+  if (!templateName) {
+    const { data: account, error: accountErr } = await db
+      .from("accounts")
+      .select("reminder_template_name, reminder_template_language")
+      .eq("id", accountId)
+      .maybeSingle();
+    if (accountErr || !account) {
+      throw new SendMessageError(
+        "no_fallback_template",
+        NO_FALLBACK_TEMPLATE_MESSAGE,
+        400,
+      );
+    }
+    const setting = account as {
+      reminder_template_name?: string | null;
+      reminder_template_language?: string | null;
+    };
+    // Exact configured values — no guessing, no second source, no
+    // silent substitution. Language defaults to en_US only when the
+    // setting itself carries none.
+    templateName = setting.reminder_template_name?.trim() || null;
+    language = setting.reminder_template_language?.trim() || "en_US";
+  }
   if (!templateName) {
     throw new SendMessageError(
       "no_fallback_template",

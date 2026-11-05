@@ -283,7 +283,8 @@ async function processOne(
   try {
     // Window routing per attempt — decided here, never probed by
     // sending: open window → free text (cheapest, exact message);
-    // closed window → the account's APPROVED fallback template with
+    // closed window → the creator's personal APPROVED fallback
+    // template when set (else the account default) with
     // the reminder as {{1}}. A closed window NEVER attempts text
     // first (Meta would reject it); template misconfiguration fails
     // loudly with the reason stored.
@@ -299,10 +300,18 @@ async function processOne(
           to: current.recipient_phone,
           text: current.message_text,
         })
-      : await sendReminderViaTemplate(db, current.account_id, {
-          to: current.recipient_phone,
-          text: current.message_text,
-        });
+      : await sendReminderViaTemplate(
+          db,
+          current.account_id,
+          {
+            to: current.recipient_phone,
+            text: current.message_text,
+          },
+          // Personal-first template resolution: this reminder sends
+          // through ITS CREATOR's fallback template when set — never
+          // another agent's configuration.
+          current.created_by,
+        );
     await markFollowup(db, row.id, {
       status: 'sent',
       sent_at: new Date().toISOString(),

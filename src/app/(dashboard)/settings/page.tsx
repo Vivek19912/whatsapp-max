@@ -53,10 +53,17 @@ export default function SettingsPage() {
       // (directly below Your profile) but stays admin-only as before —
       // the `account` group below is otherwise visible to every role.
       if (s === 'business-profile' && !isAdmin) continue;
+      // Reminder settings are personal: every agent manages their OWN
+      // WhatsApp number + fallback template (server-scoped to the
+      // authenticated user), so agents must see this section.
+      if (s === 'reminder-number') {
+        if (isAdmin || accountRole === 'agent') set.add(s);
+        continue;
+      }
       if (group === 'top' || group === 'account' || isAdmin) set.add(s);
     }
     return set;
-  }, [isAdmin, isOwner]);
+  }, [isAdmin, isOwner, accountRole]);
 
   // Legacy deep link: Team Members moved to /team-members.
   // Redirect instead of rendering a duplicate page; every other

@@ -10,8 +10,10 @@
 //
 // Every per-table assignment lands here — internal members,
 // external recipients, Meta and Flow tables alike: one row per
-// (lead, assignee, channel), so retries and duplicate deliveries
-// collapse to a single alert. The legacy account-level email queue
+// (lead, assignee, channel, recipient) for WhatsApp (the legacy
+// primary phone plus every extra number), one row per
+// (lead, assignee, channel) for email, so retries and duplicate
+// deliveries collapse per recipient. The legacy account-level email queue
 // is intentionally never consulted: the per-assignee toggles and
 // the configured recipient below are the single authority, so one
 // assignment can never produce two emails from two outboxes.
@@ -33,13 +35,14 @@ import { getMetaSmtpStatus } from "@/lib/meta-lead-ads/notify";
 import { sendEmailViaSmtp } from "@/lib/email/send";
 import {
   isValidE164,
+  normalizePhone,
   sanitizePhoneForMeta,
 } from "@/lib/whatsapp/phone-utils";
 import { sendTemplateMessage } from "@/lib/whatsapp/meta-api";
 import { extractVariableIndices } from "@/lib/whatsapp/template-validators";
 import type { MessageTemplate, TemplateButton } from "@/types";
 import type { TableAssigneeRow, TableConfigDetail } from "./table-config";
-import { isValidAssigneeEmail } from "./table-validation";
+import { isValidAssigneeEmail, normalizeAssigneePhone } from "./table-validation";
 
 export const TABLE_NOTIFY_MAX_ATTEMPTS = 5;
 export const TABLE_NOTIFY_SWEEP_LIMIT = 20;
@@ -341,15 +344,19 @@ function buildNotificationRow(
 }
 
 /**
- * One outbox row per configured WhatsApp recipient number, each
- * carrying its own template. Recipients resolve as:
- *   1. `assignee.whatsapp_numbers` entries (in configured order,
- *      per-number template, falling back to the config-level
- *      template when a number has none), when non-empty;
- *   2. otherwise the legacy single `phone` column with the
- *      config-level template (existing configurations keep
- *      working unchanged).
- * Every row carries recipient_key (the normalized number) so the
+ * One outbox row per registered WhatsApp number of the assignee.
+ * Recipients resolve from EVERY number shown in the Assignment
+ * configuration — the legacy `phone` column FIRST, then each
+ * `assignee.whatsapp_numbers` entry in configured order (per-number
+ * template, falling back to the config-level template when a
+ * number has none). Numbers are normalized (E.164) and deduplicated
+ * by digits, so `+918825069554`, `918825069554`, and
+ * `+91 88250 69554` collapse to a single recipient and one number
+ * can never receive the same alert twice. Blank entries are
+ * skipped; non-empty entries that cannot be normalized keep their
+ * trimmed value and fail individually at send time (recorded on
+ * their own row) without blocking the other recipients.
+ * Every row carries recipient_key (the send-time number) so the
  * UNIQUE(account, run, assignee, channel, recipient_key) key
  * dedupes per recipient: a retry re-enqueues nothing, while a
  * second number still gets its own row.
@@ -375,28 +382,53 @@ function buildWhatsappNotificationRows(
     queued_at: nowIso,
     next_attempt_at: nowIso,
   };
+  // All registered numbers for THIS assignee only — legacy primary
+  // first, then extras. Never another assignee's numbers (the
+  // caller passes a single assignee row), never frontend-supplied
+  // numbers (every value comes from the server-side config row).
+  const candidates: Array<{
+    phone: string;
+    template_name: string | null;
+    template_language: string;
+  }> = [];
+  if (typeof assignee.phone === "string" && assignee.phone.trim() !== "") {
+    candidates.push({
+      phone: assignee.phone.trim(),
+      template_name: null,
+      template_language: detail.whatsapp_template_language,
+    });
+  }
   const extra = Array.isArray(assignee.whatsapp_numbers)
     ? assignee.whatsapp_numbers
     : [];
-  if (extra.length > 0) {
-    return extra.map((r) => ({
-      ...base,
-      recipient_key: r.phone,
-      to_phone: r.phone,
-      template_name: r.template_name ?? detail.whatsapp_template_name,
+  for (const r of extra) {
+    if (!r || typeof r.phone !== "string" || r.phone.trim() === "") continue;
+    candidates.push({
+      phone: r.phone.trim(),
+      template_name: r.template_name ?? null,
       template_language: r.template_language || detail.whatsapp_template_language,
-    }));
+    });
   }
-  if (!assignee.phone) return [];
-  return [
-    {
+  const seen = new Set<string>();
+  const rows: Array<Record<string, unknown>> = [];
+  for (const c of candidates) {
+    // Canonical E.164 when possible (`+917006894931`); otherwise
+    // the trimmed value (send-time validation fails that row
+    // alone with a recorded error — other recipients proceed).
+    const normalized = normalizeAssigneePhone(c.phone) ?? c.phone;
+    const key = normalizePhone(normalized);
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
       ...base,
-      recipient_key: assignee.phone,
-      to_phone: assignee.phone,
-      template_name: detail.whatsapp_template_name,
-      template_language: detail.whatsapp_template_language,
-    },
-  ];
+      recipient_key: normalized,
+      to_phone: normalized,
+      template_name: c.template_name ?? detail.whatsapp_template_name,
+      template_language: c.template_language || detail.whatsapp_template_language,
+    });
+  }
+  return rows;
 }
 
 export interface TableNotifyDrainResult {

@@ -27,12 +27,14 @@ vi.mock("@/lib/auth/account", () => ({
   getCurrentAccount: async () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
+    userId: "admin-1",
+    role: h.role,
   }),
   requireRole: async (min: string) => {
     if (!h.role) throw statusError(401, "Unauthorized");
     const rank: Record<string, number> = { viewer: 1, agent: 2, admin: 3, owner: 4 };
     if ((rank[h.role] ?? 0) < (rank[min] ?? 99)) throw statusError(403, "Forbidden");
-    return { supabase: fakeSupabase(), accountId: h.accountId };
+    return { supabase: fakeSupabase(), accountId: h.accountId, userId: "admin-1", role: h.role };
   },
   toErrorResponse: (err: unknown) => {
     const status =

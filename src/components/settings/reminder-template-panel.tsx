@@ -26,13 +26,17 @@ const NONE_VALUE = "__none__";
 
 /**
  * Fallback template picker for reminders sent outside the 24-hour
- * customer-service window (`{{1}}` = reminder message). Stored on
- * the account (`reminder_template_name/_language`); the scheduler
- * validates APPROVED status again at send time. Admin-only UI —
- * the API enforces admin+ writes regardless.
+ * customer-service window (`{{1}}` = reminder message). Admins and
+ * owners save the account default (`accounts.*`); agents save their
+ * OWN personal setting (scoped server-side to the authenticated
+ * user, so teammates can never overwrite each other). The
+ * scheduler validates APPROVED status again at send time, and
+ * resolves personal-first with the account default as fallback.
+ * Agent+ UI — the API enforces agent+ writes regardless, and
+ * viewers stay read-only.
  */
 export function ReminderTemplatePanel() {
-  const { accountId, canManageMembers } = useAuth();
+  const { accountId, canManageMembers, canSendMessages } = useAuth();
   const supabase = createClient();
 
   const [options, setOptions] = useState<ApprovedTemplateOption[]>([]);
@@ -89,7 +93,7 @@ export function ReminderTemplatePanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-  if (!canManageMembers) return null;
+  if (!canManageMembers && !canSendMessages) return null;
 
   const dirty =
     (draft === NONE_VALUE ? null : draft) !==

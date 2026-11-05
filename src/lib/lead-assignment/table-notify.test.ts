@@ -962,7 +962,7 @@ describe("multiple WhatsApp numbers per assignee", () => {
       ...extra,
     });
 
-  it("fans out to every configured number with its own template", async () => {
+  it("fans out to every registered number: legacy phone plus every extra, each with its own template", async () => {
     const db = fakeSupabase();
     const out = await enqueueTableAssignmentNotifications(db as never, {
       accountId: "acct-1",
@@ -972,12 +972,14 @@ describe("multiple WhatsApp numbers per assignee", () => {
       formId: null,
     });
     expect(out.whatsapp).toMatchObject({ enqueued: true, reason: "enqueued" });
-    expect(out.whatsapp.recipients).toHaveLength(5);
-    // The same template may repeat across numbers; each number
-    // still gets its own row and template.
+    expect(out.whatsapp.recipients).toHaveLength(6);
+    // The legacy primary phone is a recipient too — it must not be
+    // dropped when extras exist. Same template may repeat across
+    // numbers; each number still gets its own row and template.
     const rows = h.notifications.filter((n) => n.channel === "whatsapp");
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(6);
     expect(rows.map((n) => n.to_phone)).toEqual([
+      "+15551234567",
       "+911234567890",
       "+911234567891",
       "+911234567892",
@@ -985,6 +987,8 @@ describe("multiple WhatsApp numbers per assignee", () => {
       "+911234567894",
     ]);
     expect(rows.map((n) => n.template_name)).toEqual([
+      // Legacy primary uses the config-level template.
+      "new_lead_assigned",
       "new_lead_notification1",
       "new_lead_notification2",
       "travel_lead_alert",
@@ -993,7 +997,7 @@ describe("multiple WhatsApp numbers per assignee", () => {
       "new_lead_assigned",
     ]);
     // Status is tracked separately per recipient number.
-    expect(new Set(rows.map((n) => n.recipient_key as string)).size).toBe(5);
+    expect(new Set(rows.map((n) => n.recipient_key as string)).size).toBe(6);
   });
 
   it("retries and duplicate events collapse per recipient, not per assignee", async () => {
@@ -1014,7 +1018,7 @@ describe("multiple WhatsApp numbers per assignee", () => {
     });
     expect(second.whatsapp).toMatchObject({ enqueued: false });
     expect(second.whatsapp.recipients?.every((r) => r.reason === "duplicate")).toBe(true);
-    expect(h.notifications.filter((n) => n.channel === "whatsapp")).toHaveLength(5);
+    expect(h.notifications.filter((n) => n.channel === "whatsapp")).toHaveLength(6);
   });
 
   it("removing one number leaves the others intact on the next assignment", async () => {
@@ -1027,7 +1031,7 @@ describe("multiple WhatsApp numbers per assignee", () => {
       formId: null,
     });
     // Owner removes the second number; the next lead still reaches
-    // the remaining four (new run = new alert set).
+    // the legacy primary plus the remaining four (new run = new alert set).
     const trimmed = multiAssignee({
       whatsapp_numbers: [
         { phone: "+911234567890", template_name: "new_lead_notification1", template_language: "en_US" },
@@ -1043,12 +1047,12 @@ describe("multiple WhatsApp numbers per assignee", () => {
       runId: "run-2",
       formId: null,
     });
-    expect(out.whatsapp.recipients).toHaveLength(4);
+    expect(out.whatsapp.recipients).toHaveLength(5);
     expect(
       h.notifications
         .filter((n) => n.channel === "whatsapp" && n.flow_run_id === "run-2")
         .map((n) => n.to_phone),
-    ).toEqual(["+911234567890", "+911234567892", "+911234567893", "+911234567894"]);
+    ).toEqual(["+15551234567", "+911234567890", "+911234567892", "+911234567893", "+911234567894"]);
   });
 
   it("one recipient's send failure does not stop the other numbers", async () => {

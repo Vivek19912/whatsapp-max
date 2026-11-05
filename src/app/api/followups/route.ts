@@ -65,16 +65,26 @@ async function loadAgentRecipientPhone(
 
 /**
  * GET /api/followups?status=scheduled|sent|failed|cancelled —
- * account-scoped list for the Reminders page. Any member may read.
+ * account-scoped list for the Reminders page. Any member may read,
+ * but agents are scoped to their OWN reminders only
+ * (created_by = authenticated user id, derived server-side —
+ * never a client-supplied id). Owner/admin/viewer keep their
+ * existing workspace-wide visibility.
  */
 export async function GET(request: Request) {
   try {
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
     const status = new URL(request.url).searchParams.get("status");
     let query = supabase
       .from("whatsapp_followups")
       .select("*")
       .eq("account_id", accountId);
+    // Agent isolation: ownership condition inside the query so
+    // list, search, pagination, sorting, and status filters can
+    // never expose another agent's reminders.
+    if (role === "agent") {
+      query = query.eq("created_by", userId);
+    }
     if (status) {
       if (!isFollowupStatus(status)) {
         return NextResponse.json({ error: "Invalid status filter." }, { status: 400 });

@@ -144,11 +144,17 @@ export async function GET(request: Request) {
     const pendingReminderStatuses = FOLLOWUP_STATUSES.filter(
       (s) => s !== "sent" && s !== "failed" && s !== "cancelled",
     );
-    const { count: scheduledCount, error: scheduledError } = await ctx.supabase
+    // Agent isolation: agents count only their OWN reminders —
+    // never workspace-wide totals.
+    let scheduledQuery = ctx.supabase
       .from("whatsapp_followups")
       .select("id", { count: "exact", head: true })
       .eq("account_id", ctx.accountId)
       .in("status", pendingReminderStatuses);
+    if (ctx.role === "agent") {
+      scheduledQuery = scheduledQuery.eq("created_by", ctx.userId);
+    }
+    const { count: scheduledCount, error: scheduledError } = await scheduledQuery;
     if (scheduledError) {
       console.error(
         "[dashboard/analytics] scheduled reminders count error:",
