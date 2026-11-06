@@ -13,6 +13,13 @@ const h = vi.hoisted(() => ({
     accountId: string;
     role: string;
   },
+  // owner policy row for user-authenticated uploads; the route rejects
+  // with 403 recording_forbidden when this does not authorize the upload.
+  policy: null as null | {
+    phone_recording_enabled: boolean;
+    phone_recording_number: string | null;
+    whatsapp_recording_source: string;
+  },
 }));
 
 function chainableSelect() {
@@ -30,6 +37,13 @@ function chainableSelect() {
 function fakeSupabase() {
   return {
     from: (table: string) => {
+      if (table === "user_recording_settings") {
+        const policyChain: Record<string, (...args: never[]) => unknown> = {};
+        policyChain.select = () => policyChain;
+        policyChain.eq = () => policyChain;
+        policyChain.maybeSingle = async () => ({ data: h.policy, error: null });
+        return policyChain;
+      }
       if (table === "call_recordings") {
         return {
           insert: (obj: Record<string, unknown>) => {
@@ -126,6 +140,14 @@ beforeEach(() => {
   h.lastInsert = null;
   h.uploadBucket = null;
   h.deviceUser = null;
+  // Owner-authorized by default: device-authenticated tests exercise the
+  // upload pipeline, not the policy gate (dedicated 403 tests below set
+  // their own policy).
+  h.policy = {
+    phone_recording_enabled: true,
+    phone_recording_number: "917460939319",
+    whatsapp_recording_source: "none",
+  };
 });
 
 describe("POST /api/v1/recordings contact association (Phase 2B)", () => {
@@ -330,5 +352,89 @@ describe("POST /api/v1/recordings contact association (Phase 2B)", () => {
     const res = await POST(uploadRequest({}));
     expect(res.status).toBe(201);
     expect(h.lastInsert?.call_type).toBeNull();
+  });
+});
+
+describe("POST /api/v1/recordings owner policy (user-authenticated)", () => {
+  const userToken =
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig";
+
+  it("phone upload accepted when owner enabled the user (matching source SIM)", async () => {
+    h.deviceUser = { userId: "user-sagar", accountId: "acct-A", role: "agent" };
+    h.policy = {
+      phone_recording_enabled: true,
+      phone_recording_number: "917460939319",
+      whatsapp_recording_source: "none",
+    };
+    const res = await POST(
+      uploadRequest(
+        { source_phone_number: "+91 74609 39319" },
+        userToken,
+      ),
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("phone upload rejected when owner disabled recording", async () => {
+    h.deviceUser = { userId: "user-sagar", accountId: "acct-A", role: "agent" };
+    h.policy = {
+      phone_recording_enabled: false,
+      phone_recording_number: "917460939319",
+      whatsapp_recording_source: "none",
+    };
+    const res = await POST(uploadRequest({}, userToken));
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as { error: { code: string } };
+    expect(json.error.code).toBe("recording_forbidden");
+  });
+
+  it("phone upload rejected when source SIM does not match the assigned number", async () => {
+    h.deviceUser = { userId: "user-sagar", accountId: "acct-A", role: "agent" };
+    h.policy = {
+      phone_recording_enabled: true,
+      phone_recording_number: "917460939319",
+      whatsapp_recording_source: "none",
+    };
+    const res = await POST(
+      uploadRequest({ source_phone_number: "+91 99999 00000" }, userToken),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("whatsapp upload accepted only for the owner-selected app", async () => {
+    h.deviceUser = { userId: "user-sagar", accountId: "acct-A", role: "agent" };
+    h.policy = {
+      phone_recording_enabled: false,
+      phone_recording_number: null,
+      whatsapp_recording_source: "whatsapp",
+    };
+    const ok = await POST(
+      uploadRequest({ call_type: "whatsapp" }, userToken),
+    );
+    expect(ok.status).toBe(201);
+    const denied = await POST(
+      uploadRequest({ call_type: "whatsapp_business" }, userToken),
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("whatsapp uploads rejected when owner selected none", async () => {
+    h.deviceUser = { userId: "user-sagar", accountId: "acct-A", role: "agent" };
+    h.policy = {
+      phone_recording_enabled: false,
+      phone_recording_number: null,
+      whatsapp_recording_source: "none",
+    };
+    for (const callType of ["whatsapp", "whatsapp_business"]) {
+      const res = await POST(uploadRequest({ call_type: callType }, userToken));
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it("api-key uploads keep the legacy account-scoped behaviour (no per-user gate)", async () => {
+    h.deviceUser = null;
+    h.policy = null;
+    const res = await POST(uploadRequest({ call_type: "whatsapp" }));
+    expect(res.status).toBe(201);
   });
 });

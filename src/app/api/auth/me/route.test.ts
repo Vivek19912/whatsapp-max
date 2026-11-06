@@ -112,6 +112,38 @@ describe("GET /api/auth/me", () => {
     h.setting = null;
   });
 
+  it("reports the explicit owner opt-in and configured flag", async () => {
+    h.setting = {
+      whatsapp_recording_source: "none",
+      phone_recording_number: "918953065369",
+      phone_recording_enabled: true,
+    } as unknown as { whatsapp_recording_source: string };
+    const enabled = await GET(
+      new Request("https://app.test/api/auth/me", {
+        headers: { Authorization: "Bearer header.payload.sig" },
+      })
+    );
+    const enabledJson = (await enabled.json()) as {
+      phoneRecordingEnabled: boolean;
+      phoneRecordingConfigured: boolean;
+    };
+    expect(enabledJson.phoneRecordingEnabled).toBe(true);
+    expect(enabledJson.phoneRecordingConfigured).toBe(true);
+    // Absent row (and legacy rows predating the flag) fail closed.
+    h.setting = null;
+    const absent = await GET(
+      new Request("https://app.test/api/auth/me", {
+        headers: { Authorization: "Bearer header.payload.sig" },
+      })
+    );
+    const absentJson = (await absent.json()) as {
+      phoneRecordingEnabled: boolean;
+      phoneRecordingConfigured: boolean;
+    };
+    expect(absentJson.phoneRecordingEnabled).toBe(false);
+    expect(absentJson.phoneRecordingConfigured).toBe(false);
+  });
+
   it("rejects invalid sessions with 401", async () => {
     h.deviceOk = false;
     const res = await GET(new Request("https://app.test/api/auth/me"));

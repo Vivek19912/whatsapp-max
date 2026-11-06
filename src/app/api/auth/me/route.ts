@@ -25,7 +25,9 @@ export async function GET(request: Request) {
       .maybeSingle();
     const { data: setting } = await dev.service
       .from('user_recording_settings')
-      .select('whatsapp_recording_source, phone_recording_source, phone_recording_number')
+      .select(
+        'whatsapp_recording_source, phone_recording_source, phone_recording_number, phone_recording_enabled'
+      )
       .eq('account_id', dev.accountId)
       .eq('user_id', dev.userId)
       .maybeSingle();
@@ -33,6 +35,7 @@ export async function GET(request: Request) {
       whatsapp_recording_source?: unknown;
       phone_recording_source?: unknown;
       phone_recording_number?: unknown;
+      phone_recording_enabled?: unknown;
     } | null;
     const whatsapp = settingRow?.whatsapp_recording_source;
     const phone = settingRow?.phone_recording_source;
@@ -50,6 +53,13 @@ export async function GET(request: Request) {
       phoneRecordingSource:
         phone === 'sim1' || phone === 'sim2' ? phone : 'none',
       phoneRecordingNumber: phoneNumber,
+      // Explicit owner opt-in for phone call recording. Absent rows and
+      // legacy rows predate the flag: both read as disabled (fail closed),
+      // so nothing may record until the owner explicitly enables it.
+      phoneRecordingEnabled: settingRow?.phone_recording_enabled === true,
+      // Whether the owner has ever saved recording settings for this user.
+      // Lets CallVault distinguish "explicitly disabled" from "never set up".
+      phoneRecordingConfigured: settingRow != null,
     });
   } catch (err) {
     return toApiErrorResponse(err);

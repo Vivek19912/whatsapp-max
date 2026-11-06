@@ -289,6 +289,7 @@ describe("recording-settings [userId]", () => {
         whatsapp_recording_source: string;
         phone_recording_source: string;
         phone_recording_number: string | null;
+        phone_recording_enabled: boolean;
         updated_at: null;
       };
     };
@@ -297,6 +298,8 @@ describe("recording-settings [userId]", () => {
       whatsapp_recording_source: "none",
       phone_recording_source: "none",
       phone_recording_number: null,
+      // Absent row (and legacy rows) fail closed: no explicit owner opt-in.
+      phone_recording_enabled: false,
       updated_at: null,
     });
   });

@@ -4,6 +4,7 @@ import {
   RECORDING_ALLOWED_MIME_TYPES,
   RECORDING_BUCKET,
   RECORDING_MAX_BYTES,
+  checkRecordingPolicy,
   formatRecordingDuration,
   formatRecordedIndia,
   formatRecordedIndiaParts,
@@ -154,6 +155,64 @@ describe('validateRecordingMetadata', () => {
         phoneNumber: '1'.repeat(65),
       })
     ).toContain('phone_number');
+  });
+
+  it('accepts source_phone_number and rejects oversized ones', () => {
+    expect(
+      validateRecordingMetadata({
+        recordedAt: null,
+        durationSeconds: null,
+        sourcePhoneNumber: '+91 74609 39319',
+      })
+    ).toBeNull();
+    expect(
+      validateRecordingMetadata({
+        recordedAt: null,
+        durationSeconds: null,
+        sourcePhoneNumber: '1'.repeat(65),
+      })
+    ).toContain('source_phone_number');
+  });
+});
+
+describe('checkRecordingPolicy', () => {
+  const enabledPhone = {
+    phone_recording_enabled: true,
+    phone_recording_number: '917460939319',
+    whatsapp_recording_source: 'none',
+  };
+
+  it('allows phone uploads when the owner enabled recording', () => {
+    expect(
+      checkRecordingPolicy({ policy: enabledPhone, callType: null, sourcePhoneNumber: null })
+    ).toBeNull();
+    expect(
+      checkRecordingPolicy({ policy: enabledPhone, callType: 'phone', sourcePhoneNumber: '+91 74609 39319' })
+    ).toBeNull();
+  });
+
+  it('rejects phone uploads when disabled, unconfigured, or SIM-mismatched', () => {
+    expect(
+      checkRecordingPolicy({ policy: { ...enabledPhone, phone_recording_enabled: false }, callType: null, sourcePhoneNumber: null })
+    ).toContain('not enabled');
+    expect(checkRecordingPolicy({ policy: null, callType: null, sourcePhoneNumber: null })).toContain(
+      'not enabled'
+    );
+    expect(
+      checkRecordingPolicy({ policy: enabledPhone, callType: 'phone', sourcePhoneNumber: '+91 99999 00000' })
+    ).toContain('source number');
+  });
+
+  it('gates whatsapp uploads on the exact owner selection', () => {
+    const wa = { ...enabledPhone, whatsapp_recording_source: 'whatsapp' };
+    expect(checkRecordingPolicy({ policy: wa, callType: 'whatsapp', sourcePhoneNumber: null })).toBeNull();
+    expect(checkRecordingPolicy({ policy: wa, callType: 'whatsapp_business', sourcePhoneNumber: null })).toContain(
+      'WhatsApp Business'
+    );
+    const none = { ...enabledPhone, whatsapp_recording_source: 'none' };
+    expect(checkRecordingPolicy({ policy: none, callType: 'whatsapp', sourcePhoneNumber: null })).toContain(
+      'WhatsApp recording'
+    );
   });
 });
 

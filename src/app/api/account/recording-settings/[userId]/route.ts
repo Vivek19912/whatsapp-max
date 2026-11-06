@@ -79,6 +79,7 @@ interface SettingRow {
   whatsapp_recording_source: string;
   phone_recording_source: string;
   phone_recording_number: string | null;
+  phone_recording_enabled: boolean | null;
   updated_at: string;
 }
 
@@ -88,6 +89,9 @@ function toSetting(userId: string, row: SettingRow | null) {
     whatsapp_recording_source: row?.whatsapp_recording_source ?? "none",
     phone_recording_source: row?.phone_recording_source ?? "none",
     phone_recording_number: row?.phone_recording_number ?? null,
+    // Explicit owner opt-in for phone call recording. Absent rows and
+    // legacy rows predate the flag: both read as disabled (fail closed).
+    phone_recording_enabled: row?.phone_recording_enabled === true,
     updated_at: row?.updated_at ?? null,
   };
 }
@@ -124,7 +128,7 @@ export async function GET(
     const { data: row, error } = await ctx.supabase
       .from("user_recording_settings")
       .select(
-        "user_id, whatsapp_recording_source, phone_recording_source, phone_recording_number, updated_at",
+        "user_id, whatsapp_recording_source, phone_recording_source, phone_recording_number, phone_recording_enabled, updated_at",
       )
       .eq("account_id", ctx.accountId)
       .eq("user_id", userId)
@@ -215,16 +219,23 @@ export async function PUT(
     };
     if (hasWhatsapp) patch.whatsapp_recording_source = body?.whatsapp_recording_source;
     if (hasPhone) patch.phone_recording_source = body?.phone_recording_source;
-    if (hasPhoneNumber)
-      patch.phone_recording_number = normalizeRecordingPhoneNumber(
+    if (hasPhoneNumber) {
+      const normalized = normalizeRecordingPhoneNumber(
         body?.phone_recording_number,
       );
+      patch.phone_recording_number = normalized;
+      // The Owner's explicit phone-recording choice, derived from the number
+      // they saved: a number means recording is enabled for that SIM, while
+      // null (Disabled in the UI) means it is not. Stored explicitly so the
+      // app never has to infer intent from a missing value.
+      patch.phone_recording_enabled = normalized !== null;
+    }
 
     const { data: row, error } = await ctx.supabase
       .from("user_recording_settings")
       .upsert(patch, { onConflict: "account_id,user_id" })
       .select(
-        "user_id, whatsapp_recording_source, phone_recording_source, phone_recording_number, updated_at",
+        "user_id, whatsapp_recording_source, phone_recording_source, phone_recording_number, phone_recording_enabled, updated_at",
       )
       .single();
     if (error) throw error;

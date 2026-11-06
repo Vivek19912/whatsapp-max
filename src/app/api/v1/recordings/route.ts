@@ -56,6 +56,7 @@ import {
   toCallRecording,
   validateRecordingFile,
   validateRecordingMetadata,
+  checkRecordingPolicy,
 } from '@/lib/recordings/recordings';
 import { matchContactByPhone } from '@/lib/recordings/contact-matching';
 
@@ -84,7 +85,11 @@ export async function POST(request: Request) {
     let accountId: string;
     let uploadedBy: string | null;
     let db: SupabaseClient;
-    if (presented && !looksLikeApiKey(presented)) {
+    // Owner policy is enforced only for user-authenticated uploads, where a
+    // per-user policy exists. Legacy API-key uploads keep the existing
+    // account-scoped behaviour.
+    const isUserUpload = !!presented && !looksLikeApiKey(presented);
+    if (isUserUpload) {
       const dev = await requireDeviceUser(request);
       accountId = dev.accountId;
       uploadedBy = dev.userId;
@@ -137,6 +142,10 @@ export async function POST(request: Request) {
         typeof form.get('call_type') === 'string'
           ? (form.get('call_type') as string).trim() || null
           : null,
+      sourcePhoneNumber:
+        typeof form.get('source_phone_number') === 'string'
+          ? (form.get('source_phone_number') as string).trim() || null
+          : null,
     });
     if (metaProblem) {
       return fail('bad_request', metaProblem, 400);
@@ -159,6 +168,40 @@ export async function POST(request: Request) {
       (form.get('call_type') as string).trim() !== ''
         ? (form.get('call_type') as string).trim()
         : null;
+    // Which SIM recorded the call, as reported by the device (digits).
+    // Optional for backward compatibility: older clients do not send it.
+    const rawSourcePhoneNumber =
+      typeof form.get('source_phone_number') === 'string' &&
+      (form.get('source_phone_number') as string).trim() !== ''
+        ? (form.get('source_phone_number') as string).trim()
+        : null;
+
+    // Owner recording policy (user-authenticated uploads only). The Owner
+    // decides which recordings are allowed: phone uploads require the
+    // explicit opt-in (and, when the client reports which SIM recorded the
+    // call, a match against the assigned company number); WhatsApp uploads
+    // must match the Owner's selected application. Rejected here, before
+    // any Storage write, so a denied upload leaves no orphan object.
+    // API-key uploads keep the legacy account-scoped behaviour.
+    if (isUserUpload) {
+      const { data: policy, error: policyError } = await db
+        .from('user_recording_settings')
+        .select(
+          'phone_recording_enabled, phone_recording_number, whatsapp_recording_source',
+        )
+        .eq('account_id', accountId)
+        .eq('user_id', uploadedBy)
+        .maybeSingle();
+      if (policyError) throw policyError;
+      const denial = checkRecordingPolicy({
+        policy,
+        callType: rawCallType,
+        sourcePhoneNumber: rawSourcePhoneNumber,
+      });
+      if (denial) {
+        return fail('recording_forbidden', denial, 403);
+      }
+    }
 
     const rawContactId =
       typeof form.get('contact_id') === 'string' &&

@@ -62,6 +62,9 @@ function fakeSupabase() {
                     phone_recording_number:
                       (row.phone_recording_number as string | null | undefined) ??
                       null,
+                    phone_recording_enabled:
+                      (row.phone_recording_enabled as boolean | undefined) ??
+                      false,
                     updated_at: "2026-10-07T00:00:00.000Z",
                   },
                   error: null,
@@ -190,5 +193,15 @@ describe("recording-settings phone number", () => {
     expect(normalizeRecordingPhoneNumber("")).toBeNull();
     expect(normalizeRecordingPhoneNumber("abc")).toBeNull();
     expect(normalizeRecordingPhoneNumber("123")).toBeNull();
+  });
+
+  it("saving a number derives phone_recording_enabled=true; clearing derives false", async () => {
+    const set = await put("agent-1", { phone_recording_number: "+91 74609 39319" });
+    expect(set.status).toBe(200);
+    expect((await set.json()).setting.phone_recording_enabled).toBe(true);
+    expect(h.writes[0].phone_recording_enabled).toBe(true);
+    const clear = await put("agent-1", { phone_recording_number: null });
+    expect(clear.status).toBe(200);
+    expect((await clear.json()).setting.phone_recording_enabled).toBe(false);
   });
 });

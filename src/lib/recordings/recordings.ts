@@ -293,6 +293,7 @@ export function validateRecordingMetadata(input: {
   direction?: unknown;
   phoneNumber?: unknown;
   callType?: unknown;
+  sourcePhoneNumber?: unknown;
 }): string | null {
   if (input.recordedAt !== null && Number.isNaN(Date.parse(input.recordedAt))) {
     return "'recorded_at' must be an ISO 8601 timestamp.";
@@ -327,6 +328,83 @@ export function validateRecordingMetadata(input: {
     ) {
       return "'call_type' must be 'phone', 'whatsapp', or 'whatsapp_business'.";
     }
+  }
+  if (input.sourcePhoneNumber !== null && input.sourcePhoneNumber !== undefined) {
+    if (typeof input.sourcePhoneNumber !== 'string') {
+      return "'source_phone_number' must be a string.";
+    }
+    if (input.sourcePhoneNumber.length > MAX_PHONE_NUMBER_LENGTH) {
+      return `'source_phone_number' must be at most ${MAX_PHONE_NUMBER_LENGTH} characters.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Owner recording-policy check for user-authenticated uploads.
+ *
+ * Decides whether the Owner's current policy allows this upload, using
+ * only the stored policy row — never client claims about permission.
+ * Returns null when allowed, otherwise a human-readable denial reason
+ * (the route surfaces it as a terminal 403, so the client stops
+ * retrying instead of burning its retry budget).
+ *
+ * Rules:
+ * - Phone uploads (including absent `call_type`, the legacy default)
+ *   require `phone_recording_enabled`. When the client reports which
+ *   SIM recorded the call (`sourcePhoneNumber`), it must match the
+ *   Owner-assigned number exactly (after digit normalization);
+ *   uploads from older clients that do not send it are still allowed
+ *   when recording is enabled (backward compatible, no silent bypass —
+ *   the flag itself is authoritative).
+ * - WhatsApp uploads require the matching Owner selection
+ *   (`whatsapp` or `whatsapp_business`); `none` (or no row) rejects all.
+ * - Identity beyond the authenticated account/user is NOT established
+ *   here: a matching number or package is a consistency check, not a
+ *   cryptographic proof of which SIM or app actually recorded the
+ *   audio. Auth scoping (account + user) is enforced by the caller.
+ */
+export interface RecordingPolicyCheck {
+  policy: {
+    phone_recording_enabled?: unknown;
+    phone_recording_number?: string | null;
+    whatsapp_recording_source?: unknown;
+  } | null;
+  callType: string | null;
+  sourcePhoneNumber: string | null;
+}
+
+function digitsOnly(raw: string): string {
+  return raw.replace(/[^\d]/g, '');
+}
+
+export function checkRecordingPolicy(input: RecordingPolicyCheck): string | null {
+  const kind =
+    input.callType === 'whatsapp' || input.callType === 'whatsapp_business'
+      ? input.callType
+      : 'phone';
+  const policy = input.policy;
+  if (kind === 'phone') {
+    if (!policy || policy.phone_recording_enabled !== true) {
+      return 'Phone recording is not enabled for this user.';
+    }
+    if (input.sourcePhoneNumber != null) {
+      const claimed = digitsOnly(input.sourcePhoneNumber);
+      const assigned =
+        typeof policy.phone_recording_number === 'string'
+          ? digitsOnly(policy.phone_recording_number)
+          : '';
+      if (claimed.length === 0 || assigned.length === 0 || claimed !== assigned) {
+        return 'Recording source number does not match the assigned company number.';
+      }
+    }
+    return null;
+  }
+  const selected = policy?.whatsapp_recording_source;
+  if (selected !== kind) {
+    return kind === 'whatsapp'
+      ? 'WhatsApp recording is not enabled for this user.'
+      : 'WhatsApp Business recording is not enabled for this user.';
   }
   return null;
 }
