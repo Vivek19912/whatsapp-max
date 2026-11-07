@@ -373,3 +373,41 @@ describe("agent scoping on Meta Lead Ads Tables", () => {
     }
   });
 });
+
+describe("RPC overload resolution (PGRST203 regression)", () => {
+  // The database keeps both the legacy 8-arg and the current
+  // 18-arg overloads of get_flow_table_rows. An 8-arg call is
+  // AMBIGUOUS (HTTP 300), so every lookup failed into
+  // found:false and deep links degraded to the not-found notice
+  // — for every role, with fully valid data. The route must pass
+  // all 18 params (column filters NULL = inactive, exactly like
+  // the table route's unfiltered reads).
+  it("passes the full 18-arg set on every table read", async () => {
+    h.runs = [run("r-1", "flow-A", "2026-09-12T10:00:00.000Z")];
+    h.pages = { "flow-A|completed|0": [pageRow("r-1")] };
+    const res = await get(
+      `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+    );
+    expect(await res.json()).toMatchObject({ found: true });
+    expect(h.rpcCalls).toHaveLength(1);
+    const args = h.rpcCalls[0]?.args ?? {};
+    expect(Object.keys(args)).toHaveLength(18);
+    expect(args).toMatchObject({
+      p_flow_id: "flow-A",
+      p_view: "completed",
+      p_search: null,
+      p_page: 0,
+      p_assignee: null,
+      p_call_status: null,
+      p_calls_tried_op: null,
+      p_calls_tried_value: null,
+      p_calls_tried_min: null,
+      p_calls_tried_max: null,
+      p_followup_status: null,
+      p_last_contact_from: null,
+      p_last_contact_to: null,
+      p_next_followup_from: null,
+      p_next_followup_to: null,
+    });
+  });
+});

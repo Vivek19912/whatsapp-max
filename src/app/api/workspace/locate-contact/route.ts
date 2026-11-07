@@ -147,6 +147,14 @@ export async function GET(request: Request) {
       for (let page = 0; page < MAX_LOCATE_PAGES; page++) {
         let rows: RpcRow[]
         try {
+          // All 18 parameters, always: the database keeps both the
+          // legacy 8-arg and the current 18-arg overloads of
+          // get_flow_table_rows, and an 8-arg call is AMBIGUOUS
+          // (PGRST203) — every lookup then fails into "not here"
+          // and the deep link degrades to the not-found notice.
+          // The 10 column-filter args are NULL (= inactive, exactly
+          // like the table route's unfiltered reads), so this only
+          // disambiguates — predicates are unchanged.
           const { data, error } = await supabase.rpc(
             'get_flow_table_rows',
             {
@@ -158,6 +166,16 @@ export async function GET(request: Request) {
               p_started_from: null,
               p_started_to: null,
               p_assignee: forceAssignee,
+              p_call_status: null,
+              p_calls_tried_op: null,
+              p_calls_tried_value: null,
+              p_calls_tried_min: null,
+              p_calls_tried_max: null,
+              p_followup_status: null,
+              p_last_contact_from: null,
+              p_last_contact_to: null,
+              p_next_followup_from: null,
+              p_next_followup_to: null,
             },
           )
           if (error) throw error

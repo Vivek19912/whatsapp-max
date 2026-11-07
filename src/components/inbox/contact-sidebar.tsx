@@ -14,7 +14,6 @@ import {
   User,
   Tag as TagIcon,
   StickyNote,
-  Table2,
   Workflow,
   Plus,
   X,
@@ -81,13 +80,13 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   // submission (virtual flow, kind = 'meta_lead_ads'). Label-only:
   // the flow name value below stays exactly as resolved.
   const [isInstantForm, setIsInstantForm] = useState(false);
-  // Verified Workspace lead for this contact (null = none
-  // resolved yet or Meta conversation without a live run).
+  // Verified workspace lead for this contact (null = none
+  // resolved yet or Meta conversation without a live run — then
+  // no button renders at all).
   const [workspaceLead, setWorkspaceLead] = useState<WorkspaceLeadLink | null>(null);
   // Whether the contact has ANY processed Meta submission. False
-  // hides the Workspace Lead section entirely (CTWA/organic/
-  // unknown conversations never show it); true with a null lead
-  // renders the explicit "not linked" state.
+  // hides the button entirely (CTWA/organic/unknown conversations
+  // never show it).
   const [hasMetaSubmission, setHasMetaSubmission] = useState(false);
   const [workspaceLeadResolved, setWorkspaceLeadResolved] = useState(false);
   const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
@@ -684,56 +683,29 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
             </div>
           </div>
 
-          {/* Workspace Lead — contextual navigation for Meta Instant
-              Form conversations only. Shown when the contact has a
-              verified processed submission (server-checked); the link
-              opens that exact lead in its table in a new tab via the
-              existing ?contact= deep link (own pagination, scroll,
-              temporary highlight). Meta conversations without a live
-              run render the explicit not-linked state — never a
-              guessed link, never a badge. */}
-          {workspaceLeadResolved && hasMetaSubmission ? (
+          {/* Verified-lead action for Meta Instant Form
+              conversations with a verified live run: a single
+              full-width button opening that exact lead in its table
+              in a new tab via the existing ?contact= deep link (own
+              pagination, scroll, temporary highlight). Button only —
+              no heading, names, or metadata. */}
+          {workspaceLeadResolved && hasMetaSubmission && workspaceLead ? (
             <>
               <div className="my-4 border-t border-border" />
-              <div>
-                <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  <Table2 className="h-3 w-3" />
-                  Workspace Lead
-                </div>
-                <div className="mt-2 px-1">
-                  {workspaceLead ? (
-                    <>
-                      <p className="break-words text-sm font-medium text-foreground">
-                        {workspaceLead.contact_name ?? contact?.name ?? "Unnamed lead"}
-                      </p>
-                      <p
-                        className="mt-0.5 break-words text-[13px] text-muted-foreground"
-                        title={workspaceLead.flow_name}
-                      >
-                        {workspaceLead.flow_name}
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="mt-2 w-full"
-                        render={
-                          <a
-                            href={workspaceContactHref(workspaceLead.contact_id)}
-                            target="_blank"
-                            rel="noreferrer"
-                          />
-                        }
-                      >
-                        Open in Workspace <ExternalLink className="h-3.5 w-3.5" />
-                      </Button>
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      Workspace lead not linked
-                    </p>
-                  )}
-                </div>
-              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                render={
+                  <a
+                    href={workspaceContactHref(workspaceLead.contact_id)}
+                    target="_blank"
+                    rel="noreferrer"
+                  />
+                }
+              >
+                Open in Workspace <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
             </>
           ) : null}
         </div>

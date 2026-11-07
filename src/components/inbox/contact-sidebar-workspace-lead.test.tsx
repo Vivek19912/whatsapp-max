@@ -27,18 +27,22 @@ describe("contact sidebar Workspace Lead section", () => {
     expect(sidebarSrc).toContain("setHasMetaSubmission(body.meta === true)");
   });
 
-  it("renders the verified lead name, full table name, and new-tab link", () => {
-    expect(sidebarSrc).toContain("Workspace Lead");
-    expect(sidebarSrc).toContain("workspaceLead.contact_name");
-    expect(sidebarSrc).toContain("workspaceLead.flow_name");
+  it("renders the new-tab link from the verified stable id", () => {
     expect(sidebarSrc).toContain("workspaceContactHref(workspaceLead.contact_id)");
     expect(sidebarSrc).toContain('target="_blank"');
     expect(sidebarSrc).toContain("Open in Workspace");
     expect(sidebarSrc).toContain("<ExternalLink");
   });
 
-  it("renders an explicit not-linked state instead of a guessed link", () => {
-    expect(sidebarSrc).toContain("Workspace lead not linked");
+  it("renders no heading, names, table text, or not-linked copy", () => {
+    // Button-only section: heading, icon-adjacent label, lead and
+    // table metadata, and the unlinked notice are all gone. (The
+    // flow-name state and resolution logic stay — only this
+    // section's display shrank.)
+    expect(sidebarSrc).not.toContain("Workspace Lead");
+    expect(sidebarSrc).not.toContain("workspaceLead.contact_name");
+    expect(sidebarSrc).not.toContain("workspaceLead.flow_name");
+    expect(sidebarSrc).not.toContain("Workspace lead not linked");
   });
 
   it("creates no badge, label, or text marking the Inbox origin", () => {
