@@ -316,10 +316,12 @@ describe("result guards", () => {
     const row = h.store.sales_followup_attempts[0];
     expect(row.completed_by).toBe("user-1");
     expect(row.outcome).toBe("No Answer");
-    // Pending datetime cleared; completion day + summary + next action written.
+    // Pending datetime cleared; completion day + next action
+    // written. Customer Response is NEVER touched — results live in
+    // the attempt row and render in Follow-up N Result columns.
     expect(cellValue("f-dt")).toBeNull();
     expect(cellValue("f-lc")).not.toBeNull();
-    expect(cellValue("f-cr")).toContain("No Answer");
+    expect(cellValue("f-cr")).toBeNull();
     expect(cellValue("f-na")).toBe("Schedule Follow-up 2");
     const state = await getState();
     expect((state.json.state as { kind: string }).kind).toBe("completed");

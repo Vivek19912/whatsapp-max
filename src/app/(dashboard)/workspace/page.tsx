@@ -345,6 +345,37 @@ export function cellText(row: FlowTableRow, column: FlowTableColumn): string {
   return row.answers[column.key] ?? '';
 }
 
+/**
+ * Read-only Follow-up N Result cell: outcome badge + two-line
+ * result preview (full text on hover via title; complete record in
+ * Follow-up History). Completed attempts carry an outcome;
+ * unresolved or absent attempts render a clean em dash — never an
+ * invented result. Stored text is never truncated, only painted.
+ */
+export function FollowupResultCell({
+  outcome,
+  resultText,
+}: {
+  outcome: string | null;
+  resultText: string | null;
+}) {
+  if (!outcome) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  return (
+    <span className="grid max-w-56 gap-1" title={resultText ?? outcome}>
+      <Badge variant="outline" className="w-fit text-xs font-normal">
+        {outcome}
+      </Badge>
+      {resultText && (
+        <span className="line-clamp-2 text-[13px] break-words whitespace-normal">
+          {resultText}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function WorkspacePage() {
   const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();
   // Agents see Workspace with ONLY their own assigned Meta leads
@@ -1383,27 +1414,61 @@ export default function WorkspacePage() {
   // keyed by the stable legacy visibility id (saved widths are
   // preserved); `fallbackIds` lets overrides persisted under the
   // legacy id still apply after the key namespacing.
+  //
+  // Sequential sales follow-up results ride along as synthetic
+  // entries (visId/widthId `followup-result:N`): they render
+  // immediately after the Customer Response column (or at the end
+  // of the business columns when it is absent/hidden), paint from
+  // the same positional sequence, and resolve widths like any
+  // column without a saved width. They never enter the visibility
+  // or Columns-menu systems — display-only, read-only, derived
+  // from sales_followup_attempts.
+  const followupResultCount =
+    payload?.followupResults && payload.followupResults.maxAttempt > 0
+      ? payload.followupResults.maxAttempt
+      : 0;
+  const customerResponseIdx = customFieldsOrdered.findIndex(
+    (f) => f.name.trim().toLowerCase() === 'customer response'
+  );
   const visibleHeaderOrder = useMemo(
     (): Array<{
       visId: string;
       label: string;
       widthId: string;
       fallbackIds?: readonly string[];
-    }> => [
-      ...(rowVisible ? [{ visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID }] : []),
-      ...flowColumnsVisible.map((c) => ({
-        visId: flowColumnRenderKey(c),
-        label: c.label,
-        widthId: flowColumnVisId(c.key),
-        fallbackIds: [flowColumnVisId(c.key)],
-      })),
-      ...customFieldsOrdered.map((f) => ({
+    }> => {
+      const business = customFieldsOrdered.map((f) => ({
         visId: customFieldVisId(f.id),
         label: f.name,
         widthId: customFieldVisId(f.id),
-      })),
-    ],
-    [rowVisible, flowColumnsVisible, customFieldsOrdered]
+      }));
+      if (followupResultCount > 0) {
+        const synthetic = Array.from(
+          { length: followupResultCount },
+          (_, i) => ({
+            visId: `followup-result:${i + 1}`,
+            label: `Follow-up ${i + 1} Result`,
+            widthId: `followup-result:${i + 1}`,
+          })
+        );
+        const at =
+          customerResponseIdx === -1
+            ? business.length
+            : customerResponseIdx + 1;
+        business.splice(at, 0, ...synthetic);
+      }
+      return [
+        ...(rowVisible ? [{ visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID }] : []),
+        ...flowColumnsVisible.map((c) => ({
+          visId: flowColumnRenderKey(c),
+          label: c.label,
+          widthId: flowColumnVisId(c.key),
+          fallbackIds: [flowColumnVisId(c.key)],
+        })),
+        ...business,
+      ];
+    },
+    [rowVisible, flowColumnsVisible, customFieldsOrdered, followupResultCount, customerResponseIdx]
   );
 
   // Positional backgrounds index-aligned with visibleHeaderOrder:
@@ -1463,6 +1528,33 @@ export default function WorkspacePage() {
     },
     [visibleHeaderOrder, headerBackgrounds, effectiveColumnWidths]
   );
+
+  // Order positions for the business columns and the synthetic
+  // Follow-up N Result block (mirrors the visibleHeaderOrder
+  // splice above): customs after Customer Response shift past the
+  // generated entries; the synthetic block starts right after
+  // Customer Response (or at the business tail when it is
+  // absent/hidden). Dial helpers consume no order slot anywhere.
+  const businessOrderBase =
+    (rowVisible ? 1 : 0) + flowColumnsVisible.length;
+  const synthOrderBase =
+    businessOrderBase +
+    (customerResponseIdx === -1
+      ? customFieldsOrdered.length
+      : customerResponseIdx + 1);
+  const customOrderAt = (customIdx: number) =>
+    businessOrderBase +
+    customIdx +
+    (customerResponseIdx !== -1 && customIdx > customerResponseIdx
+      ? followupResultCount
+      : 0);
+  const followupResultNumbers = useMemo(
+    () => Array.from({ length: followupResultCount }, (_, i) => i + 1),
+    [followupResultCount]
+  );
+  // Attempt results for this page's rows, keyed by run id then
+  // attempt number (strings — JSON object keys).
+  const followupResultValues = payload?.followupResults?.values ?? {};
 
   // Synced horizontal scrolling + frozen leading columns. One
   // scroller owns the truth (the Table primitive's inner
@@ -2173,8 +2265,8 @@ export default function WorkspacePage() {
                         );
                       })}
                       {customFieldsOrdered.map((f, customIdx) => (
+                        <Fragment key={f.id}>
                     <TableHead
-                      key={f.id}
                       className={cn(
                         'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
                             // Customer Response / Next Action headers
@@ -2185,11 +2277,7 @@ export default function WorkspacePage() {
                             // text stays left-aligned.
                             isWideTextColumnName(f.name) && 'text-center'
                           )}
-                            style={headStyleAt(
-                              (rowVisible ? 1 : 0) +
-                                flowColumnsVisible.length +
-                                customIdx
-                            )}
+                            style={headStyleAt(customOrderAt(customIdx))}
                           >
                             {formatColumnLabel(f.name)}
                           {canSendMessages && (
@@ -2205,7 +2293,33 @@ export default function WorkspacePage() {
                             />
                           )}
                         </TableHead>
+                          {/* Generated Follow-up N Result headers sit
+                              right after Customer Response (no resize
+                              handles: display-only, read-only). */}
+                          {customIdx === customerResponseIdx &&
+                            followupResultNumbers.map((n, k) => (
+                              <TableHead
+                                key={`followup-result:${n}`}
+                                className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                                style={headStyleAt(synthOrderBase + k)}
+                              >
+                                {`Follow-up ${n} Result`}
+                              </TableHead>
+                            ))}
+                        </Fragment>
                       ))}
+                      {/* No Customer Response column (absent/hidden):
+                          generated headers trail the business tail. */}
+                      {customerResponseIdx === -1 &&
+                        followupResultNumbers.map((n, k) => (
+                          <TableHead
+                            key={`followup-result:${n}`}
+                            className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                            style={headStyleAt(synthOrderBase + k)}
+                          >
+                            {`Follow-up ${n} Result`}
+                          </TableHead>
+                        ))}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2393,9 +2507,9 @@ export default function WorkspacePage() {
                           );
                         })}
                         {flowId &&
-                          customFieldsOrdered.map((f) => (
+                          customFieldsOrdered.map((f, customIdx) => (
+                            <Fragment key={f.id}>
                             <TableCell
-                              key={f.id}
                               className={cn(
                                 'overflow-hidden border-r border-border last:border-r-0',
                                 // Doubled natural cap for the two
@@ -2477,7 +2591,49 @@ export default function WorkspacePage() {
                                 }
                               />
                             </TableCell>
+                              {/* Generated Follow-up N Result cells
+                                  mirror the header positions above:
+                                  completed attempts show outcome +
+                                  preview, everything else an em dash. */}
+                              {(customIdx === customerResponseIdx ||
+                                (customerResponseIdx === -1 &&
+                                  customIdx === customFieldsOrdered.length - 1)) &&
+                                followupResultNumbers.map((n) => {
+                                  const value =
+                                    followupResultValues[row.runId]?.[String(n)];
+                                  return (
+                                    <TableCell
+                                      key={`followup-result:${n}`}
+                                      className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
+                                    >
+                                      <FollowupResultCell
+                                        outcome={value?.outcome ?? null}
+                                        resultText={value?.result_text ?? null}
+                                      />
+                                    </TableCell>
+                                  );
+                                })}
+                            </Fragment>
                           ))}
+                        {/* No Customer Response and no custom columns at
+                            all: generated cells trail the row. */}
+                        {followupResultNumbers.length > 0 &&
+                          customFieldsOrdered.length === 0 &&
+                          followupResultNumbers.map((n) => {
+                            const value =
+                              followupResultValues[row.runId]?.[String(n)];
+                            return (
+                              <TableCell
+                                key={`followup-result:${n}`}
+                                className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
+                              >
+                                <FollowupResultCell
+                                  outcome={value?.outcome ?? null}
+                                  resultText={value?.result_text ?? null}
+                                />
+                              </TableCell>
+                            );
+                          })}
                       </TableRow>
                     ))}
                   </TableBody>

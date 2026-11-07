@@ -7,7 +7,6 @@ import {
   FOLLOWUP_OUTCOMES,
   isFollowupOutcome,
   nextActionForState,
-  responseSummaryForResult,
   validateFollowupResult,
   validateScheduledAt,
   type SalesFollowupAttempt,
@@ -170,12 +169,13 @@ describe("display builders", () => {
     ).toBe("Schedule Follow-up 2");
   });
 
-  it("summarizes results concisely for the Customer Response cell", () => {
-    const summary = responseSummaryForResult("No Answer", "  Rang twice,\nno pickup.  ");
-    expect(summary).toBe("No Answer — Rang twice, no pickup.");
-    expect(
-      responseSummaryForResult("Other", "x".repeat(500)).length,
-    ).toBeLessThanOrEqual(200);
+  it("never summarizes results into Customer Response (dedicated columns own display)", async () => {
+    // responseSummaryForResult is intentionally gone: results live
+    // in sales_followup_attempts and render in Follow-up N Result
+    // columns — Customer Response keeps only what salespeople type.
+    const api = await import("@/lib/followups/attempts");
+    expect("responseSummaryForResult" in api).toBe(false);
+    expect("FOLLOWUP_RESPONSE_SUMMARY_MAX" in api).toBe(false);
   });
 
   it("badges every attempt state distinctly", () => {

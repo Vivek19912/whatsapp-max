@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FOLLOWUP_MESSAGE_MAX,
   AGENT_NUMBER_DEFAULT_COUNTRY_CODE,
+  displayFollowupStatus,
   formatAgentNumberForDisplay,
   isFollowupStatus,
   normalizeAgentWhatsappNumber,
@@ -147,5 +148,47 @@ describe("reminder number display formatting (stored value untouched)", () => {
     expect(formatAgentNumberForDisplay("+91 63874 95389")).toBe("+91 63874 95389");
     expect(formatAgentNumberForDisplay("")).toBe("");
     expect(formatAgentNumberForDisplay(null)).toBe("");
+  });
+});
+
+describe("display delivery state (Meta acceptance is not delivery)", () => {
+  const base = {
+    status: "sent",
+    delivered_at: null,
+    read_at: null,
+  } as const;
+
+  it("keeps non-sent statuses verbatim", () => {
+    for (const status of [
+      "scheduled",
+      "processing",
+      "failed",
+      "cancelled",
+    ] as const) {
+      expect(
+        displayFollowupStatus({ status, delivered_at: null, read_at: null }),
+      ).toBe(status);
+    }
+  });
+
+  it("treats bare sent as Meta acceptance only", () => {
+    expect(displayFollowupStatus({ ...base })).toBe("sent");
+  });
+
+  it("requires delivered_at for Delivered, read_at for Read", () => {
+    expect(
+      displayFollowupStatus({ ...base, delivered_at: "2026-11-08T10:30:18.000Z" }),
+    ).toBe("delivered");
+    expect(
+      displayFollowupStatus({
+        ...base,
+        delivered_at: "2026-11-08T10:30:18.000Z",
+        read_at: "2026-11-08T10:34:26.000Z",
+      }),
+    ).toBe("read");
+    // Read wins even if delivered_at is somehow missing.
+    expect(
+      displayFollowupStatus({ ...base, read_at: "2026-11-08T10:34:26.000Z" }),
+    ).toBe("read");
   });
 });

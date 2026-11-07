@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import {
   nextActionForState,
-  responseSummaryForResult,
   validateFollowupResult,
 } from "@/lib/followups/attempts";
 import {
@@ -101,12 +100,13 @@ export async function POST(
     const lastContactField = fieldIds.lastContactFieldId
       ? await loadWritableField(supabase, accountId, fieldIds.lastContactFieldId)
       : null;
-    const customerResponseField = fieldIds.customerResponseFieldId
-      ? await loadWritableField(supabase, accountId, fieldIds.customerResponseFieldId)
-      : null;
 
     // No next attempt scheduled: clear the pending datetime; the
-    // completion day (UTC) becomes Last Contact Date.
+    // completion day (UTC) becomes Last Contact Date. Customer
+    // Response is NEVER written here — results live in
+    // sales_followup_attempts and render in their own Follow-up N
+    // Result columns; existing Customer Response values stay
+    // exactly as the salesperson left them.
     await writeLeadCell({ supabase, accountId, runId, field: followupField, value: null });
     await writeLeadCell({
       supabase,
@@ -114,13 +114,6 @@ export async function POST(
       runId,
       field: lastContactField,
       value: completedAt.slice(0, 10),
-    });
-    await writeLeadCell({
-      supabase,
-      accountId,
-      runId,
-      field: customerResponseField,
-      value: responseSummaryForResult(outcome, resultText),
     });
     const attempts = await loadAttempts(supabase, accountId, runId);
     const maxNumber = Math.max(...attempts.map((a) => Number(a.attempt_number)));

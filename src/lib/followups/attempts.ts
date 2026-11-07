@@ -39,9 +39,6 @@ export function isFollowupOutcome(value: unknown): value is FollowupOutcome {
 /** Maximum result/notes length (server + client enforced). */
 export const FOLLOWUP_RESULT_MAX = 2000;
 
-/** Summary length written into the Customer Response cell. */
-export const FOLLOWUP_RESPONSE_SUMMARY_MAX = 160;
-
 export interface SalesFollowupAttempt {
   id: string;
   account_id: string;
@@ -165,19 +162,6 @@ export function nextActionForState(
     case "closed":
       return "View Follow-up History";
   }
-}
-
-/** Concise Customer Response summary for a completed attempt. */
-export function responseSummaryForResult(
-  outcome: string,
-  resultText: string,
-): string {
-  const snippet = resultText.trim().replace(/\s+/g, " ");
-  const cut =
-    snippet.length > FOLLOWUP_RESPONSE_SUMMARY_MAX
-      ? `${snippet.slice(0, FOLLOWUP_RESPONSE_SUMMARY_MAX - 1).trimEnd()}…`
-      : snippet;
-  return `${outcome} — ${cut}`;
 }
 
 /** Badge copy for the history timeline + dialogs. */

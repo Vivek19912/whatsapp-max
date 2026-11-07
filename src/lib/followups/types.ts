@@ -77,6 +77,55 @@ export interface Followup {
   /** List-view enrichment only (never persisted on the row). */
   contact_name?: string | null;
   contact_phone?: string | null;
+  /** Creator profile resolved server-side (null when unavailable). */
+  creator?: FollowupCreator | null;
+  /** Optional origin columns (absent on pre-migration schemas). */
+  source_kind?: string | null;
+  source_run_id?: string | null;
+  recipient_custom?: boolean | null;
+  /** Resolved Workspace context (null when not resolvable). */
+  workspace?: FollowupWorkspaceContext | null;
+}
+
+/**
+ * Display delivery state. `sent` means Meta accepted the request
+ * only — Delivered requires `delivered_at`, Read requires
+ * `read_at`. NULL receipts imply nothing (no callback yet).
+ */
+export type FollowupDisplayStatus =
+  | "scheduled"
+  | "processing"
+  | "sent"
+  | "delivered"
+  | "read"
+  | "failed"
+  | "cancelled";
+
+export function displayFollowupStatus(
+  row: Pick<Followup, "status" | "delivered_at" | "read_at">,
+): FollowupDisplayStatus {
+  if (row.status === "sent") {
+    if (row.read_at) return "read";
+    if (row.delivered_at) return "delivered";
+    return "sent";
+  }
+  return row.status;
+}
+
+/** Creator profile as exposed on reminder rows (email admin+ only). */
+export interface FollowupCreator {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  account_role: string | null;
+}
+
+/** Workspace origin resolved from source_run_id (all nullable). */
+export interface FollowupWorkspaceContext {
+  flow_name: string | null;
+  lead_name: string | null;
+  lead_phone: string | null;
+  assignee_name: string | null;
 }
 
 /** Meta text-message body cap — mirrors WhatsApp's 4096 limit. */

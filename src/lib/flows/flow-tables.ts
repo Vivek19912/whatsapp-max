@@ -133,6 +133,21 @@ export interface FlowTablePayload {
    */
   flowOverrides?: Record<string, Record<string, string | null>>;
   /**
+   * Sequential sales follow-up results for this page's runs.
+   * `maxAttempt` (table-wide) fixes the generated Follow-up N
+   * Result columns; `values` maps run id → attempt number →
+   * outcome/result (completed attempts carry both; unresolved
+   * attempts render as an em dash). Absent on older responses —
+   * always treated as no columns.
+   */
+  followupResults?: {
+    maxAttempt: number;
+    values: Record<
+      string,
+      Record<string, { outcome: string | null; result_text: string | null }>
+    >;
+  };
+  /**
    * Media messages per conversation for this page's runs, keyed by
    * conversation id. Additive, read-only enrichment (same pattern as
    * sourceUrl/customValues/flowOverrides): lets the Workspace render a

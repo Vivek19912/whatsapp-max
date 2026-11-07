@@ -16,7 +16,6 @@ export interface LeadFieldIds {
   followupFieldId: string | null;
   nextActionFieldId: string | null;
   lastContactFieldId: string | null;
-  customerResponseFieldId: string | null;
 }
 
 export async function loadFlow(
@@ -142,7 +141,6 @@ export async function loadLeadFieldIds(
     followupFieldId: followup?.id ?? null,
     nextActionFieldId: byName.get("next action")?.id ?? null,
     lastContactFieldId: byName.get("last contact date")?.id ?? null,
-    customerResponseFieldId: byName.get("customer response")?.id ?? null,
   };
 }
 
