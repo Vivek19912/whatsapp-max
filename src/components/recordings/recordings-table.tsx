@@ -1,15 +1,25 @@
 'use client';
 
 import {
+  Link2,
   Minus,
+  Pause,
   Play,
+  X,
 } from 'lucide-react';
+import { useState } from 'react';
 
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import { Skeleton } from '@/components/dashboard/skeleton';
 import { PhoneHandsetIcon } from '@/components/icons/call-type-icons';
 import { WhatsappIcon } from '@/components/icons/whatsapp-icon';
@@ -28,6 +38,8 @@ import {
   type WorkspacePageSize,
 } from '@/lib/flows/workspace-pagination';
 import { formatRecordedIndiaParts, type CallRecording } from '@/lib/recordings/recordings';
+import { RecordingPlayer } from './recording-player';
+import { cn } from '@/lib/utils';
 
 export const PAGE_SIZE: WorkspacePageSize = DEFAULT_WORKSPACE_PAGE_SIZE;
 
@@ -153,10 +165,16 @@ function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; cr
 
 /**
  * Recordings table: No. | Time | Lead Name | Workspace Table |
- * Call | Duration | Salesperson | Play. Display-only row numbers
- * continue across pages. No filename, no size, no storage internals.
- * Any row click selects the recording (drawer); the Play button
- * selects it and autoplays in the drawer.
+ * Call | Duration | Salesperson | Recording. Display-only row
+ * numbers continue across pages. No filename, no size, no storage
+ * internals.
+ *
+ * The Recording column stays compact: one small Play button plus
+ * the duration. The full audio player lives in a floating
+ * popover anchored to that button (never an expanded row, never
+ * a sidebar), so row height and column width never change.
+ * Row click opens the same popover ready to play; the Play
+ * button opens it autoplaying.
  *
  * Visual language (header, dividers, hover, selection, footer)
  * follows the Workspace table: same shadcn primitives, same
@@ -165,25 +183,49 @@ function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; cr
 export function RecordingsTable({
   recordings,
   loading,
-  selectedId,
-  onSelect,
   page,
   total,
   pageSize,
   onPage,
   onPageSize,
+  onFindLead,
 }: {
   recordings: CallRecording[];
   loading: boolean;
-  selectedId: string | null;
-  onSelect: (r: CallRecording, autoplay: boolean) => void;
   page: number;
   total: number;
   pageSize: WorkspacePageSize;
   onPage: (p: number) => void;
   onPageSize: (size: WorkspacePageSize) => void;
+  onFindLead?: (r: CallRecording) => void;
 }) {
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  // Single floating player: at most one popover open at a time.
+  // `autoplay` is set only by the Play-button click (row clicks
+  // open ready-to-play); both reset on close so a reopened
+  // player never inherits stale intent.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [autoplay, setAutoplay] = useState(false);
+
+  const closePlayer = () => {
+    setOpenId(null);
+    setAutoplay(false);
+  };
+
+  // Filtering, pagination, or refresh may remove the open
+  // recording from the rendered rows — close its (now stale)
+  // popover rather than floating an orphaned player. Adjusted
+  // during render (not in an effect): React re-renders
+  // immediately before paint, with no cascading effect cycle.
+  const [prevRecordings, setPrevRecordings] = useState(recordings);
+  if (prevRecordings !== recordings) {
+    setPrevRecordings(recordings);
+    if (openId !== null && !recordings.some((r) => r.id === openId)) {
+      setOpenId(null);
+      setAutoplay(false);
+    }
+  }
 
   return (
     <div>
@@ -203,7 +245,7 @@ export function RecordingsTable({
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Call</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Duration</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Salesperson</TableHead>
-              <TableHead className="h-16 px-4 align-middle text-right text-[15px] font-bold border-r border-border border-b last:border-r-0">Play</TableHead>
+              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Recording</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -218,13 +260,16 @@ export function RecordingsTable({
             ) : (
               recordings.map((r, i) => {
                 const linked = !!r.contact_id;
-                const active = r.id === selectedId;
+                const playerOpen = r.id === openId;
                 return (
                   <TableRow
                     key={r.id}
-                    aria-selected={active}
-                    data-state={active ? 'selected' : undefined}
-                    onClick={() => onSelect(r, false)}
+                    aria-selected={playerOpen}
+                    data-state={playerOpen ? 'selected' : undefined}
+                    onClick={() => {
+                      setOpenId(r.id);
+                      setAutoplay(false);
+                    }}
                     className="cursor-pointer"
                   >
                     <TableCell className="border-r border-border px-4 tabular-nums text-muted-foreground last:border-r-0">
@@ -261,19 +306,111 @@ export function RecordingsTable({
                     <TableCell className="max-w-[140px] truncate border-r border-border px-4 text-[13px] last:border-r-0">
                       {r.uploader_name ?? 'Unknown'}
                     </TableCell>
-                    <TableCell className="border-r border-border px-4 text-right last:border-r-0">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Play recording${r.contact_name ? ` of ${r.contact_name}` : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelect(r, true);
+                    {/* Compact Recording cell: small Play button plus
+                        duration only. The full player renders in a
+                        floating popover (portaled — never in the row),
+                        so this column stays narrow and row height
+                        never changes. */}
+                    <TableCell className="border-r border-border px-4 last:border-r-0">
+                      <Popover
+                        open={playerOpen}
+                        onOpenChange={(next) => {
+                          if (next) {
+                            setOpenId(r.id);
+                          } else if (openId === r.id) {
+                            closePlayer();
+                          }
                         }}
-                        className="h-9 w-9 rounded-full bg-muted text-foreground hover:bg-muted"
                       >
-                        <Play className="h-4 w-4" />
-                      </Button>
+                        <span className="inline-flex items-center gap-2">
+                          <PopoverTrigger
+                            render={
+                              <button
+                                type="button"
+                                aria-label={`Play recording${r.contact_name ? ` of ${r.contact_name}` : ''}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAutoplay(true);
+                                }}
+                                className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700"
+                              />
+                            }
+                          >
+                            {playerOpen ? (
+                              <Pause className="h-4 w-4" />
+                            ) : (
+                              <Play className="ml-0.5 h-4 w-4" />
+                            )}
+                          </PopoverTrigger>
+                          <span className="text-[13px] tabular-nums text-muted-foreground">
+                            {formatDuration(r.duration_seconds)}
+                          </span>
+                        </span>
+                        <PopoverContent
+                          side="top"
+                          align="center"
+                          sideOffset={8}
+                          collisionPadding={12}
+                          collisionAvoidance={{ side: 'flip', align: 'shift' }}
+                          className="w-80 max-w-[calc(100vw-2rem)] p-4"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span
+                              aria-hidden
+                              className={cn(
+                                'flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-base font-semibold',
+                                linked
+                                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
+                                  : 'bg-muted text-muted-foreground'
+                              )}
+                            >
+                              {linked ? leadInitial(r.contact_name) : 'U'}
+                            </span>
+                            <PopoverTitle className="min-w-0 flex-1 font-heading text-sm font-medium">
+                              <span className="block truncate text-foreground">
+                                {linked ? (r.contact_name ?? 'Unlinked') : 'Unlinked'}
+                              </span>
+                              {r.workspace_table_name ? (
+                                <span className="block truncate text-xs font-normal text-muted-foreground">
+                                  {r.workspace_table_name}
+                                </span>
+                              ) : null}
+                            </PopoverTitle>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              aria-label="Close player"
+                              onClick={closePlayer}
+                              className="h-8 w-8 shrink-0"
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          {/* Keyed by recording: switching recordings
+                              mounts a fresh player (fresh progress,
+                              speed, volume) and unmounts the old one,
+                              whose cleanup pauses its audio — no
+                              background playback, no stale events. */}
+                          <RecordingPlayer
+                            key={r.id}
+                            recordingId={r.id}
+                            autoplay={autoplay}
+                          />
+                          {!linked && onFindLead ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="w-full"
+                              onClick={() => {
+                                closePlayer();
+                                onFindLead(r);
+                              }}
+                            >
+                              <Link2 className="h-4 w-4" /> Find / Link Lead
+                            </Button>
+                          ) : null}
+                        </PopoverContent>
+                      </Popover>
                     </TableCell>
                   </TableRow>
                 );

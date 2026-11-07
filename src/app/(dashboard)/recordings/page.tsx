@@ -19,7 +19,6 @@ import {
   type RecordingsFilters,
   type RecordingsSummary,
 } from '@/lib/recordings/library';
-import { RecordingDrawer } from '@/components/recordings/recording-drawer';
 import { RecordingsToolbar } from '@/components/recordings/recordings-toolbar';
 import { RecordingsTable } from '@/components/recordings/recordings-table';
 import { SummaryCards } from '@/components/recordings/summary-cards';
@@ -71,8 +70,6 @@ export default function RecordingsPage() {
   const [loading, setLoading] = useState(true);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<CallRecording | null>(null);
-  const [autoplay, setAutoplay] = useState(false);
   const [linkTarget, setLinkTarget] = useState<UnlinkedRecording | null>(null);
 
   const debouncedQ = useDebouncedValue(filters.q, 300);
@@ -101,11 +98,6 @@ export default function RecordingsPage() {
       if (controller.signal.aborted) return;
       setRecordings(body.recordings);
       setTotalCount(body.total);
-      setSelected((prev) => {
-        if (!prev) return prev;
-        const fresh = body.recordings.find((r) => r.id === prev.id) ?? null;
-        return fresh;
-      });
     } catch (err) {
       if (controller.signal.aborted) return;
       setRecordings([]);
@@ -178,15 +170,9 @@ export default function RecordingsPage() {
     setPage(0);
   }, []);
 
-  const handleSelect = useCallback((r: CallRecording, play: boolean) => {
-    setSelected(r);
-    setAutoplay(play);
-  }, []);
-
   const handleLinked = useCallback(() => {
     setLinkTarget(null);
-    // Refresh so the row (and the open drawer, via the list merge
-    // in fetchList) shows its new lead.
+    // Refresh so the row shows its new lead.
     void fetchList();
     void fetchSummary();
   }, [fetchList, fetchSummary]);
@@ -251,25 +237,14 @@ export default function RecordingsPage() {
         <RecordingsTable
           recordings={recordings}
           loading={loading}
-          selectedId={selected?.id ?? null}
-          onSelect={handleSelect}
           page={page}
           total={totalCount}
           pageSize={pageSize}
           onPage={setPage}
           onPageSize={updatePageSize}
+          onFindLead={(r) => setLinkTarget(toUnlinked(r))}
         />
       )}
-
-      <RecordingDrawer
-        recording={selected}
-        onClose={() => {
-          setSelected(null);
-          setAutoplay(false);
-        }}
-        onFindLead={(r) => setLinkTarget(toUnlinked(r))}
-        autoplay={autoplay}
-      />
 
       <LinkCallDrawer
         recording={linkTarget}

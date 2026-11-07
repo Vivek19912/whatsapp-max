@@ -52,8 +52,6 @@ function html(
     <RecordingsTable
       recordings={recordings}
       loading={false}
-      selectedId={null}
-      onSelect={() => {}}
       page={0}
       total={recordings.length}
       pageSize={PAGE_SIZE}
@@ -78,7 +76,7 @@ function rowNumbers(markup: string): string[] {
 }
 
 describe("RecordingsTable columns", () => {
-  it("orders headers No. | Time | Lead Name | Workspace Table | Call | Duration | Salesperson | Play", () => {
+  it("orders headers No. | Time | Lead Name | Workspace Table | Call | Duration | Salesperson | Recording", () => {
     expect(headerCells(html())).toEqual([
       "No.",
       "Time",
@@ -87,7 +85,7 @@ describe("RecordingsTable columns", () => {
       "Call",
       "Duration",
       "Salesperson",
-      "Play",
+      "Recording",
     ]);
   });
 
@@ -124,9 +122,17 @@ describe("RecordingsTable columns", () => {
     expect(tbody).toContain("border-r");
   });
 
-  it("marks the selected row via data-state like the design system", () => {
-    const out = html([recording()], { selectedId: "r-1" });
-    expect(out).toContain('data-state="selected"');
+  it("marks the open player's row via data-state like the design system", () => {
+    // SSR renders every popover closed, so no row carries the
+    // selected state by default — selection follows the single
+    // openId, asserted in source below.
+    const out = html();
+    expect(out).not.toContain('data-state="selected"');
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("data-state={playerOpen ? 'selected' : undefined}");
   });
 });
 
@@ -393,7 +399,7 @@ describe("Recordings page container", () => {
   });
 });
 
-describe("Lead and Play behavior", () => {
+describe("Lead and Recording behavior", () => {
   // Lead cells hold only the name span now (the row's Play button
   // legitimately keeps its own rounded-full shape elsewhere).
   function leadCell(markup: string, name: string): string {
@@ -425,5 +431,105 @@ describe("Lead and Play behavior", () => {
   it("keeps Play buttons with recording labels", () => {
     const out = html();
     expect(out).toContain('aria-label="Play recording of Akash"');
+  });
+});
+
+describe("Compact Recording column", () => {
+  it("headers the last column Recording, not Play", () => {
+    expect(headerCells(html())).toContain("Recording");
+    expect(headerCells(html())).not.toContain("Play");
+  });
+
+  it("shows only a Play button and duration per row by default", () => {
+    // 16s fixture renders as 0:16 beside the trigger.
+    const out = html();
+    expect(out).toContain('aria-label="Play recording of Akash"');
+    expect(out).toContain("0:16");
+  });
+
+  it("keeps the Play button small, blue, and circular", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("h-8 w-8");
+    expect(src).toContain("rounded-full bg-blue-600");
+  });
+
+  it("renders no player chrome (seek, speeds, volume, audio) until opened", () => {
+    // Closed popovers unmount their content: the row carries no
+    // progress bar, speed group, sliders, or audio element.
+    const out = html();
+    expect(out).not.toContain("<audio");
+    expect(out).not.toContain("Playback speed");
+    expect(out).not.toContain('aria-label="Seek"');
+    expect(out).not.toContain('aria-label="Volume"');
+    expect(out).not.toContain("Close player");
+  });
+
+  it("opens no recording-details sidebar", () => {
+    const pageSrc = readFileSync(
+      `${root}/src/app/(dashboard)/recordings/page.tsx`,
+      "utf8",
+    );
+    expect(pageSrc).not.toContain("RecordingDrawer");
+    expect(pageSrc).not.toContain("recording-drawer");
+  });
+});
+
+describe("Floating player popover", () => {
+  const src = () =>
+    readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+
+  it("portals the player so rows never expand", () => {
+    // The player is keyed per recording inside the popover
+    // content; the shared ui/popover wrapper renders that
+    // content in a Portal, outside the table layout entirely.
+    expect(src()).toContain("PopoverContent");
+    expect(src()).toContain("<RecordingPlayer");
+    expect(src()).toContain("key={r.id}");
+    const popover = readFileSync(
+      `${root}/src/components/ui/popover.tsx`,
+      "utf8",
+    );
+    expect(popover).toContain("PopoverPrimitive.Portal");
+  });
+
+  it("prefers above the row with flip/shift collision handling", () => {
+    expect(src()).toContain('side="top"');
+    expect(src()).toContain("collisionAvoidance={{ side: 'flip', align: 'shift' }}");
+    expect(src()).toContain("collisionPadding={12}");
+    expect(src()).toContain("max-w-[calc(100vw-2rem)]");
+  });
+
+  it("holds a single open player and resets autoplay on close", () => {
+    expect(src()).toContain("const [openId, setOpenId] = useState<string | null>(null)");
+    expect(src()).toContain("open={playerOpen}");
+    expect(src()).toContain("else if (openId === r.id)");
+  });
+
+  it("closes stale players when filtering or pagination removes the row", () => {
+    expect(src()).toContain("!recordings.some((r) => r.id === openId)");
+  });
+
+  it("pauses audio when the player unmounts", () => {
+    const player = readFileSync(
+      `${root}/src/components/recordings/recording-player.tsx`,
+      "utf8",
+    );
+    expect(player).toContain("el?.pause()");
+  });
+
+  it("keeps Find / Link Lead reachable for unlinked recordings", () => {
+    expect(src()).toContain("Find / Link Lead");
+    expect(src()).toContain("onFindLead(r)");
+    const pageSrc = readFileSync(
+      `${root}/src/app/(dashboard)/recordings/page.tsx`,
+      "utf8",
+    );
+    expect(pageSrc).toContain("LinkCallDrawer");
   });
 });

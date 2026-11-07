@@ -93,7 +93,6 @@ describe("WhatsappIcon sizing and accessibility", () => {
 describe("Single WhatsApp icon source across user-facing UI", () => {
   const consumers = [
     "src/components/recordings/recordings-table.tsx",
-    "src/components/recordings/recording-drawer.tsx",
     "src/components/recordings/summary-cards.tsx",
     "src/components/calls/call-period-card.tsx",
     "src/components/team-members/recording-config-dialog.tsx",
@@ -113,11 +112,6 @@ describe("Single WhatsApp icon source across user-facing UI", () => {
     );
     expect(table).not.toContain("MessageCircle");
     expect(table).not.toContain("WhatsappBrandIcon");
-    const drawer = readFileSync(
-      `${root}/src/components/recordings/recording-drawer.tsx`,
-      "utf8",
-    );
-    expect(drawer).not.toContain("MessageCircle");
     const summary = readFileSync(
       `${root}/src/components/recordings/summary-cards.tsx`,
       "utf8",
