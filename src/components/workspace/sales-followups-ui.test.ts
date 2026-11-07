@@ -63,6 +63,13 @@ describe("history dialog", () => {
     expect(historySrc).toContain("onScheduleNext");
     expect(historySrc).toContain("onRecordResult(active)");
   });
+
+  it("offers Edit Schedule only for future unresolved attempts", () => {
+    expect(historySrc).toContain("onEditSchedule");
+    expect(historySrc).toContain("Edit Schedule");
+    expect(historySrc).toContain("attempt.completed_at === null");
+    expect(historySrc).toContain("new Date(attempt.scheduled_at).getTime() > Date.now()");
+  });
 });
 
 describe("schedule dialog sequencing", () => {
@@ -107,6 +114,15 @@ describe("workspace page wiring", () => {
     expect(pageSrc).toContain("<RecordFollowupResultDialog");
     expect(pageSrc).toContain("<FollowupHistoryDialog");
     expect(pageSrc).toContain("setHistoryRefreshSeq((n) => n + 1)");
+  });
+
+  it("opens reschedule mode from history with the saved instant", () => {
+    // initialValue carries the stored ISO so the dialog prefills
+    // the saved date/time (never tomorrow/1:30 PM); the PATCH
+    // updates the same attempt in place.
+    expect(pageSrc).toContain("onEditSchedule={(attempt)");
+    expect(pageSrc).toContain("initialValue: attempt.scheduled_at");
+    expect(pageSrc).toContain("rescheduleAttemptId: attempt.id");
   });
 
   it("adds follow-up history to the row actions menu (Meta only)", () => {

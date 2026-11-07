@@ -2000,7 +2000,10 @@ describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
         maxAttempt: number;
         values: Record<
           string,
-          Record<string, { outcome: string | null; result_text: string | null }>
+          Record<
+            string,
+            { outcome: string | null; result_text: string | null; completed_at: string | null }
+          >
         >;
       };
     };
@@ -2012,6 +2015,7 @@ describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
       flow_id: "flow-1",
       outcome: null,
       result_text: null,
+      completed_at: null,
       ...over,
     };
   }
@@ -2028,6 +2032,7 @@ describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
         attempt_number: 1,
         outcome: "Connected — Interested",
         result_text: "Wants Kashmir details.",
+        completed_at: "2026-11-07T12:13:00.000Z",
       }),
       attemptRow({ flow_run_id: "run-1", attempt_number: 2 }),
       attemptRow({
@@ -2035,6 +2040,7 @@ describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
         attempt_number: 1,
         outcome: "No Answer",
         result_text: "Rang twice.",
+        completed_at: "2026-11-08T09:00:00.000Z",
       }),
       // Foreign account/flow rows never leak in.
       attemptRow({ account_id: "acct-2", flow_run_id: "run-9", attempt_number: 9 }),
@@ -2045,13 +2051,18 @@ describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
     expect(json.followupResults.values["run-1"]["1"]).toEqual({
       outcome: "Connected — Interested",
       result_text: "Wants Kashmir details.",
+      completed_at: "2026-11-07T12:13:00.000Z",
     });
     // Unresolved attempts ride along with null outcome (em dash).
     expect(json.followupResults.values["run-1"]["2"]).toEqual({
       outcome: null,
       result_text: null,
+      completed_at: null,
     });
     expect(json.followupResults.values["run-2"]["1"]?.outcome).toBe("No Answer");
+    expect(json.followupResults.values["run-2"]["1"]?.completed_at).toBe(
+      "2026-11-08T09:00:00.000Z",
+    );
     // Leads without attempts have no entry (clean em dash).
     expect(json.followupResults.values["run-2"]["2"]).toBeUndefined();
   });

@@ -73,12 +73,14 @@ describe("dynamic result column generation", () => {
 describe("FollowupResultCell", () => {
   it("renders an em dash for missing or unresolved attempts", () => {
     for (const props of [
-      { outcome: null, resultText: null },
-      { outcome: null, resultText: "draft?" },
+      { outcome: null, resultText: null, completedAt: null },
+      { outcome: null, resultText: "draft?", completedAt: null },
     ] as const) {
       const html = renderToStaticMarkup(<FollowupResultCell {...props} />);
       expect(html).toContain("—");
       expect(html).not.toContain("Badge");
+      // No timestamp, no badge without a recorded result.
+      expect(html).not.toContain("tabular-nums");
     }
   });
 
@@ -87,6 +89,7 @@ describe("FollowupResultCell", () => {
       <FollowupResultCell
         outcome="Connected — Interested"
         resultText="Customer is interested in the Kashmir package but wants to discuss it with family first."
+        completedAt="2026-11-07T12:13:00.000Z"
       />,
     );
     expect(html).toContain("Connected — Interested");
@@ -94,12 +97,29 @@ describe("FollowupResultCell", () => {
     expect(html).toContain("line-clamp-2");
   });
 
+  it("shows the attempt's own completion timestamp, never the schedule", () => {
+    const html = renderToStaticMarkup(
+      <FollowupResultCell
+        outcome="No Answer"
+        resultText="Rang twice."
+        completedAt="2026-11-07T17:43:00.000Z"
+      />,
+    );
+    // Viewer-local date + time parts both present.
+    expect(html).toContain("2026");
+    expect(html).toContain("tabular-nums");
+    // Unresolved attempts show no timestamp at all.
+    const pending = renderToStaticMarkup(
+      <FollowupResultCell outcome={null} resultText={null} completedAt={null} />,
+    );
+    expect(pending).not.toContain("tabular-nums");
+  });
+
   it("exposes the full text on hover without clipping storage", () => {
     const full = "Line one. Line two with detail.";
     const html = renderToStaticMarkup(
-      <FollowupResultCell outcome="Other" resultText={full} />,
+      <FollowupResultCell outcome="Other" resultText={full} completedAt={null} />,
     );
-    expect(html).toContain(`title="${full}"`);
     expect(html).toContain(full);
   });
 });

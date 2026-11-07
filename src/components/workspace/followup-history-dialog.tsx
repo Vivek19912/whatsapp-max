@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { format } from "date-fns";
-import { CalendarPlus, ClipboardList, Loader2, LockOpen, XCircle } from "lucide-react";
+import { CalendarPlus, ClipboardList, Loader2, LockOpen, Pencil, XCircle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ export interface FollowupHistoryDialogProps {
   leadName: string | null;
   onRecordResult: (attempt: SalesFollowupAttempt) => void;
   onScheduleNext: () => void;
+  onEditSchedule: (attempt: SalesFollowupAttempt) => void;
   /** Bump to refetch after a schedule/record/close elsewhere. */
   refreshSeq: number;
 }
@@ -72,6 +73,7 @@ export function FollowupHistoryDialog({
   leadName,
   onRecordResult,
   onScheduleNext,
+  onEditSchedule,
   refreshSeq,
 }: FollowupHistoryDialogProps) {
   const [history, setHistory] = useState<HistoryState | null>(null);
@@ -166,6 +168,12 @@ export function FollowupHistoryDialog({
             <ol className="grid gap-4">
               {history.attempts.map((attempt) => {
                 const badge = badgeForAttempt(attempt);
+                // Editable only while still future and unresolved:
+                // due attempts must record results, completed ones
+                // keep their history (server re-enforces both).
+                const editable =
+                  attempt.completed_at === null &&
+                  new Date(attempt.scheduled_at).getTime() > Date.now();
                 return (
                   <li
                     key={attempt.id}
@@ -175,9 +183,24 @@ export function FollowupHistoryDialog({
                       <span className="text-sm font-semibold tabular-nums">
                         Follow-up {attempt.attempt_number}
                       </span>
-                      <Badge variant="outline" className={cn("text-xs", TONE_CLASS[badge.tone])}>
-                        {badge.label}
-                      </Badge>
+                      <span className="flex items-center gap-2">
+                        {editable && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            aria-label={`Edit Follow-up ${attempt.attempt_number} schedule`}
+                            onClick={() => onEditSchedule(attempt)}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            Edit Schedule
+                          </Button>
+                        )}
+                        <Badge variant="outline" className={cn("text-xs", TONE_CLASS[badge.tone])}>
+                          {badge.label}
+                        </Badge>
+                      </span>
                     </div>
                     <dl className="grid gap-1 text-sm">
                       <div className="flex justify-between gap-4">

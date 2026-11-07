@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import {
   deriveSequenceState,
+  isSystemNextAction,
   nextActionForState,
   validateScheduledAt,
   type SalesFollowupAttempt,
@@ -15,6 +16,7 @@ import {
   loadLeadFieldIds,
   loadRun,
   loadWritableField,
+  readLeadCell,
   writeLeadCell,
 } from "./_lib";
 
@@ -185,6 +187,10 @@ export async function POST(
 
     // Mirror into the Workspace cells (best-effort; the attempt row
     // is the source of truth — missing/renamed columns skip).
+    // Next Action deliberately receives NO scheduled-status text:
+    // the date already shows in Next Follow-up Date & Time. A
+    // stale system string is cleared; the salesperson's own text is
+    // preserved verbatim.
     const fieldIds = await loadLeadFieldIds(supabase, accountId, flowId);
     const followupField = fieldIds.followupFieldId
       ? await loadWritableField(supabase, accountId, fieldIds.followupFieldId)
@@ -199,13 +205,23 @@ export async function POST(
     const nextActionField = fieldIds.nextActionFieldId
       ? await loadWritableField(supabase, accountId, fieldIds.nextActionFieldId)
       : null;
-    await writeLeadCell({
-      supabase,
-      accountId,
-      runId,
-      field: nextActionField,
-      value: `Follow-up ${attempt.attempt_number} Scheduled`,
-    });
+    if (nextActionField) {
+      const current = await readLeadCell({
+        supabase,
+        accountId,
+        runId,
+        fieldId: nextActionField.id,
+      });
+      if (isSystemNextAction(current)) {
+        await writeLeadCell({
+          supabase,
+          accountId,
+          runId,
+          field: nextActionField,
+          value: null,
+        });
+      }
+    }
 
     return NextResponse.json({ attempt }, { status: 201 });
   } catch (err) {

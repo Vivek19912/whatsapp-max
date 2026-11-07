@@ -6,6 +6,7 @@ import {
   deriveSequenceState,
   FOLLOWUP_OUTCOMES,
   isFollowupOutcome,
+  isSystemNextAction,
   nextActionForState,
   validateFollowupResult,
   validateScheduledAt,
@@ -157,16 +158,55 @@ describe("schedule validation", () => {
 });
 
 describe("display builders", () => {
-  it("maps states to next actions", () => {
+  it("maps states to next actions (no scheduled-status text)", () => {
     expect(nextActionForState({ kind: "none", nextAttemptNumber: 1 })).toBe(
       "Schedule First Follow-up",
     );
+    // A scheduled attempt contributes nothing — the date already
+    // shows in Next Follow-up Date & Time.
+    expect(
+      nextActionForState({
+        kind: "scheduled",
+        activeAttempt: attempt(),
+        nextAttemptNumber: 2,
+      }),
+    ).toBeNull();
+    expect(
+      nextActionForState({
+        kind: "result_required",
+        activeAttempt: attempt(),
+        nextAttemptNumber: 2,
+      }),
+    ).toBeNull();
     expect(
       nextActionForState({ kind: "closed", nextAttemptNumber: 3 }),
     ).toBe("View Follow-up History");
     expect(
       nextActionForState({ kind: "completed", activeAttempt: null, nextAttemptNumber: 2 }),
     ).toBe("Schedule Follow-up 2");
+  });
+
+  it("recognizes system-written Next Action values (and only those)", () => {
+    for (const system of [
+      "",
+      "   ",
+      "Follow-up 1 Scheduled",
+      "Follow-up 12 Scheduled",
+      "Schedule Follow-up",
+      "Schedule Follow-up 3",
+      "Schedule First Follow-up",
+      "Record Result — Follow-up 2",
+      "View Follow-up History",
+    ]) {
+      expect(isSystemNextAction(system)).toBe(true);
+    }
+    for (const userText of [
+      "Call Ravi Tuesday",
+      "Follow-up 1 scheduled for Monday", // different casing/shape
+      "Schedule follow-up 2",
+    ]) {
+      expect(isSystemNextAction(userText)).toBe(false);
+    }
   });
 
   it("never summarizes results into Customer Response (dedicated columns own display)", async () => {

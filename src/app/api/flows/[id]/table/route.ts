@@ -693,7 +693,10 @@ export async function GET(
     maxAttempt: number;
     values: Record<
       string,
-      Record<string, { outcome: string | null; result_text: string | null }>
+      Record<
+        string,
+        { outcome: string | null; result_text: string | null; completed_at: string | null }
+      >
     >;
   } = { maxAttempt: 0, values: {} };
   try {
@@ -714,12 +717,15 @@ export async function GET(
         : 0;
     const values: Record<
       string,
-      Record<string, { outcome: string | null; result_text: string | null }>
+      Record<
+        string,
+        { outcome: string | null; result_text: string | null; completed_at: string | null }
+      >
     > = {};
     if (maxAttempt > 0 && runIds.length > 0) {
       const { data: attemptRows, error: attemptsErr } = await supabase
         .from("sales_followup_attempts")
-        .select("flow_run_id, attempt_number, outcome, result_text")
+        .select("flow_run_id, attempt_number, outcome, result_text, completed_at")
         .eq("account_id", attemptsAccountId)
         .eq("flow_id", id)
         .in("flow_run_id", runIds);
@@ -729,10 +735,12 @@ export async function GET(
         attempt_number: number;
         outcome: string | null;
         result_text: string | null;
+        completed_at: string | null;
       }>) {
         (values[a.flow_run_id] ??= {})[String(a.attempt_number)] = {
           outcome: a.outcome,
           result_text: a.result_text,
+          completed_at: a.completed_at,
         };
       }
     }

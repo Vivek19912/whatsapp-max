@@ -257,7 +257,35 @@ describe("scheduling guards", () => {
     expect(json.attempt.attempt_number).toBe(1);
     expect(json.attempt.created_by).toBe("user-1");
     expect(cellValue("f-dt")).toBe(FUTURE);
-    expect(cellValue("f-na")).toBe("Follow-up 1 Scheduled");
+    // No redundant scheduled-status text in Next Action.
+    expect(cellValue("f-na")).toBeNull();
+  });
+
+  it("clears stale system Next Action text but preserves user-entered actions", async () => {
+    const seedCell = (text: string) => {
+      h.store.workspace_values.push({
+        id: "id-cell",
+        account_id: "acct-1",
+        field_id: "f-na",
+        flow_run_id: "run-1",
+        value_text: text,
+      });
+    };
+    seedCell("Call Ravi Tuesday");
+    expect((await postSchedule()).status).toBe(201);
+    expect(cellValue("f-na")).toBe("Call Ravi Tuesday");
+  });
+
+  it("replaces a leftover scheduled-status string with empty", async () => {
+    h.store.workspace_values.push({
+      id: "id-cell",
+      account_id: "acct-1",
+      field_id: "f-na",
+      flow_run_id: "run-1",
+      value_text: "Schedule First Follow-up",
+    });
+    expect((await postSchedule()).status).toBe(201);
+    expect(cellValue("f-na")).toBeNull();
   });
 
   it("refuses a second schedule while one is unresolved", async () => {

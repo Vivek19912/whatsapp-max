@@ -144,7 +144,10 @@ export interface FlowTablePayload {
     maxAttempt: number;
     values: Record<
       string,
-      Record<string, { outcome: string | null; result_text: string | null }>
+      Record<
+        string,
+        { outcome: string | null; result_text: string | null; completed_at: string | null }
+      >
     >;
   };
   /**

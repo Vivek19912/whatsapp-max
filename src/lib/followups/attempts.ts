@@ -146,7 +146,10 @@ export function validateScheduledAt(
   return { iso: new Date(t).toISOString() };
 }
 
-/** Next Action cell text for each sequence state. */
+/** Next Action cell text for each sequence state. A scheduled
+ * attempt contributes NO text — the date already shows in Next
+ * Follow-up Date & Time, so a "Follow-up N Scheduled" string would
+ * be redundant status noise. Null = leave the cell alone. */
 export function nextActionForState(
   state: FollowupSequenceState,
 ): string | null {
@@ -154,14 +157,26 @@ export function nextActionForState(
     case "none":
       return "Schedule First Follow-up";
     case "scheduled":
-      return `Follow-up ${state.activeAttempt!.attempt_number} Scheduled`;
     case "result_required":
-      return `Record Result — Follow-up ${state.activeAttempt!.attempt_number}`;
+      return null;
     case "completed":
       return `Schedule Follow-up ${state.nextAttemptNumber}`;
     case "closed":
       return "View Follow-up History";
   }
+}
+
+/**
+ * True for Next Action values the system itself wrote (scheduled
+ * status, prompts, navigation hints). Only these may be replaced
+ * or cleared by later sequencing writes — anything else is the
+ * salesperson's own text and must be preserved verbatim.
+ */
+export function isSystemNextAction(value: string | null | undefined): boolean {
+  if (typeof value !== "string" || value.trim() === "") return true;
+  return /^(Follow-up \d+ Scheduled|Schedule Follow-up( \d+)?|Record Result — Follow-up \d+|Schedule First Follow-up|View Follow-up History)$/.test(
+    value.trim(),
+  );
 }
 
 /** Badge copy for the history timeline + dialogs. */

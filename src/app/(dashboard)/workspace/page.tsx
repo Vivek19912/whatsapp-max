@@ -346,27 +346,51 @@ export function cellText(row: FlowTableRow, column: FlowTableColumn): string {
 }
 
 /**
- * Read-only Follow-up N Result cell: outcome badge + two-line
- * result preview (full text on hover via title; complete record in
- * Follow-up History). Completed attempts carry an outcome;
- * unresolved or absent attempts render a clean em dash — never an
- * invented result. Stored text is never truncated, only painted.
+ * Read-only Follow-up N Result cell: outcome badge, the actual
+ * result-recording timestamp (completed_at, viewer-local), and a
+ * two-line result preview (full text on hover via title; complete
+ * record in Follow-up History). Completed attempts carry an
+ * outcome; unresolved or absent attempts render a clean em dash —
+ * never an invented result, never the scheduled time. Stored text
+ * is never truncated, only painted.
  */
 export function FollowupResultCell({
   outcome,
   resultText,
+  completedAt,
 }: {
   outcome: string | null;
   resultText: string | null;
+  completedAt: string | null;
 }) {
   if (!outcome) {
     return <span className="text-muted-foreground">—</span>;
   }
+  const completed = completedAt ? new Date(completedAt) : null;
+  const completedLabel =
+    completed && !Number.isNaN(completed.getTime())
+      ? `${completed.toLocaleDateString(undefined, {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })} · ${completed.toLocaleTimeString(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+        })}`
+      : null;
   return (
-    <span className="grid max-w-56 gap-1" title={resultText ?? outcome}>
+    <span
+      className="grid max-w-56 gap-1"
+      title={resultText ? `${resultText}${completedLabel ? `\nRecorded ${completedLabel}` : ""}` : outcome}
+    >
       <Badge variant="outline" className="w-fit text-xs font-normal">
         {outcome}
       </Badge>
+      {completedLabel && (
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {completedLabel}
+        </span>
+      )}
       {resultText && (
         <span className="line-clamp-2 text-[13px] break-words whitespace-normal">
           {resultText}
@@ -2609,6 +2633,7 @@ export default function WorkspacePage() {
                                       <FollowupResultCell
                                         outcome={value?.outcome ?? null}
                                         resultText={value?.result_text ?? null}
+                                        completedAt={value?.completed_at ?? null}
                                       />
                                     </TableCell>
                                   );
@@ -2630,6 +2655,7 @@ export default function WorkspacePage() {
                                 <FollowupResultCell
                                   outcome={value?.outcome ?? null}
                                   resultText={value?.result_text ?? null}
+                                  completedAt={value?.completed_at ?? null}
                                 />
                               </TableCell>
                             );
@@ -2980,6 +3006,21 @@ export default function WorkspacePage() {
                 });
               }
             })();
+          }}
+          onEditSchedule={(attempt) => {
+            // Reschedule mode: the dialog prefills from the saved
+            // instant (never the tomorrow/1:30 PM defaults) and
+            // PATCHes the same attempt in place.
+            setHistoryModal(null);
+            setScheduleModal({
+              runId: historyModal.runId,
+              fieldId: followupFieldId ?? '',
+              name: historyModal.name,
+              phone: historyModal.phone,
+              initialValue: attempt.scheduled_at,
+              attemptNumber: attempt.attempt_number,
+              rescheduleAttemptId: attempt.id,
+            });
           }}
         />
       )}

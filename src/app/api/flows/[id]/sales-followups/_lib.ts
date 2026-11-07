@@ -209,3 +209,23 @@ export async function loadWritableField(
     options: string[] | null;
   } | null;
 }
+
+/** Current stored cell value (null when absent). Never throws. */
+export async function readLeadCell(args: {
+  supabase: SupabaseClient;
+  accountId: string;
+  runId: string;
+  fieldId: string;
+}): Promise<string | null> {
+  const { supabase, accountId, runId, fieldId } = args;
+  const { data, error } = await supabase
+    .from("workspace_values")
+    .select("value_text")
+    .eq("account_id", accountId)
+    .eq("field_id", fieldId)
+    .eq("flow_run_id", runId)
+    .maybeSingle();
+  if (error || !data) return null;
+  const value = (data as { value_text: string | null }).value_text;
+  return typeof value === "string" ? value : null;
+}
