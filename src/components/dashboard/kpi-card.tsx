@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils'
 interface KpiCardProps {
   title: string
   value: number
-  icon: ComponentType<{ className?: string }>
+  /** Leading icon. Omit to render a text-only card (no icon space). */
+  icon?: ComponentType<{ className?: string }>
   /** Previous equivalent-period value. Omit when not reliably known. */
   previous?: number
   prevLabel?: string
@@ -19,9 +20,11 @@ export function KpiCard({ title, value, icon: Icon, previous, prevLabel = 'previ
     <div className="rounded-xl border border-border bg-card p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="flex items-start justify-between gap-3">
         <p className="text-[13px] font-medium text-muted-foreground">{title}</p>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
-          <Icon className="h-[18px] w-[18px]" />
-        </div>
+        {Icon ? (
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
+            <Icon className="h-[18px] w-[18px]" />
+          </div>
+        ) : null}
       </div>
       {loading ? (
         <div className="mt-3 h-8 w-20 animate-pulse rounded-md bg-muted" />

@@ -1,7 +1,6 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { FileText, Inbox } from 'lucide-react'
 import {
   getDashboardRange,
   type DashboardDateFilter,
@@ -97,10 +96,6 @@ export default function MetaLeadsDashboardPage() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">Meta Lead Ads</h1>
-      </div>
-
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {kpiLoading ? (
           <>
@@ -109,8 +104,8 @@ export default function MetaLeadsDashboardPage() {
           </>
         ) : (
           <>
-            <KpiCard title="Today's Leads" value={todayLeads} icon={Inbox} prevLabel="yesterday" />
-            <KpiCard title="Yesterday's Leads" value={yesterdayLeads} icon={FileText} prevLabel="day before" />
+            <KpiCard title="Today's Leads" value={todayLeads} prevLabel="yesterday" />
+            <KpiCard title="Yesterday's Leads" value={yesterdayLeads} prevLabel="day before" />
           </>
         )}
       </div>

@@ -69,9 +69,6 @@ export function MetaMonthlyChart({ data, year, years, onYearChange, loading }: M
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
         <div>
           <h2 className="text-[15px] font-semibold text-foreground">Month Wise Meta Leads</h2>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
-            Instant Form submissions per month, including months with zero leads
-          </p>
         </div>
         <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
           Year
