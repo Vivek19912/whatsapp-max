@@ -7,6 +7,7 @@ import {
 import { normalizePhone } from '@/lib/whatsapp/phone-utils';
 import { resolveUploaderName, toCallRecording } from '@/lib/recordings/recordings';
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders';
+import { workspaceTableNamesByContactId } from '@/lib/recordings/workspace-tables';
 
 /** Default page size — matches the contacts list convention. */
 const DEFAULT_LIMIT = 25;
@@ -252,6 +253,16 @@ export async function GET(request: Request) {
       }
     }
 
+    // Workspace-table display for the new column: two batched
+    // account-scoped lookups (flow_runs → flows), never N+1.
+    // Contacts with no runs, or runs whose flow is gone/blank,
+    // simply have no entry → '—'.
+    const workspaceTables = await workspaceTableNamesByContactId(
+      supabase,
+      accountId,
+      contactIds
+    );
+
     return NextResponse.json({
       recordings: rows.map((r) => {
         const info = r.contact_id
@@ -263,7 +274,10 @@ export async function GET(request: Request) {
             ? (names[r.uploaded_by as string] ?? resolveUploaderName(null))
             : null,
           info?.name ?? null,
-          info?.phone ?? null
+          info?.phone ?? null,
+          r.contact_id
+            ? (workspaceTables[r.contact_id as string] ?? null)
+            : null
         );
       }),
       total: count ?? 0,

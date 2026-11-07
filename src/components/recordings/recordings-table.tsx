@@ -1,8 +1,6 @@
 'use client';
 
 import {
-  ArrowDown,
-  ArrowUp,
   Minus,
   Play,
 } from 'lucide-react';
@@ -50,7 +48,7 @@ export function leadInitial(name: string | null | undefined): string {
   return first || 'U';
 }
 
-function TypeLabel({ callType }: { callType: string | null | undefined }) {
+function CallTypeIcon({ callType }: { callType: string | null | undefined }) {
   if (callType === 'phone') {
     return (
       <TypeTip label="Phone" className="text-blue-700 dark:text-blue-300">
@@ -110,24 +108,34 @@ function TypeTip({
   );
 }
 
-function DirectionLabel({ direction }: { direction: string | null | undefined }) {
-  if (direction === 'in') {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap text-blue-700 dark:text-blue-300">
-        <ArrowDown className="h-3.5 w-3.5" /> Incoming
-      </span>
-    );
-  }
-  if (direction === 'out') {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap text-emerald-700 dark:text-emerald-300">
-        <ArrowUp className="h-3.5 w-3.5" /> Outgoing
-      </span>
-    );
-  }
+/**
+ * Merged Call cell: the call-type icon (phone / WhatsApp / neutral
+ * unknown mark) alongside the direction as plain text — blue for
+ * Incoming, green for Outgoing, neutral for Unknown. No pill, no
+ * badge, and deliberately NO directional arrows (no up/down
+ * icons): the words carry the direction, the icon carries the
+ * type. Direction data and classification are untouched — this is
+ * display only.
+ */
+function CallLabel({
+  callType,
+  direction,
+}: {
+  callType: string | null | undefined;
+  direction: string | null | undefined;
+}) {
+  const directionClass =
+    direction === 'in'
+      ? 'text-blue-700 dark:text-blue-300'
+      : direction === 'out'
+        ? 'text-emerald-700 dark:text-emerald-300'
+        : 'text-muted-foreground';
+  const directionText =
+    direction === 'in' ? 'Incoming' : direction === 'out' ? 'Outgoing' : 'Unknown';
   return (
-    <span className="inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap text-muted-foreground">
-      <Minus className="h-3.5 w-3.5" /> Unknown
+    <span className={`inline-flex items-center gap-1.5 text-[13px] whitespace-nowrap ${directionClass}`}>
+      <CallTypeIcon callType={callType} />
+      {directionText}
     </span>
   );
 }
@@ -144,9 +152,9 @@ function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; cr
 }
 
 /**
- * Recordings table: No. | Recorded | Lead | Type | Direction |
- * Duration | Uploaded By | Play. Display-only row numbers continue
- * across pages. No filename, no size, no storage internals.
+ * Recordings table: No. | Time | Lead Name | Workspace Table |
+ * Call | Duration | Salesperson | Play. Display-only row numbers
+ * continue across pages. No filename, no size, no storage internals.
  * Any row click selects the recording (drawer); the Play button
  * selects it and autoplays in the drawer.
  *
@@ -191,10 +199,10 @@ export function RecordingsTable({
               <TableHead className="h-16 w-12 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">No.</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Time</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Lead Name</TableHead>
-              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Type</TableHead>
-              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Direction</TableHead>
+              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Workspace Table</TableHead>
+              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Call</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Duration</TableHead>
-              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Uploaded By</TableHead>
+              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Salesperson</TableHead>
               <TableHead className="h-16 px-4 align-middle text-right text-[15px] font-bold border-r border-border border-b last:border-r-0">Play</TableHead>
             </TableRow>
           </TableHeader>
@@ -234,11 +242,20 @@ export function RecordingsTable({
                         <span className="truncate text-rose-600 dark:text-rose-400">Unlinked</span>
                       )}
                     </TableCell>
-                    <TableCell className="border-r border-border px-4 last:border-r-0">
-                      <TypeLabel callType={r.call_type} />
+                    <TableCell className="max-w-[200px] border-r border-border px-4 last:border-r-0">
+                      {r.workspace_table_name ? (
+                        <span
+                          title={r.workspace_table_name}
+                          className="block truncate text-[13px] text-foreground"
+                        >
+                          {r.workspace_table_name}
+                        </span>
+                      ) : (
+                        <span className="block text-[13px] text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="border-r border-border px-4 last:border-r-0">
-                      <DirectionLabel direction={r.direction} />
+                      <CallLabel callType={r.call_type} direction={r.direction} />
                     </TableCell>
                     <TableCell className="border-r border-border px-4 tabular-nums last:border-r-0">{formatDuration(r.duration_seconds)}</TableCell>
                     <TableCell className="max-w-[140px] truncate border-r border-border px-4 text-[13px] last:border-r-0">

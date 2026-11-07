@@ -39,6 +39,7 @@ function recording(over: Partial<CallRecording> = {}): CallRecording {
     direction: "out",
     phone_number: "+918953065369",
     call_type: "phone",
+    workspace_table_name: "Meta Lead Ads",
     ...over,
   };
 }
@@ -77,15 +78,15 @@ function rowNumbers(markup: string): string[] {
 }
 
 describe("RecordingsTable columns", () => {
-  it("orders headers No. | Time | Lead Name | Type | Direction | Duration | Uploaded By | Play", () => {
+  it("orders headers No. | Time | Lead Name | Workspace Table | Call | Duration | Salesperson | Play", () => {
     expect(headerCells(html())).toEqual([
       "No.",
       "Time",
       "Lead Name",
-      "Type",
-      "Direction",
+      "Workspace Table",
+      "Call",
       "Duration",
-      "Uploaded By",
+      "Salesperson",
       "Play",
     ]);
   });
@@ -144,7 +145,38 @@ describe("Time cell", () => {
   });
 });
 
-describe("Type and Direction visuals", () => {
+describe("Workspace Table column", () => {
+  it("shows the resolved table name with a full-name tooltip", () => {
+    const out = html([recording({ workspace_table_name: "Meta Lead Ads" })]);
+    expect(out).toContain("Meta Lead Ads");
+    expect(out).toContain('title="Meta Lead Ads"');
+  });
+
+  it("shows an em dash for unlinked recordings", () => {
+    const out = html([
+      recording({ contact_id: null, contact_name: null, workspace_table_name: null }),
+    ]);
+    const tbody = out.slice(out.indexOf("<tbody"), out.indexOf("</tbody>"));
+    expect(tbody).toContain("—");
+  });
+
+  it("shows an em dash when the table cannot be resolved", () => {
+    const out = html([recording({ workspace_table_name: null })]);
+    expect(out).toContain("—");
+    expect(out).not.toContain("Untitled");
+  });
+
+  it("truncates long table names", () => {
+    const out = html([
+      recording({ workspace_table_name: "Instant Form for Couple Kashmir" }),
+    ]);
+    // Full name available via title; cell truncates.
+    expect(out).toContain('title="Instant Form for Couple Kashmir"');
+    expect(out).toContain("truncate");
+  });
+});
+
+describe("Call column (merged type + direction)", () => {
   // Scope to the label's own span: sibling UI (avatar, Play button)
   // legitimately uses filled backgrounds elsewhere in the row.
   function labelSpan(markup: string, text: string): string {
@@ -220,6 +252,82 @@ describe("Type and Direction visuals", () => {
 
   it("Unknown direction renders as plain text", () => {
     const out = html([recording({ direction: null })]);
+    expect(out).toContain("Unknown");
+  });
+
+  it("merges type and direction: phone icon beside Incoming text", () => {
+    const out = html([recording({ call_type: "phone", direction: "in" })]);
+    expect(out).toContain('data-icon="phone-handset"');
+    expect(out).toContain("Incoming");
+    const idx = out.indexOf("Incoming");
+    const tdStart = out.lastIndexOf("<td", idx);
+    const cell = out.slice(tdStart, out.indexOf("</td>", tdStart));
+    expect(cell).toContain('data-icon="phone-handset"');
+  });
+
+  it("merges type and direction: WhatsApp icon beside Outgoing text", () => {
+    const out = html([recording({ call_type: "whatsapp", direction: "out" })]);
+    expect(out).toContain('data-icon="whatsapp-brand"');
+    expect(out).toContain("Outgoing");
+    const idx = out.indexOf("Outgoing");
+    const tdStart = out.lastIndexOf("<td", idx);
+    const cell = out.slice(tdStart, out.indexOf("</td>", tdStart));
+    expect(cell).toContain('data-icon="whatsapp-brand"');
+  });
+
+  it("renders no directional arrow icons anywhere in the table", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).not.toContain("ArrowUp");
+    expect(src).not.toContain("ArrowDown");
+    for (const combo of [
+      { call_type: "phone", direction: "in" },
+      { call_type: "phone", direction: "out" },
+      { call_type: "whatsapp", direction: "in" },
+      { call_type: "whatsapp_business", direction: "out" },
+      { call_type: null, direction: null },
+    ] as const) {
+      const out = html([recording(combo)]);
+      // lucide arrows render as svg with these class fragments;
+      // neither may appear in any Call cell.
+      expect(out).not.toContain("arrow-up");
+      expect(out).not.toContain("arrow-down");
+    }
+  });
+
+  it("colors Incoming blue and Outgoing green, Unknown neutral", () => {
+    // Scope to the OUTER span holding the visible direction text:
+    // the type icon's own trigger span sits inside it, so step back
+    // two opens from the text (trigger open, then outer open).
+    const directionSpan = (markup: string, text: string): string => {
+      const textIdx = markup.indexOf(`${text}</span>`);
+      const triggerOpen = markup.lastIndexOf("<span", textIdx);
+      const outerOpen = markup.lastIndexOf("<span", triggerOpen - 1);
+      return markup.slice(outerOpen, textIdx);
+    };
+    expect(directionSpan(html([recording({ direction: "in" })]), "Incoming")).toContain(
+      "text-blue-700",
+    );
+    expect(directionSpan(html([recording({ direction: "out" })]), "Outgoing")).toContain(
+      "text-emerald-700",
+    );
+    expect(
+      directionSpan(html([recording({ call_type: null, direction: null })]), "Unknown"),
+    ).toContain("text-muted-foreground");
+  });
+});
+
+describe("Salesperson column", () => {
+  it("shows the uploader display name, never a bare user id", () => {
+    const out = html([recording({ uploader_name: "Vikas" })]);
+    expect(out).toContain("Vikas");
+    expect(out).not.toContain("u-1");
+  });
+
+  it("falls back to Unknown when the name is unavailable", () => {
+    const out = html([recording({ uploader_name: null })]);
     expect(out).toContain("Unknown");
   });
 });

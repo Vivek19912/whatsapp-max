@@ -235,6 +235,7 @@ describe('toCallRecording', () => {
       uploader_name: null,
       contact_name: null,
       contact_phone: null,
+      workspace_table_name: null,
       storage_bucket: 'call-recordings',
       storage_path: 'account-a1/1-call.ogg',
       file_name: null,
@@ -260,6 +261,14 @@ describe('toCallRecording', () => {
       'Sagar'
     );
     expect(toCallRecording({ id: 'r1' }).contact_name).toBeNull();
+  });
+
+  it('carries the joined workspace table name when provided, null otherwise', () => {
+    expect(
+      toCallRecording({ id: 'r1' }, null, null, null, 'Meta Lead Ads')
+        .workspace_table_name
+    ).toBe('Meta Lead Ads');
+    expect(toCallRecording({ id: 'r1' }).workspace_table_name).toBeNull();
   });
 });
 

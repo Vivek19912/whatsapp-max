@@ -76,6 +76,14 @@ export interface CallRecording {
    * carries no number.
    */
   contact_phone?: string | null;
+  /**
+   * Workspace table (flow) name holding the linked lead
+   * (`flows.name` via the lead's most recent `flow_runs` row).
+   * Joined server-side in two batched queries — never N+1. Null
+   * when unlinked, when the lead has no runs, or when the flow is
+   * gone; the UI then shows '—'. Absent on older responses.
+   */
+  workspace_table_name?: string | null;
   storage_bucket: string;
   storage_path: string;
   file_name: string | null;
@@ -105,6 +113,7 @@ export function toCallRecording(
   uploaderName?: string | null,
   contactName?: string | null,
   contactPhone?: string | null,
+  workspaceTableName?: string | null,
 ): CallRecording {
   return {
     id: row.id as string,
@@ -115,6 +124,7 @@ export function toCallRecording(
     uploader_name: uploaderName ?? null,
     contact_name: contactName ?? null,
     contact_phone: contactPhone ?? null,
+    workspace_table_name: workspaceTableName ?? null,
     storage_bucket: row.storage_bucket as string,
     storage_path: row.storage_path as string,
     file_name: (row.file_name as string | null) ?? null,

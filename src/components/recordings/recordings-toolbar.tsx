@@ -124,8 +124,8 @@ export function RecordingsToolbar({
         value={filters.uploadedBy ?? 'all'}
         onValueChange={(v) => set({ uploadedBy: v === 'all' ? null : v })}
       >
-        <SelectTrigger className="w-auto gap-2 rounded-full" aria-label="Uploaded by">
-          <SelectValue placeholder="Uploaded By" />
+        <SelectTrigger className="w-auto gap-2 rounded-full" aria-label="Salesperson">
+          <SelectValue placeholder="Salesperson" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="all">All Users</SelectItem>

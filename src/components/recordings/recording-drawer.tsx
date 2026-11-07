@@ -2,8 +2,6 @@
 
 import Link from 'next/link';
 import {
-  ArrowDown,
-  ArrowUp,
   CalendarDays,
   Clock3,
   ExternalLink,
@@ -294,15 +292,7 @@ export function RecordingDrawer({
                 </DetailRow>
               ) : null}
               <DetailRow
-                icon={
-                  recording.direction === 'in' ? (
-                    <ArrowDown className="h-4 w-4" />
-                  ) : recording.direction === 'out' ? (
-                    <ArrowUp className="h-4 w-4" />
-                  ) : (
-                    <Minus className="h-4 w-4" />
-                  )
-                }
+                icon={<Minus className="h-4 w-4" />}
                 label="Direction"
               >
                 {directionLabel}
@@ -313,7 +303,7 @@ export function RecordingDrawer({
               <DetailRow icon={<Clock3 className="h-4 w-4" />} label="Duration">
                 {formatDurationLong(recording.duration_seconds)}
               </DetailRow>
-              <DetailRow icon={<User className="h-4 w-4" />} label="Uploaded By">
+              <DetailRow icon={<User className="h-4 w-4" />} label="Salesperson">
                 {recording.uploader_name ?? 'Unknown'}
               </DetailRow>
             </section>

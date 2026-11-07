@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   recordings: [] as Array<Record<string, unknown>>,
   profiles: [] as Array<Record<string, unknown>>,
   contacts: [] as Array<Record<string, unknown>>,
+  flowRuns: [] as Array<Record<string, unknown>>,
+  flows: [] as Array<Record<string, unknown>>,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
   rpcResult: null as unknown,
 }));
@@ -15,6 +17,8 @@ function fakeSupabase() {
     table: "",
     filters: [] as Array<[string, unknown]>,
     orGroups: [] as string[],
+    orderCol: "" as string,
+    orderAsc: true as boolean,
   };
   // Minimal postgrest evaluator for the filter shapes the route
   // builds: eq/in/is/not plus top-level or() groups of atoms like
@@ -41,24 +45,44 @@ function fakeSupabase() {
     return true;
   };
   const matched = () => {
-    const source = state.table === "contacts" ? h.contacts : h.recordings;
-    return source.filter(
-      (r) =>
-        state.filters.every(([c, v]) => {
-          if (v && typeof v === "object" && "__isNull" in (v as object)) {
-            return r[c] == null;
-          }
-          if (v && typeof v === "object" && "__notNull" in (v as object)) {
-            return r[c] != null;
-          }
-          return Array.isArray(v) ? v.includes(r[c] as string) : r[c] === v;
-        }) &&
-        state.orGroups.every((g) => splitTop(g).some((a) => evalAtom(r, a)))
-    );
+    const source =
+      state.table === "contacts"
+        ? h.contacts
+        : state.table === "flow_runs"
+          ? h.flowRuns
+          : state.table === "flows"
+            ? h.flows
+            : h.recordings;
+    return source
+      .filter(
+        (r) =>
+          state.filters.every(([c, v]) => {
+            if (v && typeof v === "object" && "__isNull" in (v as object)) {
+              return r[c] == null;
+            }
+            if (v && typeof v === "object" && "__notNull" in (v as object)) {
+              return r[c] != null;
+            }
+            return Array.isArray(v) ? v.includes(r[c] as string) : r[c] === v;
+          }) &&
+          state.orGroups.every((g) => splitTop(g).some((a) => evalAtom(r, a)))
+      )
+      .sort((a, b) => {
+        // Honors .order() so recency-dependent joins (workspace
+        // table via newest flow run) resolve exactly like Postgres.
+        if (!state.orderCol) return 0;
+        const av = String(a[state.orderCol] ?? "");
+        const bv = String(b[state.orderCol] ?? "");
+        return state.orderAsc ? (av < bv ? -1 : av > bv ? 1 : 0) : av < bv ? 1 : av > bv ? -1 : 0;
+      });
   };
   const api: Record<string, unknown> = {
     select: () => api,
-    order: () => api,
+    order: (col: string, opts?: { ascending?: boolean }) => {
+      state.orderCol = col;
+      state.orderAsc = opts?.ascending ?? true;
+      return api;
+    },
     eq: (col: string, val: unknown) => {
       state.filters.push([col, val]);
       return api;
@@ -95,6 +119,8 @@ function fakeSupabase() {
       state.table = table;
       state.filters = [];
       state.orGroups = [];
+      state.orderCol = "";
+      state.orderAsc = true;
       if (table === "profiles") {
         return {
           select: () => ({
@@ -175,6 +201,8 @@ beforeEach(() => {
   h.recordings = [];
   h.profiles = [{ user_id: "u-9", full_name: "Akash", email: "a@x.com" }];
   h.contacts = [{ id: "c-1", account_id: "acct-1", name: "Akash" }];
+  h.flowRuns = [];
+  h.flows = [];
   h.rpcCalls = [];
   h.rpcResult = null;
 });
@@ -306,6 +334,81 @@ describe("GET /api/recordings?contact_id=", () => {
       recordings: Array<{ contact_phone: string | null }>;
     };
     expect(json.recordings[0].contact_phone).toBe("+919876543210");
+  });
+
+  it("joins the workspace table name via the lead's most recent flow run", async () => {
+    h.contacts = [{ id: "c-1", account_id: "acct-1", name: "Akash" }];
+    h.flowRuns = [
+      { contact_id: "c-1", account_id: "acct-1", flow_id: "f-old", started_at: "2026-09-01T00:00:00.000Z" },
+      { contact_id: "c-1", account_id: "acct-1", flow_id: "f-new", started_at: "2026-10-01T00:00:00.000Z" },
+    ];
+    h.flows = [
+      { id: "f-old", account_id: "acct-1", name: "Meta Lead Ads" },
+      { id: "f-new", account_id: "acct-1", name: "Instant Form for Couple Kashmir" },
+    ];
+    h.recordings = [recording()];
+    const res = await GET(new Request("https://app.test/api/recordings"));
+    const json = (await res.json()) as {
+      recordings: Array<{ workspace_table_name: string | null }>;
+    };
+    // Newest run first in the query; either way the helper resolves
+    // the most recent run's flow — here f-new.
+    expect(json.recordings[0].workspace_table_name).toBe(
+      "Instant Form for Couple Kashmir"
+    );
+  });
+
+  it("nulls the workspace table for unlinked recordings", async () => {
+    h.recordings = [recording({ id: "r-u", contact_id: null })];
+    const res = await GET(new Request("https://app.test/api/recordings"));
+    const json = (await res.json()) as {
+      recordings: Array<{ workspace_table_name: string | null }>;
+    };
+    expect(json.recordings[0].workspace_table_name).toBeNull();
+  });
+
+  it("nulls the workspace table when the lead has no runs or the flow is gone", async () => {
+    h.flowRuns = [];
+    h.flows = [];
+    h.recordings = [
+      recording({ id: "r-norun" }),
+      recording({
+        id: "r-goneflow",
+        contact_id: "c-2",
+      }),
+    ];
+    h.contacts = [
+      { id: "c-1", account_id: "acct-1", name: "Akash" },
+      { id: "c-2", account_id: "acct-1", name: "Sagar" },
+    ];
+    h.flowRuns = [
+      { contact_id: "c-2", account_id: "acct-1", flow_id: "f-gone", started_at: "2026-10-01T00:00:00.000Z" },
+    ];
+    h.flows = [];
+    const res = await GET(new Request("https://app.test/api/recordings"));
+    const json = (await res.json()) as {
+      recordings: Array<{ id: string; workspace_table_name: string | null }>;
+    };
+    expect(
+      json.recordings.find((r) => r.id === "r-norun")?.workspace_table_name
+    ).toBeNull();
+    expect(
+      json.recordings.find((r) => r.id === "r-goneflow")?.workspace_table_name
+    ).toBeNull();
+  });
+
+  it("never joins a workspace table from another account", async () => {
+    h.contacts = [{ id: "c-1", account_id: "acct-1", name: "Akash" }];
+    h.flowRuns = [
+      { contact_id: "c-1", account_id: "acct-evil", flow_id: "f-evil", started_at: "2026-10-01T00:00:00.000Z" },
+    ];
+    h.flows = [{ id: "f-evil", account_id: "acct-evil", name: "Evil Table" }];
+    h.recordings = [recording()];
+    const res = await GET(new Request("https://app.test/api/recordings"));
+    const json = (await res.json()) as {
+      recordings: Array<{ workspace_table_name: string | null }>;
+    };
+    expect(json.recordings[0].workspace_table_name).toBeNull();
   });
 });
 
