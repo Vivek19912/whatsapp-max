@@ -21,14 +21,14 @@ const page = readFileSync(`${root}/src/app/(dashboard)/workspace/page.tsx`, "utf
 const globals = readFileSync(`${root}/src/app/globals.css`, "utf8");
 const tablePrimitive = readFileSync(`${root}/src/components/ui/table.tsx`, "utf8");
 
-describe("5. no pinned/frozen columns — everything scrolls", () => {
-  it("the sticky-column module is gone", () => {
+describe("5. frozen No. + Name columns — everything else scrolls", () => {
+  it("the removed sticky-column module stays gone", () => {
     expect(
       existsSync(`${root}/src/components/workspace/sticky-columns.ts`)
     ).toBe(false);
   });
 
-  it("the page carries no sticky/pinned machinery", () => {
+  it("the page carries no legacy sticky/pinned machinery", () => {
     for (const token of [
       "stickyLayouts",
       "resolveStickyLayouts",
@@ -44,15 +44,18 @@ describe("5. no pinned/frozen columns — everything scrolls", () => {
     }
   });
 
-  it("row, system, flow, custom, and lead columns all scroll normally", () => {
+  it("only No. and Name freeze; row, system, flow, custom, and lead columns all scroll normally", () => {
     // Row renders conditionally like any column (no frozen twin).
     expect(page).toContain("{rowVisible && (");
-    // No body cell pins: the only `sticky` left is the header row's
-    // vertical top-0 (plus the manager footer, a different file).
-    const stickyUses = page.split("sticky").length - 1;
-    const topUses = page.split("sticky top-0").length - 1;
-    expect(stickyUses).toBe(topUses);
-    expect(page).toContain("sticky top-0");
+    // Exactly two sticky column offsets exist: No. at the viewport
+    // edge and Name after its measured width. Every other body
+    // cell carries no sticky positioning.
+    expect(page).toContain("sticky left-0 z-[1]");
+    expect(page).toContain("left: nameLeft");
+    // Frozen identity is the system `name` key (never the label),
+    // for headers and body cells alike.
+    const nameChecks = page.match(/c\.system && c\.key === 'name'/g) ?? [];
+    expect(nameChecks.length).toBeGreaterThanOrEqual(2);
   });
 });
 

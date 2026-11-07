@@ -28,7 +28,8 @@ describe("contact sidebar Workspace Lead section", () => {
   });
 
   it("renders the new-tab link from the verified stable id", () => {
-    expect(sidebarSrc).toContain("workspaceContactHref(workspaceLead.contact_id)");
+    expect(sidebarSrc).toContain("workspaceContactHref(workspaceLead.contact_id, {");
+    expect(sidebarSrc).toContain("highlightOnly: true,");
     expect(sidebarSrc).toContain('target="_blank"');
     expect(sidebarSrc).toContain("Open in Workspace");
     expect(sidebarSrc).toContain("<ExternalLink");

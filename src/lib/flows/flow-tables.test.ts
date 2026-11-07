@@ -735,6 +735,13 @@ describe("workspace lead deep link (?contact=)", () => {
     expect(workspaceContactHref("c-1")).toBe("/workspace?contact=c-1");
   });
 
+  it("appends the highlight-only mode without changing the default", () => {
+    expect(workspaceContactHref("c-1", { highlightOnly: true })).toBe(
+      "/workspace?contact=c-1&highlight=only"
+    );
+    expect(workspaceContactHref("c-1", {})).toBe("/workspace?contact=c-1");
+  });
+
   it("never points at the per-lead recordings page", () => {
     expect(workspaceContactHref("c-1")).not.toContain("/recordings/contact/");
   });

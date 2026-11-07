@@ -522,12 +522,19 @@ export function toFlowTableRow(
 /**
  * Deep-link target for a lead: the Workspace table filtered to
  * nothing, with `?contact=` carrying the canonical `contacts.id`.
- * The Workspace page selects the first row for that contact (see
- * `findWorkspaceRowForContact`), opening the same drawer a row
- * click opens — no parallel lead UI, no new route.
+ * By default the Workspace page selects the first row for that
+ * contact (see `findWorkspaceRowForContact`), opening the same
+ * drawer a row click opens — no parallel lead UI, no new route.
+ * With `{ highlightOnly: true }` the page locates, scrolls to,
+ * and temporarily highlights the row WITHOUT opening the drawer
+ * (Inbox "Open in Workspace" flow).
  */
-export function workspaceContactHref(contactId: string): string {
-  return `/workspace?contact=${encodeURIComponent(contactId)}`;
+export function workspaceContactHref(
+  contactId: string,
+  opts?: { highlightOnly?: boolean }
+): string {
+  const base = `/workspace?contact=${encodeURIComponent(contactId)}`;
+  return opts?.highlightOnly ? `${base}&highlight=only` : base;
 }
 
 /**

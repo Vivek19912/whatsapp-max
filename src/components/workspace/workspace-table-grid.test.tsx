@@ -232,13 +232,25 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
     expect(pageSrc).not.toContain("key={c.key}");
   });
 
-  it("header and body size from one width source, nothing pinned", () => {
+  it("freezes No. and Name via measured sticky offsets", () => {
     expect(pageSrc).not.toContain("resolveStickyLayouts(");
     expect(pageSrc).not.toContain("stickyLayouts[");
     // Headers paint positionally (index-aligned with the rendered
     // order); widths still resolve from the one width source.
     expect(pageSrc).toContain("headStyleAt(");
     expect(pageSrc).not.toContain("STICKY_Z.corner");
+    // Frozen leading columns: sticky positioning with offsets
+    // MEASURED from the rendered header cells (never hardcoded
+    // pixels, never the removed helpers above). Identity-based:
+    // the system `name` key, so a flow-collected "Name" question
+    // keeps scrolling.
+    expect(pageSrc).toContain("noHeadRef");
+    expect(pageSrc).toContain("nameHeadRef");
+    expect(pageSrc).toContain("metrics.noWidth");
+    expect(pageSrc).toContain("frozenTint(row)");
+    // Frozen cells stay opaque with the row's own wash so scrolled
+    // content slides underneath them.
+    expect(pageSrc).toContain("bg-card transition-colors hover:bg-muted/50");
   });
 
   it("the single scroll viewport and sticky header are untouched", () => {

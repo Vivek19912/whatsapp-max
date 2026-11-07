@@ -139,9 +139,12 @@ describe("workspace redesign — controls row and filters", () => {
 });
 
 describe("workspace redesign — dense sticky grid", () => {
-  it("shrinks header height and keeps sticky positioning", () => {
+  it("keeps the top strip above stuck headers offset below it", () => {
     const page = src("src/app/(dashboard)/workspace/page.tsx");
-    expect(page).toContain("sticky top-0 z-20");
+    // The 16px thumb strip sticks to the container top; every
+    // header cell sticks 16px below it so nothing overlaps.
+    expect(page).toContain("sticky top-0 z-30");
+    expect(page).toContain("sticky top-4 z-20");
     expect(page).toContain("h-11");
     expect(page).not.toContain("h-16 truncate");
     expect(page).toContain("[&_tr]:border-b-0");

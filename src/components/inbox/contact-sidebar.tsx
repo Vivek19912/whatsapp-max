@@ -698,7 +698,9 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
                 className="w-full"
                 render={
                   <a
-                    href={workspaceContactHref(workspaceLead.contact_id)}
+                    href={workspaceContactHref(workspaceLead.contact_id, {
+                      highlightOnly: true,
+                    })}
                     target="_blank"
                     rel="noreferrer"
                   />

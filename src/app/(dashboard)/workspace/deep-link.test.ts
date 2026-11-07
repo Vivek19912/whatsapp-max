@@ -30,10 +30,10 @@ const pageSrc = readFileSync(
 );
 
 function effectSrc(): string {
-  const start = pageSrc.indexOf("const deepLinkContactId = useSearchParams()");
+  const start = pageSrc.indexOf("const deepLinkParams = useSearchParams()");
   expect(start).toBeGreaterThan(-1);
   const end = pageSrc.indexOf(
-    "}, [deepLinkContactId, payload, pageSize, selected]);",
+    "}, [deepLinkContactId, highlightOnly, payload, pageSize, selected]);",
     start,
   );
   expect(end).toBeGreaterThan(start);
@@ -93,7 +93,7 @@ describe("deep link + payload later arrives → matching row is selected", () =>
 
   it("re-runs when the late payload arrives", () => {
     expect(pageSrc).toContain(
-      "}, [deepLinkContactId, payload, pageSize, selected]);",
+      "}, [deepLinkContactId, highlightOnly, payload, pageSize, selected]);",
     );
   });
 });
@@ -168,6 +168,37 @@ describe("cross-pagination locate (?contact= not on the loaded page)", () => {
     expect(src.indexOf("if (selected")).toBeLessThan(
       src.indexOf("/api/workspace/locate-contact"),
     );
+  });
+});
+
+describe("highlight-only mode (?contact=<id>&highlight=only)", () => {
+  it("reads the mode from the query string (default off)", () => {
+    const src = effectSrc();
+    expect(src).toContain(
+      "const highlightOnly = deepLinkParams.get('highlight') === 'only';"
+    );
+  });
+
+  it("skips the drawer selection but still highlights the located row", () => {
+    const src = effectSrc();
+    const findIdx = src.indexOf("findWorkspaceRowForContact(payload.rows");
+    expect(findIdx).toBeGreaterThan(-1);
+    const tail = src.slice(findIdx);
+    expect(tail).toContain("if (!highlightOnly) setSelected(row);");
+    expect(tail).toContain("setHighlightContactId(deepLinkContactId)");
+    // Highlight arms in both modes (drawer open or not).
+    const markIdx = tail.indexOf("setHighlightContactId(deepLinkContactId)");
+    const selectIdx = tail.indexOf("if (!highlightOnly) setSelected(row);");
+    expect(markIdx).toBeGreaterThan(-1);
+    expect(selectIdx).toBeGreaterThan(-1);
+  });
+
+  it("keeps locate, pagination, scroll, and notice behavior identical", () => {
+    const src = effectSrc();
+    // The mode only gates setSelected: lookup, navigation, and
+    // miss handling run exactly as before.
+    expect(src).toContain("setFlowId(body.flow_id);");
+    expect(src).toContain("setDeepLinkNotice(");
   });
 });
 

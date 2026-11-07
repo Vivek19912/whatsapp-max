@@ -16,6 +16,11 @@ import {
 import { WorkspaceActionsMenu } from '@/components/workspace/workspace-actions-menu';
 import { WorkspaceFollowupKpis } from '@/components/workspace/workspace-followup-kpis';
 import {
+  TableHScrollbar,
+  useShiftWheel,
+  useTableFreezeMetrics,
+} from '@/components/workspace/table-scrollbars';
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -894,7 +899,9 @@ export default function WorkspacePage() {
   }, [payload, pageSize]);
   // Deep link (e.g. from Call Recordings): ?contact=<contacts.id>
   // selects the first row for that lead — the exact same `selected`
-  // state a row click sets, so the same drawer opens. Runs once per
+  // state a row click sets, so the same drawer opens. Inbox "Open in
+  // Workspace" appends &highlight=only to skip the drawer while
+  // keeping locate/scroll/highlight identical. Runs once per
   // param value: closing the drawer never reopens it, and an
   // unknown id (or a lead with no flow rows) leaves the plain table.
   // The rows are already account-scoped, so a foreign id can only
@@ -906,7 +913,14 @@ export default function WorkspacePage() {
   // so the drawer keeps its full payload context. A manual
   // selection always wins: we never yank the user away from a lead
   // they opened themselves.
-  const deepLinkContactId = useSearchParams().get('contact');
+  const deepLinkParams = useSearchParams();
+  const deepLinkContactId = deepLinkParams.get('contact');
+  // Highlight-only mode (?contact=<id>&highlight=only, used by
+  // Inbox "Open in Workspace"): locate, scroll, and wash the row
+  // exactly like a normal deep link, but never select it — the
+  // details drawer stays closed. Absent for every other caller,
+  // which keeps the existing select-and-open behavior.
+  const highlightOnly = deepLinkParams.get('highlight') === 'only';
   const appliedContactRef = useRef<string | null | undefined>(undefined);
   const locatedContactRef = useRef<string | null | undefined>(undefined);
   // Temporary deep-link highlight (contact id whose row gets a
@@ -924,7 +938,7 @@ export default function WorkspacePage() {
     if (appliedContactRef.current === deepLinkContactId) return;
     const row = findWorkspaceRowForContact(payload.rows, deepLinkContactId);
     if (row) {
-      setSelected(row);
+      if (!highlightOnly) setSelected(row);
       setHighlightContactId(deepLinkContactId);
       appliedContactRef.current = deepLinkContactId;
       return;
@@ -960,7 +974,7 @@ export default function WorkspacePage() {
       })
       .catch(() => {});
     return () => ctrl.abort();
-  }, [deepLinkContactId, payload, pageSize, selected]);
+  }, [deepLinkContactId, highlightOnly, payload, pageSize, selected]);
 
   // Temporary deep-link highlight: once the located lead's row is
   // rendered, scroll it into view and wash it light blue for ~4s.
@@ -1348,6 +1362,46 @@ export default function WorkspacePage() {
     },
     [visibleHeaderOrder, headerBackgrounds, effectiveColumnWidths]
   );
+
+  // Synced horizontal scrolling + frozen leading columns. One
+  // scroller owns the truth (the Table primitive's inner
+  // container); the two thumb strips, Shift+wheel, and native
+  // trackpad input all read/write it, so nothing desynchronizes.
+  // Frozen offsets are MEASURED from the rendered header cells
+  // (never hardcoded): No. pins at the viewport edge, Name pins
+  // right after it. tableKey re-attaches observers whenever the
+  // rows, columns, flow, or page change.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const tableKey = `${flowId ?? ''}|${page}|${pageSize}|${visibleRows.length}|${visibleHeaderOrder.length}`;
+  // The viewport div IS the scroller: globals.css neutralizes the
+  // Table primitive's inner container to `visible` so exactly one
+  // native scrollbar pair serves the grid (see the scroll test's
+  // "one scrollbar" assertion).
+  const getScroller = useCallback((): HTMLElement | null => {
+    return viewportRef.current;
+  }, []);
+  const getTable = useCallback((): HTMLElement | null => {
+    const el = viewportRef.current?.querySelector('table');
+    return el instanceof HTMLElement ? el : null;
+  }, []);
+  const { noHeadRef, nameHeadRef, metrics } = useTableFreezeMetrics(
+    viewportRef,
+    tableKey
+  );
+  useShiftWheel(viewportRef, tableKey);
+  const nameLeft = rowVisible ? metrics.noWidth : 0;
+  // Opaque tint mirroring the row's own wash so scrolling content
+  // never shows through frozen cells. Same precedence as the row
+  // (highlight wins over pinned wins over card), without the
+  // row-edge accent (that paints on the row box itself).
+  const frozenTint = (row: FlowTableRow) =>
+    cn(
+      'bg-card transition-colors hover:bg-muted/50',
+      pinnedIds.has(row.runId) && 'bg-amber-50/70 dark:bg-amber-950/20',
+      highlightContactId !== null &&
+        row.contactId === highlightContactId &&
+        'bg-blue-100/70 duration-1000 dark:bg-blue-500/15'
+    );
 
   // Live width during a drag (no fetch); persist on release.
   // Unchanged releases skip the PUT; failures revert + toast.
@@ -1854,21 +1908,38 @@ export default function WorkspacePage() {
             <>
               <div className="border-border bg-card overflow-hidden rounded-xl border">
               <div
+                ref={viewportRef}
                 className={cn(
                   'workspace-table-viewport max-h-[70vh] overflow-auto',
                   resizingKey !== null && 'select-none'
                 )}
               >
+                {/* Sticky top scrollbar: viewport-width block pinned to
+                    the container top, driving the table's own scroller
+                    (same element Shift+wheel and both thumb strips
+                    share). Headers stick 16px below it (top-4). */}
+                <div className="sticky top-0 z-30 bg-card">
+                  <TableHScrollbar
+                    getScroller={getScroller}
+                    getTable={getTable}
+                    contentKey={tableKey}
+                    label="Top table scrollbar"
+                    className="px-2"
+                  />
+                </div>
                 <Table>
-                  {/* Enterprise grid: every header cell sticks to the
-                      top (opaque, so rows slide underneath) while the
-                      whole table scrolls horizontally as ONE unified
-                      grid — no pinned or frozen columns. The
+                  {/* Enterprise grid: the header row sticks below the
+                      top scrollbar (top-4); the No. and Name columns
+                      freeze horizontally at measured offsets (see
+                      frozenTint/noWidth below) while the whole table
+                      still scrolls as ONE unified grid. The
                       tr-level divider is neutralized (merged to
                       border-b-0 by tailwind-merge) in favour of the
                       th-level divider, which travels with the stuck
                       header. Each header carries a drag handle on its
-                      right boundary (writers only). */}
+                      right boundary (writers only). A second sticky
+                      header row right below holds the secondary thumb
+                      strip, tracking the table viewport width. */}
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
                       {/* Row actions: narrow fixed column first (writers
@@ -1879,7 +1950,7 @@ export default function WorkspacePage() {
                           width, and header-color systems. */}
                       {canSendMessages && (
                         <TableHead
-                          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+                          className="sticky top-4 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
                           aria-label="Row actions"
                         >
                           <span className="sr-only">Actions</span>
@@ -1887,8 +1958,9 @@ export default function WorkspacePage() {
                       )}
                       {rowVisible && (
                       <TableHead
-                        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
-                        style={headStyleAt(0)}
+                        ref={noHeadRef}
+                        className="sticky top-4 left-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
+                        style={{ ...headStyleAt(0), left: 0 }}
                       >
                         No.
                         {canSendMessages && (
@@ -1927,12 +1999,22 @@ export default function WorkspacePage() {
                         // sent to Google Sheets.
                         const showDialAfter =
                           c.system && c.key === 'phone';
+                        // The system Name column freezes beside No.:
+                        // identity-based (system + key), never the
+                        // label, so a flow-collected "Name" question
+                        // keeps scrolling.
+                        const isNameCol = c.system && c.key === 'name';
                         return (
                           <Fragment key={flowColumnRenderKey(c)}>
                     <TableHead
                       key={flowColumnRenderKey(c)}
-                      className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
-                      style={headStyleAt(headerIdx)}
+                      ref={isNameCol ? nameHeadRef : undefined}
+                      className="sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                      style={
+                        isNameCol
+                          ? { ...headStyleAt(headerIdx), left: nameLeft }
+                          : headStyleAt(headerIdx)
+                      }
                     >
                               {renamable ? (
                                 <MetaColumnHeaderMenu
@@ -1964,7 +2046,7 @@ export default function WorkspacePage() {
                             {showDialAfter && (
                       <TableHead
                         scope="col"
-                        className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+                        className="sticky top-4 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
                         style={{ minWidth: 112, width: 128 }}
                       >
                                 <span className="block whitespace-nowrap">Dial</span>
@@ -1977,7 +2059,7 @@ export default function WorkspacePage() {
                     <TableHead
                       key={f.id}
                       className={cn(
-                        'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+                        'sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
                             // Customer Response / Next Action headers
                             // center their labels within the full
                             // 448px cell (the resize handle is
@@ -2007,6 +2089,38 @@ export default function WorkspacePage() {
                           )}
                         </TableHead>
                       ))}
+                    </TableRow>
+                    {/* Secondary thumb strip: a full-width header row
+                        pinned just below the stuck headers (top =
+                        strip + header height) and to the viewport
+                        edge, driving the same scroller as the top
+                        strip and native swipes. Inner width tracks
+                        the measured viewport so it never overflows. */}
+                    <TableRow className="hover:bg-transparent">
+                      <td
+                        colSpan={0}
+                        className="sticky z-10 border-b border-border bg-card p-0"
+                        style={{
+                          top: canSendMessages ? 80 : 60,
+                          left: 0,
+                        }}
+                      >
+                        <div
+                          style={
+                            metrics.viewportWidth > 0
+                              ? { width: metrics.viewportWidth }
+                              : undefined
+                          }
+                        >
+                          <TableHScrollbar
+                            getScroller={getScroller}
+                            getTable={getTable}
+                            contentKey={tableKey}
+                            label="Secondary table scrollbar"
+                            className="px-2"
+                          />
+                        </div>
+                      </td>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2045,7 +2159,10 @@ export default function WorkspacePage() {
                         )}
                         {rowVisible && (
                         <TableCell
-                          className="text-muted-foreground border-r border-border text-sm tabular-nums last:border-r-0"
+                          className={cn(
+                            'sticky left-0 z-[1] border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
+                            frozenTint(row)
+                          )}
                           style={columnWidthStyle(ROW_VIS_ID, effectiveColumnWidths)}
                         >
                           {workspaceRowNumber({
@@ -2088,15 +2205,34 @@ export default function WorkspacePage() {
                           // stored).
                           const showDialAfter =
                             c.system && c.key === 'phone';
+                          // The system Name column freezes beside No.
+                          // (identity-based, like its header): opaque
+                          // tint mirroring the row wash so scrolled
+                          // columns slide underneath it.
+                          const freezeName = c.system && c.key === 'name';
                           return (
                           <Fragment key={flowColumnRenderKey(c)}>
                       <TableCell
                         key={flowColumnRenderKey(c)}
-                        className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
-                        style={columnWidthStyle(
-                          flowColumnVisId(c.key),
-                          effectiveColumnWidths
+                        className={cn(
+                          'max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0',
+                          freezeName && 'sticky z-[1]',
+                          freezeName && frozenTint(row)
                         )}
+                        style={
+                          freezeName
+                            ? {
+                                ...columnWidthStyle(
+                                  flowColumnVisId(c.key),
+                                  effectiveColumnWidths
+                                ),
+                                left: nameLeft,
+                              }
+                            : columnWidthStyle(
+                                flowColumnVisId(c.key),
+                                effectiveColumnWidths
+                              )
+                        }
                       >
                               {!c.system && flowId !== null ? (
                                 <FlowAnswerCell
