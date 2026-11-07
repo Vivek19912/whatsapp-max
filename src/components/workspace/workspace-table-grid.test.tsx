@@ -255,7 +255,8 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
 
   it("the single scroll viewport and sticky header are untouched", () => {
     expect(pageSrc).toContain("workspace-table-viewport");
-    expect(pageSrc).toContain("overflow-auto");
+    expect(pageSrc).toContain("overflow-y-auto");
+    expect(pageSrc).toContain("overflow-x-hidden");
     expect(pageSrc).toContain("sticky top-0");
     expect(pageSrc).not.toMatch(/overflow-x-(auto|scroll)/);
   });

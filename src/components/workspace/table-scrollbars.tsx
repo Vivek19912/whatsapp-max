@@ -14,11 +14,12 @@ type ScrollerGetter = () => HTMLElement | null;
  * `.workspace-table-viewport` div itself. (The shadcn Table
  * primitive's inner container is neutralized to `visible` by
  * globals.css, precisely so a single scrollport serves the
- * table.) The single sticky bottom thumb strip, native trackpad
+ * table.) The single sticky bottom thumb strip, trackpad
  * swipes, and Shift+wheel all read/write THAT element, never a
  * second scroll position, so nothing can desynchronize. The
- * viewport's own native horizontal track is hidden by globals.css
- * so the bottom thumb is the only visible horizontal scrollbar.
+ * viewport's own native horizontal track never renders
+ * (overflow-x-hidden — cross-browser, see globals.css), so the
+ * bottom thumb is the only visible horizontal scrollbar.
  *
  * Scroll position itself never touches React state: the thumb
  * mutates its own DOM directly on scroll events (passive
@@ -74,7 +75,15 @@ export function TableHScrollbar({
     const max = scroller.scrollWidth - scroller.clientWidth;
     const trackW = track.clientWidth;
     if (trackW <= 0) return;
-    const thumbW = max > 0 ? Math.max(24, (trackW * scroller.clientWidth) / scroller.scrollWidth) : trackW;
+    // ~30% longer than the proportional share (easier to grab),
+    // with a track-relative floor, clamped to the track: the
+    // drag-to-scroll span below is measured live off the DOM, so
+    // the wider thumb stays exact at any width and both ends
+    // remain reachable.
+    const minW = Math.max(40, Math.round(trackW * 0.12));
+    const proportional = (trackW * scroller.clientWidth) / scroller.scrollWidth;
+    const thumbW =
+      max > 0 ? Math.min(trackW, Math.max(minW, proportional * 1.3)) : trackW;
     const x = max > 0 ? (scroller.scrollLeft / max) * (trackW - thumbW) : 0;
     thumb.style.width = `${thumbW}px`;
     thumb.style.transform = `translateX(${x}px)`;
@@ -256,22 +265,33 @@ export function useTableFreezeMetrics(
 }
 
 /**
- * Shift+mouse-wheel horizontal scrolling, scoped to the table
- * viewport only. Native listener (non-passive) so preventDefault
- * reliably swaps the vertical delta onto the horizontal axis.
- * Plain wheel (and native trackpad horizontal swipes) is never
- * intercepted, so vertical scrolling, trackpad swipes, inputs,
- * and everything outside the table behave exactly as before.
+ * Wheel input for the table viewport, scoped to that element only.
+ * Native listener (non-passive) so preventDefault reliably steers
+ * deltas. Two cases, everything else passes through untouched:
+ * Shift+wheel swaps the vertical delta onto the horizontal axis;
+ * trackpad horizontal swipes apply their deltaX manually (the
+ * viewport's horizontal axis is user-hidden, so those deltas would
+ * otherwise go nowhere). Diagonal swipes keep their vertical
+ * component — applied alongside — so vertical scrolling never
+ * stalls mid-gesture. Plain wheel, inputs, and everything outside
+ * the table behave exactly as before.
  */
 export function useShiftWheel(viewportRef: React.RefObject<HTMLDivElement | null>, mountKey: string) {
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
+    const scale = (d: number, mode: number) => (mode === 1 ? d * 16 : d);
     const onWheel = (e: WheelEvent) => {
-      if (!e.shiftKey || e.deltaY === 0) return;
+      if (e.shiftKey) {
+        if (e.deltaY === 0) return;
+        e.preventDefault();
+        vp.scrollLeft += scale(e.deltaY, e.deltaMode);
+        return;
+      }
+      if (e.deltaX === 0) return;
       e.preventDefault();
-      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-      vp.scrollLeft += dy;
+      vp.scrollLeft += scale(e.deltaX, e.deltaMode);
+      if (e.deltaY !== 0) vp.scrollTop += scale(e.deltaY, e.deltaMode);
     };
     vp.addEventListener('wheel', onWheel, { passive: false });
     return () => vp.removeEventListener('wheel', onWheel);

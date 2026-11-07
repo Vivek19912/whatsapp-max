@@ -113,7 +113,8 @@ describe("10/11. no sticky offsets; resizing survives on plain widths", () => {
 
   it("the scroll viewport and sticky header are untouched", () => {
     expect(pageSrc).toContain("workspace-table-viewport");
-    expect(pageSrc).toContain("overflow-auto");
+    expect(pageSrc).toContain("overflow-y-auto");
+    expect(pageSrc).toContain("overflow-x-hidden");
     expect(pageSrc).toContain("sticky top-0");
   });
 });

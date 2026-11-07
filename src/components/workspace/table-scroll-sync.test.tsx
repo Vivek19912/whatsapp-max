@@ -20,10 +20,6 @@ const syncSrc = readFileSync(
   `${root}/src/components/workspace/table-scrollbars.tsx`,
   "utf8"
 );
-const cssSrc = readFileSync(
-  `${root}/src/app/globals.css`,
-  "utf8"
-);
 
 describe("both top scrollbars are gone", () => {
   it("renders no top strip above the table", () => {
@@ -79,10 +75,14 @@ describe("single sticky bottom scrollbar", () => {
     expect(pageSrc).toContain("return viewportRef.current;");
   });
 
-  it("hides the duplicate native horizontal track", () => {
-    expect(cssSrc).toContain(
-      ".workspace-table-viewport::-webkit-scrollbar:horizontal"
-    );
+  it("hides the duplicate native horizontal track in every browser", () => {
+    // overflow-x-hidden user-hides the axis (no WebKit-only
+    // pseudo-element hacks, no Firefox fallback gap) while the
+    // axis stays programmatically scrollable — thumb drags and
+    // wheel input write scrollLeft directly.
+    expect(pageSrc).toContain("overflow-x-hidden");
+    expect(pageSrc).toContain("overflow-y-auto");
+    expect(pageSrc).not.toContain("::-webkit-scrollbar");
   });
 });
 
@@ -90,9 +90,12 @@ describe("single-source synchronization", () => {
   it("keeps one scroll container: no nested horizontal scrollers", () => {
     // A second overflow-x context would desynchronize positions;
     // the thumb repaints from the shared scroller instead.
+    // Vertical scrolls natively; horizontal is user-hidden but
+    // programmatically driven.
     expect(pageSrc).not.toMatch(/overflow-x-(auto|scroll)/);
     expect(pageSrc).toContain("workspace-table-viewport");
-    expect(pageSrc).toContain("overflow-auto");
+    expect(pageSrc).toContain("overflow-y-auto");
+    expect(pageSrc).toContain("overflow-x-hidden");
   });
 
   it("repaints the thumb from scroll events without re-rendering", () => {
@@ -156,21 +159,25 @@ describe("frozen No. and Name columns", () => {
 });
 
 describe("Shift+wheel and trackpad input", () => {
-  it("swaps only Shift+wheel deltas onto the horizontal axis", () => {
+  it("swaps Shift+wheel deltas onto the horizontal axis", () => {
     expect(syncSrc).toContain("e.shiftKey");
     expect(syncSrc).toContain("e.preventDefault()");
     expect(syncSrc).toContain("passive: false");
     expect(syncSrc).toContain("deltaMode");
-    // Plain wheel (and everything else) passes through untouched.
-    expect(syncSrc).toContain("if (!e.shiftKey || e.deltaY === 0) return;");
+    expect(syncSrc).toContain("if (e.deltaY === 0) return;");
+    expect(syncSrc).toContain("vp.scrollLeft += scale(e.deltaY, e.deltaMode);");
   });
 
-  it("never intercepts native trackpad horizontal swipes", () => {
-    // Horizontal swipe deltas flow to the table's own scroller
-    // natively; the code must never read or override them.
-    expect(syncSrc).not.toContain(".deltaX");
-    expect(syncSrc).not.toContain("deltaX +");
-    expect(syncSrc).not.toContain("deltaX*");
+  it("applies trackpad horizontal swipes manually (axis is user-hidden)", () => {
+    // The native horizontal axis can't consume deltaX itself, so
+    // the handler writes scrollLeft directly — and carries a
+    // diagonal gesture's vertical component along so vertical
+    // scrolling never stalls mid-swipe. Plain vertical wheel
+    // passes through to the native vertical bar untouched.
+    expect(syncSrc).toContain("e.deltaX");
+    expect(syncSrc).toContain("if (e.deltaX === 0) return;");
+    expect(syncSrc).toContain("vp.scrollLeft += scale(e.deltaX, e.deltaMode);");
+    expect(syncSrc).toContain("vp.scrollTop += scale(e.deltaY, e.deltaMode);");
   });
 });
 
@@ -178,5 +185,24 @@ describe("thumb visuals", () => {
   it("paints a blue thumb on a neutral track", () => {
     expect(syncSrc).toContain("bg-blue-600");
     expect(syncSrc).toContain("rounded-full bg-muted");
+  });
+
+  it("renders the thumb ~30% longer with a responsive floor, clamped to the track", () => {
+    // Longer grab target where space permits; the track-relative
+    // floor keeps it usable on narrow viewports; the clamp keeps
+    // it inside the track so both ends stay reachable.
+    expect(syncSrc).toContain("proportional * 1.3");
+    expect(syncSrc).toContain("Math.max(40, Math.round(trackW * 0.12))");
+    expect(syncSrc).toContain("Math.min(trackW, Math.max(minW,");
+  });
+
+  it("keeps drag-to-scroll mapping exact at the wider width", () => {
+    // Drag math measures the LIVE thumb width off the DOM
+    // (offsetWidth) and spans the remaining track, so the wider
+    // thumb controls the complete range accurately — far-left and
+    // far-right stay reachable with no rescaling needed.
+    expect(syncSrc).toContain("thumb.offsetWidth");
+    expect(syncSrc).toContain("m.trackW - m.thumbW");
+    expect(syncSrc).toContain("(trackW - thumbW)");
   });
 });

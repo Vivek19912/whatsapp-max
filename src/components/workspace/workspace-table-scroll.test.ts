@@ -88,7 +88,8 @@ describe("6. header and body share one width source", () => {
 describe("1/4/7. single table viewport, no page scroll, vertical intact", () => {
   it("the table viewport owns scrolling with a viewport-relative bound", () => {
     expect(page).toContain("workspace-table-viewport");
-    expect(page).toContain("overflow-auto");
+    expect(page).toContain("overflow-y-auto");
+    expect(page).toContain("overflow-x-hidden");
     expect(page).toContain("max-h-[70vh]");
     // No fixed-px viewport heights/widths that break screen sizes.
     expect(page).not.toMatch(/max-h-\[\d+px\]/);

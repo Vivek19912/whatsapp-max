@@ -1366,9 +1366,10 @@ export default function WorkspacePage() {
   // Synced horizontal scrolling + frozen leading columns. One
   // scroller owns the truth (the Table primitive's inner
   // container); the single bottom thumb strip, Shift+wheel, and
-  // native trackpad input all read/write it, so nothing
-  // desynchronizes. The native horizontal track is hidden (see
-  // globals.css) so exactly one scrollbar is ever visible.
+  // trackpad input all read/write it, so nothing desynchronizes.
+  // The native horizontal track is user-hidden (overflow-x) so
+  // exactly one scrollbar is ever visible — the axis stays
+  // programmatically scrollable (see globals.css + useShiftWheel).
   // Frozen offsets are MEASURED from the rendered header cells
   // (never hardcoded): No. pins at the viewport edge, Name pins
   // right after it. tableKey re-attaches observers whenever the
@@ -1917,7 +1918,7 @@ export default function WorkspacePage() {
               <div
                 ref={viewportRef}
                 className={cn(
-                  'workspace-table-viewport max-h-[70vh] overflow-auto',
+                  'workspace-table-viewport max-h-[70vh] overflow-y-auto overflow-x-hidden',
                   resizingKey !== null && 'select-none'
                 )}
               >

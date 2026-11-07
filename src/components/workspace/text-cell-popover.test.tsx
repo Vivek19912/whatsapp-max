@@ -284,7 +284,8 @@ describe("18+19+20. table UX preserved (resize, sticky, scroll)", () => {
     expect(pageSrc).toContain("ColumnResizeHandle");
     expect(pageSrc).toContain("sticky top-0");
     expect(pageSrc).toContain("workspace-table-viewport");
-    expect(pageSrc).toContain("overflow-auto");
+    expect(pageSrc).toContain("overflow-y-auto");
+    expect(pageSrc).toContain("overflow-x-hidden");
   });
 });
 

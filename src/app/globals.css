@@ -302,21 +302,19 @@ html[data-theme="rose"] {
  * to it, and header/body columns stay aligned. No column pins
  * or freezes: the whole grid scrolls horizontally as one.
  *
- * The viewport's OWN native horizontal track is hidden below so
- * the single sticky bottom thumb strip is the only visible
- * horizontal scrollbar in Chromium/Safari/Edge (the axis stays
- * natively scrollable for trackpad/Shift+wheel — only the
- * duplicate native track is painted away; vertical scrolling
- * keeps its native bar). Firefox has no per-axis scrollbar
- * hiding, so it keeps its native horizontal track as a
- * fallback alongside the thumb — scrolling stays correct
- * there, just not single-track. Scoped to Workspace; every
+ * The viewport's native horizontal track never renders:
+ * `overflow-x-hidden` on the viewport user-hides that axis in
+ * every browser (no WebKit-only pseudo-element hacks, no
+ * Firefox fallback gap), so the single sticky bottom thumb strip
+ * is the only visible horizontal scrollbar. The axis stays
+ * programmatically scrollable — thumb drags, step buttons,
+ * thumb keyboard, Shift+wheel, and trackpad swipes (see
+ * `useShiftWheel`) all write `scrollLeft` directly, and
+ * `scrollWidth` still reports the full content width, so the
+ * thumb keeps reflecting the true range. Vertical scrolling
+ * keeps its native bar, untouched. Scoped to Workspace; every
  * other Table in the app is untouched.
  * ============================================================ */
 .workspace-table-viewport [data-slot="table-container"] {
   overflow: visible;
-}
-
-.workspace-table-viewport::-webkit-scrollbar:horizontal {
-  display: none;
 }
