@@ -298,12 +298,25 @@ html[data-theme="rose"] {
  * container and can never stick) and produces two competing
  * scrollbars. Neutralizing the inner container to `visible`
  * leaves exactly ONE scrollport — the bordered
- * `.workspace-table-viewport` — so one native scrollbar pair
- * serves the table, the stuck header resolves to it, and
- * header/body columns stay aligned. No column pins or freezes:
- * the whole grid scrolls horizontally as one. Scoped to
- * Workspace; every other Table in the app is untouched.
+ * `.workspace-table-viewport` — so the stuck header resolves
+ * to it, and header/body columns stay aligned. No column pins
+ * or freezes: the whole grid scrolls horizontally as one.
+ *
+ * The viewport's OWN native horizontal track is hidden below so
+ * the single sticky bottom thumb strip is the only visible
+ * horizontal scrollbar in Chromium/Safari/Edge (the axis stays
+ * natively scrollable for trackpad/Shift+wheel — only the
+ * duplicate native track is painted away; vertical scrolling
+ * keeps its native bar). Firefox has no per-axis scrollbar
+ * hiding, so it keeps its native horizontal track as a
+ * fallback alongside the thumb — scrolling stays correct
+ * there, just not single-track. Scoped to Workspace; every
+ * other Table in the app is untouched.
  * ============================================================ */
 .workspace-table-viewport [data-slot="table-container"] {
   overflow: visible;
+}
+
+.workspace-table-viewport::-webkit-scrollbar:horizontal {
+  display: none;
 }

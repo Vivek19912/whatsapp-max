@@ -1365,8 +1365,10 @@ export default function WorkspacePage() {
 
   // Synced horizontal scrolling + frozen leading columns. One
   // scroller owns the truth (the Table primitive's inner
-  // container); the two thumb strips, Shift+wheel, and native
-  // trackpad input all read/write it, so nothing desynchronizes.
+  // container); the single bottom thumb strip, Shift+wheel, and
+  // native trackpad input all read/write it, so nothing
+  // desynchronizes. The native horizontal track is hidden (see
+  // globals.css) so exactly one scrollbar is ever visible.
   // Frozen offsets are MEASURED from the rendered header cells
   // (never hardcoded): No. pins at the viewport edge, Name pins
   // right after it. tableKey re-attaches observers whenever the
@@ -1395,21 +1397,6 @@ export default function WorkspacePage() {
   // Sticky positioning applies only once geometry is measured;
   // a first render can never pin Name over No. at offset 0.
   const freezeReady = metrics.viewportWidth > 0;
-  // Exact span for the secondary strip row. colSpan={0} ("span to
-  // end") is inconsistently supported and fractures the
-  // header/body grid — count every rendered column instead,
-  // mirroring the FIRST header row exactly (customs render
-  // unconditionally up there; over-counting would only widen a
-  // single-cell row, under-counting breaks alignment).
-  const stripColSpan =
-    Math.max(
-      (canSendMessages ? 1 : 0) +
-        (rowVisible ? 1 : 0) +
-        flowColumnsVisible.length +
-        flowColumnsVisible.filter((c) => c.system && c.key === 'phone').length +
-        customFieldsOrdered.length,
-      1
-    );
   // Opaque tint mirroring the row's own wash so scrolling content
   // never shows through frozen cells. Same precedence as the row
   // (highlight wins over pinned wins over card), without the
@@ -1934,32 +1921,9 @@ export default function WorkspacePage() {
                   resizingKey !== null && 'select-none'
                 )}
               >
-                {/* Sticky top scrollbar: viewport-width block pinned to
-                    the container top AND left, driving the table's own
-                    scroller (same element Shift+wheel and both thumb
-                    strips share). Headers stick 16px below it (top-4).
-                    The explicit viewport width keeps the strip visible
-                    at any horizontal position, matching the secondary
-                    strip below. */}
-                <div
-                  className="sticky top-0 left-0 z-30 bg-card"
-                  style={
-                    metrics.viewportWidth > 0
-                      ? { width: metrics.viewportWidth }
-                      : undefined
-                  }
-                >
-                  <TableHScrollbar
-                    getScroller={getScroller}
-                    getTable={getTable}
-                    contentKey={tableKey}
-                    label="Top table scrollbar"
-                    className="px-2"
-                  />
-                </div>
                 <Table>
-                  {/* Enterprise grid: the header row sticks below the
-                      top scrollbar (top-4); the No. and Name columns
+                  {/* Enterprise grid: the header row sticks to the
+                      viewport top (top-0); the No. and Name columns
                       freeze horizontally at measured offsets (see
                       frozenTint/noWidth below) while the whole table
                       still scrolls as ONE unified grid. The
@@ -1967,9 +1931,10 @@ export default function WorkspacePage() {
                       border-b-0 by tailwind-merge) in favour of the
                       th-level divider, which travels with the stuck
                       header. Each header carries a drag handle on its
-                      right boundary (writers only). A second sticky
-                      header row right below holds the secondary thumb
-                      strip, tracking the table viewport width. */}
+                      right boundary (writers only). A single thumb
+                      strip sticks to the viewport bottom below the
+                      table (see after </Table>), tracking the table
+                      viewport width. */}
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
                       {/* Row actions: narrow fixed column first (writers
@@ -1980,7 +1945,7 @@ export default function WorkspacePage() {
                           width, and header-color systems. */}
                       {canSendMessages && (
                         <TableHead
-                          className="sticky top-4 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+                          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
                           aria-label="Row actions"
                         >
                           <span className="sr-only">Actions</span>
@@ -1989,7 +1954,7 @@ export default function WorkspacePage() {
                       {rowVisible && (
                       <TableHead
                         ref={noHeadRef}
-                        className="sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
+                        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
                         style={{ ...headStyleAt(0), ...(freezeReady ? { left: 0 } : null) }}
                       >
                         No.
@@ -2049,7 +2014,7 @@ export default function WorkspacePage() {
                     <TableHead
                       key={flowColumnRenderKey(c)}
                       ref={isNameCol ? nameHeadRef : undefined}
-                      className="sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+                      className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
                       style={
                         isNameCol && freezeReady
                           ? { ...headStyleAt(headerIdx), left: nameLeft }
@@ -2086,7 +2051,7 @@ export default function WorkspacePage() {
                             {showDialAfter && (
                       <TableHead
                         scope="col"
-                        className="sticky top-4 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+                        className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
                         style={{ minWidth: 112, width: 128 }}
                       >
                                 <span className="block whitespace-nowrap">Dial</span>
@@ -2099,7 +2064,7 @@ export default function WorkspacePage() {
                     <TableHead
                       key={f.id}
                       className={cn(
-                        'sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+                        'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
                             // Customer Response / Next Action headers
                             // center their labels within the full
                             // 448px cell (the resize handle is
@@ -2132,38 +2097,6 @@ export default function WorkspacePage() {
                           )}
                         </TableHead>
                       ))}
-                    </TableRow>
-                    {/* Secondary thumb strip: a full-width header row
-                        pinned just below the stuck headers (top =
-                        strip + header height) and to the viewport
-                        edge, driving the same scroller as the top
-                        strip and native swipes. Inner width tracks
-                        the measured viewport so it never overflows. */}
-                    <TableRow className="hover:bg-transparent">
-                      <td
-                        colSpan={stripColSpan}
-                        className="sticky z-10 border-b border-border bg-card p-0"
-                        style={{
-                          top: canSendMessages ? 80 : 60,
-                          left: 0,
-                        }}
-                      >
-                        <div
-                          style={
-                            metrics.viewportWidth > 0
-                              ? { width: metrics.viewportWidth }
-                              : undefined
-                          }
-                        >
-                          <TableHScrollbar
-                            getScroller={getScroller}
-                            getTable={getTable}
-                            contentKey={tableKey}
-                            label="Secondary table scrollbar"
-                            className="px-2"
-                          />
-                        </div>
-                      </td>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2433,6 +2366,31 @@ export default function WorkspacePage() {
                     ))}
                   </TableBody>
                 </Table>
+                {/* Single bottom thumb strip: an in-flow block pinned
+                    to the viewport bottom AND left, driving the
+                    table's own scroller (the same element Shift+wheel
+                    and native swipes share). In-flow — never an
+                    overlay — so it cannot cover rows or the
+                    pagination below; stickiness keeps it visible
+                    while rows scroll. The explicit viewport width
+                    keeps it aligned without touching the sidebar or
+                    overflowing the page. */}
+                <div
+                  className="sticky bottom-0 left-0 z-30 border-t border-border bg-card"
+                  style={
+                    metrics.viewportWidth > 0
+                      ? { width: metrics.viewportWidth }
+                      : undefined
+                  }
+                >
+                  <TableHScrollbar
+                    getScroller={getScroller}
+                    getTable={getTable}
+                    contentKey={tableKey}
+                    label="Bottom table scrollbar"
+                    className="px-2 py-1"
+                  />
+                </div>
               </div>
               <WorkspacePagination
                 page={page}

@@ -13,16 +13,18 @@ type ScrollerGetter = () => HTMLElement | null;
  * One scroller owns the truth: the bordered
  * `.workspace-table-viewport` div itself. (The shadcn Table
  * primitive's inner container is neutralized to `visible` by
- * globals.css, precisely so a single native scrollbar pair serves
- * the table.) Every control — the sticky top strip, the
- * below-headers strip, native trackpad swipes, Shift+wheel — reads
- * or writes THAT element, never a second scroll position, so
- * nothing can desynchronize.
+ * globals.css, precisely so a single scrollport serves the
+ * table.) The single sticky bottom thumb strip, native trackpad
+ * swipes, and Shift+wheel all read/write THAT element, never a
+ * second scroll position, so nothing can desynchronize. The
+ * viewport's own native horizontal track is hidden by globals.css
+ * so the bottom thumb is the only visible horizontal scrollbar.
  *
- * Scroll position itself never touches React state: thumbs mutate
- * their own DOM directly on scroll events (passive listeners), so
- * dragging or wheeling causes zero re-renders. State only carries
- * slow-changing geometry (frozen offsets, viewport width).
+ * Scroll position itself never touches React state: the thumb
+ * mutates its own DOM directly on scroll events (passive
+ * listeners), so dragging or wheeling causes zero re-renders.
+ * State only carries slow-changing geometry (frozen offsets,
+ * viewport width).
  */
 
 /** Blue thumb on a neutral track, shared by both strips. */
@@ -36,6 +38,7 @@ const THUMB_CLASS =
  * table's own scroller. A viewport-width track with a proportional
  * thumb; drag, track-click, arrows/Home/End all drive the shared
  * scroller, and every scroll of that scroller repaints the thumb.
+ * Rendered ONCE per table as the sticky bottom strip.
  */
 export function TableHScrollbar({
   getScroller,
