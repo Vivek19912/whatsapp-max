@@ -1933,9 +1933,9 @@ export default function WorkspacePage() {
                       th-level divider, which travels with the stuck
                       header. Each header carries a drag handle on its
                       right boundary (writers only). A single thumb
-                      strip sticks to the viewport bottom below the
-                      table (see after </Table>), tracking the table
-                      viewport width. */}
+                      strip sits below the vertical viewport as a
+                      card-level sibling (see after </Table>) — always
+                      visible, never in the row flow. */}
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
                       {/* Row actions: narrow fixed column first (writers
@@ -2367,31 +2367,27 @@ export default function WorkspacePage() {
                     ))}
                   </TableBody>
                 </Table>
-                {/* Single bottom thumb strip: an in-flow block pinned
-                    to the viewport bottom AND left, driving the
-                    table's own scroller (the same element Shift+wheel
-                    and native swipes share). In-flow — never an
-                    overlay — so it cannot cover rows or the
-                    pagination below; stickiness keeps it visible
-                    while rows scroll. The explicit viewport width
-                    keeps it aligned without touching the sidebar or
-                    overflowing the page. */}
-                <div
-                  className="sticky bottom-0 left-0 z-30 border-t border-border bg-card"
-                  style={
-                    metrics.viewportWidth > 0
-                      ? { width: metrics.viewportWidth }
-                      : undefined
-                  }
-                >
-                  <TableHScrollbar
-                    getScroller={getScroller}
-                    getTable={getTable}
-                    contentKey={tableKey}
-                    label="Bottom table scrollbar"
-                    className="px-2 py-1"
-                  />
-                </div>
+              </div>
+              {/* Single bottom thumb strip: a sibling BELOW the
+                  vertical viewport — never inside the row flow — so
+                  it is structurally always visible at the table's
+                  bottom edge, whether the first, middle, or last
+                  rows are in view. No sticky positioning involved:
+                  visibility cannot depend on scroll position. A
+                  plain block filling the card, so it aligns with
+                  the table width without touching the sidebar or
+                  overflowing the page; in-flow, never an overlay,
+                  so it covers neither rows nor the pagination
+                  below. Drives the viewport's own scroller (the
+                  same element Shift+wheel and swipes share). */}
+              <div className="border-t border-border bg-card">
+                <TableHScrollbar
+                  getScroller={getScroller}
+                  getTable={getTable}
+                  contentKey={tableKey}
+                  label="Bottom table scrollbar"
+                  className="px-2 py-1"
+                />
               </div>
               <WorkspacePagination
                 page={page}

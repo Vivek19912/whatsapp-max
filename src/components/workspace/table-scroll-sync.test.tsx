@@ -42,31 +42,42 @@ describe("both top scrollbars are gone", () => {
   });
 });
 
-describe("single sticky bottom scrollbar", () => {
-  it("renders exactly one thumb, after the table, stuck to the viewport bottom", () => {
+describe("single bottom scrollbar, always visible", () => {
+  it("renders exactly one thumb below the vertical viewport (never in the row flow)", () => {
     expect(pageSrc).toContain('label="Bottom table scrollbar"');
     expect(pageSrc).not.toContain('label="Top table scrollbar"');
     expect(pageSrc).not.toContain('label="Secondary table scrollbar"');
     const thumbIdx = pageSrc.indexOf('label="Bottom table scrollbar"');
-    const tableEnd = pageSrc.indexOf("</Table>", thumbIdx - 4000);
+    const tableEnd = pageSrc.indexOf("</Table>");
     expect(tableEnd).toBeGreaterThan(-1);
     expect(tableEnd).toBeLessThan(thumbIdx);
-    expect(pageSrc).toContain("sticky bottom-0 left-0 z-30");
+    // The vertical viewport closes BEFORE the strip: the strip is
+    // a card-level sibling, so its visibility cannot depend on
+    // row scroll position — first, middle, and last rows all show
+    // it. No sticky-bottom reliance of any kind.
+    const between = pageSrc.slice(tableEnd, thumbIdx);
+    expect(between).toContain("</div>");
+    expect(pageSrc).not.toContain("sticky bottom-0");
   });
 
-  it("stays in-flow (never an overlay over rows or pagination)", () => {
-    // In-flow block after </Table>, inside the viewport, ahead of
-    // pagination — stickiness keeps it visible while rows scroll.
+  it("sits below the table and above pagination (covers neither)", () => {
+    // Plain block sibling after the viewport, ahead of
+    // pagination — always on screen with the card, never an
+    // overlay over rows.
     const thumbIdx = pageSrc.indexOf('label="Bottom table scrollbar"');
     const pagerIdx = pageSrc.indexOf("<WorkspacePagination", thumbIdx);
     expect(pagerIdx).toBeGreaterThan(thumbIdx);
     expect(pageSrc).toContain("border-t border-border bg-card");
   });
 
-  it("tracks the measured viewport width (never the sidebar, never overflow)", () => {
+  it("fills the card width (aligned, never the sidebar, never overflow)", () => {
+    // Block-level sibling of the viewport inside the same card:
+    // width follows the card automatically — no measured inline
+    // width that could desync.
     const thumbIdx = pageSrc.indexOf('label="Bottom table scrollbar"');
     const block = pageSrc.slice(Math.max(0, thumbIdx - 600), thumbIdx);
-    expect(block).toContain("metrics.viewportWidth");
+    expect(block).not.toContain("metrics.viewportWidth");
+    expect(block).toContain("border-t border-border bg-card");
   });
 
   it("drives the table's own scroller, nothing else", () => {
@@ -182,8 +193,8 @@ describe("Shift+wheel and trackpad input", () => {
 });
 
 describe("thumb visuals", () => {
-  it("paints a blue thumb on a neutral track", () => {
-    expect(syncSrc).toContain("bg-blue-600");
+  it("paints a grey thumb on a neutral track", () => {
+    expect(syncSrc).toContain("bg-neutral-400");
     expect(syncSrc).toContain("rounded-full bg-muted");
   });
 

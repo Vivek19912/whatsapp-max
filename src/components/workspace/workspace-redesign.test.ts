@@ -139,12 +139,14 @@ describe("workspace redesign — controls row and filters", () => {
 });
 
 describe("workspace redesign — dense sticky grid", () => {
-  it("keeps stuck headers at the top with the thumb strip at the bottom", () => {
+  it("keeps stuck headers at the top with the thumb strip below the viewport", () => {
     const page = src("src/app/(dashboard)/workspace/page.tsx");
     // Headers stick to the container top (no top strips remain);
-    // the single thumb strip sticks to the viewport bottom.
+    // the single thumb strip is a sibling below the vertical
+    // viewport — always visible, no sticky-bottom reliance.
     expect(page).toContain("sticky top-0 z-20");
-    expect(page).toContain("sticky bottom-0 left-0 z-30");
+    expect(page).toContain('label="Bottom table scrollbar"');
+    expect(page).not.toContain("sticky bottom-0");
     expect(page).toContain("h-11");
     expect(page).not.toContain("h-16 truncate");
     expect(page).toContain("[&_tr]:border-b-0");

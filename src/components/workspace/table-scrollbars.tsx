@@ -14,12 +14,14 @@ type ScrollerGetter = () => HTMLElement | null;
  * `.workspace-table-viewport` div itself. (The shadcn Table
  * primitive's inner container is neutralized to `visible` by
  * globals.css, precisely so a single scrollport serves the
- * table.) The single sticky bottom thumb strip, trackpad
- * swipes, and Shift+wheel all read/write THAT element, never a
- * second scroll position, so nothing can desynchronize. The
- * viewport's own native horizontal track never renders
- * (overflow-x-hidden — cross-browser, see globals.css), so the
- * bottom thumb is the only visible horizontal scrollbar.
+ * table.) The single bottom thumb strip sits BELOW the vertical
+ * viewport as a card-level sibling (never inside the row flow),
+ * so it is always visible; trackpad swipes and Shift+wheel all
+ * read/write THAT element, never a second scroll position, so
+ * nothing can desynchronize. The viewport's own native
+ * horizontal track never renders (overflow-x-hidden —
+ * cross-browser, see globals.css), so the bottom thumb is the
+ * only visible horizontal scrollbar.
  *
  * Scroll position itself never touches React state: the thumb
  * mutates its own DOM directly on scroll events (passive
@@ -28,18 +30,19 @@ type ScrollerGetter = () => HTMLElement | null;
  * viewport width).
  */
 
-/** Blue thumb on a neutral track, shared by both strips. */
+/** Grey thumb on a neutral track, shared by both strips. */
 const TRACK_CLASS =
   'relative h-2 min-w-0 flex-1 cursor-pointer rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring';
 const THUMB_CLASS =
-  'absolute top-0 left-0 h-2 rounded-full bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400';
+  'absolute top-0 left-0 h-2 rounded-full bg-neutral-400 hover:bg-neutral-500 dark:bg-neutral-500 dark:hover:bg-neutral-400';
 
 /**
  * Draggable + keyboard-operable horizontal scrollbar bound to the
  * table's own scroller. A viewport-width track with a proportional
  * thumb; drag, track-click, arrows/Home/End all drive the shared
  * scroller, and every scroll of that scroller repaints the thumb.
- * Rendered ONCE per table as the sticky bottom strip.
+ * Rendered ONCE per table as the strip below the vertical
+ * viewport (always visible, independent of row scroll position).
  */
 export function TableHScrollbar({
   getScroller,
