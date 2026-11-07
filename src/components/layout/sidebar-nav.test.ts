@@ -18,20 +18,18 @@ describe('Features removal — sidebar', () => {
     );
   });
 
-  it('places Meta Lead Ads immediately below Dashboard', () => {
-    expect(navItems[0]).toMatchObject({ href: '/dashboard' });
-    expect(navItems[1]).toMatchObject({ href: '/meta-lead-ads/dashboard', label: 'Meta Lead Ads' });
-    expect(navItems[2]).toMatchObject({ href: '/inbox' });
+  it('leads with Dashboard (Meta Lead Ads route), then Inbox', () => {
+    expect(navItems[0]).toMatchObject({ href: '/meta-lead-ads/dashboard', label: 'Dashboard' });
+    expect(navItems[1]).toMatchObject({ href: '/inbox' });
   });
 
   it('places Calls after the Meta Lead Ads entry and Inbox', () => {
-    expect(navItems[2]).toMatchObject({ href: '/inbox' });
-    expect(navItems[3]).toMatchObject({ href: '/calls', label: 'Calls' });
+    expect(navItems[1]).toMatchObject({ href: '/inbox' });
+    expect(navItems[2]).toMatchObject({ href: '/calls', label: 'Calls' });
   });
 
   it('keeps every other entry in the required order', () => {
     expect(navItems.map((i) => i.href)).toEqual([
-      '/dashboard',
       '/meta-lead-ads/dashboard',
       '/inbox',
       '/calls',
@@ -65,9 +63,19 @@ describe('Features removal — sidebar', () => {
     );
   });
 
-  it('places Workspace eighth with no Beta badge', () => {
-    expect(navItems[7]).toMatchObject({ href: '/workspace' });
-    expect(navItems[7].beta ?? false).toBe(false);
+  it('contains no old Dashboard route entry (sidebar-only visibility change)', () => {
+    // Exact href match only: the label 'Dashboard' now belongs to
+    // the Meta Lead Ads route (/meta-lead-ads/dashboard), which
+    // stays in the sidebar.
+    expect(navItems.some((i) => i.href === '/dashboard')).toBe(false);
+    expect(
+      navItems.find((i) => i.href === '/meta-lead-ads/dashboard')?.label
+    ).toBe('Dashboard');
+  });
+
+  it('places Workspace seventh with no Beta badge', () => {
+    expect(navItems[6]).toMatchObject({ href: '/workspace' });
+    expect(navItems[6].beta ?? false).toBe(false);
   });
 
   it('places Chat Assignment after the Google Sheets children', () => {
@@ -156,7 +164,9 @@ describe('Features removal — protected areas intact', () => {
     expect(navItems.map((i) => i.href)).toContain('/followups');
   });
 
-  it('Dashboard navigation still present', () => {
-    expect(navItems.map((i) => i.href)).toContain('/dashboard');
+  it('Dashboard route still exists (sidebar entry removed only)', () => {
+    // The /dashboard page and route are untouched — only its
+    // sidebar entry is gone.
+    expect(existsSync(join(root, 'src/app/(dashboard)/dashboard'))).toBe(true);
   });
 });

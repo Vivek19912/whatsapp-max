@@ -12,7 +12,6 @@ import { KpiCard } from '@/components/dashboard/kpi-card'
 import { SkeletonCard } from '@/components/dashboard/skeleton'
 import { MetaDailyChart } from '@/components/meta-leads-dashboard/meta-daily-chart'
 import { MetaMonthlyChart } from '@/components/meta-leads-dashboard/meta-monthly-chart'
-import { TeamPerformance } from '@/components/meta-leads-dashboard/team-performance'
 
 /**
  * Standalone Meta Lead Ads dashboard (acquisition analytics only).
@@ -99,12 +98,7 @@ export default function MetaLeadsDashboardPage() {
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">Meta Lead Ads</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Instant Form submissions received — regardless of whether a WhatsApp message was sent.
-          </p>
-        </div>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Meta Lead Ads</h1>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -130,8 +124,6 @@ export default function MetaLeadsDashboardPage() {
         onYearChange={handleYearChange}
         loading={loading || monthly == null}
       />
-
-      <TeamPerformance />
     </div>
   )
 }

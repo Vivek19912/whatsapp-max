@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, Fragment, type ReactElement } from "react";
+import { useEffect, useState, Fragment, type ComponentType, type ReactElement } from "react";
 import { cn } from "@/lib/utils";
 import { getTravelCrmUrl } from "@/lib/travel-crm";
 import { useAuth } from "@/hooks/use-auth";
@@ -15,7 +15,6 @@ import {
   ChevronLeft,
   ChevronRight,
   FileText,
-  LayoutDashboard,
   MessageSquare,
   MessageSquareText,
   Megaphone,
@@ -45,7 +44,7 @@ import {
 interface NavItem {
   href: string;
   label: string;
-  icon: typeof LayoutDashboard;
+  icon: ComponentType<{ className?: string }>;
   /**
    * When true, the nav row renders a small "Beta" chip after the label.
    * Purely informational — doesn't affect routing or access.
@@ -54,8 +53,7 @@ interface NavItem {
 }
 
 export const navItems: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/meta-lead-ads/dashboard", label: "Meta Lead Ads", icon: Megaphone },
+  { href: "/meta-lead-ads/dashboard", label: "Dashboard", icon: Megaphone },
   { href: "/inbox", label: "Inbox", icon: MessageSquare },
   { href: "/calls", label: "Calls", icon: Phone },
   { href: "/recordings", label: "Recordings", icon: Mic },

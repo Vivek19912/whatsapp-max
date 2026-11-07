@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { SignedInRedirect } from './landing-redirect';
 import {
   COMPANY_NAME,
   PRODUCT_NAME,
@@ -862,6 +863,7 @@ function Footer() {
 export default function HomePage() {
   return (
     <div className="bg-background min-h-screen">
+      <SignedInRedirect />
       <Header />
       <main>
         <Hero />
