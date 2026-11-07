@@ -109,6 +109,25 @@ export function buildWorkspaceFollowupMessage(args: {
   return name !== "" ? name : phone;
 }
 
+/** Default follow-up time for brand-new attempts: 1:30 PM. */
+export const DEFAULT_FOLLOWUP_TIME = "13:30";
+
+/**
+ * Default follow-up date for brand-new attempts: tomorrow as a
+ * LOCAL calendar day (`setDate` arithmetic, never +24h, so a DST
+ * transition can neither skip nor repeat a day). Computed in the
+ * same viewer zone `combine`/`split` use, so the prefilled default
+ * can never off-by-one against what gets stored. Only used when
+ * the dialog has no saved value — edits and reschedules keep
+ * their stored date verbatim.
+ */
+export function defaultFollowupDate(now: Date = new Date()): string {
+  const d = new Date(now.getTime());
+  d.setDate(d.getDate() + 1);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 /**
  * Merge a linked reminder's saved message into an open dialog
  * without clobbering the agent: returns the linked message only

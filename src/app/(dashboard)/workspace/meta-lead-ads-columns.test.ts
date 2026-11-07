@@ -154,9 +154,12 @@ describe("workspace page — single Schedule Follow-up modal", () => {
 
   it("passes the row's lead details and current value into the modal", () => {
     const src = page();
+    // Routed through the sequential state (record/history/schedule)
+    // with the row's identity, column, and current value.
+    expect(src).toContain("openFollowupForRow(");
     expect(src).toContain("runId: row.runId");
-    expect(src).toContain("fieldId: f.id");
-    expect(src).toContain("initialValue:");
+    expect(src).toContain("f.id,");
+    expect(src).toContain("attemptNumber:");
   });
 
   it("the modal writes the cell and the reminder with one shared timestamp", () => {

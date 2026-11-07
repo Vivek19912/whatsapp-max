@@ -11,8 +11,10 @@ import { describe, expect, it } from "vitest";
 import {
   WORKSPACE_FOLLOWUP_FIELD_NAME,
   WORKSPACE_FOLLOWUP_SOURCE_KIND,
+  DEFAULT_FOLLOWUP_TIME,
   buildWorkspaceFollowupMessage,
   combineFollowupDateTime,
+  defaultFollowupDate,
   formatWorkspaceFollowupDateTime,
   isWorkspaceFollowupFieldName,
   kpiBucketRange,
@@ -435,5 +437,38 @@ describe("kpiBucketRange (KPI card → server-side follow-up window)", () => {
     const dec31 = bounds(new Date(2026, 11, 31, 12, 0, 0));
     expect(ymd(dec31.tomorrowStart)).toEqual([2027, 0, 1]);
     expect(ymd(dec31.dayAfterStart)).toEqual([2027, 0, 2]);
+  });
+});
+
+describe("new-attempt defaults (tomorrow at 1:30 PM, viewer-local)", () => {
+  it("fixes the default time at exactly 1:30 PM", () => {
+    expect(DEFAULT_FOLLOWUP_TIME).toBe("13:30");
+  });
+
+  it("returns the next local calendar day, never a hardcoded date", () => {
+    // Nov 8 → Nov 9 in whatever zone the suite runs in.
+    expect(defaultFollowupDate(new Date(2026, 10, 8, 15, 0))).toBe(
+      "2026-11-09",
+    );
+  });
+
+  it("rolls month and year boundaries forward", () => {
+    expect(defaultFollowupDate(new Date(2026, 0, 31, 9, 0))).toBe(
+      "2026-02-01",
+    );
+    expect(defaultFollowupDate(new Date(2026, 11, 31, 23, 30))).toBe(
+      "2027-01-01",
+    );
+  });
+
+  it("combines with the default time into a valid future instant", () => {
+    const iso = combineFollowupDateTime(
+      defaultFollowupDate(),
+      DEFAULT_FOLLOWUP_TIME,
+    );
+    expect(iso).not.toBeNull();
+    expect(
+      validateFollowupDateTime(defaultFollowupDate(), DEFAULT_FOLLOWUP_TIME),
+    ).toBeNull();
   });
 });

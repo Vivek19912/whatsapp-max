@@ -1,6 +1,6 @@
 "use client";
 
-import { EyeOff, Loader2, MoreHorizontal, Pin, PinOff } from "lucide-react";
+import { EyeOff, History, Loader2, MoreHorizontal, Pin, PinOff } from "lucide-react";
 
 import {
   DropdownMenu,
@@ -11,11 +11,11 @@ import {
 
 /**
  * Per-row actions menu for the Workspace live table (Pin /
- * Unpin / Hide). Lives in the dedicated narrow actions column —
- * one menu per row, never a button per cell. Clicks never bubble
- * to the row (which opens the lead drawer); the menu itself
- * renders through a portal, so the table's scroll viewport and
- * sticky header can never clip it.
+ * Unpin / Hide, plus Follow-up history on Meta tables). Lives in
+ * the dedicated narrow actions column — one menu per row, never
+ * a button per cell. Clicks never bubble to the row (which opens
+ * the lead drawer); the menu itself renders through a portal, so
+ * the table's scroll viewport and sticky header can never clip it.
  */
 export function RowActionsMenu({
   rowLabel,
@@ -23,6 +23,7 @@ export function RowActionsMenu({
   pending,
   onTogglePin,
   onHide,
+  onOpenFollowups,
 }: {
   /** Accessible label for the trigger (lead name/phone). */
   rowLabel: string;
@@ -34,6 +35,8 @@ export function RowActionsMenu({
   onTogglePin: () => void;
   /** Hide the row (visibility-only, reversible). */
   onHide: () => void;
+  /** Open the lead's follow-up history (Meta tables only). */
+  onOpenFollowups?: () => void;
 }) {
   return (
     <span
@@ -79,6 +82,16 @@ export function RowActionsMenu({
             <EyeOff className="h-4 w-4" />
             Hide row
           </DropdownMenuItem>
+          {onOpenFollowups && (
+            <DropdownMenuItem
+              onClick={onOpenFollowups}
+              disabled={pending}
+              aria-label="Follow-up history"
+            >
+              <History className="h-4 w-4" />
+              Follow-up history
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
     </span>

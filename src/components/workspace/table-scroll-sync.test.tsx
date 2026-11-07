@@ -140,6 +140,19 @@ describe("frozen No. and Name columns", () => {
     expect(pageSrc).toContain("sticky top-0 z-20");
   });
 
+  it("stacks frozen headers above scrolling headers (equal z would bury them)", () => {
+    // Every scrolling header slides left when scrolled; with an
+    // equal z-index, later-DOM scrollers paint OVER the frozen
+    // No./Name headers, which then "disappear" while their
+    // (z-[1]-over-auto) body cells stay visible. Frozen headers
+    // sit at z-30: above scrolling headers (z-20) and above
+    // frozen body (z-[1]).
+    expect(pageSrc).toContain("sticky top-0 z-30 h-11");
+    expect(pageSrc).toContain("isNameCol ? 'z-30' : 'z-20'");
+    // Scrolling headers keep z-20 and slide underneath.
+    expect(pageSrc).toContain("sticky top-0 z-20 h-11");
+  });
+
   it("pins Name after the measured No. width (never hardcoded)", () => {
     expect(pageSrc).toContain("left: nameLeft");
     expect(pageSrc).toContain("rowVisible ? metrics.noWidth : 0");

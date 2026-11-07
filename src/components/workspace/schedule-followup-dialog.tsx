@@ -12,6 +12,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  FollowupDateField,
+  FollowupTimeField,
+} from "@/components/workspace/followup-datetime-pickers";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,6 +23,8 @@ import { FOLLOWUP_MESSAGE_MAX, normalizeAgentWhatsappNumber } from "@/lib/follow
 import {
   buildWorkspaceFollowupMessage,
   combineFollowupDateTime,
+  DEFAULT_FOLLOWUP_TIME,
+  defaultFollowupDate,
   mergeLinkedFollowupMessage,
   splitFollowupDateTime,
   validateFollowupDateTime,
@@ -56,6 +62,10 @@ export interface ScheduleFollowupDialogProps {
   leadPhone: string | null;
   /** Current cell value (ISO instant) or null when unset. */
   initialValue: string | null;
+  /** Sequential attempt number being scheduled (auto-assigned by the caller). */
+  attemptNumber: number;
+  /** When set, the submit reschedules this open attempt in place. */
+  rescheduleAttemptId?: string | null;
   /** The follow-up datetime field id for the cell write. */
   fieldId: string;
   /** Refresh the table after a successful save or clear. */
@@ -70,11 +80,17 @@ export function ScheduleFollowupDialog({
   leadName,
   leadPhone,
   initialValue,
+  attemptNumber,
+  rescheduleAttemptId,
   fieldId,
   onSaved,
 }: ScheduleFollowupDialogProps) {
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
+  // Which custom picker popover is open (date XOR time): the two
+  // never open simultaneously, so neither can cover the message
+  // field or footer, and closing one never strands the other.
+  const [pickerOpen, setPickerOpen] = useState<"date" | "time" | null>(null);
   // Prefilled with the "<name>, <phone>" default for a new
   // follow-up; an existing linked reminder's exact saved message
   // overwrites it on load (see below). Always editable.
@@ -121,8 +137,11 @@ export function ScheduleFollowupDialog({
   useEffect(() => {
     if (!open) return;
     const parts = splitFollowupDateTime(initialValue);
-    setDate(parts?.date ?? "");
-    setTime(parts?.time ?? "");
+    // Brand-new attempts default to tomorrow at 1:30 PM; an
+    // existing saved value (edit/reschedule) always wins and is
+    // never overwritten by the defaults.
+    setDate(parts?.date ?? defaultFollowupDate());
+    setTime(parts?.time ?? DEFAULT_FOLLOWUP_TIME);
     setMessage(defaultMessage);
     setRecipient("");
     recipientDirtyRef.current = false;
@@ -226,10 +245,38 @@ export function ScheduleFollowupDialog({
       return;
     }
     // Combine in the viewer's timezone into one unambiguous UTC
-    // instant used for BOTH writes below.
+    // instant used for ALL writes below.
     const iso = combineFollowupDateTime(date, time);
     if (iso === null) {
       setError("Enter a valid date and time.");
+      return;
+    }
+    // Sequential sales attempt FIRST: the server owns numbering and
+    // rejects past instants, closed sequences, and scheduling while
+    // a previous attempt still needs its result (409 surfaces
+    // below — the cell and reminder are only written when the
+    // attempt is accepted).
+    try {
+      const attemptRes = rescheduleAttemptId
+        ? await fetch(`/api/flows/${flowId}/sales-followups/${rescheduleAttemptId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ flow_run_id: runId, scheduled_for: iso }),
+          })
+        : await fetch(`/api/flows/${flowId}/sales-followups`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ flow_run_id: runId, scheduled_for: iso }),
+          });
+      if (!attemptRes.ok) {
+        const attemptJson = (await attemptRes.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        setError(attemptJson?.error ?? "Could not schedule the follow-up.");
+        return;
+      }
+    } catch {
+      setError("Could not schedule the follow-up. Try again.");
       return;
     }
     setSaving(true);
@@ -336,7 +383,11 @@ export function ScheduleFollowupDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Schedule Follow-up</DialogTitle>
+          <DialogTitle>
+            {rescheduleAttemptId
+              ? `Reschedule Follow-up ${attemptNumber}`
+              : `Schedule Follow-up ${attemptNumber}`}
+          </DialogTitle>
           <DialogDescription>
             Pick a date and time, choose the WhatsApp number that should
             receive the reminder, edit the message if needed, and save —
@@ -387,25 +438,29 @@ export function ScheduleFollowupDialog({
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-2">
+          {/* Matched date/time pair: custom popover pickers with
+              identical contracts to the native inputs they replace
+              (`YYYY-MM-DD` + 24-hour `HH:MM`), stacked on narrow
+              screens, side by side otherwise. Portaled popovers
+              with collision handling stay off the message field
+              and footer without expanding the modal. */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid min-w-0 gap-2">
               <Label htmlFor="fu-date">Follow-up date</Label>
-              <Input
-                id="fu-date"
-                type="date"
+              <FollowupDateField
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
-                required
+                onChange={setDate}
+                open={pickerOpen === "date"}
+                onOpenChange={(open) => setPickerOpen(open ? "date" : null)}
               />
             </div>
-            <div className="grid gap-2">
+            <div className="grid min-w-0 gap-2">
               <Label htmlFor="fu-time">Follow-up time</Label>
-              <Input
-                id="fu-time"
-                type="time"
+              <FollowupTimeField
                 value={time}
-                onChange={(e) => setTime(e.target.value)}
-                required
+                onChange={setTime}
+                open={pickerOpen === "time"}
+                onOpenChange={(open) => setPickerOpen(open ? "time" : null)}
               />
             </div>
           </div>
