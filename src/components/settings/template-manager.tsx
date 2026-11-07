@@ -12,6 +12,7 @@ import {
   Pencil,
   RotateCcw,
   Upload,
+  Eye,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import {
@@ -123,6 +124,93 @@ function emptyButton(type: TemplateButton['type']): TemplateButton {
   }
 }
 
+/**
+ * Read-only template preview body: name badges plus a
+ * WhatsApp-style message bubble with the stored header, body,
+ * footer, and buttons rendered verbatim (variables like {{1}}
+ * untouched — never substituted, never saved). No inputs, no
+ * handlers that write; the only action is Close.
+ */
+function TemplatePreviewBody({
+  template,
+  onClose,
+}: {
+  template: MessageTemplate;
+  onClose: () => void;
+}) {
+  const statusKey = template.status || 'DRAFT';
+  const status = templateStatusConfig[statusKey];
+  const buttons = Array.isArray(template.buttons) ? template.buttons : [];
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium text-popover-foreground break-all">
+          {template.name}
+        </span>
+        <Badge className={`text-xs border ${categoryColors[template.category] || ''}`}>
+          {template.category}
+        </Badge>
+        <Badge className={`text-xs border ${status.classes}`}>{status.label}</Badge>
+        {template.language ? (
+          <span className="text-xs text-muted-foreground uppercase">{template.language}</span>
+        ) : null}
+      </div>
+      <div className="rounded-xl bg-muted/60 p-4">
+        {template.header_type === 'text' && template.header_content ? (
+          <p className="text-sm font-semibold text-foreground whitespace-pre-wrap break-words">
+            {template.header_content}
+          </p>
+        ) : template.header_type && template.header_type !== 'text' ? (
+          <p className="text-xs text-muted-foreground">
+            {template.header_type === 'image'
+              ? 'Image header'
+              : template.header_type === 'video'
+                ? 'Video header'
+                : 'Document header'}
+          </p>
+        ) : null}
+        <p className="mt-1 text-sm text-foreground whitespace-pre-wrap break-words">
+          {template.body_text}
+        </p>
+        {template.footer_text ? (
+          <p className="mt-1 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+            {template.footer_text}
+          </p>
+        ) : null}
+        {buttons.length > 0 ? (
+          <div className="mt-3 flex flex-col gap-1.5">
+            {buttons.map((b, i) => (
+              <span
+                // Buttons are data-driven but stable per template;
+                // index keys match the card list convention below.
+                key={`${b.type}-${i}`}
+                className="rounded-lg border border-border bg-card px-3 py-1.5 text-center text-[13px] font-medium text-blue-400"
+              >
+                {b.text}
+                {b.type === 'URL' && b.url ? (
+                  <span className="block truncate text-xs font-normal text-muted-foreground">
+                    {b.url}
+                  </span>
+                ) : null}
+                {b.type === 'PHONE_NUMBER' && b.phone_number ? (
+                  <span className="block text-xs font-normal text-muted-foreground">
+                    {b.phone_number}
+                  </span>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="flex justify-end">
+        <Button variant="outline" onClick={onClose} className="border-border">
+          Close
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function TemplateManager() {
   const supabase = createClient();
   const { user, loading: authLoading } = useAuth();
@@ -142,6 +230,10 @@ export function TemplateManager() {
   // action goes through this two-step so a slip on the trash icon
   // doesn't take the template off Meta as well as locally.
   const [templateToDelete, setTemplateToDelete] =
+    useState<MessageTemplate | null>(null);
+  // Template selected for the read-only preview dialog. Viewing
+  // never writes: no form state, no submit, no status change.
+  const [previewTemplate, setPreviewTemplate] =
     useState<MessageTemplate | null>(null);
   // Header-image upload (issue #230). Uploads to the account-scoped
   // chat-media bucket and stores the public URL in header_media_url; the
@@ -571,6 +663,16 @@ export function TemplateManager() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0 ml-2">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setPreviewTemplate(template)}
+                      aria-label="View template"
+                      title="View template"
+                      className="text-muted-foreground hover:text-primary hover:bg-primary/10 h-8 w-8"
+                    >
+                      <Eye className="size-4" />
+                    </Button>
                     {statusKey === 'APPROVED' && (
                       <Button
                         variant="ghost"
@@ -1082,6 +1184,32 @@ export function TemplateManager() {
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Read-only template preview. Pure display over the
+          already-loaded row — no inputs, no submit, no status
+          change. Variables ({{1}}, {{2}}, …) render exactly as
+          stored; nothing is substituted or saved. */}
+      <Dialog
+        open={previewTemplate !== null}
+        onOpenChange={(open) => {
+          if (!open) setPreviewTemplate(null);
+        }}
+      >
+        <DialogContent className="bg-popover border-border sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-popover-foreground">Template Preview</DialogTitle>
+            <DialogDescription className="text-muted-foreground break-all">
+              {previewTemplate?.name}
+            </DialogDescription>
+          </DialogHeader>
+          {previewTemplate ? (
+            <TemplatePreviewBody
+              template={previewTemplate}
+              onClose={() => setPreviewTemplate(null)}
+            />
+          ) : null}
         </DialogContent>
       </Dialog>
 

@@ -170,3 +170,30 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("flows.length > 0 && (");
   });
 });
+
+describe("ConversationList Form options show full names", () => {
+  it("never ellipsis-truncates form option text", () => {
+    expect(listSrc).not.toContain('<span className="truncate">{form.name}</span>');
+    expect(listSrc).toContain("{form.name}");
+  });
+
+  it("sizes the Form menu to its longest option within the viewport", () => {
+    // Content-driven width (trigger floor, viewport cap) instead
+    // of the fixed w-56 the other filter menus keep.
+    expect(listSrc).toContain("w-max min-w-56 max-w-[calc(100vw-2rem)]");
+    expect(listSrc).toContain("whitespace-normal break-words");
+  });
+
+  it("leaves every other filter menu exactly as before", () => {
+    // Lead Source, Date, Tags, Flow, and Team keep their compact
+    // fixed-width menus; only the Form menu grows.
+    const fixed = listSrc.match(/max-h-64 w-56/g) ?? [];
+    expect(fixed.length).toBe(5);
+  });
+
+  it("preserves Form selection behavior", () => {
+    expect(listSrc).toContain("All Forms");
+    expect(listSrc).toContain("setSelectedFormId(form.id)");
+    expect(listSrc).toContain("setSelectedFormId(null)");
+  });
+});

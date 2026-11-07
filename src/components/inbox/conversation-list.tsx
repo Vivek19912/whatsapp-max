@@ -1447,7 +1447,7 @@ export function ConversationList({
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
-              className="border-border bg-popover max-h-64 w-56"
+              className="border-border bg-popover max-h-64 w-max min-w-56 max-w-[calc(100vw-2rem)]"
             >
               <DropdownMenuItem
                 onClick={() => setSelectedFormId(null)}
@@ -1471,7 +1471,10 @@ export function ConversationList({
                       : "text-popover-foreground"
                   )}
                 >
-                  <span className="truncate">{form.name}</span>
+                  {/* Full form names: the menu grows with its longest
+                      option (trigger floor, viewport cap) and wraps
+                      instead of ellipsis-clipping. */}
+                  <span title={form.name} className="min-w-0 flex-1 whitespace-normal break-words">{form.name}</span>
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
