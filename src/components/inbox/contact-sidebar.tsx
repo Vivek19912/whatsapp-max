@@ -14,6 +14,7 @@ import {
   User,
   Tag as TagIcon,
   StickyNote,
+  Table2,
   Workflow,
   Plus,
   X,
@@ -28,6 +29,7 @@ import {
   pickContactFlowRun,
   type ContactFlowRun,
 } from "@/lib/inbox/contact-flow";
+import { workspaceContactHref } from "@/lib/flows/flow-tables";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -42,6 +44,19 @@ interface ContactSidebarProps {
   contact: Contact | null;
   onTagsChanged?: () => void;
    className?: string;
+}
+
+/**
+ * Verified Workspace lead for the selected contact, resolved
+ * server-side (GET /api/inbox/workspace-lead): exact submission →
+ * run → table chain by stable ids. Null = resolvable Meta
+ * conversation with no live run ("not linked" state).
+ */
+interface WorkspaceLeadLink {
+  contact_id: string;
+  contact_name: string | null;
+  flow_id: string;
+  flow_name: string;
 }
 
 // Same palette as the Settings > Tags manager, so a tag created here
@@ -66,6 +81,15 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
   // submission (virtual flow, kind = 'meta_lead_ads'). Label-only:
   // the flow name value below stays exactly as resolved.
   const [isInstantForm, setIsInstantForm] = useState(false);
+  // Verified Workspace lead for this contact (null = none
+  // resolved yet or Meta conversation without a live run).
+  const [workspaceLead, setWorkspaceLead] = useState<WorkspaceLeadLink | null>(null);
+  // Whether the contact has ANY processed Meta submission. False
+  // hides the Workspace Lead section entirely (CTWA/organic/
+  // unknown conversations never show it); true with a null lead
+  // renders the explicit "not linked" state.
+  const [hasMetaSubmission, setHasMetaSubmission] = useState(false);
+  const [workspaceLeadResolved, setWorkspaceLeadResolved] = useState(false);
   const [tags, setTags] = useState<(Tag & { contact_tag_id: string })[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
   const [newNote, setNewNote] = useState("");
@@ -121,6 +145,61 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchContactData();
   }, [fetchContactData]);
+
+  // Verified Workspace lead for the selected contact. Separate
+  // from the notes/tags/flow fetch above: one server call that
+  // walks the submission → run → table chain with account checks
+  // at every hop. Fail-closed (network/permission error hides the
+  // section) so a broken lookup can never render a guessed link.
+  useEffect(() => {
+    // Resets run synchronously so a newly selected contact never
+    // flashes the previous contact's Workspace link for a frame.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWorkspaceLead(null);
+    setHasMetaSubmission(false);
+    setWorkspaceLeadResolved(false);
+    if (!contact) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/inbox/workspace-lead?contact_id=${encodeURIComponent(contact.id)}`,
+          { cache: "no-store" }
+        );
+        if (!res.ok || cancelled) return;
+        const body = (await res.json()) as {
+          linked?: unknown;
+          meta?: unknown;
+          contact_id?: unknown;
+          contact_name?: unknown;
+          flow_id?: unknown;
+          flow_name?: unknown;
+        };
+        if (cancelled) return;
+        setHasMetaSubmission(body.meta === true);
+        setWorkspaceLead(
+          body.linked === true &&
+            typeof body.contact_id === "string" &&
+            typeof body.flow_id === "string" &&
+            typeof body.flow_name === "string"
+            ? {
+                contact_id: body.contact_id,
+                contact_name:
+                  typeof body.contact_name === "string" ? body.contact_name : null,
+                flow_id: body.flow_id,
+                flow_name: body.flow_name,
+              }
+            : null
+        );
+        setWorkspaceLeadResolved(true);
+      } catch {
+        if (!cancelled) setWorkspaceLeadResolved(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [contact]);
 
   // All account tags, for the assign/unassign picker. Same source table
   // and scoping as Settings > Tags (`TagManager`) so both surfaces stay
@@ -604,6 +683,59 @@ export function ContactSidebar({ contact, onTagsChanged,className }: ContactSide
               )}
             </div>
           </div>
+
+          {/* Workspace Lead — contextual navigation for Meta Instant
+              Form conversations only. Shown when the contact has a
+              verified processed submission (server-checked); the link
+              opens that exact lead in its table in a new tab via the
+              existing ?contact= deep link (own pagination, scroll,
+              temporary highlight). Meta conversations without a live
+              run render the explicit not-linked state — never a
+              guessed link, never a badge. */}
+          {workspaceLeadResolved && hasMetaSubmission ? (
+            <>
+              <div className="my-4 border-t border-border" />
+              <div>
+                <div className="flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  <Table2 className="h-3 w-3" />
+                  Workspace Lead
+                </div>
+                <div className="mt-2 px-1">
+                  {workspaceLead ? (
+                    <>
+                      <p className="break-words text-sm font-medium text-foreground">
+                        {workspaceLead.contact_name ?? contact?.name ?? "Unnamed lead"}
+                      </p>
+                      <p
+                        className="mt-0.5 break-words text-[13px] text-muted-foreground"
+                        title={workspaceLead.flow_name}
+                      >
+                        {workspaceLead.flow_name}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-2 w-full"
+                        render={
+                          <a
+                            href={workspaceContactHref(workspaceLead.contact_id)}
+                            target="_blank"
+                            rel="noreferrer"
+                          />
+                        }
+                      >
+                        Open in Workspace <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Workspace lead not linked
+                    </p>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : null}
         </div>
       </ScrollArea>
     </div>
