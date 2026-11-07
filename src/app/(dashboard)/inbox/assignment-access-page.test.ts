@@ -67,12 +67,13 @@ describe("Inbox page assignment enforcement", () => {
     expect(src).toContain("showUnassignedOption");
   });
 
-  it("cross-thread Assign entry requires the Manage Assignments grant", () => {
+  it("toolbar carries no cross-thread Assign entry (removed; header owns assigning)", () => {
     const src = listSrc();
-    expect(src).toContain("canAssignAnywhere");
-    expect(src).toContain("viewerCaps.canManageAssignments");
-    expect(src).toContain("setAssignDialogOpen(true)");
-    expect(src).toContain("<AssignDialog");
+    expect(src).not.toContain("canAssignAnywhere");
+    expect(src).not.toContain("setAssignDialogOpen");
+    expect(src).not.toContain("<AssignDialog");
+    expect(src).not.toContain('aria-label="Assign conversations"');
+    expect(src).not.toContain("onAssignChange");
   });
 
   it("conversation rows show no assignee line (header owns that display)", () => {

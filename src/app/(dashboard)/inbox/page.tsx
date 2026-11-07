@@ -852,7 +852,6 @@ export default function InboxPage() {
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
-            onAssignChange={handleAssignChange}
             viewerCaps={viewerCaps}
           />
         </div>

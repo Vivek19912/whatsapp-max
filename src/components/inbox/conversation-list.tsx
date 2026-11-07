@@ -7,6 +7,7 @@ import {
   NO_FLOW_FILTER_ID,
   type ConversationDateFilter,
   getConversationDateRange,
+  hasActiveInboxFilters,
   isSourceFilterBlocked,
   matchesContactFilters,
   matchesConversationDateFilter,
@@ -33,7 +34,6 @@ import {
   getHiddenConversationIds,
 } from "@/lib/inbox/hidden";
 import { cn } from "@/lib/utils";
-import { AssignDialog } from "./assign-dialog";
 import { useAuth } from "@/hooks/use-auth";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
@@ -52,7 +52,7 @@ import type {
   Conversation,
   Tag,
 } from "@/types";
-import { Search, ChevronDown, Users, UserCog, X, Pin, Loader2, Workflow } from "lucide-react";
+import { Search, ChevronDown, Users, X, Pin, Loader2, Workflow } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
 import { Input } from "@/components/ui/input";
@@ -89,16 +89,9 @@ interface ConversationListProps {
    */
   resyncToken?: number;
   /**
-   * Called after the cross-thread Assign dialog changes an owner, so
-   * the parent list state converges immediately (RLS already replays
-   * the same value on refetch/realtime — this just skips the wait).
-   */
-  onAssignChange?: (conversationId: string, agentId: string | null) => void;
-  /**
    * The viewer's granted Inbox permissions (fetched once by the
    * parent). Agents with View All see the full team roster and every
-   * matching thread; agents with Manage Assignments get the
-   * cross-thread Assign entry point. Defaults deny both.
+   * matching thread. Defaults deny both.
    */
   viewerCaps?: InboxViewerCaps;
 }
@@ -128,7 +121,6 @@ export function ConversationList({
   conversations,
   onConversationsLoaded,
   resyncToken = 0,
-  onAssignChange,
   viewerCaps = NO_INBOX_CAPS,
 }: ConversationListProps) {
   const [search, setSearch] = useState("");
@@ -597,17 +589,6 @@ export function ConversationList({
   const showUnassignedOption =
     accountRole !== "agent" || viewerCaps.canViewAll;
 
-  // Cross-thread assignment entry point: owners/admins always;
-  // agents only with the Manage Assignments grant (their own threads
-  // are assignable from the thread header regardless). Opens the
-  // Assign dialog, which lists threads by name/assignee only — no
-  // message content ever crosses the visibility boundary.
-  const canAssignAnywhere =
-    accountRole === "owner" ||
-    accountRole === "admin" ||
-    (accountRole === "agent" && viewerCaps.canManageAssignments);
-  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
-
   // Whether the normal list may apply the Instant Form / Other filter
   // right now (see isSourceFilterBlocked). Server-side search never
   // waits on the client lookup (its EXISTS runs in Postgres); ctwa/all
@@ -962,6 +943,17 @@ export function ConversationList({
     setSelectedFormId(null);
     setSelectedMemberIds([]);
     setSelectedSource(null);
+    // Clear all resets EVERY applied facet — including the
+    // read/unread status and the date range, which never render
+    // chips of their own. (Same date reset as clearDateFilter,
+    // inlined: that callback is declared below.)
+    setFilter("all");
+    setDateFilter("all");
+    setCustomFrom("");
+    setCustomTo("");
+    setDraftCustomFrom("");
+    setDraftCustomTo("");
+    setCustomDateOpen(false);
   }, []);
 
   const hasContactFilters =
@@ -1057,6 +1049,14 @@ export function ConversationList({
     customTo,
   });
   const hasDateFilter = activeDateRange !== null;
+  // Clear-all visibility inspects applied STATE, never chip
+  // visibility: the read/unread status and the date range render
+  // no chips of their own, yet both are real active filters.
+  const hasActiveFilters = hasActiveInboxFilters({
+    hasContactFilters,
+    hasDateFilter,
+    status: filter,
+  });
   const customDateReady = draftCustomFrom !== "" && draftCustomTo !== "";
 
   return (
@@ -1272,48 +1272,6 @@ export function ConversationList({
             </Popover>
           </div>
 
-          {tags.length > 0 && (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className={cn(
-                  "hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs",
-                  selectedTagIds.length > 0
-                    ? "text-primary"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                Tags
-                {selectedTagIds.length > 0 && (
-                  <span className="bg-primary text-primary-foreground flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold">
-                    {selectedTagIds.length}
-                  </span>
-                )}
-                <ChevronDown className="h-3 w-3" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="start"
-                className="border-border bg-popover max-h-64 w-56"
-              >
-                {tags.map((t) => (
-                  <DropdownMenuCheckboxItem
-                    key={t.id}
-                    checked={selectedTagIds.includes(t.id)}
-                    onCheckedChange={() => toggleTag(t.id)}
-                    className="text-popover-foreground text-sm"
-                  >
-                    <span className="flex items-center gap-2">
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: t.color }}
-                      />
-                      <span className="truncate">{t.name}</span>
-                    </span>
-                  </DropdownMenuCheckboxItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-
           {companies.length > 0 && (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -1354,74 +1312,6 @@ export function ConversationList({
                     )}
                   >
                     <span className="truncate">{co}</span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-
-          {/* Flow and Form are independent, always-visible filters.
-              Flow narrows by the contact's WhatsApp automation flow;
-              Form narrows by the Meta Instant Form submission. Either,
-              both, or neither may be set — they never reset each other.
-              Form options come from this account's actual submission
-              records — never hardcoded, never cross-account — and
-              refresh with the list, so newly received forms appear
-              automatically. */}
-          {flows.length > 0 && (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className={cn(
-                  "hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs",
-                  selectedFlowId
-                    ? "text-primary"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                <Workflow className="h-3 w-3" />
-                <span className="max-w-24 truncate">
-                  {activeFlowName}
-                </span>
-                <ChevronDown className="h-3 w-3 shrink-0" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="start"
-                className="border-border bg-popover max-h-64 w-56"
-              >
-                <DropdownMenuItem
-                  onClick={() => setSelectedFlowId(null)}
-                  className={cn(
-                    "text-sm",
-                    selectedFlowId === null
-                      ? "text-primary"
-                      : "text-popover-foreground"
-                  )}
-                >
-                  All flows
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => setSelectedFlowId(NO_FLOW_FILTER_ID)}
-                  className={cn(
-                    "text-sm",
-                    selectedFlowId === NO_FLOW_FILTER_ID
-                      ? "text-primary"
-                      : "text-popover-foreground"
-                  )}
-                >
-                  No flow
-                </DropdownMenuItem>
-                {flows.map((flow) => (
-                  <DropdownMenuItem
-                    key={flow.id}
-                    onClick={() => setSelectedFlowId(flow.id)}
-                    className={cn(
-                      "text-sm",
-                      selectedFlowId === flow.id
-                        ? "text-primary"
-                        : "text-popover-foreground"
-                    )}
-                  >
-                    <span className="truncate">{flow.name}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
@@ -1526,32 +1416,119 @@ export function ConversationList({
             </DropdownMenu>
           )}
 
-          {/* Cross-thread assignment (owners/admins, plus agents holding
-              the Manage Assignments permission). Opens the assign dialog
-              for threads the viewer may not be able to open — names and
-              current assignees only, never message content. */}
-          {canAssignAnywhere && (
-            <button
-              type="button"
-              onClick={() => setAssignDialogOpen(true)}
-              title="Assign conversations"
-              aria-label="Assign conversations"
-              className="text-muted-foreground hover:text-foreground hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs"
-            >
-              <UserCog className="h-3 w-3" />
-              <span className="hidden xl:inline">Assign</span>
-            </button>
+          {tags.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className={cn(
+                  "hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                  selectedTagIds.length > 0
+                    ? "text-primary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Tags
+                {selectedTagIds.length > 0 && (
+                  <span className="bg-primary text-primary-foreground flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold">
+                    {selectedTagIds.length}
+                  </span>
+                )}
+                <ChevronDown className="h-3 w-3" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                className="border-border bg-popover max-h-64 w-56"
+              >
+                {tags.map((t) => (
+                  <DropdownMenuCheckboxItem
+                    key={t.id}
+                    checked={selectedTagIds.includes(t.id)}
+                    onCheckedChange={() => toggleTag(t.id)}
+                    className="text-popover-foreground text-sm"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: t.color }}
+                      />
+                      <span className="truncate">{t.name}</span>
+                    </span>
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
+
+          {/* Flow and Form are independent, always-visible filters.
+              Flow narrows by the contact's WhatsApp automation flow;
+              Form narrows by the Meta Instant Form submission. Either,
+              both, or neither may be set — they never reset each other.
+              Form options come from this account's actual submission
+              records — never hardcoded, never cross-account — and
+              refresh with the list, so newly received forms appear
+              automatically. */}
+          {flows.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className={cn(
+                  "hover:bg-muted inline-flex h-7 items-center justify-center gap-1 rounded-md px-2 text-xs",
+                  selectedFlowId
+                    ? "text-primary"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <Workflow className="h-3 w-3" />
+                <span className="max-w-24 truncate">
+                  {activeFlowName}
+                </span>
+                <ChevronDown className="h-3 w-3 shrink-0" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                className="border-border bg-popover max-h-64 w-56"
+              >
+                <DropdownMenuItem
+                  onClick={() => setSelectedFlowId(null)}
+                  className={cn(
+                    "text-sm",
+                    selectedFlowId === null
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  All flows
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setSelectedFlowId(NO_FLOW_FILTER_ID)}
+                  className={cn(
+                    "text-sm",
+                    selectedFlowId === NO_FLOW_FILTER_ID
+                      ? "text-primary"
+                      : "text-popover-foreground"
+                  )}
+                >
+                  No flow
+                </DropdownMenuItem>
+                {flows.map((flow) => (
+                  <DropdownMenuItem
+                    key={flow.id}
+                    onClick={() => setSelectedFlowId(flow.id)}
+                    className={cn(
+                      "text-sm",
+                      selectedFlowId === flow.id
+                        ? "text-primary"
+                        : "text-popover-foreground"
+                    )}
+                  >
+                    <span className="truncate">{flow.name}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
         </div>
 
-        <AssignDialog
-          open={assignDialogOpen}
-          onClose={() => setAssignDialogOpen(false)}
-          members={members}
-          onAssigned={(conversationId, agentId) => onAssignChange?.(conversationId, agentId)}
-        />
-
-        {hasContactFilters && (
+        {hasActiveFilters && (
           <div className="flex flex-wrap items-center gap-1">
             {selectedTagIds.map((id) => {
               const tag = tagsById.get(id);

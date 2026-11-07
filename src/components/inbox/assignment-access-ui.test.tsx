@@ -35,13 +35,12 @@ describe("Inbox assignment UI wiring", () => {
     expect(src).toContain("showUnassignedOption");
   });
 
-  it("cross-thread Assign entry is gated on the Manage Assignments grant", () => {
+  it("toolbar has no Assign entry; the thread header keeps the Assign control", () => {
     const src = listSrc();
-    expect(src).toContain("canAssignAnywhere");
-    expect(src).toContain("canManageAssignments");
-    expect(src).toContain("setAssignDialogOpen(true)");
-    expect(src).toContain("<AssignDialog");
-    expect(src).toContain("onAssignChange?.(");
+    expect(src).not.toContain("canAssignAnywhere");
+    expect(src).not.toContain("setAssignDialogOpen(true)");
+    expect(src).not.toContain("<AssignDialog");
+    expect(src).not.toContain("onAssignChange?.(");
   });
 
   it("assign dialog lists identity + assignee only — never message content", () => {

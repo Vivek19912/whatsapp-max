@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   NO_FLOW_FILTER_ID,
   getConversationDateRange,
+  hasActiveInboxFilters,
   hasNewerConversationActivity,
   hasValidCtwaAttribution,
   isSourceFilterBlocked,
@@ -771,6 +772,29 @@ describe("matchesStatusFilter", () => {
     expect(matchesStatusFilter({ ...base, unread_count: 0 }, "unread")).toBe(false);
     expect(matchesStatusFilter({ ...base, unread_count: 1 }, "unread")).toBe(true);
     expect(matchesStatusFilter({ ...base, unread_count: 12 }, "unread")).toBe(true);
+  });
+});
+
+describe("hasActiveInboxFilters", () => {
+  const idle = { hasContactFilters: false, hasDateFilter: false, status: "all" };
+
+  it("is false only when every facet sits at its default", () => {
+    expect(hasActiveInboxFilters(idle)).toBe(false);
+  });
+
+  it("is true for Unread alone (no chip exists for status)", () => {
+    expect(hasActiveInboxFilters({ ...idle, status: "unread" })).toBe(true);
+  });
+
+  it("is true for an applied date alone (no chip exists for date here)", () => {
+    expect(hasActiveInboxFilters({ ...idle, hasDateFilter: true })).toBe(true);
+  });
+
+  it("is true for any chip-backed facet and for combinations", () => {
+    expect(hasActiveInboxFilters({ ...idle, hasContactFilters: true })).toBe(true);
+    expect(
+      hasActiveInboxFilters({ hasContactFilters: true, hasDateFilter: true, status: "unread" })
+    ).toBe(true);
   });
 });
 

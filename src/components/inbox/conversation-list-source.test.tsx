@@ -28,19 +28,21 @@ describe("ConversationList Lead Source wiring", () => {
     expect(listSrc).toContain("setSelectedSource");
   });
 
-  it("places Lead Source second: All, Lead Source, Date, Tags, Company, Flow, Form, Team", () => {
+  it("places filters: All, Lead Source, Date, Form, Team, Tags, Flow", () => {
     // Source-order assertion on the toolbar: each marker must appear
     // after the previous one. Markers are code tokens unique to their
-    // dropdown in render order (searched strictly forward).
+    // dropdown in render order (searched strictly forward). Tags is
+    // second-last and Flow is last; Company keeps its relative place
+    // after Date.
     const markers = [
       "FILTER_OPTIONS.map((opt)", // 1. All
       "All Sources", // 2. Lead Source option (inside its dropdown)
       "customDateOpen", // 3. Date popover (first toolbar use is after Lead Source)
-      "tags.map((t)", // 4. Tags
       "companies.map((co)", // Company (kept in relative place; not reordered)
-      "flows.map((flow)", // 5. Flow (always visible)
-      "availableForms.map((form)", // 6. Form (always visible)
-      "teamOptions.map((member)", // 7. Team
+      "availableForms.map((form)", // 4. Form (always visible)
+      "teamOptions.map((member)", // 5. Team
+      "tags.map((t)", // 6. Tags (second-last)
+      "flows.map((flow)", // 7. Flow (last)
     ];
     let from = 0;
     const positions: number[] = [];
@@ -168,6 +170,57 @@ describe("ConversationList Lead Source wiring", () => {
     // The Flow dropdown still gates on having flows to offer; the
     // Form dropdown is unconditional (All Forms is always valid).
     expect(listSrc).toContain("flows.length > 0 && (");
+  });
+
+  it("orders filters All | Lead Source | Date | Form | Team | Tags | Flow", () => {
+    // Visual order only — every marker below is render markup or
+    // the conditional that gates its dropdown; each must appear
+    // after the previous one. (The conditional Company picker,
+    // when present, stays where it was: after Date.)
+    const markers = [
+      'activeFilter?.label ?? "All"',
+      "LEAD_SOURCE_LABELS[selectedSource]",
+      "<Popover open={customDateOpen}",
+      '?? "Form"',
+      "teamOptions.length > 0 && (",
+      "{tags.length > 0 && (",
+      "{flows.length > 0 && (",
+    ];
+    let from = -1;
+    for (const marker of markers) {
+      const idx = listSrc.indexOf(marker, from + 1);
+      expect(idx, marker).toBeGreaterThan(from);
+      from = idx;
+    }
+  });
+});
+
+describe("Clear-all visibility follows applied state, not chips", () => {
+  it("gates the chips row on every facet including status and date", () => {
+    // hasContactFilters alone would hide Clear all for Unread or
+    // date-only selections (neither renders chips here).
+    expect(listSrc).toContain("hasActiveInboxFilters({");
+    expect(listSrc).toContain("{hasActiveFilters && (");
+    expect(listSrc).not.toMatch(/\{hasContactFilters && \(/);
+  });
+
+  it("Clear all resets status and date alongside every chip facet", () => {
+    const start = listSrc.indexOf("const clearContactFilters");
+    expect(start).toBeGreaterThan(-1);
+    const end = listSrc.indexOf("}, []);", start);
+    const body = listSrc.slice(start, end);
+    for (const reset of [
+      "setFilter(\"all\")",
+      "setDateFilter(\"all\")",
+      "setSelectedTagIds([])",
+      "setSelectedCompany(null)",
+      "setSelectedFlowId(null)",
+      "setSelectedFormId(null)",
+      "setSelectedMemberIds([])",
+      "setSelectedSource(null)",
+    ]) {
+      expect(body).toContain(reset);
+    }
   });
 });
 

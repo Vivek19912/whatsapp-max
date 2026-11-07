@@ -64,6 +64,24 @@ export interface MetaFormOption {
 }
 
 /**
+ * Whether ANY Inbox filter is applied — the Clear-all visibility
+ * rule. Inspects applied STATE, never chip visibility: the
+ * read/unread status and the date range render no chips of their
+ * own, yet selecting Unread alone (or a date alone) is a real
+ * active filter and must surface Clear all. Pure for unit
+ * testing; the list component feeds it live state.
+ */
+export function hasActiveInboxFilters(args: {
+  hasContactFilters: boolean;
+  hasDateFilter: boolean;
+  status: string;
+}): boolean {
+  return (
+    args.hasContactFilters || args.hasDateFilter || args.status !== "all"
+  );
+}
+
+/**
  * Whether a conversation matches the Inbox read-status filter.
  * "all" is a no-op; "unread" keeps only threads with unread messages.
  */
