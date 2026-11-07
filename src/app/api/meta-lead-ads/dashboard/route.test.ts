@@ -63,10 +63,33 @@ describe("GET /api/meta-lead-ads/dashboard", () => {
     expect(h.rpcArgs).not.toHaveProperty("p_account_id");
   });
 
-  it("returns the RPC payload verbatim with no-store caching", async () => {
+  it("returns the RPC payload with server-derived rolling KPIs and no-store caching", async () => {
+    h.rpcData = {
+      todayLeads: 3,
+      yesterdayLeads: 1,
+      daily: [
+        { date: "2026-09-20", total: 2, forms: [] },
+        { date: "2026-09-21", total: 1, forms: [] },
+        { date: "2026-09-22", total: 4, forms: [] },
+      ],
+      monthly: [],
+    };
     const res = await GET(new Request(URL));
-    expect(await res.json()).toMatchObject({ todayLeads: 3, yesterdayLeads: 1 });
+    // Existing fields pass through byte-identical; the rolling
+    // windows sum the RPC's own buckets (last 7 → 7, all → 7).
+    expect(await res.json()).toMatchObject({
+      todayLeads: 3,
+      yesterdayLeads: 1,
+      last7Leads: 7,
+      last30Leads: 7,
+    });
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("derives zero rolling KPIs from an empty or malformed series", async () => {
+    h.rpcData = { todayLeads: 0, yesterdayLeads: 0, daily: null, monthly: [] };
+    const res = await GET(new Request(URL));
+    expect(await res.json()).toMatchObject({ last7Leads: 0, last30Leads: 0 });
   });
 
   it("rejects missing bounds, bad years, and inverted ranges", async () => {

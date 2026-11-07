@@ -79,7 +79,7 @@ export function MetaDailyChart({ data, loading }: MetaDailyChartProps) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.04)]" aria-label="Meta Leads Last 30 Days">
       <div className="border-b border-border px-5 py-4">
-        <h2 className="text-[15px] font-semibold text-foreground">Meta Leads — Last 30 Days</h2>
+        <h2 className="text-[15px] font-semibold text-foreground">Leads — Last 30 Days</h2>
       </div>
       <div className="p-5">
         {!hasData ? (

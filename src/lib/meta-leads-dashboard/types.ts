@@ -30,6 +30,10 @@ export interface MetaLeadMonth {
 export interface MetaLeadsAnalytics {
   todayLeads: number;
   yesterdayLeads: number;
+  /** Rolling most-recent 7 calendar days (today + previous 6), server-derived. */
+  last7Leads: number;
+  /** Rolling most-recent 30 calendar days (today + previous 29), server-derived. */
+  last30Leads: number;
   /** Trailing 30 days, oldest first, zero days included. */
   daily: MetaLeadDay[];
   /** Selected calendar year. */

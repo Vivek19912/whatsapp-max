@@ -47,6 +47,8 @@ export default function MetaLeadsDashboardPage() {
 
   const [todayLeads, setTodayLeads] = useState(0)
   const [yesterdayLeads, setYesterdayLeads] = useState(0)
+  const [last7Leads, setLast7Leads] = useState(0)
+  const [last30Leads, setLast30Leads] = useState(0)
   const [daily, setDaily] = useState<MetaLeadDay[] | null>(null)
   const [monthly, setMonthly] = useState<MetaLeadMonth[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -72,6 +74,8 @@ export default function MetaLeadsDashboardPage() {
       .then((d) => {
         setTodayLeads(d.todayLeads)
         setYesterdayLeads(d.yesterdayLeads)
+        setLast7Leads(d.last7Leads)
+        setLast30Leads(d.last30Leads)
         setDaily(d.daily)
         setMonthly(d.monthly)
       })
@@ -101,11 +105,15 @@ export default function MetaLeadsDashboardPage() {
           <>
             <SkeletonCard key="kpi-today" />
             <SkeletonCard key="kpi-yesterday" />
+            <SkeletonCard key="kpi-last7" />
+            <SkeletonCard key="kpi-last30" />
           </>
         ) : (
           <>
             <KpiCard title="Today's Leads" value={todayLeads} prevLabel="yesterday" />
             <KpiCard title="Yesterday's Leads" value={yesterdayLeads} prevLabel="day before" />
+            <KpiCard title="Last 7 Days" value={last7Leads} prevLabel="last 7 days" />
+            <KpiCard title="Last 30 Days" value={last30Leads} prevLabel="last 30 days" />
           </>
         )}
       </div>

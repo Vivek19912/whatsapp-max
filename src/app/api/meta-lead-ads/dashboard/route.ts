@@ -2,8 +2,10 @@
 // GET /api/meta-lead-ads/dashboard — acquisition analytics for the
 // standalone Meta Lead Ads dashboard (route /meta-lead-ads/dashboard).
 //
-// One analytics request per (day, year): KPI counts plus daily and
-// monthly submission aggregates, computed inside Postgres via
+// One analytics request per (day, year): KPI counts (today,
+// yesterday, plus server-derived rolling Last-7 / Last-30 from
+// the same daily buckets) plus daily and monthly submission
+// aggregates, computed inside Postgres via
 // get_meta_leads_analytics() (see supabase/migrations/
 // 155_meta_leads_dashboard.sql). Source of truth is
 // meta_lead_submissions ONLY — messages, flow_runs, and the Inbox
@@ -23,6 +25,7 @@
 import { NextResponse } from "next/server";
 
 import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
+import { rollupTrailingKpis } from "@/lib/meta-leads-dashboard/analytics-client";
 
 export const dynamic = "force-dynamic";
 
@@ -82,7 +85,9 @@ export async function GET(request: Request) {
       );
     }
 
-    const res = NextResponse.json((data as object) ?? {});
+    const res = NextResponse.json(
+      withRollingKpis((data as Record<string, unknown> | null) ?? {}),
+    );
     // Never cache analytics: every dashboard load must show one
     // live request in the Network tab, not a cached response.
     res.headers.set("Cache-Control", "no-store");
@@ -90,4 +95,18 @@ export async function GET(request: Request) {
   } catch (err) {
     return toErrorResponse(err);
   }
+}
+
+/**
+ * Rolling Last-7 / Last-30 KPIs, derived server-side from the
+ * RPC's own trailing-30 daily buckets (see rollupTrailingKpis
+ * for the exactness argument). Same request, same buckets, no
+ * extra query; additive keys, so existing response fields pass
+ * through byte-identical.
+ */
+function withRollingKpis(payload: Record<string, unknown>): Record<string, unknown> {
+  const { last7Leads, last30Leads } = rollupTrailingKpis(
+    (payload as { daily?: unknown }).daily ?? null,
+  );
+  return { ...payload, last7Leads, last30Leads };
 }

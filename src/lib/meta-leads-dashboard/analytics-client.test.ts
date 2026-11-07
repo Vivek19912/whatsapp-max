@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeMetaDaily,
   normalizeMetaMonthly,
+  rollupTrailingKpis,
 } from "./analytics-client";
 import { assignFormColors } from "./form-colors";
 
@@ -57,6 +58,47 @@ describe("normalizeMetaDaily", () => {
       total: 2,
       forms: [{ formName: "Fair", leads: 2 }],
     });
+  });
+});
+
+describe("rollupTrailingKpis", () => {
+  const days = (totals: number[]) =>
+    totals.map((total, i) => ({
+      date: `2026-10-${String(i + 1).padStart(2, "0")}`,
+      total,
+      forms: [],
+    }));
+
+  it("sums the most-recent 7 and all 30 trailing days", () => {
+    // 30 days of 1 lead each, today (last) spiking to 5.
+    const totals = Array.from({ length: 30 }, () => 1);
+    totals[29] = 5;
+    const out = rollupTrailingKpis(days(totals));
+    expect(out).toEqual({ last7Leads: 11, last30Leads: 34 });
+  });
+
+  it("reads zero for empty periods", () => {
+    expect(rollupTrailingKpis([])).toEqual({ last7Leads: 0, last30Leads: 0 });
+    expect(rollupTrailingKpis(null)).toEqual({ last7Leads: 0, last30Leads: 0 });
+  });
+
+  it("drops malformed days instead of counting them", () => {
+    const out = rollupTrailingKpis([
+      { date: "2026-10-30", total: 4, forms: [] },
+      { date: "bad", total: 100, forms: [] },
+      { date: "2026-10-29", total: -3, forms: [] },
+      null,
+    ]);
+    // Normalized to 30 entries (28 padded zeros + 2 valid days);
+    // only the valid day counts, in both windows.
+    expect(out).toEqual({ last7Leads: 4, last30Leads: 4 });
+  });
+
+  it("floors fractional totals like the loader", () => {
+    const out = rollupTrailingKpis([
+      { date: "2026-10-30", total: 2.9, forms: [] },
+    ]);
+    expect(out).toEqual({ last7Leads: 2, last30Leads: 2 });
   });
 });
 

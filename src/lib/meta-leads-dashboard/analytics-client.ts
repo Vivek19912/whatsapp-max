@@ -4,6 +4,14 @@
 // inside Postgres over meta_lead_submissions. No Supabase calls
 // from the browser, no message/flow/Inbox data anywhere in the
 // pipeline.
+//
+// The loader passes server-computed totals through verbatim
+// (never recomputed here). rollupTrailingKpis is the one
+// exception to that rule in reverse: it is NOT used by the
+// loader at all — the API ROUTE calls it server-side to derive
+// the rolling Last-7/Last-30 KPIs from the RPC's own daily
+// buckets (same file because the helpers are isomorphic pure
+// functions; see its contract below).
 
 import type {
   MetaLeadDay,
@@ -78,6 +86,31 @@ export function normalizeMetaDaily(input: unknown, dayCount: number = 30): MetaL
 }
 
 /**
+ * Rolling-window KPIs derived from the RPC's trailing-30 daily
+ * series: most-recent 7 days (today + previous 6) and all 30
+ * (today + previous 29). Called SERVER-SIDE by the dashboard
+ * route — never by the browser loader.
+ *
+ * Exactness: UNIQUE(account_id, meta_lead_id) guarantees one
+ * submission row per lead, so each lead occupies exactly one
+ * daily bucket and a window sum EQUALS the distinct-lead count
+ * for that window. Timezone bucketing, countable statuses
+ * (received/processed/failed, never ignored), the
+ * COALESCE(meta_created_time, created_at) timestamp, and tenant
+ * scoping all come from the server buckets unchanged; the
+ * normalize step additionally drops malformed days to zero and
+ * pads short series so empty periods read 0, never NaN.
+ */
+export function rollupTrailingKpis(input: unknown): {
+  last7Leads: number;
+  last30Leads: number;
+} {
+  const days = normalizeMetaDaily(input);
+  const sum = (xs: MetaLeadDay[]) => xs.reduce((acc, d) => acc + d.total, 0);
+  return { last7Leads: sum(days.slice(-7)), last30Leads: sum(days) };
+}
+
+/**
  * Normalize the RPC `monthly` payload to exactly 12 months.
  * Malformed months are dropped; missing months become explicit
  * zeros so every January–December cell renders.
@@ -134,6 +167,8 @@ export async function loadMetaLeadsAnalytics(
   const json = (await res.json()) as {
     todayLeads?: unknown
     yesterdayLeads?: unknown
+    last7Leads?: unknown
+    last30Leads?: unknown
     daily?: unknown
     monthly?: unknown
     year?: unknown
@@ -142,6 +177,8 @@ export async function loadMetaLeadsAnalytics(
   return {
     todayLeads: toCount(json.todayLeads),
     yesterdayLeads: toCount(json.yesterdayLeads),
+    last7Leads: toCount(json.last7Leads),
+    last30Leads: toCount(json.last30Leads),
     daily: normalizeMetaDaily(json.daily),
     year:
       typeof json.year === 'number' && Number.isInteger(json.year)
