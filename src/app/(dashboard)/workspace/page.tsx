@@ -363,7 +363,10 @@ export function FollowupResultCell({
   resultText: string | null;
   completedAt: string | null;
 }) {
-  if (!outcome) {
+  // Unresolved or absent attempts: clean em dash. A completed
+  // attempt WITHOUT an outcome still shows its timestamp + text
+  // (no badge, never an invented outcome).
+  if (!outcome && !completedAt) {
     return <span className="text-muted-foreground">—</span>;
   }
   const completed = completedAt ? new Date(completedAt) : null;
@@ -381,7 +384,7 @@ export function FollowupResultCell({
   return (
     <span
       className="grid max-w-56 gap-1"
-      title={resultText ? `${resultText}${completedLabel ? `\nRecorded ${completedLabel}` : ""}` : outcome}
+      title={resultText ? `${resultText}${completedLabel ? `\nRecorded ${completedLabel}` : ""}` : (outcome ?? undefined)}
     >
       <Badge variant="outline" className="w-fit text-xs font-normal">
         {outcome}

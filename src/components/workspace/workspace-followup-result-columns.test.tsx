@@ -115,6 +115,21 @@ describe("FollowupResultCell", () => {
     expect(pending).not.toContain("tabular-nums");
   });
 
+  it("renders timestamp + text with no badge when outcome is NULL", () => {
+    const html = renderToStaticMarkup(
+      <FollowupResultCell
+        outcome={null}
+        resultText="Shared the itinerary on WhatsApp."
+        completedAt="2026-11-07T17:43:00.000Z"
+      />,
+    );
+    expect(html).toContain("Shared the itinerary on WhatsApp.");
+    expect(html).toContain("2026");
+    expect(html).toContain("tabular-nums");
+    // No invented outcome, no empty badge.
+    expect(html).not.toContain("Other");
+  });
+
   it("exposes the full text on hover without clipping storage", () => {
     const full = "Line one. Line two with detail.";
     const html = renderToStaticMarkup(

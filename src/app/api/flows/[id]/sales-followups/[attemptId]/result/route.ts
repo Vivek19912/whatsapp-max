@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
-import {
-  nextActionForState,
-  validateFollowupResult,
-} from "@/lib/followups/attempts";
+import { validateFollowupResult } from "@/lib/followups/attempts";
 import {
   assertAgentMayTouchRun,
-  loadAttempts,
   loadFlow,
   loadLeadFieldIds,
   loadRun,
@@ -21,11 +17,11 @@ import {
  *
  * Guards: attempt exists for this lead, still unresolved, no result
  * yet (completed_at IS NULL — a second POST collides on the update
- * filter and 409s), valid outcome, non-blank result within the
- * limit. Records the authenticated salesperson + completion
- * instant, then mirrors Last Contact Date (completion day),
- * Customer Response (outcome + summary), clears Next Follow-up,
- * and advances Next Action to Schedule Follow-up N+1.
+ * filter and 409s), optional outcome (validated when provided),
+ * non-blank result within the limit. Records the authenticated
+ * salesperson + completion instant, then mirrors Last Contact Date
+ * (completion day) and clears Next Follow-up. Next Action and
+ * Customer Response are never written here.
  */
 export async function POST(
   req: Request,
@@ -62,7 +58,14 @@ export async function POST(
     if (validationError !== null) {
       return NextResponse.json({ error: validationError }, { status: 422 });
     }
-    const outcome = String(body?.outcome);
+    // Outcome is optional: absent/blank stores NULL (never an
+    // invented placeholder); a provided value already passed the
+    // eight-option check above.
+    const rawOutcome = body?.outcome;
+    const outcome =
+      typeof rawOutcome === "string" && rawOutcome.trim() !== ""
+        ? rawOutcome
+        : null;
     const resultText = String(body?.result_text).trim();
 
     // Claim exactly the unresolved row: a duplicate submission finds
@@ -94,9 +97,6 @@ export async function POST(
     const followupField = fieldIds.followupFieldId
       ? await loadWritableField(supabase, accountId, fieldIds.followupFieldId)
       : null;
-    const nextActionField = fieldIds.nextActionFieldId
-      ? await loadWritableField(supabase, accountId, fieldIds.nextActionFieldId)
-      : null;
     const lastContactField = fieldIds.lastContactFieldId
       ? await loadWritableField(supabase, accountId, fieldIds.lastContactFieldId)
       : null;
@@ -106,7 +106,10 @@ export async function POST(
     // Response is NEVER written here — results live in
     // sales_followup_attempts and render in their own Follow-up N
     // Result columns; existing Customer Response values stay
-    // exactly as the salesperson left them.
+    // exactly as the salesperson left them. Next Action is left
+    // entirely alone: no "Schedule Follow-up N" status text is
+    // generated (scheduling stays available in Follow-up History),
+    // and independently entered actions are never overwritten.
     await writeLeadCell({ supabase, accountId, runId, field: followupField, value: null });
     await writeLeadCell({
       supabase,
@@ -114,19 +117,6 @@ export async function POST(
       runId,
       field: lastContactField,
       value: completedAt.slice(0, 10),
-    });
-    const attempts = await loadAttempts(supabase, accountId, runId);
-    const maxNumber = Math.max(...attempts.map((a) => Number(a.attempt_number)));
-    await writeLeadCell({
-      supabase,
-      accountId,
-      runId,
-      field: nextActionField,
-      value: nextActionForState({
-        kind: "completed",
-        activeAttempt: null,
-        nextAttemptNumber: maxNumber + 1,
-      }),
     });
 
     return NextResponse.json({ attempt: updated });

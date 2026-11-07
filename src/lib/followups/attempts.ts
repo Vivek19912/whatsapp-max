@@ -110,15 +110,22 @@ export function deriveSequenceState(
 }
 
 /**
- * Validate a result submission. Returns null when the outcome +
- * text pair is acceptable, otherwise a user-facing message.
+ * Validate a result submission. The outcome is OPTIONAL (null,
+ * undefined, or blank = no outcome); a provided outcome must be one
+ * of the eight allowed values. Result text is always mandatory.
+ * Returns null when acceptable, otherwise a user-facing message.
  */
 export function validateFollowupResult(
   outcome: unknown,
   resultText: unknown,
 ): string | null {
-  if (!isFollowupOutcome(outcome)) {
-    return "Choose the follow-up outcome.";
+  if (
+    outcome !== null &&
+    outcome !== undefined &&
+    !(typeof outcome === "string" && outcome.trim() === "") &&
+    !isFollowupOutcome(outcome)
+  ) {
+    return "Choose a valid follow-up outcome.";
   }
   if (typeof resultText !== "string" || resultText.trim() === "") {
     return "Describe the follow-up result.";
@@ -146,10 +153,12 @@ export function validateScheduledAt(
   return { iso: new Date(t).toISOString() };
 }
 
-/** Next Action cell text for each sequence state. A scheduled
- * attempt contributes NO text — the date already shows in Next
- * Follow-up Date & Time, so a "Follow-up N Scheduled" string would
- * be redundant status noise. Null = leave the cell alone. */
+/** Next Action cell text for each sequence state. Only genuinely
+ * actionable prompts are produced — never redundant status text:
+ * a scheduled attempt contributes nothing (the date already shows
+ * in Next Follow-up Date & Time), and a completed attempt likewise
+ * writes nothing (scheduling continues in Follow-up History).
+ * Null = leave the cell alone. */
 export function nextActionForState(
   state: FollowupSequenceState,
 ): string | null {
@@ -158,9 +167,8 @@ export function nextActionForState(
       return "Schedule First Follow-up";
     case "scheduled":
     case "result_required":
-      return null;
     case "completed":
-      return `Schedule Follow-up ${state.nextAttemptNumber}`;
+      return null;
     case "closed":
       return "View Follow-up History";
   }

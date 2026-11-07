@@ -129,11 +129,29 @@ describe("result validation", () => {
     expect(isFollowupOutcome("Maybe later")).toBe(false);
   });
 
-  it("rejects missing outcome, blank, whitespace-only, and oversized text", () => {
-    expect(validateFollowupResult("", "note")).toBe("Choose the follow-up outcome.");
+  it("treats outcome as optional (null, undefined, or blank)", () => {
+    for (const outcome of [null, undefined, "", "   "]) {
+      expect(
+        validateFollowupResult(outcome, "Customer asked for details."),
+      ).toBeNull();
+    }
+  });
+
+  it("still rejects invalid non-null outcomes", () => {
+    expect(validateFollowupResult("Maybe later", "note")).toBe(
+      "Choose a valid follow-up outcome.",
+    );
+    expect(validateFollowupResult(42, "note")).toBe(
+      "Choose a valid follow-up outcome.",
+    );
+  });
+
+  it("keeps result text mandatory with its limit", () => {
     expect(validateFollowupResult("No Answer", "")).toBe("Describe the follow-up result.");
-    expect(validateFollowupResult("Busy", "   ")).toBe("Describe the follow-up result.");
+    expect(validateFollowupResult(null, "")).toBe("Describe the follow-up result.");
+    expect(validateFollowupResult(null, "   ")).toBe("Describe the follow-up result.");
     expect(validateFollowupResult("Busy", "x".repeat(2001))).toContain("2000");
+    expect(validateFollowupResult(null, "x".repeat(2001))).toContain("2000");
   });
 });
 
@@ -183,7 +201,7 @@ describe("display builders", () => {
     ).toBe("View Follow-up History");
     expect(
       nextActionForState({ kind: "completed", activeAttempt: null, nextAttemptNumber: 2 }),
-    ).toBe("Schedule Follow-up 2");
+    ).toBeNull();
   });
 
   it("recognizes system-written Next Action values (and only those)", () => {

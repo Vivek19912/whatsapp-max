@@ -213,7 +213,7 @@ async function postSchedule(runId = "run-1", scheduledFor: unknown = FUTURE) {
   return scheduleAttempt(req, { params });
 }
 
-async function postResult(attemptId: string, outcome = "No Answer", text = "Rang twice, no pickup.") {
+async function postResult(attemptId: string, outcome: string | null = "No Answer", text = "Rang twice, no pickup.") {
   const req = new Request("http://x/api", {
     method: "POST",
     body: JSON.stringify({ flow_run_id: "run-1", outcome, result_text: text }),
@@ -344,16 +344,36 @@ describe("result guards", () => {
     const row = h.store.sales_followup_attempts[0];
     expect(row.completed_by).toBe("user-1");
     expect(row.outcome).toBe("No Answer");
-    // Pending datetime cleared; completion day + next action
-    // written. Customer Response is NEVER touched — results live in
-    // the attempt row and render in Follow-up N Result columns.
+    // Pending datetime cleared; completion day written. Customer
+    // Response is NEVER touched — results live in the attempt row
+    // and render in Follow-up N Result columns. Next Action is left
+    // entirely alone (no generated scheduling text).
     expect(cellValue("f-dt")).toBeNull();
     expect(cellValue("f-lc")).not.toBeNull();
     expect(cellValue("f-cr")).toBeNull();
-    expect(cellValue("f-na")).toBe("Schedule Follow-up 2");
+    expect(cellValue("f-na")).toBeNull();
     const state = await getState();
     expect((state.json.state as { kind: string }).kind).toBe("completed");
     expect((state.json.state as { nextAttemptNumber: number }).nextAttemptNumber).toBe(2);
+  });
+
+  it("saves results without an outcome and preserves user Next Action text", async () => {
+    h.store.workspace_values.push({
+      id: "id-cell",
+      account_id: "acct-1",
+      field_id: "f-na",
+      flow_run_id: "run-1",
+      value_text: "Call Ravi Tuesday",
+    });
+    const first = await postSchedule();
+    const id = ((await first.json()) as { attempt: { id: string } }).attempt.id;
+    const res = await postResult(id, null, "Shared itinerary.");
+    expect(res.status).toBe(200);
+    const row = h.store.sales_followup_attempts[0];
+    expect(row.outcome).toBeNull();
+    expect(row.result_text).toBe("Shared itinerary.");
+    expect(row.completed_at).not.toBeNull();
+    expect(cellValue("f-na")).toBe("Call Ravi Tuesday");
   });
 
   it("rejects duplicate results without overwriting history", async () => {

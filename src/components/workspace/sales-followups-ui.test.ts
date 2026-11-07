@@ -19,18 +19,19 @@ const menuSrc = src("src/components/workspace/row-actions-menu.tsx");
 const migrationSrc = src("supabase/migrations/161_sales_followup_attempts.sql");
 
 describe("record-result dialog", () => {
-  it("collects a mandatory outcome + notes with validation", () => {
+  it("collects an optional outcome + mandatory notes with validation", () => {
     expect(recordSrc).toContain("FOLLOWUP_OUTCOMES");
-    expect(recordSrc).toContain("Follow-up Outcome");
+    expect(recordSrc).toContain("Follow-up Outcome (optional)");
+    expect(recordSrc).toContain("Select outcome (optional)");
     expect(recordSrc).toContain("Follow-up Result / Notes");
     expect(recordSrc).toContain("FOLLOWUP_RESULT_MAX");
-    expect(recordSrc).toContain("Choose the follow-up outcome.");
+    expect(recordSrc).not.toContain("Choose the follow-up outcome.");
     expect(recordSrc).toContain("Describe the follow-up result.");
   });
 
   it("posts to the attempt result endpoint and refreshes", () => {
     expect(recordSrc).toContain("/sales-followups/${attemptId}/result");
-    expect(recordSrc).toContain("outcome,");
+    expect(recordSrc).toContain("outcome: outcome === \"\" ? null : outcome");
     expect(recordSrc).toContain("result_text: trimmed");
     expect(recordSrc).toContain("Save Result");
   });
@@ -139,6 +140,29 @@ describe("migration guard rails", () => {
     expect(migrationSrc).toContain("WHERE completed_at IS NULL");
     expect(migrationSrc).toContain("uq_sales_followup_attempt_number");
     expect(migrationSrc).toContain("CREATE TABLE IF NOT EXISTS sales_followup_closures");
+  });
+
+  it("relaxes completion to optional outcome via an additive migration", () => {
+    const migration162 = src("supabase/migrations/162_sales_followup_optional_outcome.sql");
+    // 161 is never rewritten: 162 drops + re-adds only the
+    // completion CHECK, preserving every saved row.
+    expect(migration162).toContain("sales_followup_attempts_completed_check");
+    expect(migration162).toContain("DROP CONSTRAINT");
+    expect(migration162).toContain("IF EXISTS");
+    expect(migration162).toContain("length(btrim(result_text)) > 0");
+  });
+
+  it("never auto-writes scheduling text into Next Action", () => {
+    const resultSrc = src(
+      "src/app/api/flows/[id]/sales-followups/[attemptId]/result/route.ts",
+    );
+    // The route no longer resolves the Next Action field at all:
+    // neither status strings nor prompts are written on completion.
+    expect(resultSrc).not.toContain("nextActionField");
+    expect(resultSrc).not.toContain("Schedule Follow-up ${");
+    // History keeps the scheduling action instead.
+    expect(historySrc).toContain("onScheduleNext");
+    expect(historySrc).toContain("Schedule Follow-up {history.state.nextAttemptNumber}");
   });
 
   it("scopes RLS to the account with agent+ writes", () => {

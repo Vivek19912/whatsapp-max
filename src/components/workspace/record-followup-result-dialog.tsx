@@ -79,14 +79,13 @@ export function RecordFollowupResultDialog({
   }, [open, attemptId]);
 
   const trimmed = resultText.trim();
+  // Outcome is optional — only the result text is mandatory.
   const clientError =
-    outcome === ""
-      ? "Choose the follow-up outcome."
-      : trimmed === ""
-        ? "Describe the follow-up result."
-        : trimmed.length > FOLLOWUP_RESULT_MAX
-          ? `Keep the result to ${FOLLOWUP_RESULT_MAX} characters or fewer.`
-          : null;
+    trimmed === ""
+      ? "Describe the follow-up result."
+      : trimmed.length > FOLLOWUP_RESULT_MAX
+        ? `Keep the result to ${FOLLOWUP_RESULT_MAX} characters or fewer.`
+        : null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -104,7 +103,7 @@ export function RecordFollowupResultDialog({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             flow_run_id: runId,
-            outcome,
+            outcome: outcome === "" ? null : outcome,
             result_text: trimmed,
           }),
         },
@@ -158,13 +157,13 @@ export function RecordFollowupResultDialog({
           </dl>
 
           <div className="grid gap-2">
-            <Label htmlFor="fr-outcome">Follow-up Outcome</Label>
+            <Label htmlFor="fr-outcome">Follow-up Outcome (optional)</Label>
             <Select
               value={outcome}
               onValueChange={(v) => setOutcome(v as FollowupOutcome)}
             >
               <SelectTrigger id="fr-outcome" aria-label="Follow-up outcome">
-                <SelectValue placeholder="Select outcome" />
+                <SelectValue placeholder="Select outcome (optional)" />
               </SelectTrigger>
               <SelectContent>
                 {FOLLOWUP_OUTCOMES.map((o) => (
