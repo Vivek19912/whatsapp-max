@@ -61,6 +61,7 @@ function FilterSelect({
   ariaLabel,
   formatValue,
   valueClassName,
+  wideContent,
   children,
 }: {
   label: string;
@@ -70,6 +71,14 @@ function FilterSelect({
   ariaLabel: string;
   formatValue: (v: string | null) => React.ReactNode;
   valueClassName?: string;
+  /**
+   * Wide menu for long option text (Workspace Table): the popup
+   * sizes to its longest option (trigger width as the floor,
+   * viewport as the cap) instead of the trigger's width, and
+   * options wrap instead of ellipsis-clipping. Off by default —
+   * every other filter keeps its compact anchored menu.
+   */
+  wideContent?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -85,7 +94,15 @@ function FilterSelect({
           </SelectValue>
         </span>
       </SelectTrigger>
-      <SelectContent>{children}</SelectContent>
+      <SelectContent
+        className={
+          wideContent
+            ? 'w-max min-w-(--anchor-width) max-w-[calc(100vw-2rem)]'
+            : undefined
+        }
+      >
+        {children}
+      </SelectContent>
     </Select>
   );
 }
@@ -410,10 +427,20 @@ export function RecordingsToolbar({
             : (tables.find((t) => t.flow_id === v)?.name ?? 'All tables')
         }
         valueClassName="max-w-[180px]"
+        wideContent
       >
         <SelectItem value="all">All tables</SelectItem>
         {tables.map((t) => (
-          <SelectItem key={t.flow_id} value={t.flow_id}>
+          <SelectItem
+            key={t.flow_id}
+            value={t.flow_id}
+            title={t.name}
+            // Names render in full: wrap (never ellipsis) when the
+            // viewport cap binds. The item's right padding still
+            // reserves the checkmark column, so wrapped text never
+            // overlaps the indicator.
+            className="[&>span]:min-w-0 [&>span]:shrink [&>span]:whitespace-normal [&>span]:break-words"
+          >
             {t.name}
           </SelectItem>
         ))}

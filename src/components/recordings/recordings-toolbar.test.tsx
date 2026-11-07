@@ -154,6 +154,37 @@ describe("Workspace Table filter", () => {
     expect(out).toContain(">Workspace Table<");
     expect(out).toContain(">Instant Form for Couple Kashmir<");
   });
+
+  it("sizes the menu to its longest option and wraps instead of truncating", () => {
+    const root = process.cwd();
+    const toolbar = readFileSync(
+      `${root}/src/components/recordings/recordings-toolbar.tsx`,
+      "utf8",
+    );
+    // Opt-in wide menu on the Workspace Table filter only: popup
+    // grows with content (trigger floor, viewport cap) instead of
+    // locking to the trigger width.
+    expect(toolbar).toContain("wideContent");
+    expect(toolbar).toContain("w-max min-w-(--anchor-width) max-w-[calc(100vw-2rem)]");
+    // Option text wraps (never ellipsis); the checkmark column
+    // stays reserved so wrapped lines never overlap it.
+    expect(toolbar).toContain("[&>span]:whitespace-normal");
+    expect(toolbar).toContain("break-words");
+    // No other filter opts into the wide menu: exactly one
+    // FilterSelect call site passes the bare `wideContent` prop
+    // (the Workspace Table).
+    const wideUses = toolbar.match(/^ {8}wideContent$/gm) ?? [];
+    expect(wideUses).toHaveLength(1);
+  });
+
+  it("renders the menu in a portal above surrounding content", () => {
+    const popup = readFileSync(
+      `${process.cwd()}/src/components/ui/select.tsx`,
+      "utf8",
+    );
+    expect(popup).toContain("SelectPrimitive.Portal");
+    expect(popup).toContain("isolate z-50");
+  });
 });
 
 describe("Custom date range popover", () => {

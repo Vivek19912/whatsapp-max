@@ -11,7 +11,6 @@ import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import Image from "next/image";
 import {
   Bell,
-  Bot,
   CalendarClock,
   ChevronLeft,
   ChevronRight,
@@ -68,7 +67,6 @@ export const navItems: NavItem[] = [
   { href: "/automations", label: "Automations", icon: Zap },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/templates", label: "Templates", icon: FileText },
-  { href: "/agents", label: "AI Agents", icon: Bot },
   { href: "/data-export", label: "Flow Sheets", icon: Sheet },
   { href: "/all-sheets", label: "All Sheets", icon: Sheet },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
@@ -150,7 +148,7 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     DEFAULT_SHEETS_COLLAPSED
   );
   const sheetsOpen = resolveSheetsOpen(sheetsCollapsed, pathname);
-  // UI-only gating: Flows, AI Agents, and Settings are shown to the owner
+  // UI-only gating: Flows and Settings are shown to the owner
   // only. Non-owners simply don't see these nav entries. This is purely a
   // visibility change — the backend/routes are untouched, so it can be
   // reverted by removing the `isOwner` checks below.
@@ -170,7 +168,7 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     if (
       !isOwner &&
-      (item.href === "/flows" || item.href === "/agents" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/chat-assignment")
+      (item.href === "/flows" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/chat-assignment")
     ) {
       return false;
     }

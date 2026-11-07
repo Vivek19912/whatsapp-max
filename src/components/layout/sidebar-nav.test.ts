@@ -44,7 +44,6 @@ describe('Features removal — sidebar', () => {
       '/automations',
       '/notifications',
       '/templates',
-      '/agents',
       '/data-export',
       '/all-sheets',
       '/chat-assignment',
@@ -55,6 +54,13 @@ describe('Features removal — sidebar', () => {
   it('contains no Contacts entry', () => {
     expect(navItems.some((i) => i.href === '/contacts')).toBe(false);
     expect(navItems.some((i) => i.label.toLowerCase() === 'contacts')).toBe(
+      false
+    );
+  });
+
+  it('contains no AI Agents entry (sidebar-only visibility change)', () => {
+    expect(navItems.some((i) => i.href === '/agents')).toBe(false);
+    expect(navItems.some((i) => i.label.toLowerCase() === 'ai agents')).toBe(
       false
     );
   });

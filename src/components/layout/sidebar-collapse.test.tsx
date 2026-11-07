@@ -258,13 +258,27 @@ describe("agent Workspace access (no Flow Tables, no admin areas)", () => {
       expect(html).toContain('href="/workspace"');
       for (const href of [
         'href="/flows"',
-        'href="/agents"',
         'href="/data-export"',
         'href="/chat-assignment"',
         'href="/lead-assignment"',
       ]) {
         expect(html).not.toContain(href);
       }
+    } finally {
+      h.accountRole = "owner";
+      h.canEditSettings = true;
+    }
+  });
+
+  it("AI Agents entry is gone for every role (owner included)", () => {
+    // Sidebar-only visibility change: the /agents route, page, and
+    // functionality are untouched.
+    expect(render(false)).not.toContain('href="/agents"');
+    expect(render(false)).not.toContain("AI Agents");
+    h.accountRole = "agent";
+    h.canEditSettings = false;
+    try {
+      expect(render(false)).not.toContain('href="/agents"');
     } finally {
       h.accountRole = "owner";
       h.canEditSettings = true;
