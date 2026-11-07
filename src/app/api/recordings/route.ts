@@ -7,7 +7,10 @@ import {
 import { normalizePhone } from '@/lib/whatsapp/phone-utils';
 import { resolveUploaderName, toCallRecording } from '@/lib/recordings/recordings';
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders';
-import { workspaceTableNamesByContactId } from '@/lib/recordings/workspace-tables';
+import {
+  flowContactIds,
+  workspaceTableNamesByContactId,
+} from '@/lib/recordings/workspace-tables';
 
 /** Default page size — matches the contacts list convention. */
 const DEFAULT_LIMIT = 25;
@@ -47,6 +50,11 @@ function parseBound(value: string | null): number | null {
  *     folded into in/out).
  *   uploaded_by — auth user UUID.
  *   status — linked | unlinked (contact_id nullity).
+ *   workspace_table — flow UUID: only recordings linked to leads
+ *     holding a run in that flow. Unlinked recordings never match
+ *     a specific table; omitting it matches everything (the All
+ *     tables view). A foreign or empty flow matches nothing — the
+ *     same no-oracle empty result as matchless search.
  *   summary=1 — instead of rows, aggregate the filtered set:
  *     { total, totalDurationSecs, phone, whatsapp (merged),
  *       unlinked }. The stored whatsapp/whatsapp_business split
@@ -69,6 +77,7 @@ export async function GET(request: Request) {
     const callType = params.get('call_type')?.trim() || null;
     const direction = params.get('direction')?.trim() || null;
     const uploadedBy = params.get('uploaded_by')?.trim() || null;
+    const workspaceTable = params.get('workspace_table')?.trim() || null;
     const status = params.get('status')?.trim() || null;
     const wantSummary = params.get('summary') === '1';
 
@@ -93,6 +102,12 @@ export async function GET(request: Request) {
     if (uploadedBy && !UUID_RE.test(uploadedBy)) {
       return NextResponse.json(
         { error: "'uploaded_by' must be a valid user id." },
+        { status: 400 }
+      );
+    }
+    if (workspaceTable && !UUID_RE.test(workspaceTable)) {
+      return NextResponse.json(
+        { error: "'workspace_table' must be a valid flow id." },
         { status: 400 }
       );
     }
@@ -157,6 +172,45 @@ export async function GET(request: Request) {
       }
     }
 
+    // Workspace Table filter: the flow's lead membership, resolved
+    // account-scoped (a foreign or empty flow yields [] — the
+    // no-oracle empty result below, never another tenant's rows).
+    // Throws on database failure so the request 500s instead of
+    // silently emptying the list.
+    let tableContactIds: string[] | null = null;
+    if (workspaceTable) {
+      tableContactIds = await flowContactIds(supabase, accountId, workspaceTable);
+      if (tableContactIds.length === 0) {
+        return NextResponse.json(
+          wantSummary
+            ? { summary: emptySummary() }
+            : { recordings: [], total: 0, limit, offset, contact: contactHeader }
+        );
+      }
+    }
+
+    // Contact-id candidates shared by the list query and the
+    // summary RPC. A specific table ANDs with text search (the
+    // intersection); either alone passes its own set through.
+    // With a table selected the phone-digits half is disabled —
+    // its only unique contribution is unlinked recordings, which
+    // must never match a specific table — so list and summary
+    // stay exactly equivalent.
+    const effectiveDigits = tableContactIds ? null : searchDigits;
+    let rpcContactIds: string[] | null = null;
+    if (tableContactIds && searchContactIds) {
+      rpcContactIds = tableContactIds.filter((id) => searchContactIds.includes(id));
+    } else {
+      rpcContactIds = tableContactIds ?? searchContactIds;
+    }
+    if ((tableContactIds || q) && (rpcContactIds?.length ?? 0) === 0 && !effectiveDigits) {
+      return NextResponse.json(
+        wantSummary
+          ? { summary: emptySummary() }
+          : { recordings: [], total: 0, limit, offset, contact: contactHeader }
+      );
+    }
+
     const buildQuery = (select: string) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query: any = supabase
@@ -176,6 +230,12 @@ export async function GET(request: Request) {
       if (uploadedBy) query = query.eq('uploaded_by', uploadedBy);
       if (status === 'linked') query = query.not('contact_id', 'is', null);
       if (status === 'unlinked') query = query.is('contact_id', null);
+      // Table membership ANDs with every other predicate (a NULL
+      // contact_id never satisfies IN, so unlinked rows drop out
+      // of specific-table selections by construction).
+      if (tableContactIds && tableContactIds.length > 0) {
+        query = query.in('contact_id', tableContactIds);
+      }
       if (from !== null && to !== null) {
         const fromISO = new Date(from).toISOString();
         const toISO = new Date(to).toISOString();
@@ -189,8 +249,8 @@ export async function GET(request: Request) {
         if (searchContactIds && searchContactIds.length > 0) {
           parts.push(`contact_id.in.(${searchContactIds.join(',')})`);
         }
-        if (searchDigits) {
-          parts.push(`phone_number.ilike.%${searchDigits}%`);
+        if (effectiveDigits) {
+          parts.push(`phone_number.ilike.%${effectiveDigits}%`);
         }
         if (parts.length > 0) query = query.or(parts.join(','));
       }
@@ -206,8 +266,8 @@ export async function GET(request: Request) {
       const rpcArgs: Record<string, unknown> = {
         p_account_id: accountId,
         p_contact_id: contactId,
-        p_contact_ids: q ? (searchContactIds ?? []) : null,
-        p_digits: q ? searchDigits : null,
+        p_contact_ids: q || tableContactIds ? (rpcContactIds ?? []) : null,
+        p_digits: q ? effectiveDigits : null,
         p_from: from !== null ? new Date(from).toISOString() : null,
         p_to: to !== null ? new Date(to).toISOString() : null,
         p_call_type: callType,

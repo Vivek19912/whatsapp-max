@@ -13,12 +13,14 @@ import {
   loadMemberOptions,
   loadRecordingsList,
   loadRecordingsSummary,
+  loadWorkspaceTableOptions,
   recordingsQuery,
   resetRecordingsFilters,
   summaryQuery,
   type MemberOption,
   type RecordingsFilters,
   type RecordingsSummary,
+  type WorkspaceTableOption,
 } from '@/lib/recordings/library';
 import { RecordingsToolbar } from '@/components/recordings/recordings-toolbar';
 import { RecordingsTable } from '@/components/recordings/recordings-table';
@@ -59,6 +61,7 @@ export default function RecordingsPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [summary, setSummary] = useState<RecordingsSummary | null>(null);
   const [members, setMembers] = useState<MemberOption[]>([]);
+  const [tables, setTables] = useState<WorkspaceTableOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +142,7 @@ export default function RecordingsPage() {
   useEffect(() => {
     const controller = new AbortController();
     void loadMemberOptions(controller.signal).then(setMembers).catch(() => undefined);
+    void loadWorkspaceTableOptions(controller.signal).then(setTables).catch(() => undefined);
     return () => controller.abort();
   }, []);
 
@@ -174,6 +178,7 @@ export default function RecordingsPage() {
     filters.callType !== null ||
     filters.direction !== null ||
     filters.uploadedBy !== null ||
+    filters.workspaceTable !== null ||
     filters.status !== null ||
     filters.rangeKey !== 'last30';
 
@@ -185,12 +190,7 @@ export default function RecordingsPage() {
     <div className="flex w-full flex-col gap-4">
       <div className="flex items-center gap-3">
         <Mic className="h-6 w-6 shrink-0" />
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Call Recordings</h1>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            Recorded calls from your devices, connected to your leads.
-          </p>
-        </div>
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Call Recordings</h1>
       </div>
 
       <RecordingsToolbar
@@ -199,6 +199,7 @@ export default function RecordingsPage() {
         nowMs={nowMs}
         timeZone={tz}
         members={members}
+        tables={tables}
       />
 
       <SummaryCards summary={summary} loading={summaryLoading} />

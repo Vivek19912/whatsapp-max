@@ -403,7 +403,7 @@ describe("Recordings page container", () => {
 });
 
 describe("Lead and Recording behavior", () => {
-  // Lead cells hold only the name span now (the row's Play button
+  // Lead cells hold only the name link now (the row's Play button
   // legitimately keeps its own rounded-full shape elsewhere).
   function leadCell(markup: string, name: string): string {
     const idx = markup.indexOf(`>${name}<`);
@@ -411,19 +411,35 @@ describe("Lead and Recording behavior", () => {
     return markup.slice(tdStart, markup.indexOf("</td>", tdStart));
   }
 
-  it("shows linked lead names with no avatar or initial", () => {
+  it("links linked lead names to the exact Workspace lead in a new tab", () => {
     const out = html();
-    expect(out).toContain("Akash");
     const cell = leadCell(out, "Akash");
+    // Stable contacts.id — never the name or phone number.
+    expect(cell).toContain('href="/workspace?contact=c-1"');
+    expect(cell).toContain('target="_blank"');
+    expect(cell).toContain('rel="noreferrer"');
+    // Blue and clickable affordance, no avatar or initial.
+    expect(cell).toContain("text-blue-600");
     expect(cell).not.toContain("rounded-full");
-    expect(cell).not.toContain("bg-");
   });
 
-  it("shows Unlinked with no avatar", () => {
+  it("shows Unlinked with no avatar and no navigation link", () => {
     const out = html([recording({ contact_id: null, contact_name: null })]);
     const cell = leadCell(out, "Unlinked");
     expect(cell).not.toContain("rounded-full");
     expect(cell).not.toContain("bg-");
+    expect(cell).not.toContain("<a");
+    expect(cell).not.toContain("/workspace?contact=");
+  });
+
+  it("never marks the lead as coming from a call recording", () => {
+    const out = html();
+    expect(out).not.toMatch(/from call recording/i);
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).not.toMatch(/from call recording/i);
   });
 
   it("keeps the filename out of the table", () => {
@@ -473,11 +489,42 @@ describe("Compact Recording column", () => {
       src.indexOf("<Popover"),
     );
     expect(bodyRow).not.toContain("onClick");
-    expect(src).not.toContain("cursor-pointer");
+    // No row is a pointer surface (the Recording cell's own
+    // click area, asserted below, is the only exception).
+    expect(bodyRow).not.toContain("cursor-pointer");
     // The sole opener is the Recording cell's Play trigger, which
     // sets autoplay and flips this row's popover open.
     expect(src).toContain("setAutoplay(true)");
     expect(src).toContain("open={playerOpen}");
+  });
+
+  it("makes the whole Recording cell one clickable area with hover affordance", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    // Cell-level click area (icon + duration together).
+    expect(src).toContain("cursor-pointer items-center gap-2 rounded-md");
+    expect(src).toContain("hover:bg-muted/60");
+    // Play-button clicks defer to the trigger toggle; any other
+    // click inside the cell opens the player.
+    expect(src).toContain("closest('button')");
+    expect(src).toContain("setOpenId(r.id)");
+  });
+
+  it("keeps lead info out of the floating player", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    // No title, avatar, or lead metadata inside the popover —
+    // only the close button, the player, and (for unlinked rows)
+    // the link-lead action.
+    expect(src).not.toContain("PopoverTitle");
+    expect(src).not.toContain("leadInitial(r.contact_name)");
+    expect(src).not.toContain("h-10 w-10");
+    expect(src).toContain('aria-label="Close player"');
+    expect(src).toContain('aria-label="Recording audio player"');
   });
 
   it("keeps the Play button small, blue, and circular", () => {

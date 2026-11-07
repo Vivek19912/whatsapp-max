@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { workspaceTableNamesByContactId } from './workspace-tables';
+import { workspaceTableNamesByContactId, flowContactIds } from './workspace-tables';
 
 // Minimal thenable stub for the exact chain the helper builds:
 // from().select().eq().in().order() (runs) and
@@ -29,6 +29,8 @@ function stubClient(opts: {
     return builder;
   };
   builder.order = () => builder;
+  builder.not = () => builder;
+  builder.limit = () => builder;
   (builder as { then: unknown }).then = (resolve: (v: unknown) => unknown) => {
     const isRuns = track.table === 'flow_runs';
     opts.calls?.push({ table: track.table, filters: [...track.filters] });
@@ -117,5 +119,49 @@ describe('workspaceTableNamesByContactId', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await expect(workspaceTableNamesByContactId(client as any, 'acct-1', ['c-1'])).resolves.toEqual({});
     }
+  });
+});
+
+describe('flowContactIds', () => {
+  it('returns distinct contact ids for the flow', async () => {
+    const client = stubClient({
+      runs: [
+        { contact_id: 'c-1', flow_id: 'f-1' },
+        { contact_id: 'c-1', flow_id: 'f-1' },
+        { contact_id: null, flow_id: 'f-1' },
+        { contact_id: 'c-2', flow_id: 'f-1' },
+      ],
+      flows: [],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(flowContactIds(client as any, 'acct-1', 'f-1')).resolves.toEqual([
+      'c-1',
+      'c-2',
+    ]);
+  });
+
+  it('returns [] for blank account or flow ids without querying', async () => {
+    const calls: Array<unknown> = [];
+    const client = stubClient({ runs: [], flows: [], calls: calls as never });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(flowContactIds(client as any, '', 'f-1')).resolves.toEqual([]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(flowContactIds(client as any, 'acct-1', '')).resolves.toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('scopes the membership query to the caller’s account and flow', async () => {
+    const calls: Array<{ table: string; filters: Array<[string, unknown]> }> = [];
+    const client = stubClient({
+      runs: [{ contact_id: 'c-1', flow_id: 'f-1' }],
+      flows: [],
+      calls,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await flowContactIds(client as any, 'acct-1', 'f-1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].table).toBe('flow_runs');
+    expect(calls[0].filters).toContainEqual(['account_id', 'acct-1']);
+    expect(calls[0].filters).toContainEqual(['flow_id', 'f-1']);
   });
 });

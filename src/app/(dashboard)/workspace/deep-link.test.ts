@@ -150,9 +150,15 @@ describe("cross-pagination locate (?contact= not on the loaded page)", () => {
     );
   });
 
-  it("a non-hit changes nothing (plain table, as before)", () => {
+  it("a non-hit shows a notice and navigates nowhere (plain table otherwise)", () => {
     const src = effectSrc();
-    expect(src).toContain("if (!body || body.found !== true) return;");
+    expect(src).toContain("if (!body || body.found !== true) {");
+    expect(src).toContain("setDeepLinkNotice(");
+    // Never navigates to an unrelated lead on a miss.
+    const missIdx = src.indexOf("if (!body || body.found !== true) {");
+    const missBlock = src.slice(missIdx, missIdx + 600);
+    expect(missBlock).not.toContain("setFlowId");
+    expect(missBlock).not.toContain("setPage");
   });
 
   it("a manual selection wins over the lookup", () => {
@@ -162,5 +168,55 @@ describe("cross-pagination locate (?contact= not on the loaded page)", () => {
     expect(src.indexOf("if (selected")).toBeLessThan(
       src.indexOf("/api/workspace/locate-contact"),
     );
+  });
+});
+
+describe("located lead is scrolled to and temporarily highlighted", () => {
+  it("arms the highlight when the deep-linked row is selected", () => {
+    const src = effectSrc();
+    const findIdx = src.indexOf("findWorkspaceRowForContact(payload.rows");
+    expect(findIdx).toBeGreaterThan(-1);
+    const tail = src.slice(findIdx);
+    // Same branch that selects the row also arms its highlight —
+    // covers both the direct hit and the post-locate-navigation
+    // hit, since locate routes back through this match.
+    expect(tail).toContain("setHighlightContactId(deepLinkContactId)");
+    const ifIdx = tail.indexOf("if (row)");
+    const markIdx = tail.indexOf("setHighlightContactId(deepLinkContactId)");
+    expect(markIdx).toBeGreaterThan(ifIdx);
+  });
+
+  it("scrolls the row into view and clears the highlight after ~4s", () => {
+    expect(pageSrc).toContain("document.querySelector(");
+    expect(pageSrc).toContain('`tr[data-contact-id="${highlightContactId}"]`');
+    expect(pageSrc).toContain(
+      "el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });",
+    );
+    expect(pageSrc).toContain(
+      "window.setTimeout(() => setHighlightContactId(null), 4000);",
+    );
+  });
+
+  it("hooks rows by stable contact id for the highlight lookup", () => {
+    expect(pageSrc).toContain("data-contact-id={row.contactId ?? undefined}");
+  });
+
+  it("washes the row light blue with an accent — and nothing else", () => {
+    // Light blue wash + blue left accent + fade transition.
+    // (Border utilities only — the grid system forbids shadow
+    // styling on the Workspace page.)
+    expect(pageSrc).toContain("bg-blue-100/70");
+    expect(pageSrc).toContain("border-l-4 border-l-blue-500");
+    expect(pageSrc).toContain("duration-1000");
+    // No singular "From Call Recording" badge, label, chip, or
+    // text — the wash alone identifies the lead. (Pre-existing
+    // "from Call Recordings" code comments are not UI.)
+    expect(pageSrc).not.toMatch(/from call recording(?!s)/i);
+  });
+
+  it("renders the miss notice with a dismiss action", () => {
+    expect(pageSrc).toContain("deepLinkNotice");
+    expect(pageSrc).toContain('role="status"');
+    expect(pageSrc).toContain("setDeepLinkNotice(null)");
   });
 });

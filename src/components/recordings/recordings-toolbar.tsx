@@ -1,15 +1,24 @@
 'use client';
 
+import { useState } from 'react';
 import {
   ArrowLeftRight,
   CalendarDays,
+  ChevronDown,
   Link2,
   Phone,
   Search,
+  Table2,
   User,
 } from 'lucide-react';
 
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import {
   Select,
   SelectContent,
@@ -17,9 +26,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { MemberOption, RecordingsFilters } from '@/lib/recordings/library';
-import { resetRecordingsFilters } from '@/lib/recordings/library';
+import type {
+  MemberOption,
+  RecordingsFilters,
+  WorkspaceTableOption,
+} from '@/lib/recordings/library';
+import {
+  formatCustomRangeLabel,
+  resetRecordingsFilters,
+} from '@/lib/recordings/library';
 import { toDateInputValue, type CallsRangeKey } from '@/lib/calls/ranges';
+
+/** Shared labelled-card trigger styling for every filter control. */
+const CARD_CLASS =
+  'h-auto min-w-[148px] gap-2.5 rounded-xl border-border bg-card px-3.5 py-2 text-left hover:bg-muted/50';
 
 /**
  * Labelled filter dropdown card: a small icon, a permanently
@@ -54,10 +74,7 @@ function FilterSelect({
 }) {
   return (
     <Select value={value} onValueChange={onValueChange}>
-      <SelectTrigger
-        aria-label={ariaLabel}
-        className="h-auto min-w-[136px] gap-2.5 rounded-xl border-border bg-card px-3 py-1.5 text-left hover:bg-muted/50"
-      >
+      <SelectTrigger aria-label={ariaLabel} className={CARD_CLASS}>
         <span className="shrink-0 text-muted-foreground">{icon}</span>
         <span className="flex min-w-0 flex-1 flex-col items-start leading-tight">
           <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
@@ -73,14 +90,13 @@ function FilterSelect({
   );
 }
 
-const DATE_LABELS: Record<string, string> = {
-  today: 'Today',
-  yesterday: 'Yesterday',
-  last7: 'Last 7 days',
-  last30: 'Last 30 days',
-  last90: 'Last 90 days',
-  custom: 'Custom',
-};
+const DATE_PRESETS: Array<{ key: CallsRangeKey; label: string }> = [
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'last7', label: 'Last 7 days' },
+  { key: 'last30', label: 'Last 30 days' },
+  { key: 'last90', label: 'Last 90 days' },
+];
 
 const CALL_TYPE_LABELS: Record<string, string> = {
   all: 'All types',
@@ -101,13 +117,202 @@ const STATUS_LABELS: Record<string, string> = {
   unlinked: 'Unlinked',
 };
 
+const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Strict YYYY-MM-DD < YYYY-MM-DD check (same rule the API enforces). */
+function isValidRange(fromInput: string, toInput: string): boolean {
+  if (!DAY_RE.test(fromInput) || !DAY_RE.test(toInput)) return false;
+  return fromInput < toInput;
+}
+
+/**
+ * Date filter card: preset menu plus a unified Custom Date Range
+ * picker inside ONE popover. Presets apply instantly (as before);
+ * Custom reveals the grouped start/end section whose Apply
+ * commits and Cancel discards — nothing applies until Apply.
+ * Drafts snapshot the applied range on every open, so reopening
+ * retains the current selection and Cancel never disturbs it.
+ */
+function DateFilterCard({
+  filters,
+  set,
+  todayInput,
+}: {
+  filters: RecordingsFilters;
+  set: (patch: Partial<RecordingsFilters>) => void;
+  todayInput: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [draftFrom, setDraftFrom] = useState('');
+  const [draftTo, setDraftTo] = useState('');
+
+  const appliedCustom = filters.rangeKey === 'custom';
+  const display =
+    appliedCustom
+      ? formatCustomRangeLabel(filters.customFrom, filters.customTo)
+      : (DATE_PRESETS.find((p) => p.key === filters.rangeKey)?.label ?? 'Last 30 days');
+
+  const handleOpenChange = (next: boolean) => {
+    if (next) {
+      // Snapshot the applied range: reopening starts from what
+      // is actually filtering, and the range section shows
+      // immediately when Custom is the applied preset.
+      setDraftFrom(filters.customFrom);
+      setDraftTo(filters.customTo);
+      setCustomOpen(appliedCustom);
+    }
+    setOpen(next);
+  };
+
+  const applyCustom = () => {
+    if (!isValidRange(draftFrom, draftTo)) return;
+    set({ rangeKey: 'custom', customFrom: draftFrom, customTo: draftTo });
+    setOpen(false);
+  };
+
+  const valid = isValidRange(draftFrom, draftTo);
+  const showHint = draftFrom !== '' && draftTo !== '' && !valid;
+
+  return (
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            aria-label="Date range"
+            aria-haspopup="dialog"
+            className={`flex w-fit cursor-pointer items-center justify-between border text-sm whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 ${CARD_CLASS} min-w-[168px]`}
+          />
+        }
+      >
+        <span className="shrink-0 text-muted-foreground">
+          <CalendarDays className="h-4 w-4" />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col items-start leading-tight">
+          <span className="text-[11px] font-medium text-muted-foreground">Date</span>
+          <span
+            title={display}
+            className="block max-w-full truncate text-left text-[13px] font-semibold text-foreground"
+          >
+            {display}
+          </span>
+        </span>
+        <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+      </PopoverTrigger>
+      <PopoverContent align="start" side="bottom" className="w-72 p-1.5">
+        <div role="menu" aria-label="Date range options" className="flex flex-col">
+          {DATE_PRESETS.map((p) => {
+            const active = !customOpen && filters.rangeKey === p.key;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                role="menuitemradio"
+                aria-checked={active}
+                onClick={() => {
+                  set({ rangeKey: p.key });
+                  setOpen(false);
+                }}
+                className={`flex items-center justify-between rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-muted focus-visible:bg-muted ${active ? 'font-semibold text-foreground' : 'text-foreground'}`}
+              >
+                {p.label}
+                {active ? <span aria-hidden className="text-xs text-muted-foreground">✓</span> : null}
+              </button>
+            );
+          })}
+          <button
+            key="custom"
+            type="button"
+            role="menuitemradio"
+            aria-checked={customOpen || appliedCustom}
+            onClick={() => setCustomOpen(true)}
+            className="flex items-center justify-between rounded-md px-2 py-1.5 text-left text-sm text-foreground outline-none hover:bg-muted focus-visible:bg-muted"
+          >
+            Custom
+            {customOpen || appliedCustom ? (
+              <span aria-hidden className="text-xs text-muted-foreground">✓</span>
+            ) : null}
+          </button>
+        </div>
+        {customOpen ? (
+          <div className="mt-1 border-t border-border px-2 pt-2 pb-1">
+            <p className="mb-2 text-xs font-semibold text-foreground">Custom date range</p>
+            <div className="flex items-end gap-1.5">
+              <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] font-medium text-muted-foreground">
+                Start date
+                <Input
+                  type="date"
+                  aria-label="Custom start date"
+                  value={draftFrom}
+                  max={draftTo || todayInput}
+                  onChange={(e) => setDraftFrom(e.target.value)}
+                  className="h-8 w-full min-w-0 text-[13px]"
+                />
+              </label>
+              <span aria-hidden className="pb-2 text-xs text-muted-foreground">→</span>
+              <label className="flex min-w-0 flex-1 flex-col gap-1 text-[11px] font-medium text-muted-foreground">
+                End date
+                <Input
+                  type="date"
+                  aria-label="Custom end date"
+                  value={draftTo}
+                  min={draftFrom}
+                  max={todayInput}
+                  onChange={(e) => setDraftTo(e.target.value)}
+                  className="h-8 w-full min-w-0 text-[13px]"
+                />
+              </label>
+            </div>
+            {showHint ? (
+              <p role="alert" className="mt-1.5 text-xs text-destructive">
+                End date must be after the start date.
+              </p>
+            ) : null}
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setDraftFrom('');
+                  setDraftTo('');
+                }}
+                className="text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Reset
+              </button>
+              <span className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setOpen(false)}
+                  className="h-7 px-2.5 text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!valid}
+                  onClick={applyCustom}
+                  className="h-7 bg-blue-600 px-3 text-xs hover:bg-blue-600"
+                >
+                  Apply
+                </Button>
+              </span>
+            </div>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /**
  * Library toolbar: debounced text search plus real server-side
- * filters (date, type, direction, salesperson, status). Every
- * control maps to a GET /api/recordings param — nothing
- * decorative. Only the presentation changed (labelled cards);
- * filter state, values, options, and reset behavior are exactly
- * as before.
+ * filters (date, type, direction, salesperson, workspace table,
+ * status). Every control maps to a GET /api/recordings param —
+ * nothing decorative.
  */
 export function RecordingsToolbar({
   filters,
@@ -115,19 +320,21 @@ export function RecordingsToolbar({
   nowMs,
   timeZone,
   members,
+  tables,
 }: {
   filters: RecordingsFilters;
   onChange: (f: RecordingsFilters) => void;
   nowMs: number;
   timeZone: string;
   members: MemberOption[];
+  tables: WorkspaceTableOption[];
 }) {
   const todayInput = toDateInputValue(nowMs, timeZone);
 
   const set = (patch: Partial<RecordingsFilters>) => onChange({ ...filters, ...patch });
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-center gap-3">
       <div className="relative min-w-[220px] flex-1 sm:max-w-xs">
         <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -139,46 +346,7 @@ export function RecordingsToolbar({
         />
       </div>
 
-      <FilterSelect
-        label="Date"
-        icon={<CalendarDays className="h-4 w-4" />}
-        value={filters.rangeKey}
-        onValueChange={(v) => {
-          if (v) set({ rangeKey: v as CallsRangeKey });
-        }}
-        ariaLabel="Date range"
-        formatValue={(v) => DATE_LABELS[v ?? ''] ?? v}
-      >
-        <SelectItem value="today">Today</SelectItem>
-        <SelectItem value="yesterday">Yesterday</SelectItem>
-        <SelectItem value="last7">Last 7 days</SelectItem>
-        <SelectItem value="last30">Last 30 days</SelectItem>
-        <SelectItem value="last90">Last 90 days</SelectItem>
-        <SelectItem value="custom">Custom</SelectItem>
-      </FilterSelect>
-
-      {filters.rangeKey === 'custom' ? (
-        <span className="flex items-center gap-1.5">
-          <Input
-            type="date"
-            aria-label="Custom start date"
-            value={filters.customFrom}
-            max={filters.customTo || todayInput}
-            onChange={(e) => set({ customFrom: e.target.value })}
-            className="h-8 w-auto rounded-xl text-[13px]"
-          />
-          <span className="text-xs text-muted-foreground">→</span>
-          <Input
-            type="date"
-            aria-label="Custom end date"
-            value={filters.customTo}
-            min={filters.customFrom}
-            max={todayInput}
-            onChange={(e) => set({ customTo: e.target.value })}
-            className="h-8 w-auto rounded-xl text-[13px]"
-          />
-        </span>
-      ) : null}
+      <DateFilterCard filters={filters} set={set} todayInput={todayInput} />
 
       <FilterSelect
         label="Call type"
@@ -220,12 +388,33 @@ export function RecordingsToolbar({
             ? 'All users'
             : (members.find((m) => m.user_id === v)?.label ?? 'All users')
         }
-        valueClassName="max-w-[160px]"
+        valueClassName="max-w-[180px]"
       >
         <SelectItem value="all">All users</SelectItem>
         {members.map((m) => (
           <SelectItem key={m.user_id} value={m.user_id}>
             {m.label}
+          </SelectItem>
+        ))}
+      </FilterSelect>
+
+      <FilterSelect
+        label="Workspace Table"
+        icon={<Table2 className="h-4 w-4" />}
+        value={filters.workspaceTable ?? 'all'}
+        onValueChange={(v) => set({ workspaceTable: v === 'all' ? null : v })}
+        ariaLabel="Workspace Table"
+        formatValue={(v) =>
+          v === 'all' || v == null
+            ? 'All tables'
+            : (tables.find((t) => t.flow_id === v)?.name ?? 'All tables')
+        }
+        valueClassName="max-w-[180px]"
+      >
+        <SelectItem value="all">All tables</SelectItem>
+        {tables.map((t) => (
+          <SelectItem key={t.flow_id} value={t.flow_id}>
+            {t.name}
           </SelectItem>
         ))}
       </FilterSelect>

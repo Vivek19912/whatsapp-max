@@ -909,6 +909,11 @@ export default function WorkspacePage() {
   const deepLinkContactId = useSearchParams().get('contact');
   const appliedContactRef = useRef<string | null | undefined>(undefined);
   const locatedContactRef = useRef<string | null | undefined>(undefined);
+  // Temporary deep-link highlight (contact id whose row gets a
+  // ~4s blue wash once located) and the miss notice. Both are
+  // purely visual: no record writes, no badge, no label.
+  const [highlightContactId, setHighlightContactId] = useState<string | null>(null);
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
   useEffect(() => {
     // Fail-closed ordering: never mark the param as applied before
     // the payload exists. On fresh navigation (e.g. from Call
@@ -920,6 +925,7 @@ export default function WorkspacePage() {
     const row = findWorkspaceRowForContact(payload.rows, deepLinkContactId);
     if (row) {
       setSelected(row);
+      setHighlightContactId(deepLinkContactId);
       appliedContactRef.current = deepLinkContactId;
       return;
     }
@@ -934,7 +940,15 @@ export default function WorkspacePage() {
         const body = (await res.json().catch(
           () => null,
         )) as LocateContactResponse | null;
-        if (!body || body.found !== true) return;
+        if (!body || body.found !== true) {
+          // Resolvable nowhere the caller may see: surface a
+          // notice instead of leaving a silently plain table.
+          // Never navigates to an unrelated lead.
+          setDeepLinkNotice(
+            'Could not locate that lead in your workspace tables. It may have been moved, deleted, or shared outside your access.'
+          );
+          return;
+        }
         if (typeof body.flow_id !== 'string' || !body.flow_id) return;
         if (body.view !== 'completed' && body.view !== 'incomplete') return;
         if (!Number.isInteger(body.page) || body.page < 0) return;
@@ -946,7 +960,25 @@ export default function WorkspacePage() {
       })
       .catch(() => {});
     return () => ctrl.abort();
-  }, [deepLinkContactId, payload, pageSize, selected]);  const activeFlowName = flows?.find((f) => f.id === flowId)?.name ?? null;
+  }, [deepLinkContactId, payload, pageSize, selected]);
+
+  // Temporary deep-link highlight: once the located lead's row is
+  // rendered, scroll it into view and wash it light blue for ~4s.
+  // The row carries only a data-contact-id hook and highlight
+  // classes — no badge, no label, no record change. Re-runs when
+  // the payload arrives (post-locate navigation) so timing never
+  // strands the highlight; cleanup clears the timer on unmount.
+  useEffect(() => {
+    if (!highlightContactId) return;
+    const el = document.querySelector(
+      `tr[data-contact-id="${highlightContactId}"]`
+    );
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const t = window.setTimeout(() => setHighlightContactId(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [highlightContactId, payload]);
+
+  const activeFlowName = flows?.find((f) => f.id === flowId)?.name ?? null;
 
   const customFields = useMemo(() => payload?.customFields ?? [], [payload]);
   // Meta Lead Ads only: drop the "Lead Received" business column
@@ -1765,6 +1797,17 @@ export default function WorkspacePage() {
             <p className="text-destructive text-sm" role="alert">
               {tableError}
             </p>
+          ) : deepLinkNotice ? (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+              <span>{deepLinkNotice}</span>
+              <button
+                type="button"
+                onClick={() => setDeepLinkNotice(null)}
+                className="font-medium text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Dismiss
+              </button>
+            </p>
           ) : loading && !payload ? (
             <Skeleton className="h-64 w-full" />
           ) : !payload || payload.rows.length === 0 ? (
@@ -1970,12 +2013,22 @@ export default function WorkspacePage() {
                     {visibleRows.map((row, rowIndex) => (
                       <TableRow
                         key={row.runId}
+                        data-contact-id={row.contactId ?? undefined}
                         className={cn(
                           'cursor-pointer',
                           // Pinned rows read subtly highlighted (light
                           // amber wash) while keeping the row hover.
                           pinnedIds.has(row.runId) &&
-                            'bg-amber-50/70 dark:bg-amber-950/20'
+                            'bg-amber-50/70 dark:bg-amber-950/20',
+                          // Temporary deep-link highlight: light blue
+                          // wash with a blue left accent, fading via
+                          // the row's own color transition. No badge,
+                          // no label — the wash alone identifies it.
+                          // (Border utilities only: the grid system
+                          // forbids shadow styling on this page.)
+                          highlightContactId !== null &&
+                            row.contactId === highlightContactId &&
+                            'border-l-4 border-l-blue-500 bg-blue-100/70 duration-1000 dark:bg-blue-500/15'
                         )}
                         onClick={() => setSelected(row)}
                       >

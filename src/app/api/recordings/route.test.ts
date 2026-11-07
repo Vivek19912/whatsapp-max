@@ -336,6 +336,13 @@ describe("GET /api/recordings?contact_id=", () => {
     expect(json.recordings[0].contact_phone).toBe("+919876543210");
   });
 
+  it("400s a malformed workspace_table value", async () => {
+    const res = await GET(
+      new Request("https://app.test/api/recordings?workspace_table=nope")
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("joins the workspace table name via the lead's most recent flow run", async () => {
     h.contacts = [{ id: "c-1", account_id: "acct-1", name: "Akash" }];
     h.flowRuns = [
@@ -409,6 +416,119 @@ describe("GET /api/recordings?contact_id=", () => {
       recordings: Array<{ workspace_table_name: string | null }>;
     };
     expect(json.recordings[0].workspace_table_name).toBeNull();
+  });
+});
+
+describe("GET /api/recordings?workspace_table=", () => {
+  const FLOW = "123e4567-e89b-12d3-a456-426614174010";
+  const OTHER_FLOW = "123e4567-e89b-12d3-a456-426614174011";
+  const seed = () => {
+    h.contacts = [
+      { id: "c-1", account_id: "acct-1", name: "Akash" },
+      { id: "c-2", account_id: "acct-1", name: "Sagar" },
+    ];
+    h.flowRuns = [
+      { contact_id: "c-1", account_id: "acct-1", flow_id: FLOW },
+      { contact_id: "c-2", account_id: "acct-1", flow_id: OTHER_FLOW },
+    ];
+    h.recordings = [
+      recording({ id: "r-1", contact_id: "c-1" }),
+      recording({ id: "r-2", contact_id: "c-2" }),
+      recording({ id: "r-u", contact_id: null }),
+    ];
+  };
+  const ids = async (qs: string) => {
+    const res = await GET(new Request(`https://app.test/api/recordings?${qs}`));
+    const json = (await res.json()) as { recordings: Array<{ id: string }> };
+    return json.recordings.map((r) => r.id).sort();
+  };
+
+  it("returns only the selected table's linked recordings, never unlinked", async () => {
+    seed();
+    expect(await ids(`workspace_table=${FLOW}`)).toEqual(["r-1"]);
+    expect(await ids(`workspace_table=${OTHER_FLOW}`)).toEqual(["r-2"]);
+  });
+
+  it("omitting the table restores linked and unlinked recordings", async () => {
+    seed();
+    expect(await ids("")).toEqual(["r-1", "r-2", "r-u"]);
+  });
+
+  it("returns empty for a foreign or empty flow (no cross-tenant oracle)", async () => {
+    seed();
+    h.flowRuns = [
+      { contact_id: "c-1", account_id: "acct-evil", flow_id: FLOW },
+    ];
+    expect(await ids(`workspace_table=${FLOW}`)).toEqual([]);
+    const res = await GET(
+      new Request(`https://app.test/api/recordings?workspace_table=${FLOW}&summary=1`)
+    );
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary).toEqual({
+      total: 0,
+      totalDurationSecs: 0,
+      phone: 0,
+      whatsapp: 0,
+      unlinked: 0,
+    });
+  });
+
+  it("combines with status and direction filters", async () => {
+    seed();
+    expect(await ids(`workspace_table=${FLOW}&status=linked`)).toEqual(["r-1"]);
+    // Unlinked can never satisfy a specific-table selection.
+    expect(await ids(`workspace_table=${FLOW}&status=unlinked`)).toEqual([]);
+  });
+
+  it("passes the table membership to the summary RPC and drops phone digits", async () => {
+    seed();
+    h.rpcResult = {
+      total: 1,
+      totalDurationSecs: 16,
+      phone: 1,
+      whatsapp: 0,
+      whatsappBusiness: 0,
+      unlinked: 0,
+    };
+    const res = await GET(
+      new Request(
+        `https://app.test/api/recordings?summary=1&workspace_table=${FLOW}&q=5555555555`
+      )
+    );
+    expect(res.status).toBe(200);
+    // Digits alone match only the unlinked r-3, which the table
+    // excludes: membership intersects to nothing... except the
+    // mock search prefetch finds no contact for those digits, so
+    // the intersection is empty and the route short-circuits.
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary.total).toBe(0);
+    expect(h.rpcCalls).toHaveLength(0);
+  });
+
+  it("intersects table membership with text-search candidates for the RPC", async () => {
+    seed();
+    h.contacts = [
+      { id: "c-1", account_id: "acct-1", name: "Akash", phone_normalized: "919876543210" },
+      { id: "c-2", account_id: "acct-1", name: "Sagar", phone_normalized: "911234567890" },
+    ];
+    h.rpcResult = {
+      total: 1,
+      totalDurationSecs: 16,
+      phone: 1,
+      whatsapp: 0,
+      whatsappBusiness: 0,
+      unlinked: 0,
+    };
+    const res = await GET(
+      new Request(
+        `https://app.test/api/recordings?summary=1&workspace_table=${FLOW}&q=aka`
+      )
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary.total).toBe(1);
+    expect(h.rpcCalls).toHaveLength(1);
+    expect(h.rpcCalls[0].args).toMatchObject({ p_contact_ids: ["c-1"] });
   });
 });
 

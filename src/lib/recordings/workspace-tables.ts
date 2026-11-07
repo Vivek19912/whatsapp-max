@@ -17,6 +17,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
+ * Cap for one flow's contact-id prefetch behind the Workspace
+ * Table filter. Keeps the `contact_id.in.(...)` list (and the
+ * matching RPC array) inside safe URL lengths — the same
+ * discipline as the search prefetch cap, only roomier.
+ */
+export const WORKSPACE_TABLE_CONTACT_LIMIT = 200;
+
+/**
  * Map `contact_id` → workspace table (flow) name for the given
  * contacts. Contacts with no runs, runs whose flow is gone, or
  * flows with a blank name simply have no entry — the call site
@@ -84,4 +92,36 @@ export async function workspaceTableNamesByContactId(
   } catch {
     return {};
   }
+}
+
+/**
+ * Distinct lead ids holding at least one run in the given flow —
+ * the membership set behind the Workspace Table filter. One
+ * account-scoped query, never N+1. A foreign or nonexistent flow
+ * resolves to [] (no cross-tenant oracle, no leak — the caller
+ * short-circuits to an empty result exactly like matchless
+ * search). Throws on database failure so the caller surfaces a
+ * 500 instead of a silently empty list.
+ */
+export async function flowContactIds(
+  supabase: SupabaseClient,
+  accountId: string,
+  flowId: string
+): Promise<string[]> {
+  if (!accountId || !flowId) return [];
+  const { data, error } = await supabase
+    .from('flow_runs')
+    .select('contact_id')
+    .eq('account_id', accountId)
+    .eq('flow_id', flowId)
+    .not('contact_id', 'is', null)
+    .limit(WORKSPACE_TABLE_CONTACT_LIMIT);
+  if (error) throw error;
+  return [
+    ...new Set(
+      ((data ?? []) as Array<{ contact_id: string | null }>)
+        .map((r) => r.contact_id)
+        .filter((id): id is string => !!id)
+    ),
+  ];
 }

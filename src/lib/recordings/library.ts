@@ -15,6 +15,8 @@ export interface RecordingsFilters {
   callType: string | null;
   direction: string | null;
   uploadedBy: string | null;
+  /** Workspace table (flow) id, or null for all tables. */
+  workspaceTable: string | null;
   status: string | null;
 }
 
@@ -33,6 +35,7 @@ export function resetRecordingsFilters(): RecordingsFilters {
     callType: null,
     direction: null,
     uploadedBy: null,
+    workspaceTable: null,
     status: null,
   };
 }
@@ -79,6 +82,7 @@ export function recordingsQuery(
   if (filters.callType) qs.set('call_type', filters.callType);
   if (filters.direction) qs.set('direction', filters.direction);
   if (filters.uploadedBy) qs.set('uploaded_by', filters.uploadedBy);
+  if (filters.workspaceTable) qs.set('workspace_table', filters.workspaceTable);
   if (filters.status) qs.set('status', filters.status);
   return qs.toString();
 }
@@ -95,6 +99,7 @@ export function summaryQuery(
   if (filters.callType) qs.set('call_type', filters.callType);
   if (filters.direction) qs.set('direction', filters.direction);
   if (filters.uploadedBy) qs.set('uploaded_by', filters.uploadedBy);
+  if (filters.workspaceTable) qs.set('workspace_table', filters.workspaceTable);
   if (filters.status) qs.set('status', filters.status);
   return qs.toString();
 }
@@ -145,6 +150,77 @@ export async function loadMemberOptions(signal?: AbortSignal): Promise<MemberOpt
     user_id: m.user_id,
     label: m.full_name || m.email || 'Unknown user',
   }));
+}
+
+export interface WorkspaceTableOption {
+  flow_id: string;
+  name: string;
+}
+
+interface FlowsResponse {
+  flows?: Array<{ id: string; name: string | null }>;
+}
+
+/**
+ * Workspace tables available to the caller for the Workspace
+ * Table filter. Reuses GET /api/flows (account-scoped via RLS —
+ * the same source the Workspace selector reads), mapped to the
+ * option shape. Never throws (returns [] on failure — the filter
+ * degrades to All tables rather than breaking the toolbar).
+ */
+export async function loadWorkspaceTableOptions(
+  signal?: AbortSignal
+): Promise<WorkspaceTableOption[]> {
+  const body = await getJson<FlowsResponse>('/api/flows', signal).catch(() => null);
+  return (body?.flows ?? [])
+    .filter((f) => typeof f?.id === 'string' && f.id)
+    .map((f) => ({
+      flow_id: f.id,
+      name: typeof f.name === 'string' && f.name.trim() ? f.name.trim() : 'Untitled Flow',
+    }));
+}
+
+const RANGE_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const;
+
+/**
+ * Compact applied-range label for the Date card
+ * ("07 Nov – 15 Nov 2026"; year repeated only when the range
+ * spans years). Inputs are YYYY-MM-DD calendar days parsed in
+ * UTC so the label never shifts with the viewer's zone.
+ * Anything unparseable (or from ≥ to) falls back to 'Custom'.
+ */
+export function formatCustomRangeLabel(fromInput: string, toInput: string): string {
+  const parse = (input: string): { y: number; m: number; d: number } | null => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input);
+    if (!m) return null;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    const dt = new Date(Date.UTC(y, mo - 1, d));
+    if (
+      dt.getUTCFullYear() !== y ||
+      dt.getUTCMonth() !== mo - 1 ||
+      dt.getUTCDate() !== d
+    ) {
+      return null;
+    }
+    return { y, m: mo, d };
+  };
+  const from = parse(fromInput);
+  const to = parse(toInput);
+  if (!from || !to) return 'Custom';
+  const fromMs = Date.UTC(from.y, from.m - 1, from.d);
+  const toMs = Date.UTC(to.y, to.m - 1, to.d);
+  if (!(fromMs < toMs)) return 'Custom';
+  const day = (p: { d: number }) => String(p.d).padStart(2, '0');
+  const mon = (p: { m: number }) => RANGE_MONTHS[p.m - 1] ?? '';
+  if (from.y === to.y) {
+    return `${day(from)} ${mon(from)} – ${day(to)} ${mon(to)} ${to.y}`;
+  }
+  return `${day(from)} ${mon(from)} ${from.y} – ${day(to)} ${mon(to)} ${to.y}`;
 }
 
 /** Long-form duration for the drawer ("16 seconds", "3:12"). */

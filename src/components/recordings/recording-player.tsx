@@ -63,7 +63,7 @@ export function RecordingPlayer({
   };
 
   return (
-    <div className="rounded-xl border border-border bg-muted/40 p-4">
+    <div className="w-full min-w-0 rounded-xl border border-border bg-muted/40 p-4">
       <audio
         ref={audioRef}
         src={`/api/recordings/${recordingId}/audio`}
@@ -75,7 +75,7 @@ export function RecordingPlayer({
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
         onEnded={() => setPlaying(false)}
       />
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-3">
         <Button
           size="icon"
           aria-label={playing ? 'Pause' : 'Play'}
@@ -96,14 +96,18 @@ export function RecordingPlayer({
             }
           }}
           aria-label="Seek"
-          className="h-1.5 flex-1 cursor-pointer accent-blue-600"
+          className="h-1.5 min-w-0 flex-1 cursor-pointer accent-blue-600"
         />
         <span className="shrink-0 text-[13px] tabular-nums text-muted-foreground">
           {fmtClock(time)} / {Number.isFinite(duration) ? fmtClock(duration) : '0:00'}
         </span>
       </div>
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1" role="group" aria-label="Playback speed">
+      {/* Second row wraps instead of overflowing: the speed
+          group keeps its buttons together while the volume group
+          takes remaining space with a flexible (capped) slider,
+          so icon + slider always fit inside the container. */}
+      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1" role="group" aria-label="Playback speed">
           {SPEEDS.map((s) => (
             <Button
               key={s}
@@ -120,11 +124,11 @@ export function RecordingPlayer({
             </Button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8"
+            className="h-8 w-8 shrink-0"
             aria-label={muted ? 'Unmute' : 'Mute'}
             onClick={() => {
               const el = audioRef.current;
@@ -153,7 +157,7 @@ export function RecordingPlayer({
               }
             }}
             aria-label="Volume"
-            className="h-1.5 w-24 cursor-pointer accent-blue-600"
+            className="h-1.5 w-full min-w-0 max-w-28 flex-1 cursor-pointer accent-blue-600"
           />
         </div>
       </div>

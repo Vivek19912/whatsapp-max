@@ -333,7 +333,6 @@ export async function loadActivity(db: DB, limit = 20): Promise<ActivityItem[]> 
       kind: 'contact',
       text: `New contact: ${c.name || c.phone}`,
       at: c.created_at,
-      href: '/contacts',
     })
   }
 

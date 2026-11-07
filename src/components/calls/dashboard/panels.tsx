@@ -1,10 +1,7 @@
 'use client';
 
-import Link from 'next/link';
-
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { Skeleton } from '@/components/dashboard/skeleton';
-import { Button } from '@/components/ui/button';
 import {
   Table,
   TableBody,
@@ -114,9 +111,6 @@ export function TopClients({
           </h2>
           <p className="mt-0.5 text-[13px] text-muted-foreground">Clients with most recorded calls</p>
         </div>
-        <Button variant="ghost" size="sm" className="text-blue-600" render={<Link href="/contacts" />}>
-          View All
-        </Button>
       </div>
       <div className="flex-1 p-2">
         {loading || !clients ? (

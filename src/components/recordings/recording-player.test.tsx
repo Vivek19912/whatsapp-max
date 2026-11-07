@@ -51,4 +51,14 @@ describe("RecordingPlayer controls", () => {
     expect(html("r-1", true)).toContain("autoPlay");
     expect(html("r-1", false)).not.toContain("autoPlay");
   });
+
+  it("keeps every control inside the container with flexible sizing", () => {
+    const out = html();
+    // Sliders flex instead of forcing fixed widths: the seek bar
+    // and (previously overflowing) volume slider shrink with the
+    // container, and the second row wraps instead of clipping.
+    expect(out).toContain("min-w-0 flex-1");
+    expect(out).toContain("flex-wrap");
+    expect(out).not.toContain("w-24");
+  });
 });

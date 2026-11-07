@@ -17,7 +17,6 @@ import {
 import {
   Popover,
   PopoverContent,
-  PopoverTitle,
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { Skeleton } from '@/components/dashboard/skeleton';
@@ -39,7 +38,6 @@ import {
 } from '@/lib/flows/workspace-pagination';
 import { formatRecordedIndiaParts, type CallRecording } from '@/lib/recordings/recordings';
 import { RecordingPlayer } from './recording-player';
-import { cn } from '@/lib/utils';
 
 export const PAGE_SIZE: WorkspacePageSize = DEFAULT_WORKSPACE_PAGE_SIZE;
 
@@ -279,10 +277,21 @@ export function RecordingsTable({
                       <RecordedCell recordedAt={r.recorded_at} createdAt={r.created_at} />
                     </TableCell>
                     <TableCell className="border-r border-border px-4 last:border-r-0">
-                      {linked ? (
-                        <span className="truncate font-medium text-blue-600 dark:text-blue-400">
+                      {linked && r.contact_id ? (
+                        // Deep link: opens the lead's own Workspace
+                        // table in a NEW tab, located by stable
+                        // contacts.id (never name/phone). New-tab
+                        // navigation leaves this page untouched;
+                        // rows are not clickable so the player
+                        // never opens from here.
+                        <a
+                          href={`/workspace?contact=${encodeURIComponent(r.contact_id)}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="truncate font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        >
                           {r.contact_name ?? 'Unlinked'}
-                        </span>
+                        </a>
                       ) : (
                         <span className="truncate text-rose-600 dark:text-rose-400">Unlinked</span>
                       )}
@@ -305,8 +314,8 @@ export function RecordingsTable({
                     <TableCell className="max-w-[140px] truncate border-r border-border px-4 text-[13px] last:border-r-0">
                       {r.uploader_name ?? 'Unknown'}
                     </TableCell>
-                    {/* Compact Recording cell: small Play button plus
-                        duration only — the SOLE opener of the
+                    {/* Compact Recording cell: the whole cell is one
+                        clickable area and the SOLE opener of the
                         floating player. The player renders in a
                         floating popover (portaled — never in the row),
                         so this column stays narrow and row height
@@ -322,7 +331,18 @@ export function RecordingsTable({
                           }
                         }}
                       >
-                        <span className="inline-flex items-center gap-2">
+                        <div
+                          onClick={(e) => {
+                            // Clicks on the Play button itself are
+                            // left to the trigger toggle below; every
+                            // other click inside this cell opens the
+                            // player. No other cell opens it.
+                            if ((e.target as HTMLElement).closest('button')) return;
+                            setOpenId(r.id);
+                            setAutoplay(true);
+                          }}
+                          className="inline-flex cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 transition-colors hover:bg-muted/60"
+                        >
                           <PopoverTrigger
                             render={
                               <button
@@ -344,7 +364,7 @@ export function RecordingsTable({
                           <span className="text-[13px] tabular-nums text-muted-foreground">
                             {formatDuration(r.duration_seconds)}
                           </span>
-                        </span>
+                        </div>
                         <PopoverContent
                           side="top"
                           align="center"
@@ -352,29 +372,13 @@ export function RecordingsTable({
                           collisionPadding={12}
                           collisionAvoidance={{ side: 'flip', align: 'shift' }}
                           className="w-80 max-w-[calc(100vw-2rem)] p-4"
+                          aria-label="Recording audio player"
                         >
-                          <div className="flex items-center gap-3">
-                            <span
-                              aria-hidden
-                              className={cn(
-                                'flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-base font-semibold',
-                                linked
-                                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300'
-                                  : 'bg-muted text-muted-foreground'
-                              )}
-                            >
-                              {linked ? leadInitial(r.contact_name) : 'U'}
-                            </span>
-                            <PopoverTitle className="min-w-0 flex-1 font-heading text-sm font-medium">
-                              <span className="block truncate text-foreground">
-                                {linked ? (r.contact_name ?? 'Unlinked') : 'Unlinked'}
-                              </span>
-                              {r.workspace_table_name ? (
-                                <span className="block truncate text-xs font-normal text-muted-foreground">
-                                  {r.workspace_table_name}
-                                </span>
-                              ) : null}
-                            </PopoverTitle>
+                          {/* Audio controls only: no lead name, avatar,
+                              phone, workspace table, or other lead
+                              metadata — the table row already
+                              identifies the recording. */}
+                          <div className="flex justify-end">
                             <Button
                               variant="ghost"
                               size="icon"

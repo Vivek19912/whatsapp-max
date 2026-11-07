@@ -1,10 +1,13 @@
 // Recordings library data layer — query building and duration text.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  formatCustomRangeLabel,
   formatDurationLong,
+  loadWorkspaceTableOptions,
   recordingsQuery,
+  resetRecordingsFilters,
   summaryQuery,
   type RecordingsFilters,
 } from './library';
@@ -17,6 +20,7 @@ const FILTERS: RecordingsFilters = {
   callType: null,
   direction: null,
   uploadedBy: null,
+  workspaceTable: null,
   status: null,
 };
 
@@ -54,6 +58,25 @@ describe('recordingsQuery', () => {
     expect(qs.get('uploaded_by')).toBe('123e4567-e89b-12d3-a456-426614174000');
     expect(qs.get('status')).toBe('unlinked');
   });
+
+  it('passes the workspace table filter to the server', () => {
+    const qs = new URLSearchParams(
+      recordingsQuery({ ...FILTERS, workspaceTable: 'flow-1' }, RANGE, 10, 0)
+    );
+    expect(qs.get('workspace_table')).toBe('flow-1');
+    expect(
+      new URLSearchParams(recordingsQuery(FILTERS, RANGE, 10, 0)).get('workspace_table')
+    ).toBeNull();
+    expect(
+      new URLSearchParams(summaryQuery({ ...FILTERS, workspaceTable: 'flow-1' }, RANGE)).get(
+        'workspace_table'
+      )
+    ).toBe('flow-1');
+  });
+
+  it('resetRecordingsFilters clears the workspace table too', () => {
+    expect(resetRecordingsFilters().workspaceTable).toBeNull();
+  });
 });
 
 describe('summaryQuery', () => {
@@ -62,6 +85,67 @@ describe('summaryQuery', () => {
     expect(qs.get('summary')).toBe('1');
     expect(qs.get('limit')).toBeNull();
     expect(qs.get('from')).toBe(RANGE.fromISO);
+  });
+});
+
+describe('formatCustomRangeLabel', () => {
+  it('renders a same-year range with the year once', () => {
+    expect(formatCustomRangeLabel('2026-11-07', '2026-11-15')).toBe(
+      '07 Nov – 15 Nov 2026'
+    );
+  });
+
+  it('repeats the year when the range spans years', () => {
+    expect(formatCustomRangeLabel('2025-12-28', '2026-01-05')).toBe(
+      '28 Dec 2025 – 05 Jan 2026'
+    );
+  });
+
+  it('falls back to Custom for missing, invalid, or inverted ranges', () => {
+    expect(formatCustomRangeLabel('', '')).toBe('Custom');
+    expect(formatCustomRangeLabel('2026-11-15', '2026-11-07')).toBe('Custom');
+    expect(formatCustomRangeLabel('2026-11-07', '2026-11-07')).toBe('Custom');
+    expect(formatCustomRangeLabel('not-a-date', '2026-11-07')).toBe('Custom');
+    expect(formatCustomRangeLabel('2026-13-01', '2026-11-07')).toBe('Custom');
+  });
+});
+
+describe('loadWorkspaceTableOptions', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.unstubAllGlobals();
+  });
+
+  it('maps flows to filter options with an Untitled fallback', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          flows: [
+            { id: 'f-1', name: 'Meta Lead Ads' },
+            { id: 'f-2', name: '   ' },
+            { id: null, name: 'Ghost' },
+          ],
+        }),
+      }))
+    );
+    await expect(loadWorkspaceTableOptions()).resolves.toEqual([
+      { flow_id: 'f-1', name: 'Meta Lead Ads' },
+      { flow_id: 'f-2', name: 'Untitled Flow' },
+    ]);
+  });
+
+  it('degrades to no options when the endpoint fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('down');
+      })
+    );
+    await expect(loadWorkspaceTableOptions()).resolves.toEqual([]);
   });
 });
 

@@ -44,13 +44,19 @@ describe('Features removal — sidebar', () => {
       '/automations',
       '/notifications',
       '/templates',
-      '/contacts',
       '/agents',
       '/data-export',
       '/all-sheets',
       '/chat-assignment',
       '/lead-assignment',
     ]);
+  });
+
+  it('contains no Contacts entry', () => {
+    expect(navItems.some((i) => i.href === '/contacts')).toBe(false);
+    expect(navItems.some((i) => i.label.toLowerCase() === 'contacts')).toBe(
+      false
+    );
   });
 
   it('places Workspace eighth with no Beta badge', () => {
@@ -86,6 +92,16 @@ describe('Features removal — route is gone', () => {
 
   it('has no features-only components left', () => {
     expect(existsSync(join(root, 'src/components/features'))).toBe(false);
+  });
+});
+
+describe('Contacts removal — sidebar and route are gone', () => {
+  it('has no /contacts route directory or page', () => {
+    expect(existsSync(join(root, 'src/app/(dashboard)/contacts'))).toBe(false);
+  });
+
+  it('points no dashboard quick action at the removed page', () => {
+    expect(navItems.some((i) => i.href === '/contacts')).toBe(false);
   });
 });
 
