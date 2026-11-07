@@ -1973,17 +1973,17 @@ export default function WorkspacePage() {
                       )}
                       {flowColumnsVisible.map((c, flowIdx) => {
                         const visId = flowColumnVisId(c.key);
-                        // Dial helper THs sit between flow THs but are
-                        // NOT in visibleHeaderOrder — offset every
-                        // index after them or headers paint with the
-                        // wrong slot's width/tint and misalign from
-                        // the body. Customs base below adds the same
-                        // total.
-                        const dialsBefore = flowColumnsVisible
-                          .slice(0, flowIdx)
-                          .filter((d) => d.system && d.key === 'phone').length;
-                        const headerIdx =
-                          (rowVisible ? 1 : 0) + flowIdx + dialsBefore;
+                        // Index into visibleHeaderOrder (order position,
+                        // NOT rendered position): Dial helper THs render
+                        // between flow THs but consume no order or
+                        // background slot — they carry hardcoded
+                        // geometry — so every flow header indexes its
+                        // own order slot exactly as the body cells
+                        // resolve their widths. Offsetting past Dials
+                        // here would shift every later header into the
+                        // wrong slot (and the tail past the array end:
+                        // transparent, widthless headers).
+                        const headerIdx = (rowVisible ? 1 : 0) + flowIdx;
                         // Meta Lead Ads tables only: Instant Form
                         // question columns get a header menu (Rename /
                         // Restore). System columns, the Source column,
@@ -2077,9 +2077,6 @@ export default function WorkspacePage() {
                             style={headStyleAt(
                               (rowVisible ? 1 : 0) +
                                 flowColumnsVisible.length +
-                                flowColumnsVisible.filter(
-                                  (d) => d.system && d.key === 'phone'
-                                ).length +
                                 customIdx
                             )}
                           >

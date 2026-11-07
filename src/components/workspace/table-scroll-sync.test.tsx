@@ -145,6 +145,15 @@ describe("frozen No. and Name columns", () => {
     expect(pageSrc).toContain("rowVisible ? metrics.noWidth : 0");
   });
 
+  it("gives headers and body cells identical freeze offsets", () => {
+    // No. header and No. body both pin at left: 0; Name header
+    // and Name body both pin at the measured No. width — the
+    // pairs move and align together at scroll 0 and at maximum.
+    const noHeader = pageSrc.indexOf("...(freezeReady ? { left: 0 } : null)");
+    expect(noHeader).toBeGreaterThan(-1);
+    expect(pageSrc).toContain("left: nameLeft");
+  });
+
   it("applies sticky positioning only once geometry is measured", () => {
     // First render must never pin Name over No. at offset 0:
     // all four frozen cells (both headers, both body cells) gate
@@ -155,11 +164,16 @@ describe("frozen No. and Name columns", () => {
     expect(pageSrc).toContain("freezeName && freezeReady");
   });
 
-  it("keeps header/body widths aligned across Dial helper columns", () => {
-    // Dial THs sit between flow THs but are NOT in
-    // visibleHeaderOrder — indices offset past them or every
-    // header after Phone paints with the wrong slot's width.
-    expect(pageSrc).toContain("dialsBefore");
+  it("paints every header from its own order slot (Dial helpers consume none)", () => {
+    // Dial THs render between flow THs but consume no
+    // visibleHeaderOrder/background slot (hardcoded geometry), so
+    // headers index by ORDER position — the same slot whose
+    // widthId the body cells resolve. Offsetting past Dials would
+    // shift later headers into the wrong slot and the tail past
+    // the array end (transparent, widthless headers that read as
+    // unfrozen next to their opaque frozen body cells).
+    expect(pageSrc).not.toContain("dialsBefore");
+    expect(pageSrc).toContain("const headerIdx = (rowVisible ? 1 : 0) + flowIdx;");
   });
 
   it("keeps the frozen boundary on the existing cell dividers", () => {
