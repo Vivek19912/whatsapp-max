@@ -25,7 +25,7 @@ describe("sticky top scrollbar", () => {
   it("renders above the table and sticks to the container top", () => {
     const stripIdx = pageSrc.indexOf('label="Top table scrollbar"');
     expect(stripIdx).toBeGreaterThan(-1);
-    expect(pageSrc).toContain("sticky top-0 z-30");
+    expect(pageSrc).toContain("sticky top-0 left-0 z-30");
     // The strip precedes the table: clean spacing above the
     // headers, inside the same scroll viewport.
     const tableIdx = pageSrc.indexOf("<Table>", stripIdx);
@@ -43,11 +43,23 @@ describe("sticky top scrollbar", () => {
 describe("secondary below-headers scrollbar", () => {
   it("sits in its own header row beneath the column headers", () => {
     expect(pageSrc).toContain('label="Secondary table scrollbar"');
-    // Full-width row (spans to the table end), stuck below the
-    // stuck headers and pinned to the viewport edge.
-    expect(pageSrc).toContain("colSpan={0}");
+    // Exact measured span: colSpan={0} ("span to end") is
+    // inconsistently supported and fractures the header/body grid,
+    // so the strip spans the counted rendered columns instead.
+    // (JSX attribute check: the comment above names the old value,
+    // so match the attribute line ending, not the bare token.)
+    expect(pageSrc).not.toContain("colSpan={0}\n");
+    expect(pageSrc).toContain("colSpan={stripColSpan}");
     expect(pageSrc).toContain("top: canSendMessages ? 80 : 60");
     expect(pageSrc).toContain("metrics.viewportWidth");
+  });
+
+  it("spans every rendered column of the first header row", () => {
+    // actions? + No.? + flow THs + Dial helpers + customs, min 1 —
+    // mirroring the header row exactly so the grid never fractures.
+    expect(pageSrc).toContain("const stripColSpan");
+    expect(pageSrc).toContain("flowColumnsVisible.filter((c) => c.system && c.key === 'phone').length");
+    expect(pageSrc).toContain("customFieldsOrdered.length");
   });
 });
 
@@ -87,13 +99,30 @@ describe("single-source synchronization", () => {
 
 describe("frozen No. and Name columns", () => {
   it("pins No. at the viewport edge with stacking above rows", () => {
-    expect(pageSrc).toContain("sticky left-0 z-[1]");
-    expect(pageSrc).toContain("sticky top-4 left-0 z-20");
+    expect(pageSrc).toContain("freezeReady && 'sticky left-0 z-[1]'");
+    expect(pageSrc).toContain("sticky top-4 z-20");
   });
 
   it("pins Name after the measured No. width (never hardcoded)", () => {
     expect(pageSrc).toContain("left: nameLeft");
     expect(pageSrc).toContain("rowVisible ? metrics.noWidth : 0");
+  });
+
+  it("applies sticky positioning only once geometry is measured", () => {
+    // First render must never pin Name over No. at offset 0:
+    // all four frozen cells (both headers, both body cells) gate
+    // on freezeReady (viewport measured).
+    expect(pageSrc).toContain("const freezeReady = metrics.viewportWidth > 0;");
+    expect(pageSrc).toContain("...(freezeReady ? { left: 0 } : null)");
+    expect(pageSrc).toContain("isNameCol && freezeReady");
+    expect(pageSrc).toContain("freezeName && freezeReady");
+  });
+
+  it("keeps header/body widths aligned across Dial helper columns", () => {
+    // Dial THs sit between flow THs but are NOT in
+    // visibleHeaderOrder — indices offset past them or every
+    // header after Phone paints with the wrong slot's width.
+    expect(pageSrc).toContain("dialsBefore");
   });
 
   it("keeps the frozen boundary on the existing cell dividers", () => {

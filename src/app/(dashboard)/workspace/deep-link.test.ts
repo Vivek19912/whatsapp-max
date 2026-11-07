@@ -221,7 +221,7 @@ describe("located lead is scrolled to and temporarily highlighted", () => {
     expect(pageSrc).toContain("document.querySelector(");
     expect(pageSrc).toContain('`tr[data-contact-id="${highlightContactId}"]`');
     expect(pageSrc).toContain(
-      "el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });",
+      "el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });",
     );
     expect(pageSrc).toContain(
       "window.setTimeout(() => setHighlightContactId(null), 4000);",

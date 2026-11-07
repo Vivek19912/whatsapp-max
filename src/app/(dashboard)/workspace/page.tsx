@@ -987,7 +987,7 @@ export default function WorkspacePage() {
     const el = document.querySelector(
       `tr[data-contact-id="${highlightContactId}"]`
     );
-    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
     const t = window.setTimeout(() => setHighlightContactId(null), 4000);
     return () => window.clearTimeout(t);
   }, [highlightContactId, payload]);
@@ -1389,7 +1389,27 @@ export default function WorkspacePage() {
     tableKey
   );
   useShiftWheel(viewportRef, tableKey);
+  // Name's sticky offset = the measured No. width (0 when No. is
+  // hidden).
   const nameLeft = rowVisible ? metrics.noWidth : 0;
+  // Sticky positioning applies only once geometry is measured;
+  // a first render can never pin Name over No. at offset 0.
+  const freezeReady = metrics.viewportWidth > 0;
+  // Exact span for the secondary strip row. colSpan={0} ("span to
+  // end") is inconsistently supported and fractures the
+  // header/body grid — count every rendered column instead,
+  // mirroring the FIRST header row exactly (customs render
+  // unconditionally up there; over-counting would only widen a
+  // single-cell row, under-counting breaks alignment).
+  const stripColSpan =
+    Math.max(
+      (canSendMessages ? 1 : 0) +
+        (rowVisible ? 1 : 0) +
+        flowColumnsVisible.length +
+        flowColumnsVisible.filter((c) => c.system && c.key === 'phone').length +
+        customFieldsOrdered.length,
+      1
+    );
   // Opaque tint mirroring the row's own wash so scrolling content
   // never shows through frozen cells. Same precedence as the row
   // (highlight wins over pinned wins over card), without the
@@ -1915,10 +1935,20 @@ export default function WorkspacePage() {
                 )}
               >
                 {/* Sticky top scrollbar: viewport-width block pinned to
-                    the container top, driving the table's own scroller
-                    (same element Shift+wheel and both thumb strips
-                    share). Headers stick 16px below it (top-4). */}
-                <div className="sticky top-0 z-30 bg-card">
+                    the container top AND left, driving the table's own
+                    scroller (same element Shift+wheel and both thumb
+                    strips share). Headers stick 16px below it (top-4).
+                    The explicit viewport width keeps the strip visible
+                    at any horizontal position, matching the secondary
+                    strip below. */}
+                <div
+                  className="sticky top-0 left-0 z-30 bg-card"
+                  style={
+                    metrics.viewportWidth > 0
+                      ? { width: metrics.viewportWidth }
+                      : undefined
+                  }
+                >
                   <TableHScrollbar
                     getScroller={getScroller}
                     getTable={getTable}
@@ -1959,8 +1989,8 @@ export default function WorkspacePage() {
                       {rowVisible && (
                       <TableHead
                         ref={noHeadRef}
-                        className="sticky top-4 left-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
-                        style={{ ...headStyleAt(0), left: 0 }}
+                        className="sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
+                        style={{ ...headStyleAt(0), ...(freezeReady ? { left: 0 } : null) }}
                       >
                         No.
                         {canSendMessages && (
@@ -1977,7 +2007,17 @@ export default function WorkspacePage() {
                       )}
                       {flowColumnsVisible.map((c, flowIdx) => {
                         const visId = flowColumnVisId(c.key);
-                        const headerIdx = (rowVisible ? 1 : 0) + flowIdx;
+                        // Dial helper THs sit between flow THs but are
+                        // NOT in visibleHeaderOrder — offset every
+                        // index after them or headers paint with the
+                        // wrong slot's width/tint and misalign from
+                        // the body. Customs base below adds the same
+                        // total.
+                        const dialsBefore = flowColumnsVisible
+                          .slice(0, flowIdx)
+                          .filter((d) => d.system && d.key === 'phone').length;
+                        const headerIdx =
+                          (rowVisible ? 1 : 0) + flowIdx + dialsBefore;
                         // Meta Lead Ads tables only: Instant Form
                         // question columns get a header menu (Rename /
                         // Restore). System columns, the Source column,
@@ -2011,7 +2051,7 @@ export default function WorkspacePage() {
                       ref={isNameCol ? nameHeadRef : undefined}
                       className="sticky top-4 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
                       style={
-                        isNameCol
+                        isNameCol && freezeReady
                           ? { ...headStyleAt(headerIdx), left: nameLeft }
                           : headStyleAt(headerIdx)
                       }
@@ -2071,6 +2111,9 @@ export default function WorkspacePage() {
                             style={headStyleAt(
                               (rowVisible ? 1 : 0) +
                                 flowColumnsVisible.length +
+                                flowColumnsVisible.filter(
+                                  (d) => d.system && d.key === 'phone'
+                                ).length +
                                 customIdx
                             )}
                           >
@@ -2098,7 +2141,7 @@ export default function WorkspacePage() {
                         the measured viewport so it never overflows. */}
                     <TableRow className="hover:bg-transparent">
                       <td
-                        colSpan={0}
+                        colSpan={stripColSpan}
                         className="sticky z-10 border-b border-border bg-card p-0"
                         style={{
                           top: canSendMessages ? 80 : 60,
@@ -2160,10 +2203,24 @@ export default function WorkspacePage() {
                         {rowVisible && (
                         <TableCell
                           className={cn(
-                            'sticky left-0 z-[1] border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
+                            'border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
+                            freezeReady && 'sticky left-0 z-[1]',
                             frozenTint(row)
                           )}
-                          style={columnWidthStyle(ROW_VIS_ID, effectiveColumnWidths)}
+                          style={
+                            freezeReady
+                              ? {
+                                  ...columnWidthStyle(
+                                    ROW_VIS_ID,
+                                    effectiveColumnWidths
+                                  ),
+                                  left: 0,
+                                }
+                              : columnWidthStyle(
+                                  ROW_VIS_ID,
+                                  effectiveColumnWidths
+                                )
+                          }
                         >
                           {workspaceRowNumber({
                             page,
@@ -2216,11 +2273,11 @@ export default function WorkspacePage() {
                         key={flowColumnRenderKey(c)}
                         className={cn(
                           'max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0',
-                          freezeName && 'sticky z-[1]',
+                          freezeName && freezeReady && 'sticky z-[1]',
                           freezeName && frozenTint(row)
                         )}
                         style={
-                          freezeName
+                          freezeName && freezeReady
                             ? {
                                 ...columnWidthStyle(
                                   flowColumnVisId(c.key),
