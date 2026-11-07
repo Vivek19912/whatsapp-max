@@ -14,6 +14,7 @@ import {
   loadRecordingsList,
   loadRecordingsSummary,
   recordingsQuery,
+  resetRecordingsFilters,
   summaryQuery,
   type MemberOption,
   type RecordingsFilters,
@@ -27,16 +28,7 @@ import {
   type WorkspacePageSize,
 } from '@/lib/flows/workspace-pagination';
 
-const DEFAULT_FILTERS: RecordingsFilters = {
-  q: '',
-  rangeKey: 'last30',
-  customFrom: '',
-  customTo: '',
-  callType: null,
-  direction: null,
-  uploadedBy: null,
-  status: null,
-};
+const DEFAULT_FILTERS: RecordingsFilters = resetRecordingsFilters();
 
 function toUnlinked(r: CallRecording): UnlinkedRecording {
   return {

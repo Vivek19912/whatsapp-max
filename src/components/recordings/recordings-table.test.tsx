@@ -76,17 +76,20 @@ function rowNumbers(markup: string): string[] {
 }
 
 describe("RecordingsTable columns", () => {
-  it("orders headers No. | Time | Lead Name | Workspace Table | Call | Duration | Salesperson | Recording", () => {
+  it("orders headers No. | Time | Lead Name | Workspace Table | Call | Salesperson | Recording", () => {
     expect(headerCells(html())).toEqual([
       "No.",
       "Time",
       "Lead Name",
       "Workspace Table",
       "Call",
-      "Duration",
       "Salesperson",
       "Recording",
     ]);
+  });
+
+  it("has no Duration column header", () => {
+    expect(headerCells(html())).not.toContain("Duration");
   });
 
   it("numbers rows sequentially from the page offset without restarting", () => {
@@ -445,6 +448,36 @@ describe("Compact Recording column", () => {
     const out = html();
     expect(out).toContain('aria-label="Play recording of Akash"');
     expect(out).toContain("0:16");
+  });
+
+  it("renders no Duration cells — duration lives only in the Recording readout", () => {
+    // One row → exactly 7 cells and a single 0:16 (the Recording
+    // cell readout). A Duration column would add an 8th cell and
+    // a second 0:16.
+    const out = html([recording()]);
+    const tbody = out.slice(out.indexOf("<tbody"), out.indexOf("</tbody>"));
+    expect(tbody.match(/<td[\s>]/g)).toHaveLength(7);
+    expect(tbody.match(/0:16/g)).toHaveLength(1);
+  });
+
+  it("opens the player only from the Recording cell, never from the row", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    // No row-level opener: the body TableRow (up to the
+    // Recording cell's Popover) carries no onClick, and no row
+    // is a pointer surface.
+    const bodyRow = src.slice(
+      src.indexOf("recordings.map"),
+      src.indexOf("<Popover"),
+    );
+    expect(bodyRow).not.toContain("onClick");
+    expect(src).not.toContain("cursor-pointer");
+    // The sole opener is the Recording cell's Play trigger, which
+    // sets autoplay and flips this row's popover open.
+    expect(src).toContain("setAutoplay(true)");
+    expect(src).toContain("open={playerOpen}");
   });
 
   it("keeps the Play button small, blue, and circular", () => {

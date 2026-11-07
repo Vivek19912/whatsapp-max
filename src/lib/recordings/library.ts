@@ -18,6 +18,25 @@ export interface RecordingsFilters {
   status: string | null;
 }
 
+/**
+ * Default filter state: last-30-days window, every dropdown at
+ * its "all" option, empty search. Single source for the page's
+ * initial state and the toolbar's Clear filters action, so the
+ * two can never disagree.
+ */
+export function resetRecordingsFilters(): RecordingsFilters {
+  return {
+    q: '',
+    rangeKey: 'last30',
+    customFrom: '',
+    customTo: '',
+    callType: null,
+    direction: null,
+    uploadedBy: null,
+    status: null,
+  };
+}
+
 export interface RecordingsSummary {
   total: number;
   totalDurationSecs: number;

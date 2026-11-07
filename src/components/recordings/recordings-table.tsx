@@ -165,16 +165,18 @@ function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; cr
 
 /**
  * Recordings table: No. | Time | Lead Name | Workspace Table |
- * Call | Duration | Salesperson | Recording. Display-only row
- * numbers continue across pages. No filename, no size, no storage
- * internals.
+ * Call | Salesperson | Recording. Display-only row numbers
+ * continue across pages. No filename, no size, no storage
+ * internals. (Duration lives only in the Recording cell's
+ * compact readout and inside the audio player — never as its
+ * own column.)
  *
  * The Recording column stays compact: one small Play button plus
  * the duration. The full audio player lives in a floating
  * popover anchored to that button (never an expanded row, never
  * a sidebar), so row height and column width never change.
- * Row click opens the same popover ready to play; the Play
- * button opens it autoplaying.
+ * The popover opens ONLY from the Recording cell's Play button —
+ * rows themselves are not clickable and no other cell opens it.
  *
  * Visual language (header, dividers, hover, selection, footer)
  * follows the Workspace table: same shadcn primitives, same
@@ -202,9 +204,9 @@ export function RecordingsTable({
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   // Single floating player: at most one popover open at a time.
-  // `autoplay` is set only by the Play-button click (row clicks
-  // open ready-to-play); both reset on close so a reopened
-  // player never inherits stale intent.
+  // `autoplay` is set only by the Play-button click — the sole
+  // opener; both reset on close so a reopened player never
+  // inherits stale intent.
   const [openId, setOpenId] = useState<string | null>(null);
   const [autoplay, setAutoplay] = useState(false);
 
@@ -243,7 +245,6 @@ export function RecordingsTable({
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Lead Name</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Workspace Table</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Call</TableHead>
-              <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Duration</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Salesperson</TableHead>
               <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Recording</TableHead>
             </TableRow>
@@ -252,7 +253,7 @@ export function RecordingsTable({
             {loading ? (
               Array.from({ length: pageSize }).map((_, i) => (
                 <TableRow key={i} className="hover:bg-transparent">
-                  <TableCell colSpan={8}>
+                  <TableCell colSpan={7}>
                     <Skeleton className="h-10 w-full" />
                   </TableCell>
                 </TableRow>
@@ -262,15 +263,14 @@ export function RecordingsTable({
                 const linked = !!r.contact_id;
                 const playerOpen = r.id === openId;
                 return (
+                  // Rows are not clickable: the player opens ONLY
+                  // from the Recording cell's Play button below.
+                  // No other cell carries an opener, so clicks
+                  // elsewhere in the row do nothing.
                   <TableRow
                     key={r.id}
                     aria-selected={playerOpen}
                     data-state={playerOpen ? 'selected' : undefined}
-                    onClick={() => {
-                      setOpenId(r.id);
-                      setAutoplay(false);
-                    }}
-                    className="cursor-pointer"
                   >
                     <TableCell className="border-r border-border px-4 tabular-nums text-muted-foreground last:border-r-0">
                       {page * pageSize + i + 1}
@@ -302,12 +302,12 @@ export function RecordingsTable({
                     <TableCell className="border-r border-border px-4 last:border-r-0">
                       <CallLabel callType={r.call_type} direction={r.direction} />
                     </TableCell>
-                    <TableCell className="border-r border-border px-4 tabular-nums last:border-r-0">{formatDuration(r.duration_seconds)}</TableCell>
                     <TableCell className="max-w-[140px] truncate border-r border-border px-4 text-[13px] last:border-r-0">
                       {r.uploader_name ?? 'Unknown'}
                     </TableCell>
                     {/* Compact Recording cell: small Play button plus
-                        duration only. The full player renders in a
+                        duration only — the SOLE opener of the
+                        floating player. The player renders in a
                         floating popover (portaled — never in the row),
                         so this column stays narrow and row height
                         never changes. */}
@@ -328,8 +328,7 @@ export function RecordingsTable({
                               <button
                                 type="button"
                                 aria-label={`Play recording${r.contact_name ? ` of ${r.contact_name}` : ''}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
+                                onClick={() => {
                                   setAutoplay(true);
                                 }}
                                 className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700"
