@@ -45,8 +45,10 @@ describe("5. frozen No. + Name columns — everything else scrolls", () => {
   });
 
   it("only No. and Name freeze; row, system, flow, custom, and lead columns all scroll normally", () => {
-    // Row renders conditionally like any column (no frozen twin).
-    expect(page).toContain("{rowVisible && (");
+    // Row gating lives in the shared order model (no frozen twin,
+    // no separate header conditional).
+    expect(page).toContain("if (id === ROW_VIS_ID) {");
+    expect(page).toContain("if (rowVisible)");
     // Exactly two sticky column offsets exist: No. at the viewport
     // edge and Name after its measured width. Every other body
     // cell carries no sticky positioning.
@@ -123,29 +125,26 @@ describe("1/4/7. single table viewport, no page scroll, vertical intact", () => 
 });
 
 describe("custom columns render last in the table", () => {
-  it("thead: Row, flow map, then custom map — in that order", () => {
+  it("thead renders the single shared order (no per-group loops)", () => {
     const thead = page.slice(
       page.indexOf("<TableHeader"),
       page.indexOf("</TableHeader>")
     );
-    const rowIdx = thead.indexOf("{rowVisible && (");
-    const flowIdx = thead.indexOf("flowColumnsVisible.map");
-    // Business columns render through the Group 3 display-ordered
-    // list derived from the visibility output.
-    const customIdx = thead.indexOf("customFieldsOrdered.map");
-    expect(rowIdx).toBeGreaterThan(-1);
-    expect(flowIdx).toBeGreaterThan(rowIdx);
-    expect(customIdx).toBeGreaterThan(flowIdx);
+    // One loop over the canonical order — flow/custom/result
+    // positions all come from the same list, so header order can
+    // never diverge from body order.
+    expect(thead).toContain("orderedColumns.map((entry) => renderHeaderEntry(entry))");
+    expect(thead).not.toContain("flowColumnsVisible.map");
+    expect(thead).not.toContain("customFieldsOrdered.map");
     // No lead pseudo-column conditional remains.
     expect(thead).not.toContain("{leadSourceVisible && (");
   });
 
   it("tbody rows follow the same order", () => {
     const tbody = page.slice(page.indexOf("<TableBody"));
-    const flowIdx = tbody.indexOf("flowColumnsVisible.map");
-    const customIdx = tbody.indexOf("customFieldsOrdered.map");
-    expect(flowIdx).toBeGreaterThan(-1);
-    expect(customIdx).toBeGreaterThan(flowIdx);
+    expect(tbody).toContain("orderedColumns.map((entry) => renderBodyEntry(entry, row, rowIndex))");
+    expect(tbody).not.toContain("flowColumnsVisible.map");
+    expect(tbody).not.toContain("customFieldsOrdered.map");
     expect(tbody).not.toContain("{leadSourceVisible && (");
     expect(tbody).not.toContain("<AdSourceCell");
   });

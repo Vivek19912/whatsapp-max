@@ -5,7 +5,27 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { Inbox, Table2 } from 'lucide-react';
+import { Inbox, Table2, GripVertical } from 'lucide-react';
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from '@dnd-kit/sortable';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -112,9 +132,21 @@ import {
 } from '@/lib/flows/header-colors';
 import {
   customFieldVisId,
+  DISPLAY_EXCLUDED_COLUMN_KEYS,
   flowColumnVisId,
   ROW_VIS_ID,
 } from '@/lib/flows/workspace-visibility';
+import {
+  ACTIONS_ORDER_ID,
+  buildDefaultOrderIds,
+  dialOrderId,
+  flowOrderId,
+  mergeColumnOrder,
+  resultOrderId,
+  RESULT_ORDER_PREFIX,
+  useWorkspaceColumnOrder,
+  type ColumnOrderEntry,
+} from '@/lib/flows/workspace-column-order';
 import {
   isLeadReceivedField,
   orderBusinessColumns,
@@ -401,6 +433,136 @@ export function FollowupResultCell({
       )}
     </span>
   );
+}
+
+/**
+ * Sortable Workspace header cell (drag-and-drop column reordering).
+ *
+ * One useSortable registration per header: the TH itself is the
+ * droppable node (pinned columns pass `disabled`, so they can
+ * never be dragged or receive drops), while ONLY the small grip
+ * button carries the drag listeners — resize handles, rename
+ * menus, dropdowns, inputs, and Dial buttons never start a drag.
+ *
+ * No transform animation is applied to the TH: CSS transforms are
+ * unreliable on table-cell display types, and moving DOM mid-drag
+ * would fight the frozen No./Name offsets. Instead the dragged
+ * header dims, the drop target shows a thin insertion bar, and a
+ * DragOverlay carries the floating preview — the grid never jumps.
+ * Dial helpers render via `dialAfter`, OUTSIDE the sortable node,
+ * so they can never detach from their Phone column.
+ */
+function SortableWorkspaceHeaderCell({
+  id,
+  label,
+  disabled,
+  onHeaderNode,
+  className,
+  style,
+  scope,
+  showInsertionBar,
+  dialAfter,
+  children,
+}: {
+  id: string;
+  /** Human label for the handle's accessible name. */
+  label: string;
+  /** Pinned columns and viewers: fully inert (no drag, no drop). */
+  disabled: boolean;
+  /** Ref callback for width measurement (frozen No./Name). */
+  onHeaderNode?: (el: HTMLTableCellElement | null) => void;
+  className?: string;
+  style?: React.CSSProperties;
+  scope?: 'col';
+  /** True while another column hovers this one mid-drag. */
+  showInsertionBar: boolean;
+  /** Attached helper (Dial) — outside the sortable node. */
+  dialAfter?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useSortable({
+    id,
+    disabled,
+  });
+  const setRefs = (el: HTMLTableCellElement | null) => {
+    setNodeRef(el);
+    onHeaderNode?.(el);
+  };
+  return (
+    <Fragment>
+      <TableHead
+        ref={setRefs}
+        scope={scope}
+        className={cn(
+          className,
+          'group/th',
+          isDragging && 'opacity-40',
+        )}
+        style={style}
+      >
+        {!disabled && (
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            aria-label={`Drag ${label} column to reorder`}
+            title={`Drag to reorder ${label}`}
+            onClick={(e) => e.stopPropagation()}
+            className="text-muted-foreground/50 hover:text-foreground hover:bg-muted focus-visible:ring-ring mr-1 inline-flex h-5 w-4 shrink-0 cursor-grab items-center justify-center rounded align-middle opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:outline-none active:cursor-grabbing"
+          >
+            <GripVertical className="size-3.5" aria-hidden />
+          </button>
+        )}
+        {children}
+        {showInsertionBar && (
+          <span
+            aria-hidden
+            className="bg-primary pointer-events-none absolute top-1 bottom-1 left-0 w-0.5 rounded-full"
+          />
+        )}
+      </TableHead>
+      {dialAfter}
+    </Fragment>
+  );
+}
+
+/**
+ * Edge auto-scroll for column dragging. The Workspace viewport
+ * uses overflow-x-hidden with programmatic scrolling, so dnd-kit
+ * cannot auto-scroll it: while a drag is active, a pointermove
+ * listener tracks the edge zone and a rAF loop nudges scrollLeft.
+ * Only runs mid-drag; the Shift+wheel and trackpad handlers are
+ * untouched.
+ */
+function useColumnDragAutoscroll(
+  viewportRef: React.RefObject<HTMLDivElement | null>,
+  dragging: boolean,
+) {
+  useEffect(() => {
+    if (!dragging) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const ZONE_PX = 56;
+    const SPEED_PX = 14;
+    let edge: -1 | 0 | 1 = 0;
+    let raf = 0;
+    const onMove = (e: PointerEvent) => {
+      const rect = viewport.getBoundingClientRect();
+      if (e.clientX < rect.left + ZONE_PX) edge = -1;
+      else if (e.clientX > rect.right - ZONE_PX) edge = 1;
+      else edge = 0;
+    };
+    const tick = () => {
+      if (edge !== 0) viewport.scrollLeft += edge * SPEED_PX;
+      raf = requestAnimationFrame(tick);
+    };
+    window.addEventListener('pointermove', onMove, { passive: true });
+    raf = requestAnimationFrame(tick);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      cancelAnimationFrame(raf);
+    };
+  }, [viewportRef, dragging]);
 }
 
 export default function WorkspacePage() {
@@ -1348,10 +1510,10 @@ export default function WorkspacePage() {
     [payload?.meta?.kind, payload?.columns],
   );
   const visibility = useWorkspaceVisibility(accountId, flowId, metaDefaultHiddenIds);
-  const {
-    flowColumns: flowColumnsVisible,
-    customFields: customFieldsVisible,
-  } = useMemo(
+  // Visible customs feed non-grid consumers (lead-received
+  // detection); the GRID iterates orderedColumns (the shared order
+  // model), never these arrays directly.
+  const { customFields: customFieldsVisible } = useMemo(
     () =>
       applyVisibility(
         payload?.columns ?? [],
@@ -1368,15 +1530,6 @@ export default function WorkspacePage() {
   // is stored and always wins; detection is never written back.
   const leadReceivedField = useMemo(
     () => customFieldsVisible.find((f) => isLeadReceivedField({ name: f.name })) ?? null,
-    [customFieldsVisible]
-  );
-  // Group 3 display order for the business/workspace columns:
-  // Assigned To, Received, Type, Stage first (stored-name
-  // identity), then everything else in stored relative order.
-  // Render-only: visibility, widths, header colors, values, and
-  // the Columns menu all keep using the stored-order lists above.
-  const customFieldsOrdered = useMemo(
-    () => orderBusinessColumns(customFieldsVisible),
     [customFieldsVisible]
   );
   // Doubled-width defaults for "Customer Response" / "Next Action"
@@ -1442,60 +1595,201 @@ export default function WorkspacePage() {
   // preserved); `fallbackIds` lets overrides persisted under the
   // legacy id still apply after the key namespacing.
   //
+  // CANONICAL COLUMN ORDER (single source of truth for header AND
+  // body rendering). Previously the header row and body rows
+  // iterated three parallel arrays with separately maintained
+  // positional paint math — any reorder could silently misalign
+  // paint from values. Now one ordered id list drives both loops;
+  // every entry resolves by stable id (never array index, label,
+  // or screen position).
+  //
   // Sequential sales follow-up results ride along as synthetic
-  // entries (visId/widthId `followup-result:N`): they render
-  // immediately after the Customer Response column (or at the end
-  // of the business columns when it is absent/hidden), paint from
-  // the same positional sequence, and resolve widths like any
-  // column without a saved width. They never enter the visibility
-  // or Columns-menu systems — display-only, read-only, derived
-  // from sales_followup_attempts.
+  // `followup-result:N` entries: they render immediately after the
+  // Customer Response column (or at the end of the business
+  // columns when it is absent), paint from the same positional
+  // sequence, and resolve widths like any column without a saved
+  // width. They never enter the visibility or Columns-menu
+  // systems — display-only, read-only, derived from
+  // sales_followup_attempts.
   const followupResultCount =
     payload?.followupResults && payload.followupResults.maxAttempt > 0
       ? payload.followupResults.maxAttempt
       : 0;
-  const customerResponseIdx = customFieldsOrdered.findIndex(
+  // FULL (visibility-independent) order inputs: hiding a column
+  // must never move its default slot, so unhiding restores it.
+  const allFlowColumns = useMemo(
+    () => (payload?.columns ?? []).filter((c) => !DISPLAY_EXCLUDED_COLUMN_KEYS.has(c.key)),
+    [payload]
+  );
+  const allBusinessOrdered = useMemo(
+    () => orderBusinessColumns(customFieldsScoped),
+    [customFieldsScoped]
+  );
+  const fullCustomerResponseIdx = allBusinessOrdered.findIndex(
     (f) => f.name.trim().toLowerCase() === 'customer response'
   );
+  const fullDefaultIds = useMemo(
+    () =>
+      buildDefaultOrderIds({
+        includeActions: canSendMessages,
+        includeRow: rowVisible,
+        flowColumns: allFlowColumns,
+        customIds: allBusinessOrdered.map((f) => customFieldVisId(f.id)),
+        customerResponseIdx: fullCustomerResponseIdx,
+        resultCount: followupResultCount,
+      }),
+    [canSendMessages, rowVisible, allFlowColumns, allBusinessOrdered, fullCustomerResponseIdx, followupResultCount]
+  );
+  // Pinned first, always: row actions, No., then Name (when the
+  // flow carries a system Name column). Identity-based — a
+  // flow-collected "Name" question is never pinned.
+  const nameOrderId = useMemo(() => {
+    const nameCol = allFlowColumns.find((c) => c.system && c.key === 'name');
+    return nameCol ? flowOrderId(nameCol) : null;
+  }, [allFlowColumns]);
+  const pinnedOrderIds = useMemo(
+    () => [
+      ...(canSendMessages ? [ACTIONS_ORDER_ID] : []),
+      ...(rowVisible ? [ROW_VIS_ID] : []),
+      ...(nameOrderId ? [nameOrderId] : []),
+    ],
+    [canSendMessages, rowVisible, nameOrderId]
+  );
+  const { savedOrder, saveOrder, resetOrder } = useWorkspaceColumnOrder(accountId, flowId);
+  // Drag-and-drop column reordering (writers only). The merged id
+  // list below is the single source of truth: a drop computes the
+  // next complete order via arrayMove, re-renders optimistically
+  // through the same memo, and persists ONLY on drop (never during
+  // pointer movement). A failed save rolls back via the hook and
+  // toasts; reset clears the preference back to default order.
+  const [activeColumnId, setActiveColumnId] = useState<string | null>(null);
+  const [overColumnId, setOverColumnId] = useState<string | null>(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [resettingOrder, setResettingOrder] = useState(false);
+  const columnSensors = useSensors(
+    // Distance guard: resize handles, rename menus, dropdowns, and
+    // inputs never start a drag (only the grip button carries
+    // listeners, and even it needs a real movement).
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    // Touch: long-press to drag so swipes still scroll.
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const handleColumnDragStart = useCallback((event: DragStartEvent) => {
+    setActiveColumnId(String(event.active.id));
+    setOverColumnId(null);
+  }, []);
+  const handleColumnDragOver = useCallback((event: DragOverEvent) => {
+    // Track the drop target for the insertion bar only — no
+    // reordering and no persistence until drop.
+    setOverColumnId(event.over ? String(event.over.id) : null);
+  }, []);
+  const handleColumnDragCancel = useCallback(() => {
+    setActiveColumnId(null);
+    setOverColumnId(null);
+  }, []);
+  const mergedOrderIds = useMemo(
+    () =>
+      mergeColumnOrder({
+        defaultIds: fullDefaultIds,
+        savedIds: savedOrder,
+        pinnedIds: pinnedOrderIds,
+      }),
+    [fullDefaultIds, savedOrder, pinnedOrderIds]
+  );
+  // Resolve merged ids to render entries, applying visibility and
+  // assigning paint positions in ONE pass: header cell #k and body
+  // cell #k always come from the same entry. Actions consume no
+  // paint slot; Dial cells paint from hardcoded geometry.
+  const orderedColumns = useMemo((): ColumnOrderEntry[] => {
+    const flowsById = new Map(allFlowColumns.map((c) => [flowOrderId(c), c]));
+    const fieldsById = new Map(
+      allBusinessOrdered.map((f) => [customFieldVisId(f.id), f])
+    );
+    const hidden = new Set(visibility.hiddenIds);
+    const out: ColumnOrderEntry[] = [];
+    let paint = 0;
+    for (const id of mergedOrderIds) {
+      if (id === ACTIONS_ORDER_ID) {
+        if (canSendMessages) out.push({ id, kind: 'actions', paintIndex: null });
+        continue;
+      }
+      if (id === ROW_VIS_ID) {
+        if (rowVisible) out.push({ id, kind: 'row', paintIndex: paint++ });
+        continue;
+      }
+      if (id.startsWith(RESULT_ORDER_PREFIX)) {
+        const n = Number(id.slice(RESULT_ORDER_PREFIX.length));
+        if (Number.isInteger(n) && n >= 1 && n <= followupResultCount) {
+          out.push({ id, kind: 'result', n, paintIndex: paint++ });
+        }
+        continue;
+      }
+      const col = flowsById.get(id);
+      if (col) {
+        if (hidden.has(flowColumnVisId(col.key))) continue;
+        out.push({
+          id,
+          kind: 'flow',
+          col,
+          dialAfter: col.system && col.key === 'phone',
+          paintIndex: paint++,
+        });
+        continue;
+      }
+      const field = fieldsById.get(id);
+      if (field) {
+        if (hidden.has(customFieldVisId(field.id))) continue;
+        out.push({ id, kind: 'custom', field, paintIndex: paint++ });
+        continue;
+      }
+      // Stale id (column removed after the order was saved) → dropped.
+    }
+    return out;
+  }, [
+    mergedOrderIds,
+    allFlowColumns,
+    allBusinessOrdered,
+    canSendMessages,
+    rowVisible,
+    followupResultCount,
+    visibility.hiddenIds,
+  ]);
   const visibleHeaderOrder = useMemo(
     (): Array<{
       visId: string;
       label: string;
       widthId: string;
       fallbackIds?: readonly string[];
-    }> => {
-      const business = customFieldsOrdered.map((f) => ({
-        visId: customFieldVisId(f.id),
-        label: f.name,
-        widthId: customFieldVisId(f.id),
-      }));
-      if (followupResultCount > 0) {
-        const synthetic = Array.from(
-          { length: followupResultCount },
-          (_, i) => ({
-            visId: `followup-result:${i + 1}`,
-            label: `Follow-up ${i + 1} Result`,
-            widthId: `followup-result:${i + 1}`,
-          })
-        );
-        const at =
-          customerResponseIdx === -1
-            ? business.length
-            : customerResponseIdx + 1;
-        business.splice(at, 0, ...synthetic);
-      }
-      return [
-        ...(rowVisible ? [{ visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID }] : []),
-        ...flowColumnsVisible.map((c) => ({
-          visId: flowColumnRenderKey(c),
-          label: c.label,
-          widthId: flowColumnVisId(c.key),
-          fallbackIds: [flowColumnVisId(c.key)],
-        })),
-        ...business,
-      ];
-    },
-    [rowVisible, flowColumnsVisible, customFieldsOrdered, followupResultCount, customerResponseIdx]
+    }> =>
+      orderedColumns
+        .filter((e) => e.paintIndex !== null)
+        .map((e) => {
+          if (e.kind === 'custom' && e.field) {
+            return {
+              visId: customFieldVisId(e.field.id),
+              label: e.field.name,
+              widthId: customFieldVisId(e.field.id),
+            };
+          }
+          if (e.kind === 'flow' && e.col) {
+            return {
+              visId: flowColumnRenderKey(e.col),
+              label: e.col.label,
+              widthId: flowColumnVisId(e.col.key),
+              fallbackIds: [flowColumnVisId(e.col.key)],
+            };
+          }
+          if (e.kind === 'result') {
+            return {
+              visId: resultOrderId(e.n ?? 0),
+              label: `Follow-up ${e.n ?? 0} Result`,
+              widthId: resultOrderId(e.n ?? 0),
+            };
+          }
+          return { visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID };
+        }),
+    [orderedColumns]
   );
 
   // Positional backgrounds index-aligned with visibleHeaderOrder:
@@ -1556,32 +1850,573 @@ export default function WorkspacePage() {
     [visibleHeaderOrder, headerBackgrounds, effectiveColumnWidths]
   );
 
-  // Order positions for the business columns and the synthetic
-  // Follow-up N Result block (mirrors the visibleHeaderOrder
-  // splice above): customs after Customer Response shift past the
-  // generated entries; the synthetic block starts right after
-  // Customer Response (or at the business tail when it is
-  // absent/hidden). Dial helpers consume no order slot anywhere.
-  const businessOrderBase =
-    (rowVisible ? 1 : 0) + flowColumnsVisible.length;
-  const synthOrderBase =
-    businessOrderBase +
-    (customerResponseIdx === -1
-      ? customFieldsOrdered.length
-      : customerResponseIdx + 1);
-  const customOrderAt = (customIdx: number) =>
-    businessOrderBase +
-    customIdx +
-    (customerResponseIdx !== -1 && customIdx > customerResponseIdx
-      ? followupResultCount
-      : 0);
-  const followupResultNumbers = useMemo(
-    () => Array.from({ length: followupResultCount }, (_, i) => i + 1),
-    [followupResultCount]
-  );
   // Attempt results for this page's rows, keyed by run id then
   // attempt number (strings — JSON object keys).
   const followupResultValues = payload?.followupResults?.values ?? {};
+
+  // Shared header/body renderers: BOTH grid loops below iterate
+  // orderedColumns, so header cell #k and body cell #k always come
+  // from the same stable-id entry. Paint positions come from
+  // entry.paintIndex — never from loop-local arithmetic — and all
+  // value lookups resolve by stable id, so a reorder can never
+  // separate a header from its data.
+  // Sortable ids: every rendered header except the structural
+  // row-actions column (never wrapped, never draggable). Pinned
+  // entries (No., Name) stay registered with `disabled` so they
+  // can neither be dragged nor receive drops.
+  const sortableColumnIds = useMemo(
+    () => orderedColumns.filter((e) => e.kind !== 'actions').map((e) => e.id),
+    [orderedColumns]
+  );
+  const pinnedColumnIdSet = useMemo(() => new Set(pinnedOrderIds), [pinnedOrderIds]);
+  const handleColumnDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const activeId = String(event.active.id);
+      const overId = event.over ? String(event.over.id) : null;
+      setActiveColumnId(null);
+      setOverColumnId(null);
+      if (overId === null || activeId === overId || savingOrder) return;
+      const ids = [...mergedOrderIds];
+      const from = ids.indexOf(activeId);
+      const to = ids.indexOf(overId);
+      if (from < 0 || to < 0) return;
+      // Pinned entries lead the merged list: clamp the insertion
+      // point past them so no drop (pointer or keyboard) can move
+      // a column before or between No./Name/actions.
+      let pinnedCount = 0;
+      for (const id of ids) {
+        if (pinnedColumnIdSet.has(id)) pinnedCount++;
+        else break;
+      }
+      const next = arrayMove(ids, from, Math.max(to, pinnedCount));
+      if (next.every((id, i) => id === ids[i])) return;
+      setSavingOrder(true);
+      void saveOrder(next).then(
+        () => {
+          setSavingOrder(false);
+          toast.success('Column order saved.');
+        },
+        () => {
+          // The hook already rolled back to the previous order.
+          setSavingOrder(false);
+          toast.error('Could not save the column order. Reverted.');
+        }
+      );
+    },
+    [mergedOrderIds, pinnedColumnIdSet, savingOrder, saveOrder]
+  );
+  const handleResetColumnOrder = useCallback(() => {
+    if (resettingOrder) return;
+    setResettingOrder(true);
+    void resetOrder().then(
+      () => {
+        setResettingOrder(false);
+        toast.success('Column order reset to default.');
+      },
+      () => {
+        setResettingOrder(false);
+        toast.error('Could not reset the column order.');
+      }
+    );
+  }, [resetOrder, resettingOrder]);
+
+  const renderHeaderEntry = (entry: ColumnOrderEntry) => {
+    // Writers only (and never mid-save): viewers and pinned
+    // columns render a fully inert header — no grip, no drag, no
+    // drop. Pinned entries additionally force `disabled` so No.
+    // and Name can never be a drop target either.
+    const dragDisabled = !canSendMessages || savingOrder;
+    const insertionFor = (id: string) =>
+      overColumnId === id && activeColumnId !== null && activeColumnId !== id;
+    if (entry.kind === 'actions') {
+      return (
+        <TableHead
+          key={entry.id}
+          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+          aria-label="Row actions"
+        >
+          <span className="sr-only">Actions</span>
+        </TableHead>
+      );
+    }
+    if (entry.kind === 'row') {
+      return (
+        <SortableWorkspaceHeaderCell
+          key={entry.id}
+          id={entry.id}
+          label="No."
+          disabled
+          onHeaderNode={(el) => {
+            noHeadRef.current = el;
+          }}
+          // z-30 (not z-20 like the scrolling headers):
+          // with equal z-index, later-DOM scrolling
+          // headers would paint OVER this frozen one as
+          // they slide left. Above frozen body (z-[1]).
+          className={cn(
+            'sticky top-0 z-30 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0',
+            frozenEdgeLeft,
+            frozenEdgeRight
+          )}
+          style={{ ...headStyleAt(entry.paintIndex), ...(freezeReady ? { left: 0 } : null) }}
+          showInsertionBar={false}
+        >
+          No.
+          {canSendMessages && (
+            <ColumnResizeHandle
+              columnKey={ROW_VIS_ID}
+              onResize={handleResizeWidth}
+              onCommit={handleCommitWidth}
+              onActiveChange={(active) =>
+                setResizingKey(active ? ROW_VIS_ID : null)
+              }
+            />
+          )}
+        </SortableWorkspaceHeaderCell>
+      );
+    }
+    if (entry.kind === 'result') {
+      const resultLabel = `Follow-up ${entry.n} Result`;
+      return (
+        <SortableWorkspaceHeaderCell
+          key={entry.id}
+          id={entry.id}
+          label={resultLabel}
+          disabled={dragDisabled}
+          className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+          style={headStyleAt(entry.paintIndex)}
+          showInsertionBar={insertionFor(entry.id)}
+        >
+          {resultLabel}
+        </SortableWorkspaceHeaderCell>
+      );
+    }
+    if (entry.kind === 'custom') {
+      const f = entry.field;
+      return (
+        <SortableWorkspaceHeaderCell
+          key={entry.id}
+          id={entry.id}
+          label={f.name}
+          disabled={dragDisabled}
+          className={cn(
+            'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+            // Customer Response / Next Action headers
+            // center their labels within the full
+            // 448px cell (the resize handle is
+            // absolutely positioned, so it never
+            // offsets centering). Header-only: body
+            // text stays left-aligned.
+            isWideTextColumnName(f.name) && 'text-center'
+          )}
+          style={headStyleAt(entry.paintIndex)}
+          showInsertionBar={insertionFor(entry.id)}
+        >
+          {formatColumnLabel(f.name)}
+          {canSendMessages && (
+            <ColumnResizeHandle
+              columnKey={customFieldVisId(f.id)}
+              onResize={handleResizeWidth}
+              onCommit={handleCommitWidth}
+              onActiveChange={(active) =>
+                setResizingKey(
+                  active ? customFieldVisId(f.id) : null
+                )
+              }
+            />
+          )}
+        </SortableWorkspaceHeaderCell>
+      );
+    }
+    // Flow column (entry.kind === 'flow'): identity-based rendering
+    // exactly as before — system Name freezes, Dial stays attached
+    // to Phone via the shared predicate, Meta renames keep working.
+    const c = entry.col;
+    const visId = flowColumnVisId(c.key);
+    // Meta Lead Ads tables only: Instant Form
+    // question columns get a header menu (Rename /
+    // Restore). System columns, the Source column,
+    // and every Flow Table header render exactly
+    // as before.
+    const renamable =
+      payload?.meta.kind === 'meta_lead_ads' &&
+      isRenamableMetaColumn({ key: c.key, system: c.system });
+    const customLabel = renamable
+      ? (headerLabels[visId] ?? null)
+      : null;
+    // Dial is an application action column for EVERY
+    // Workspace table (Meta Lead Ads, Flow, and any
+    // other table with a Phone Number column): it
+    // renders immediately after the Phone Number
+    // system column, is not part of
+    // flowColumnsVisible, carries no resize handle
+    // / visibility id / header color, and is never
+    // sent to Google Sheets.
+    const showDialAfter =
+      c.system && c.key === 'phone';
+    // The system Name column freezes beside No.:
+    // identity-based (system + key), never the
+    // label, so a flow-collected "Name" question
+    // keeps scrolling.
+    const isNameCol = c.system && c.key === 'name';
+    return (
+      <SortableWorkspaceHeaderCell
+        key={entry.id}
+        id={entry.id}
+        label={c.label}
+        disabled={isNameCol || dragDisabled}
+        onHeaderNode={
+          isNameCol
+            ? (el) => {
+                nameHeadRef.current = el;
+              }
+            : undefined
+        }
+        // Frozen Name stacks like No. (z-30, above the
+        // z-20 scrolling headers); every other flow
+        // header keeps z-20 and slides underneath.
+        // Frozen Name also owns its edge lines (see
+        // frozenEdgeRight); scrollers never get them.
+        className={cn(
+          'sticky top-0 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+          isNameCol ? 'z-30' : 'z-20',
+          isNameCol && frozenEdgeRight
+        )}
+        style={
+          isNameCol && freezeReady
+            ? { ...headStyleAt(entry.paintIndex), left: nameLeft }
+            : headStyleAt(entry.paintIndex)
+        }
+        showInsertionBar={!isNameCol && insertionFor(entry.id)}
+        dialAfter={
+          showDialAfter ? (
+            <TableHead
+              key={dialOrderId(entry.id)}
+              scope="col"
+              className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+              style={{ minWidth: 112, width: 128 }}
+            >
+              <span className="block whitespace-nowrap">Dial</span>
+            </TableHead>
+          ) : undefined
+        }
+      >
+        {renamable ? (
+          <MetaColumnHeaderMenu
+            columnKey={c.key}
+            originalLabel={c.label}
+            displayLabel={
+              customLabel ?? formatColumnLabel(c.label)
+            }
+            customLabel={customLabel}
+            onRename={(label) =>
+              handleSaveHeaderLabel(c.key, label)
+            }
+            onRestore={() => handleSaveHeaderLabel(c.key, null)}
+          />
+        ) : (
+          formatColumnLabel(c.label)
+        )}
+        {canSendMessages && (
+          <ColumnResizeHandle
+            columnKey={visId}
+            onResize={handleResizeWidth}
+            onCommit={handleCommitWidth}
+            onActiveChange={(active) =>
+              setResizingKey(active ? visId : null)
+            }
+          />
+        )}
+      </SortableWorkspaceHeaderCell>
+    );
+  };
+
+  const renderBodyEntry = (
+    entry: ColumnOrderEntry,
+    row: FlowTableRow,
+    rowIndex: number
+  ) => {
+    if (entry.kind === 'actions') {
+      return (
+        <TableCell key={entry.id} className="w-12 border-r border-border px-2 last:border-r-0">
+          <RowActionsMenu
+            rowLabel={row.name ?? row.phone ?? 'row'}
+            isPinned={pinnedIds.has(row.runId)}
+            pending={rowActionPending.has(row.runId)}
+            onTogglePin={() => handleTogglePin(row.runId)}
+            onHide={() => handleHideRow(row.runId)}
+            onOpenFollowups={
+              isMetaTable
+                ? () =>
+                    setHistoryModal({
+                      runId: row.runId,
+                      name: row.name ?? null,
+                      phone: row.phone ?? null,
+                    })
+                : undefined
+            }
+          />
+        </TableCell>
+      );
+    }
+    if (entry.kind === 'row') {
+      return (
+        <TableCell
+          key={entry.id}
+          className={cn(
+            'border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
+            freezeReady && 'sticky left-0 z-[1]',
+            // Own edge lines (see frozenEdgeRight):
+            // stuck or not, the No. column keeps its
+            // separators at every scroll position.
+            frozenEdgeLeft,
+            frozenEdgeRight,
+            frozenTint(row)
+          )}
+          style={
+            freezeReady
+              ? {
+                  ...columnWidthStyle(
+                    ROW_VIS_ID,
+                    effectiveColumnWidths
+                  ),
+                  left: 0,
+                }
+              : columnWidthStyle(
+                  ROW_VIS_ID,
+                  effectiveColumnWidths
+                )
+          }
+        >
+          {workspaceRowNumber({
+            page,
+            pageSize,
+            index: rowIndex,
+          }).toLocaleString()}
+        </TableCell>
+      );
+    }
+    if (entry.kind === 'result') {
+      const value = followupResultValues[row.runId]?.[String(entry.n)];
+      return (
+        <TableCell
+          key={entry.id}
+          className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
+        >
+          <FollowupResultCell
+            outcome={value?.outcome ?? null}
+            resultText={value?.result_text ?? null}
+            completedAt={value?.completed_at ?? null}
+          />
+        </TableCell>
+      );
+    }
+    if (entry.kind === 'custom') {
+      const f = entry.field;
+      // Body custom cells render only with a selected flow (the
+      // header still paints — same asymmetry as before the shared
+      // order refactor).
+      if (flowId === null) return null;
+      return (
+        <TableCell
+          key={entry.id}
+          className={cn(
+            'overflow-hidden border-r border-border last:border-r-0',
+            // Doubled natural cap for the two
+            // long-text columns (2 × max-w-56 =
+            // max-w-112 = 448px): twice the room
+            // with no clipping or overlap, and
+            // the grid keeps scrolling as one.
+            // Customer Response / Next Action
+            // cells additionally wrap up to 2
+            // lines (see twoLineClamp below):
+            // whitespace-normal overrides the
+            // table primitive's nowrap so text
+            // wraps within the 448px; px-3/py-2
+            // sets 12px horizontal + 8px
+            // vertical padding (vertical centering
+            // comes from the primitive's
+            // align-middle). Every other column
+            // keeps max-w-56 + natural width.
+            isWideTextColumnName(f.name)
+              ? 'max-w-112 whitespace-normal px-3 py-2'
+              : 'max-w-56 px-2.5 py-1.5 text-[13px]'
+          )}
+          style={columnWidthStyle(
+            customFieldVisId(f.id),
+            effectiveColumnWidths
+          )}
+        >
+          <CustomCell
+            flowId={flowId}
+            runId={row.runId}
+            field={f}
+            stored={
+              overridesForRequest[row.runId]?.[f.id] ??
+              payload?.customValues?.[row.runId]?.[f.id] ??
+              (leadReceivedField?.id === f.id
+                ? (receivedDefaults[row.runId] ?? null)
+                : null)
+            }
+            canEdit={
+              // Agents work their own Meta leads but
+              // can never reassign them (the Assigned
+              // To cell stays read-only; reassignment
+              // is admin-only). Everything else keeps
+              // the existing edit permissions.
+              canSendMessages &&
+              !(isAgent && isMetaTable && isAssigneeField(f))
+            }
+            onSaved={handleCustomSaved}
+            members={teamMembers}
+            twoLineClamp={isWideTextColumnName(f.name)}
+            // Meta Lead Ads Tables only: clicking the
+            // follow-up cell routes through the lead's
+            // sequential state (record due result,
+            // history, or schedule next). Every other
+            // column — and every Flow Table — keeps
+            // the existing inline editing.
+            onEditIntercept={
+              isMetaTable && followupFieldId !== null && f.id === followupFieldId
+                ? () =>
+                    void openFollowupForRow(
+                      row,
+                      f.id,
+                      overridesForRequest[row.runId]?.[f.id] ??
+                        payload.customValues?.[row.runId]?.[f.id] ??
+                        null,
+                    )
+                : undefined
+            }
+            // Meta Lead Ads Tables only: manual
+            // assignment goes through the audited
+            // endpoint (write + history). Every
+            // other column — and every Flow Table
+            // — keeps the generic save path.
+            saveAssignee={
+              isMetaTable && isAssigneeField(f)
+                ? async (raw) =>
+                    manualAssignMetaLead(row.runId, raw)
+                : undefined
+            }
+          />
+        </TableCell>
+      );
+    }
+    // Flow column (entry.kind === 'flow').
+    const c = entry.col;
+    // Flow-derived cells edit through Workspace
+    // overrides (originals stay in row.answers);
+    // system columns keep their plain rendering.
+    // Display = override ?? original, resolved
+    // per row from the table payload.
+    const rowOverrides =
+      payload?.flowOverrides?.[row.runId];
+    const overrideFor =
+      rowOverrides !== undefined &&
+      Object.prototype.hasOwnProperty.call(rowOverrides, c.key)
+        ? (rowOverrides[c.key] ?? null)
+        : undefined;
+    // Attachment cells: resolve the existing file
+    // URL (media message match, else a URL value)
+    // so FlowAnswerCell can render the filename as
+    // a link opening the file in a new tab. Null →
+    // ordinary text cell, unchanged.
+    const rawCellValue =
+      overrideFor !== undefined
+        ? overrideFor
+        : (row.answers[c.key] ?? '');
+    const cellFileUrl = resolveAttachmentUrl(
+      payload?.mediaByConversation ?? {},
+      row.conversationId,
+      rawCellValue,
+    );
+    // Every Workspace table: Dial action cell
+    // right after Phone Number. Application-only
+    // (never a sheet field, never editable, never
+    // stored).
+    const showDialAfter =
+      c.system && c.key === 'phone';
+    // The system Name column freezes beside No.
+    // (identity-based, like its header): opaque
+    // tint mirroring the row wash so scrolled
+    // columns slide underneath it.
+    const freezeName = c.system && c.key === 'name';
+    return (
+      <Fragment key={entry.id}>
+        <TableCell
+          key={flowColumnRenderKey(c)}
+          className={cn(
+            'max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0',
+            freezeName && freezeReady && 'sticky z-[1]',
+            freezeName && frozenEdgeRight,
+            freezeName && frozenTint(row)
+          )}
+          style={
+            freezeName && freezeReady
+              ? {
+                  ...columnWidthStyle(
+                    flowColumnVisId(c.key),
+                    effectiveColumnWidths
+                  ),
+                  left: nameLeft,
+                }
+              : columnWidthStyle(
+                  flowColumnVisId(c.key),
+                  effectiveColumnWidths
+                )
+          }
+        >
+          {!c.system && flowId !== null ? (
+            <FlowAnswerCell
+              flowId={flowId}
+              runId={row.runId}
+              columnKey={c.key}
+              label={formatColumnLabel(c.label)}
+              options={c.options ?? null}
+              original={row.answers[c.key] ?? null}
+              rawOriginal={
+                payload?.meta?.kind === 'meta_lead_ads'
+                  ? (row.rawAnswers?.[c.key] ?? null)
+                  : undefined
+              }
+              override={overrideFor}
+              fileUrl={cellFileUrl}
+              canEdit={canSendMessages}
+              onChanged={reloadTable}
+            />
+          ) : c.system && c.key === 'latest_recording' ? (
+            <LatestRecordingCell
+              entry={
+                (payload?.latestRecordingByContact?.[
+                  row.contactId ?? ''
+                ] ?? null)
+              }
+            />
+          ) : (
+            cellText(row, c)
+          )}
+        </TableCell>
+        {showDialAfter && (
+          <TableCell
+            key={dialOrderId(entry.id)}
+            className="border-r border-border px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
+            style={{ minWidth: 112, width: 128 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="inline-flex justify-center">
+              <DialAction
+                phone={row.phone}
+                contactId={row.contactId}
+                flowId={flowId}
+                runId={row.runId}
+              />
+            </span>
+          </TableCell>
+        )}
+      </Fragment>
+    );
+  };
 
   // Synced horizontal scrolling + frozen leading columns. One
   // scroller owns the truth (the Table primitive's inner
@@ -1612,12 +2447,29 @@ export default function WorkspacePage() {
     tableKey
   );
   useShiftWheel(viewportRef, tableKey);
+  // Column-drag edge auto-scroll (see useColumnDragAutoscroll):
+  // the overflow-x-hidden viewport cannot self-scroll under
+  // dnd-kit, so the drag nudges it near either edge instead.
+  useColumnDragAutoscroll(viewportRef, activeColumnId !== null);
   // Name's sticky offset = the measured No. width (0 when No. is
   // hidden).
   const nameLeft = rowVisible ? metrics.noWidth : 0;
   // Sticky positioning applies only once geometry is measured;
   // a first render can never pin Name over No. at offset 0.
   const freezeReady = metrics.viewportWidth > 0;
+  // Cell-owned vertical separators for the frozen No./Name columns.
+  // The table uses collapsed borders, whose shared boundary lines
+  // are owned by the grid — not the cell — so a stuck cell cannot
+  // guarantee its own edge lines while opaque scrolling columns
+  // slide beneath it. These 1px ::before/::after lines paint inside
+  // the frozen cells themselves (which stack above all scrollers),
+  // travel with them, and span the full cell height at every scroll
+  // position. Same border token, zero layout effect. The existing
+  // border-r classes stay untouched as fallback.
+  const frozenEdgeRight =
+    'after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-border after:content-[""]';
+  const frozenEdgeLeft =
+    'before:absolute before:inset-y-0 before:left-0 before:w-px before:bg-border before:content-[""]';
   // Opaque tint mirroring the row's own wash so scrolling content
   // never shows through frozen cells. Same precedence as the row
   // (highlight wins over pinned wins over card), without the
@@ -2017,6 +2869,8 @@ export default function WorkspacePage() {
                       onSaveHeaderColor={handleSaveHeaderColor}
                       canCustomizeColors={canSendMessages}
                       headerColorMap={headerMap}
+                      onResetOrder={canSendMessages ? handleResetColumnOrder : undefined}
+                      resettingOrder={resettingOrder}
                     />
                   }
                   hiddenRows={
@@ -2151,204 +3005,58 @@ export default function WorkspacePage() {
                       tr-level divider is neutralized (merged to
                       border-b-0 by tailwind-merge) in favour of the
                       th-level divider, which travels with the stuck
-                      header. Each header carries a drag handle on its
-                      right boundary (writers only). A single thumb
+                      header. Each eligible header carries a subtle
+                      grip handle (writers only) for drag-and-drop
+                      reordering; No., Name, and row actions are
+                      permanently pinned. A single thumb
                       strip sits below the vertical viewport as a
                       card-level sibling (see after </Table>) — always
                       visible, never in the row flow. */}
+                  <DndContext
+                    sensors={columnSensors}
+                    collisionDetection={closestCenter}
+                    onDragStart={handleColumnDragStart}
+                    onDragOver={handleColumnDragOver}
+                    onDragEnd={handleColumnDragEnd}
+                    onDragCancel={handleColumnDragCancel}
+                  >
+                  <SortableContext
+                    items={sortableColumnIds}
+                    strategy={horizontalListSortingStrategy}
+                  >
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
-                      {/* Row actions: narrow fixed column first (writers
-                          only). One three-dot menu per row — pin /
-                          unpin / hide — with a filled-pin indicator
-                          for pinned rows. Never resized, hidden, or
-                          recolored: it sits outside the visibility,
-                          width, and header-color systems. */}
-                      {canSendMessages && (
-                        <TableHead
-                          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
-                          aria-label="Row actions"
-                        >
-                          <span className="sr-only">Actions</span>
-                        </TableHead>
-                      )}
-                      {rowVisible && (
-                      <TableHead
-                        ref={noHeadRef}
-                        // z-30 (not z-20 like the scrolling headers):
-                        // with equal z-index, later-DOM scrolling
-                        // headers would paint OVER this frozen one as
-                        // they slide left. Above frozen body (z-[1]).
-                        className="sticky top-0 z-30 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0"
-                        style={{ ...headStyleAt(0), ...(freezeReady ? { left: 0 } : null) }}
-                      >
-                        No.
-                        {canSendMessages && (
-                          <ColumnResizeHandle
-                            columnKey={ROW_VIS_ID}
-                            onResize={handleResizeWidth}
-                            onCommit={handleCommitWidth}
-                            onActiveChange={(active) =>
-                              setResizingKey(active ? ROW_VIS_ID : null)
-                            }
-                          />
-                        )}
-                      </TableHead>
-                      )}
-                      {flowColumnsVisible.map((c, flowIdx) => {
-                        const visId = flowColumnVisId(c.key);
-                        // Index into visibleHeaderOrder (order position,
-                        // NOT rendered position): Dial helper THs render
-                        // between flow THs but consume no order or
-                        // background slot — they carry hardcoded
-                        // geometry — so every flow header indexes its
-                        // own order slot exactly as the body cells
-                        // resolve their widths. Offsetting past Dials
-                        // here would shift every later header into the
-                        // wrong slot (and the tail past the array end:
-                        // transparent, widthless headers).
-                        const headerIdx = (rowVisible ? 1 : 0) + flowIdx;
-                        // Meta Lead Ads tables only: Instant Form
-                        // question columns get a header menu (Rename /
-                        // Restore). System columns, the Source column,
-                        // and every Flow Table header render exactly
-                        // as before.
-                        const renamable =
-                          payload?.meta.kind === 'meta_lead_ads' &&
-                          isRenamableMetaColumn({ key: c.key, system: c.system });
-                        const customLabel = renamable
-                          ? (headerLabels[visId] ?? null)
-                          : null;
-                        // Dial is an application action column for EVERY
-                        // Workspace table (Meta Lead Ads, Flow, and any
-                        // other table with a Phone Number column): it
-                        // renders immediately after the Phone Number
-                        // system column, is not part of
-                        // flowColumnsVisible, carries no resize handle
-                        // / visibility id / header color, and is never
-                        // sent to Google Sheets.
-                        const showDialAfter =
-                          c.system && c.key === 'phone';
-                        // The system Name column freezes beside No.:
-                        // identity-based (system + key), never the
-                        // label, so a flow-collected "Name" question
-                        // keeps scrolling.
-                        const isNameCol = c.system && c.key === 'name';
-                        return (
-                          <Fragment key={flowColumnRenderKey(c)}>
-                    <TableHead
-                      key={flowColumnRenderKey(c)}
-                      ref={isNameCol ? nameHeadRef : undefined}
-                      // Frozen Name stacks like No. (z-30, above the
-                      // z-20 scrolling headers); every other flow
-                      // header keeps z-20 and slides underneath.
-                      className={cn(
-                        'sticky top-0 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
-                        isNameCol ? 'z-30' : 'z-20'
-                      )}
-                      style={
-                        isNameCol && freezeReady
-                          ? { ...headStyleAt(headerIdx), left: nameLeft }
-                          : headStyleAt(headerIdx)
-                      }
-                    >
-                              {renamable ? (
-                                <MetaColumnHeaderMenu
-                                  columnKey={c.key}
-                                  originalLabel={c.label}
-                                  displayLabel={
-                                    customLabel ?? formatColumnLabel(c.label)
-                                  }
-                                  customLabel={customLabel}
-                                  onRename={(label) =>
-                                    handleSaveHeaderLabel(c.key, label)
-                                  }
-                                  onRestore={() => handleSaveHeaderLabel(c.key, null)}
-                                />
-                              ) : (
-                                formatColumnLabel(c.label)
-                              )}
-                              {canSendMessages && (
-                                <ColumnResizeHandle
-                                  columnKey={visId}
-                                  onResize={handleResizeWidth}
-                                  onCommit={handleCommitWidth}
-                                  onActiveChange={(active) =>
-                                    setResizingKey(active ? visId : null)
-                                  }
-                                />
-                              )}
-                            </TableHead>
-                            {showDialAfter && (
-                      <TableHead
-                        scope="col"
-                        className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
-                        style={{ minWidth: 112, width: 128 }}
-                      >
-                                <span className="block whitespace-nowrap">Dial</span>
-                              </TableHead>
-                            )}
-                          </Fragment>
-                        );
-                      })}
-                      {customFieldsOrdered.map((f, customIdx) => (
-                        <Fragment key={f.id}>
-                    <TableHead
-                      className={cn(
-                        'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
-                            // Customer Response / Next Action headers
-                            // center their labels within the full
-                            // 448px cell (the resize handle is
-                            // absolutely positioned, so it never
-                            // offsets centering). Header-only: body
-                            // text stays left-aligned.
-                            isWideTextColumnName(f.name) && 'text-center'
-                          )}
-                            style={headStyleAt(customOrderAt(customIdx))}
-                          >
-                            {formatColumnLabel(f.name)}
-                          {canSendMessages && (
-                            <ColumnResizeHandle
-                              columnKey={customFieldVisId(f.id)}
-                              onResize={handleResizeWidth}
-                              onCommit={handleCommitWidth}
-                              onActiveChange={(active) =>
-                                setResizingKey(
-                                  active ? customFieldVisId(f.id) : null
-                                )
-                              }
-                            />
-                          )}
-                        </TableHead>
-                          {/* Generated Follow-up N Result headers sit
-                              right after Customer Response (no resize
-                              handles: display-only, read-only). */}
-                          {customIdx === customerResponseIdx &&
-                            followupResultNumbers.map((n, k) => (
-                              <TableHead
-                                key={`followup-result:${n}`}
-                                className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
-                                style={headStyleAt(synthOrderBase + k)}
-                              >
-                                {`Follow-up ${n} Result`}
-                              </TableHead>
-                            ))}
-                        </Fragment>
-                      ))}
-                      {/* No Customer Response column (absent/hidden):
-                          generated headers trail the business tail. */}
-                      {customerResponseIdx === -1 &&
-                        followupResultNumbers.map((n, k) => (
-                          <TableHead
-                            key={`followup-result:${n}`}
-                            className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
-                            style={headStyleAt(synthOrderBase + k)}
-                          >
-                            {`Follow-up ${n} Result`}
-                          </TableHead>
-                        ))}
+                      {/* One shared column order drives every header
+                          AND body cell (see orderedColumns): header
+                          #k and body #k always resolve from the same
+                          stable-id entry, so reordering can never
+                          separate a header from its data. */}
+                      {orderedColumns.map((entry) => renderHeaderEntry(entry))}
                     </TableRow>
                   </TableHeader>
+                  </SortableContext>
+                  <DragOverlay>
+                    {activeColumnId ? (
+                      <span className="bg-popover text-popover-foreground border-border inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] font-semibold whitespace-nowrap">
+                        <GripVertical className="size-3.5" aria-hidden />
+                        {(() => {
+                          const active = orderedColumns.find(
+                            (e) => e.id === activeColumnId
+                          );
+                          if (!active) return activeColumnId;
+                          if (active.kind === 'row') return 'No.';
+                          if (active.kind === 'result')
+                            return `Follow-up ${active.n} Result`;
+                          if (active.kind === 'custom')
+                            return formatColumnLabel(active.field.name);
+                          if (active.kind === 'flow')
+                            return formatColumnLabel(active.col.label);
+                          return activeColumnId;
+                        })()}
+                      </span>
+                    ) : null}
+                  </DragOverlay>
+                  </DndContext>
                   <TableBody>
                     {visibleRows.map((row, rowIndex) => (
                       <TableRow
@@ -2372,297 +3080,10 @@ export default function WorkspacePage() {
                         )}
                         onClick={() => setSelected(row)}
                       >
-                        {canSendMessages && (
-                          <TableCell className="w-12 border-r border-border px-2 last:border-r-0">
-                            <RowActionsMenu
-                              rowLabel={row.name ?? row.phone ?? 'row'}
-                              isPinned={pinnedIds.has(row.runId)}
-                              pending={rowActionPending.has(row.runId)}
-                              onTogglePin={() => handleTogglePin(row.runId)}
-                              onHide={() => handleHideRow(row.runId)}
-                              onOpenFollowups={
-                                isMetaTable
-                                  ? () =>
-                                      setHistoryModal({
-                                        runId: row.runId,
-                                        name: row.name ?? null,
-                                        phone: row.phone ?? null,
-                                      })
-                                  : undefined
-                              }
-                            />
-                          </TableCell>
-                        )}
-                        {rowVisible && (
-                        <TableCell
-                          className={cn(
-                            'border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
-                            freezeReady && 'sticky left-0 z-[1]',
-                            frozenTint(row)
-                          )}
-                          style={
-                            freezeReady
-                              ? {
-                                  ...columnWidthStyle(
-                                    ROW_VIS_ID,
-                                    effectiveColumnWidths
-                                  ),
-                                  left: 0,
-                                }
-                              : columnWidthStyle(
-                                  ROW_VIS_ID,
-                                  effectiveColumnWidths
-                                )
-                          }
-                        >
-                          {workspaceRowNumber({
-                            page,
-                            pageSize,
-                            index: rowIndex,
-                          }).toLocaleString()}
-                        </TableCell>
-                        )}
-                        {flowColumnsVisible.map((c) => {
-                          // Flow-derived cells edit through Workspace
-                          // overrides (originals stay in row.answers);
-                          // system columns keep their plain rendering.
-                          // Display = override ?? original, resolved
-                          // per row from the table payload.
-                          const rowOverrides =
-                            payload.flowOverrides?.[row.runId];
-                          const overrideFor =
-                            rowOverrides !== undefined &&
-                            Object.prototype.hasOwnProperty.call(rowOverrides, c.key)
-                              ? (rowOverrides[c.key] ?? null)
-                              : undefined;
-                          // Attachment cells: resolve the existing file
-                          // URL (media message match, else a URL value)
-                          // so FlowAnswerCell can render the filename as
-                          // a link opening the file in a new tab. Null →
-                          // ordinary text cell, unchanged.
-                          const rawCellValue =
-                            overrideFor !== undefined
-                              ? overrideFor
-                              : (row.answers[c.key] ?? '');
-                          const cellFileUrl = resolveAttachmentUrl(
-                            payload.mediaByConversation ?? {},
-                            row.conversationId,
-                            rawCellValue,
-                          );
-                          // Every Workspace table: Dial action cell
-                          // right after Phone Number. Application-only
-                          // (never a sheet field, never editable, never
-                          // stored).
-                          const showDialAfter =
-                            c.system && c.key === 'phone';
-                          // The system Name column freezes beside No.
-                          // (identity-based, like its header): opaque
-                          // tint mirroring the row wash so scrolled
-                          // columns slide underneath it.
-                          const freezeName = c.system && c.key === 'name';
-                          return (
-                          <Fragment key={flowColumnRenderKey(c)}>
-                      <TableCell
-                        key={flowColumnRenderKey(c)}
-                        className={cn(
-                          'max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0',
-                          freezeName && freezeReady && 'sticky z-[1]',
-                          freezeName && frozenTint(row)
-                        )}
-                        style={
-                          freezeName && freezeReady
-                            ? {
-                                ...columnWidthStyle(
-                                  flowColumnVisId(c.key),
-                                  effectiveColumnWidths
-                                ),
-                                left: nameLeft,
-                              }
-                            : columnWidthStyle(
-                                flowColumnVisId(c.key),
-                                effectiveColumnWidths
-                              )
-                        }
-                      >
-                              {!c.system && flowId !== null ? (
-                                <FlowAnswerCell
-                                  flowId={flowId}
-                                  runId={row.runId}
-                                  columnKey={c.key}
-                                  label={formatColumnLabel(c.label)}
-                                  options={c.options ?? null}
-                                  original={row.answers[c.key] ?? null}
-                    rawOriginal={
-                      payload?.meta?.kind === 'meta_lead_ads'
-                        ? (row.rawAnswers?.[c.key] ?? null)
-                        : undefined
-                    }
-                                  override={overrideFor}
-                                  fileUrl={cellFileUrl}
-                                  canEdit={canSendMessages}
-                                  onChanged={reloadTable}
-                                />
-                              ) : c.system && c.key === 'latest_recording' ? (
-                                <LatestRecordingCell
-                                  entry={
-                                    (payload.latestRecordingByContact?.[
-                                      row.contactId ?? ''
-                                    ] ?? null)
-                                  }
-                                />
-                              ) : (
-                                cellText(row, c)
-                              )}
-                            </TableCell>
-                            {showDialAfter && (
-                      <TableCell
-                        className="border-r border-border px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
-                        style={{ minWidth: 112, width: 128 }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                                <span className="inline-flex justify-center">
-                                  <DialAction
-                                    phone={row.phone}
-                                    contactId={row.contactId}
-                                    flowId={flowId}
-                                    runId={row.runId}
-                                  />
-                                </span>
-                              </TableCell>
-                            )}
-                          </Fragment>
-                          );
-                        })}
-                        {flowId &&
-                          customFieldsOrdered.map((f, customIdx) => (
-                            <Fragment key={f.id}>
-                            <TableCell
-                              className={cn(
-                                'overflow-hidden border-r border-border last:border-r-0',
-                                // Doubled natural cap for the two
-                                // long-text columns (2 × max-w-56 =
-                                // max-w-112 = 448px): twice the room
-                                // with no clipping or overlap, and
-                                // the grid keeps scrolling as one.
-                                // Customer Response / Next Action
-                                // cells additionally wrap up to 2
-                                // lines (see twoLineClamp below):
-                                // whitespace-normal overrides the
-                                // table primitive's nowrap so text
-                                // wraps within the 448px; px-3/py-2
-                                // sets 12px horizontal + 8px
-                                // vertical padding (vertical centering
-                                // comes from the primitive's
-                                // align-middle). Every other column
-                                // keeps max-w-56 + natural width.
-                        isWideTextColumnName(f.name)
-                          ? 'max-w-112 whitespace-normal px-3 py-2'
-                          : 'max-w-56 px-2.5 py-1.5 text-[13px]'
-                              )}
-                              style={columnWidthStyle(
-                                customFieldVisId(f.id),
-                                effectiveColumnWidths
-                              )}
-                            >
-                              <CustomCell
-                                flowId={flowId}
-                                runId={row.runId}
-                                field={f}
-                                stored={
-                                  overridesForRequest[row.runId]?.[f.id] ??
-                                  payload.customValues?.[row.runId]?.[f.id] ??
-                                  (leadReceivedField?.id === f.id
-                                    ? (receivedDefaults[row.runId] ?? null)
-                                    : null)
-                                }
-                                canEdit={
-                                  // Agents work their own Meta leads but
-                                  // can never reassign them (the Assigned
-                                  // To cell stays read-only; reassignment
-                                  // is admin-only). Everything else keeps
-                                  // the existing edit permissions.
-                                  canSendMessages &&
-                                  !(isAgent && isMetaTable && isAssigneeField(f))
-                                }
-                                onSaved={handleCustomSaved}
-                                members={teamMembers}
-                                twoLineClamp={isWideTextColumnName(f.name)}
-                                // Meta Lead Ads Tables only: clicking the
-                                // follow-up cell routes through the lead's
-                                // sequential state (record due result,
-                                // history, or schedule next). Every other
-                                // column — and every Flow Table — keeps
-                                // the existing inline editing.
-                                onEditIntercept={
-                                  isMetaTable && followupFieldId !== null && f.id === followupFieldId
-                                    ? () =>
-                                        void openFollowupForRow(
-                                          row,
-                                          f.id,
-                                          overridesForRequest[row.runId]?.[f.id] ??
-                                            payload.customValues?.[row.runId]?.[f.id] ??
-                                            null,
-                                        )
-                                    : undefined
-                                }
-                                // Meta Lead Ads Tables only: manual
-                                // assignment goes through the audited
-                                // endpoint (write + history). Every
-                                // other column — and every Flow Table
-                                // — keeps the generic save path.
-                                saveAssignee={
-                                  isMetaTable && isAssigneeField(f)
-                                    ? async (raw) =>
-                                        manualAssignMetaLead(row.runId, raw)
-                                    : undefined
-                                }
-                              />
-                            </TableCell>
-                              {/* Generated Follow-up N Result cells
-                                  mirror the header positions above:
-                                  completed attempts show outcome +
-                                  preview, everything else an em dash. */}
-                              {(customIdx === customerResponseIdx ||
-                                (customerResponseIdx === -1 &&
-                                  customIdx === customFieldsOrdered.length - 1)) &&
-                                followupResultNumbers.map((n) => {
-                                  const value =
-                                    followupResultValues[row.runId]?.[String(n)];
-                                  return (
-                                    <TableCell
-                                      key={`followup-result:${n}`}
-                                      className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
-                                    >
-                                      <FollowupResultCell
-                                        outcome={value?.outcome ?? null}
-                                        resultText={value?.result_text ?? null}
-                                        completedAt={value?.completed_at ?? null}
-                                      />
-                                    </TableCell>
-                                  );
-                                })}
-                            </Fragment>
-                          ))}
-                        {/* No Customer Response and no custom columns at
-                            all: generated cells trail the row. */}
-                        {followupResultNumbers.length > 0 &&
-                          customFieldsOrdered.length === 0 &&
-                          followupResultNumbers.map((n) => {
-                            const value =
-                              followupResultValues[row.runId]?.[String(n)];
-                            return (
-                              <TableCell
-                                key={`followup-result:${n}`}
-                                className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
-                              >
-                                <FollowupResultCell
-                                  outcome={value?.outcome ?? null}
-                                  resultText={value?.result_text ?? null}
-                                  completedAt={value?.completed_at ?? null}
-                                />
-                              </TableCell>
-                            );
-                          })}
+                        {/* Same shared order as the header above:
+                            body cell #k resolves from the same entry
+                            as header #k (stable id, never position). */}
+                        {orderedColumns.map((entry) => renderBodyEntry(entry, row, rowIndex))}
                       </TableRow>
                     ))}
                   </TableBody>

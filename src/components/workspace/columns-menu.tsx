@@ -67,6 +67,8 @@ export function ColumnsMenu({
   onToggleVisibility,
   onShowAll,
   onReset,
+  onResetOrder,
+  resettingOrder,
   onEditField,
   onChanged,
   headerColors,
@@ -82,6 +84,14 @@ export function ColumnsMenu({
   onToggleVisibility: (id: string) => void;
   onShowAll: () => void;
   onReset: () => void;
+  /**
+   * Reset the per-user drag-and-drop column order to default.
+   * Omitted (viewers) hides the affordance — visibility reset is
+   * unaffected. Ordering-only: widths, colors, visibility, and
+   * values are never touched.
+   */
+  onResetOrder?: () => void;
+  resettingOrder?: boolean;
   onEditField: (field: WorkspaceField) => void;
   onChanged: () => void;
   /**
@@ -165,6 +175,8 @@ export function ColumnsMenu({
             onToggleVisibility={onToggleVisibility}
             onShowAll={onShowAll}
             onReset={onReset}
+            onResetOrder={onResetOrder}
+            resettingOrder={resettingOrder}
             onEditField={onEditField}
             onDeleteField={setDeleting}
             headerColors={headerColors}
@@ -263,6 +275,8 @@ function VisibilityPanel({
   onToggleVisibility,
   onShowAll,
   onReset,
+  onResetOrder,
+  resettingOrder,
   onEditField,
   onDeleteField,
   headerColors,
@@ -276,6 +290,14 @@ function VisibilityPanel({
   onToggleVisibility: (id: string) => void;
   onShowAll: () => void;
   onReset: () => void;
+  /**
+   * Reset the per-user drag-and-drop column order to default.
+   * Omitted (viewers) hides the affordance — visibility reset is
+   * unaffected. Ordering-only: widths, colors, visibility, and
+   * values are never touched.
+   */
+  onResetOrder?: () => void;
+  resettingOrder?: boolean;
   onEditField: (field: WorkspaceField) => void;
   onDeleteField: (field: WorkspaceField) => void;
   headerColors?: Record<string, string>;
@@ -396,6 +418,17 @@ function VisibilityPanel({
             Reset columns
           </button>
         </div>
+        {onResetOrder && (
+          <button
+            type="button"
+            onClick={onResetOrder}
+            disabled={resettingOrder}
+            className="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-ring mt-1 flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50"
+          >
+            <RotateCcw className="h-3 w-3" aria-hidden="true" />
+            {resettingOrder ? 'Resetting order…' : 'Reset column order'}
+          </button>
+        )}
       </div>
     </>
   );

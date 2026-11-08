@@ -31,36 +31,44 @@ describe("dynamic result column generation", () => {
     expect(pageSrc).toContain("followupResultCount");
     expect(pageSrc).toContain("payload?.followupResults");
     expect(pageSrc).toContain("followupResults.maxAttempt");
-    expect(pageSrc).toContain("followupResultNumbers");
-    expect(pageSrc).toContain("Array.from({ length: followupResultCount }");
+    // Entries resolve by attempt number within the table-wide max —
+    // the shared order model carries n, never a parallel array.
+    expect(pageSrc).toContain("n >= 1 && n <= followupResultCount");
+    expect(pageSrc).toContain("resultOrderId(");
   });
 
   it("labels headers exactly Follow-up N Result", () => {
-    expect(pageSrc).toContain("label: `Follow-up ${i + 1} Result`");
-    expect(pageSrc).toContain("{`Follow-up ${n} Result`}");
+    expect(pageSrc).toContain("`Follow-up ${entry.n} Result`");
   });
 
   it("inserts the block after Customer Response (tail fallback)", () => {
-    expect(pageSrc).toContain("customerResponseIdx");
+    // Default-order construction splices synthetics after the
+    // Customer Response anchor (tail when absent); the page passes
+    // the full-list anchor into the shared order model.
+    expect(pageSrc).toContain("fullCustomerResponseIdx");
     expect(pageSrc).toContain("customer response");
-    // Header order splice + body insertion share the anchor.
-    expect(pageSrc).toContain("customerResponseIdx + 1");
-    expect(pageSrc).toContain("customerResponseIdx === -1");
+    expect(pageSrc).toContain("customerResponseIdx:");
+    const libSrc = readFileSync(
+      `${root}/src/lib/flows/workspace-column-order.ts`,
+      "utf8",
+    );
+    expect(libSrc).toContain("customerResponseIdx + 1");
+    expect(libSrc).toContain("customerResponseIdx === -1");
   });
 
   it("keeps header paint positional across the inserted block", () => {
-    // Business columns after the anchor shift past the generated
-    // entries; the synthetic block paints from its own base — no
-    // slot reads past the backgrounds array end.
-    expect(pageSrc).toContain("customOrderAt(customIdx)");
-    expect(pageSrc).toContain("synthOrderBase");
-    expect(pageSrc).toContain("headStyleAt(synthOrderBase + k)");
+    // Every entry — synthetics included — paints from its own
+    // shared-order slot. No loop-local index math survives.
+    expect(pageSrc).toContain("headStyleAt(entry.paintIndex)");
+    expect(pageSrc).not.toContain("customOrderAt(");
+    expect(pageSrc).not.toContain("synthOrderBase");
+    expect(pageSrc).not.toContain("businessOrderBase");
   });
 
   it("renders result cells at the same positions in every body row", () => {
     expect(pageSrc).toContain("<FollowupResultCell");
-    expect(pageSrc).toContain("followupResultValues[row.runId]?.[String(n)]");
-    expect(pageSrc).toContain("followup-result:${n}");
+    expect(pageSrc).toContain("followupResultValues[row.runId]?.[String(entry.n)]");
+    expect(pageSrc).toContain("kind: 'result'");
   });
 
   it("stays out of the visibility/columns-menu systems", () => {

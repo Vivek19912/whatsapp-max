@@ -6,9 +6,13 @@ import { describe, expect, it } from "vitest";
 // (flow-derived) come from the table payload in derivation order;
 // Group 3 (business/workspace) renders Assigned To, Received,
 // Type, Stage first via orderBusinessColumns, then the rest in
-// stored order. These are page-wiring assertions (same
-// read-source pattern as the workspace scroll/grid tests):
-// derivation lives in lib, the page only chooses render order.
+// stored order. Since the shared-order refactor, ONE ordered id
+// list (orderedColumns) drives BOTH the header row and the body
+// rows: header cell #k and body cell #k always resolve from the
+// same stable-id entry, so render order can never diverge. These
+// are page-wiring assertions (same read-source pattern as the
+// workspace scroll/grid tests): derivation lives in lib, the page
+// only chooses render order.
 // ---------------------------------------------------------------------------
 
 const root = process.cwd();
@@ -17,67 +21,57 @@ const pageSrc = readFileSync(
   "utf8",
 );
 
-describe("Group 2 before Group 3 (flow columns render before business columns)", () => {
-  it("flow header cells render before business header cells", () => {
-    // Header cells paint positionally (headStyleAt) from
-    // visibleHeaderOrder; the flow mapping precedes the business
-    // spread in the returned order array, and the JSX header sites
-    // follow the same sequence (flow header block before business
-    // header block). Business entries are built into a local list
-    // first (so the synthetic Follow-up N Result entries splice in
-    // after Customer Response) — still spread strictly after flow.
-    const orderFlow = pageSrc.indexOf("...flowColumnsVisible.map((c) => ({");
-    const orderBusiness = pageSrc.indexOf("...business,");
-    expect(orderFlow).toBeGreaterThan(-1);
-    expect(orderBusiness).toBeGreaterThan(orderFlow);
-    const flowHead = pageSrc.indexOf("flowColumnsVisible.map((c, flowIdx) => {");
-    const businessHead = pageSrc.indexOf("customFieldsOrdered.map((f, customIdx) => (");
-    expect(flowHead).toBeGreaterThan(-1);
-    expect(businessHead).toBeGreaterThan(flowHead);
+describe("one shared order drives header and body (never divergent)", () => {
+  it("both grid loops iterate the same orderedColumns list", () => {
+    // Exactly two consumers: the header TableRow and the body
+    // TableRow. No loop iterates flow/custom arrays directly.
+    const consumers = pageSrc.split("orderedColumns.map((entry)").length - 1;
+    expect(consumers).toBe(2);
+    expect(pageSrc).not.toContain("flowColumnsVisible.map((c, flowIdx)");
+    expect(pageSrc).not.toContain("customFieldsOrdered.map((f, customIdx)");
+    expect(pageSrc).not.toContain("{flowColumnsVisible.map((c) => {");
   });
 
-  it("flow body cells render before business body cells", () => {
-    const flowBody = pageSrc.lastIndexOf("{flowColumnsVisible.map((c) => {");
-    const businessBody = pageSrc.lastIndexOf("customFieldsOrdered.map((f, customIdx) => (");
-    expect(flowBody).toBeGreaterThan(-1);
-    expect(businessBody).toBeGreaterThan(flowBody);
+  it("header and body resolve through entry renderers, not indexes", () => {
+    expect(pageSrc).toContain("renderHeaderEntry(entry)");
+    expect(pageSrc).toContain("renderBodyEntry(entry, row, rowIndex)");
+    // Paint positions come from the entry (shared with the body),
+    // never from loop-local arithmetic.
+    expect(pageSrc).toContain("headStyleAt(entry.paintIndex");
+    expect(pageSrc).not.toContain("customOrderAt(");
+    expect(pageSrc).not.toContain("synthOrderBase");
+    expect(pageSrc).not.toContain("businessOrderBase");
   });
 });
 
 describe("Group 3 pinned order (Assigned To, Received, Type, Stage)", () => {
-  it("the page derives a display-ordered business list from visibility output", () => {
-    expect(pageSrc).toContain("orderBusinessColumns(customFieldsVisible)");
-    expect(pageSrc).toContain("customFieldsOrdered");
+  it("the page derives a display-ordered business list from scoped fields", () => {
+    expect(pageSrc).toContain("orderBusinessColumns(customFieldsScoped)");
+    expect(pageSrc).toContain("allBusinessOrdered");
   });
 
-  it("header, body, and color order all use the ordered list (never divergent)", () => {
-    // visibleHeaderOrder builds business entries from the ordered
-    // list (object form), then splices the synthetic result
-    // entries in; header cells take a positional index, body cells
-    // the plain `(f) => (` form.
-    const plain = pageSrc.split("customFieldsOrdered.map((f) => ({").length - 1;
-    expect(plain).toBe(1);
-    expect(pageSrc).toContain("customFieldsOrdered.map((f, customIdx) => (");
-    expect(pageSrc).toContain("customFieldsOrdered.map((f) => (");
-    // No JSX table render still uses the stored-order list.
-    expect(pageSrc).not.toContain("{customFieldsVisible.map((f) => (");
+  it("default order keeps payload sequence with synthetics after Customer Response", () => {
+    expect(pageSrc).toContain("buildDefaultOrderIds({");
+    expect(pageSrc).toContain("customerResponseIdx");
+    // Saved orders merge onto the default; unknown ids drop, new
+    // ids append, pinned ids stay first.
+    expect(pageSrc).toContain("mergeColumnOrder({");
   });
 
-  it("visibility, widths, colors, and menu keep the stored-order identities", () => {
-    // Header colors resolve on the DISPLAY order
-    // (`customFieldsOrdered` business entries) so adjacent visible
-    // headers never share a background after the pinned business
-    // reorder; visibility/widths/menu still use stable stored
-    // identities.
-    expect(pageSrc).toContain("const business = customFieldsOrdered.map((f) => ({");
-    // Synthetic result entries join the same positional sequence
-    // right after Customer Response.
-    expect(pageSrc).toContain("business.splice(");
-    // The Columns menu reads the Meta-scoped list: Meta tables drop
-    // Lead Received (it duplicates the Source answer column) while
-    // Flow Tables pass the identical full-list reference through,
-    // so their menu is unchanged.
+  it("visibility, widths, colors, and menu keep the stored-order identities", () => {    // Header colors resolve on the DISPLAY order (orderedColumns
+    // entries) so adjacent visible headers never share a
+    // background after the pinned business reorder;
+    // visibility/widths/menu still use stable stored identities.
     expect(pageSrc).toContain("customFields={customFieldsScoped}");
     expect(pageSrc).toContain(": customFields,");
+    // Synthetic result entries join the same positional sequence
+    // right after Customer Response (identity IS the attempt number).
+    expect(pageSrc).toContain("resultOrderId(");
+    const libSrc = readFileSync(
+      `${root}/src/lib/flows/workspace-column-order.ts`,
+      "utf8",
+    );
+    expect(libSrc).toContain("RESULT_ORDER_PREFIX = 'followup-result:'");
+    expect(libSrc).toContain("resultOrderId(i + 1)");
   });
 });

@@ -38,18 +38,20 @@ describe("1. row actions column (narrow, first, writers only)", () => {
   it("adds a narrow actions header before the row-number column", () => {
     expect(pageSrc).toContain('aria-label="Row actions"');
     expect(pageSrc).toContain("w-12");
-    const actionsIdx = pageSrc.indexOf('aria-label="Row actions"');
-    // Row header paints positionally at index 0 of the rendered order.
-    const rowIdx = pageSrc.indexOf("headStyleAt(0)");
-    expect(actionsIdx).toBeGreaterThan(-1);
-    expect(rowIdx).toBeGreaterThan(-1);
-    expect(actionsIdx).toBeLessThan(rowIdx);
+    // The shared order model pins actions first, then No.: the
+    // default-order input and the resolved render branches both
+    // keep that leading position.
+    expect(pageSrc).toContain("ACTIONS_ORDER_ID");
+    expect(pageSrc).toContain("pinnedOrderIds");
+    expect(pageSrc).toContain("kind: 'actions'");
+    expect(pageSrc).toContain("headStyleAt(entry.paintIndex)");
   });
 
   it("gates the column on writers, like editing and resizing", () => {
-    const headIdx = pageSrc.indexOf('aria-label="Row actions"');
-    const gateIdx = pageSrc.lastIndexOf("canSendMessages && (", headIdx);
-    expect(gateIdx).toBeGreaterThan(-1);
+    // The actions entry resolves only for writers, inside the
+    // shared ordered-columns memo (never a separate header gate).
+    expect(pageSrc).toContain("if (canSendMessages)");
+    expect(pageSrc).toContain("kind: 'actions'");
     // The fixed actions column stays out of the width system.
     expect(pageSrc).not.toMatch(/columnWidthStyle\(.*ACTION/i);
   });

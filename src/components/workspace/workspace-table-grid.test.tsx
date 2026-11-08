@@ -226,9 +226,12 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
   it("column siblings use namespaced render keys (never bare display keys)", () => {
     // A flow answer may share its logical key with a system column
     // (e.g. var_key "name" beside system Name) — keying by c.key
-    // alone rendered duplicate React keys.
+    // alone rendered duplicate React keys. Header cells additionally
+    // key by the stable order entry id (flowOrderId IS the render
+    // key, so the sortable shell preserves the same uniqueness).
     const namespaced = pageSrc.split("key={flowColumnRenderKey(c)}").length - 1;
-    expect(namespaced).toBeGreaterThanOrEqual(3);
+    expect(namespaced).toBeGreaterThanOrEqual(2);
+    expect(pageSrc).toContain("key={entry.id}");
     expect(pageSrc).not.toContain("key={c.key}");
   });
 
@@ -269,12 +272,11 @@ describe("6/7/8/9. alignment, sticky borders, scroll, header intact", () => {
     // Vertical centering, background, sizing, and resizing come
     // from the untouched header path.
     expect(pageSrc).toContain("align-middle");
-    // Headers paint by rendered position (never by key lookup, so
-    // a system/flow key collision cannot share one slot); the
-    // business header passes its rendered index.
+    // Headers paint by shared order position (never by key lookup,
+    // so a system/flow key collision cannot share one slot); both
+    // loops resolve paint from the same entry's paintIndex.
     expect(pageSrc).toContain("headStyleAt(");
-    expect(pageSrc).toContain("flowColumnsVisible.length");
-    expect(pageSrc).toContain("customIdx");
+    expect(pageSrc).toContain("entry.paintIndex");
     expect(pageSrc).toContain("ColumnResizeHandle");
     // Body cells keep no centering: the wide body cap and the text
     // trigger stay left-aligned (including two-line truncation).

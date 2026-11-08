@@ -35,7 +35,7 @@ export const ROW_VIS_ID = 'core:row';
  * column stays in the payload (drawer badges, types, API) but is
  * not a table column and is not offered in the menu.
  */
-const DISPLAY_EXCLUDED_COLUMN_KEYS: ReadonlySet<string> = new Set(['status']);
+export const DISPLAY_EXCLUDED_COLUMN_KEYS: ReadonlySet<string> = new Set(['status']);
 
 export function flowColumnVisId(key: string): string {
   return `flow:${key}`;

@@ -153,6 +153,30 @@ describe("frozen No. and Name columns", () => {
     expect(pageSrc).toContain("sticky top-0 z-20 h-11");
   });
 
+  it("paints cell-owned vertical separators on all four frozen cells", () => {
+    // Collapsed table borders are grid-owned: a stuck cell cannot
+    // guarantee its own edge lines while opaque scrollers slide
+    // beneath. Each frozen cell therefore paints its own 1px
+    // ::before/::after lines in the border token — full cell
+    // height, zero layout effect, moving with the cell at every
+    // scroll position (either direction, any vertical offset).
+    expect(pageSrc).toContain("frozenEdgeRight");
+    expect(pageSrc).toContain("frozenEdgeLeft");
+    expect(pageSrc).toContain('after:bg-border after:content-[""]');
+    expect(pageSrc).toContain('before:bg-border before:content-[""]');
+    // No. owns both edges (left table edge + No.|Name boundary);
+    // Name owns its right edge (Name|scrollers boundary).
+    // Measurement refs wire through the sortable header shell's
+    // node callback (same TH, same freeze geometry — the shell
+    // only adds the grip handle and insertion bar).
+    const noHead = pageSrc.indexOf("noHeadRef.current = el");
+    expect(noHead).toBeGreaterThan(-1);
+    expect(pageSrc.slice(noHead, noHead + 1200)).toContain("frozenEdgeLeft");
+    expect(pageSrc).toContain("nameHeadRef.current = el");
+    expect(pageSrc).toContain("isNameCol && frozenEdgeRight");
+    expect(pageSrc).toContain("freezeName && frozenEdgeRight");
+  });
+
   it("pins Name after the measured No. width (never hardcoded)", () => {
     expect(pageSrc).toContain("left: nameLeft");
     expect(pageSrc).toContain("rowVisible ? metrics.noWidth : 0");
@@ -177,16 +201,20 @@ describe("frozen No. and Name columns", () => {
     expect(pageSrc).toContain("freezeName && freezeReady");
   });
 
-  it("paints every header from its own order slot (Dial helpers consume none)", () => {
-    // Dial THs render between flow THs but consume no
+  it("paints every header from its shared order slot (Dial helpers consume none)", () => {
+    // Dial THs render attached to their phone entry but consume no
     // visibleHeaderOrder/background slot (hardcoded geometry), so
-    // headers index by ORDER position — the same slot whose
-    // widthId the body cells resolve. Offsetting past Dials would
-    // shift later headers into the wrong slot and the tail past
-    // the array end (transparent, widthless headers that read as
-    // unfrozen next to their opaque frozen body cells).
+    // every header paints from its own entry.paintIndex — the same
+    // slot order the body resolves widths from. Separate
+    // loop-local index math would shift later headers into the
+    // wrong slot and the tail past the array end (transparent,
+    // widthless headers that read as unfrozen next to their opaque
+    // frozen body cells).
     expect(pageSrc).not.toContain("dialsBefore");
-    expect(pageSrc).toContain("const headerIdx = (rowVisible ? 1 : 0) + flowIdx;");
+    expect(pageSrc).not.toContain("headerIdx");
+    expect(pageSrc).not.toContain("customOrderAt(");
+    expect(pageSrc).not.toContain("synthOrderBase");
+    expect(pageSrc).toContain("headStyleAt(entry.paintIndex)");
   });
 
   it("keeps the frozen boundary on the existing cell dividers", () => {
