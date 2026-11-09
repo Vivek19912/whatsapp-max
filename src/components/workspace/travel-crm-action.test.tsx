@@ -240,6 +240,7 @@ describe("buildDialogInputs (missing fields + always Name/Phone)", () => {
       "departureCountry",
       "departureCity",
       "services",
+      "travelStartDate",
     ]);
     // Row-resolved enum seeds the Received select even though the
     // mapping marks it available; Type/Stage ride the canonical
@@ -249,6 +250,21 @@ describe("buildDialogInputs (missing fields + always Name/Phone)", () => {
     for (const f of ["leadType", "leadStage"] as const) {
       expect(inputs.find((i) => i.field === f)?.kind).toBe("select");
     }
+  });
+
+  it("Travel Date always renders as an optional field (never gated on missing)", () => {
+    // Even with nothing missing, the dialog offers Travel Date so
+    // the agent can optionally fill it. No required marker.
+    const inputs = buildDialogInputs(
+      { available: ["customerName"], missing: [], ambiguous: [], invalid: [], ready: true },
+      { assignedToEmail: "agent@acme.com" },
+      null,
+      null,
+    );
+    const date = inputs.find((i) => i.field === "travelStartDate");
+    expect(date).toBeDefined();
+    expect(date?.label).toBe("Travel Date");
+    expect(date?.label).not.toContain("*");
   });
 
   it("prefilled Lead Source renders selected (never the placeholder)", () => {
@@ -1282,17 +1298,17 @@ describe("Funnel row layout (Lead Source + Type + Stage side by side)", () => {
   });
 });
 
-describe("Travel Date required validation (Create Lead dialog)", () => {
-  // submit() blocks the create request with this inline error when the
-  // Travel Date input is rendered but empty; the same validator clears
-  // the error once a valid date is selected. Date format and payload
-  // mapping are untouched — presence only.
-  it("empty Travel Date yields the required error (blocks submit)", () => {
-    expect(validateTravelDateValue("")).toBe(TRAVEL_DATE_REQUIRED_ERROR);
-    expect(validateTravelDateValue("   ")).toBe(TRAVEL_DATE_REQUIRED_ERROR);
-    expect(validateTravelDateValue(undefined)).toBe(TRAVEL_DATE_REQUIRED_ERROR);
-    expect(validateTravelDateValue(null)).toBe(TRAVEL_DATE_REQUIRED_ERROR);
-    expect(validateTravelDateValue(42)).toBe(TRAVEL_DATE_REQUIRED_ERROR);
+describe("Travel Date optional validation (Create Lead dialog)", () => {
+  // Travel Date is optional (native Travel CRM parity): submit()
+  // never blocks on an empty date and no required-date error is
+  // shown. A provided date still passes validation unchanged, and
+  // the payload mapping is untouched.
+  it("empty Travel Date yields no error (submit flow continues)", () => {
+    expect(validateTravelDateValue("")).toBeNull();
+    expect(validateTravelDateValue("   ")).toBeNull();
+    expect(validateTravelDateValue(undefined)).toBeNull();
+    expect(validateTravelDateValue(null)).toBeNull();
+    expect(validateTravelDateValue(42)).toBeNull();
     expect(TRAVEL_DATE_REQUIRED_ERROR).toBe("Travel Date is required.");
   });
 
@@ -1301,10 +1317,10 @@ describe("Travel Date required validation (Create Lead dialog)", () => {
     expect(validateTravelDateValue(" 2026-12-01 ")).toBeNull();
   });
 
-  it("correcting an empty date removes the validation error", () => {
-    let error = validateTravelDateValue("");
-    expect(error).toBe(TRAVEL_DATE_REQUIRED_ERROR);
-    error = validateTravelDateValue("2026-12-01");
+  it("clearing an entered date keeps no validation error", () => {
+    let error = validateTravelDateValue("2026-12-01");
+    expect(error).toBeNull();
+    error = validateTravelDateValue("");
     expect(error).toBeNull();
   });
 });

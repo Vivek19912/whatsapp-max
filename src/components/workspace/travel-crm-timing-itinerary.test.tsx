@@ -38,7 +38,7 @@ const SRC = () =>
   );
 
 describe("travel timing modes", () => {
-  it("Exact Date keeps the existing presence validation and payload shape", () => {
+  it("Exact Date keeps its payload shape; empty dates pass (optional)", () => {
     expect(
       validateTravelTiming({
         mode: "exact",
@@ -54,7 +54,7 @@ describe("travel timing modes", () => {
         travelMonth: "",
         travelYear: "",
       }),
-    ).toBe(TRAVEL_DATE_REQUIRED_ERROR);
+    ).toBeNull();
     expect(
       buildTravelTimingPayload({
         mode: "exact",
@@ -135,15 +135,34 @@ describe("travel timing modes", () => {
 });
 
 describe("travel timing validation", () => {
-  it("month and year are validated together", () => {
+  it("blank timing in either mode validates clean (optional date)", () => {
+    // Neither an empty exact date nor an empty month selection
+    // blocks submit — the lead is created with a null date and
+    // nothing is invented.
+    expect(
+      validateTravelTiming({ mode: "exact", travelStartDate: "", travelMonth: "", travelYear: "" }),
+    ).toBeNull();
+    expect(
+      validateTravelTiming({ mode: "month", travelStartDate: "", travelMonth: "", travelYear: "" }),
+    ).toBeNull();
+    // Month-blank with only the auto-selected year is still blank.
+    expect(
+      validateTravelTiming({
+        mode: "month",
+        travelStartDate: "",
+        travelMonth: "",
+        travelYear: String(currentTravelYear()),
+      }),
+    ).toBeNull();
+  });
+
+  it("month and year are validated together; blank timing passes (optional)", () => {
     const base = { mode: "month" as const, travelStartDate: "" };
-    expect(validateTravelTiming({ ...base, travelMonth: "", travelYear: "" })).toBe(
-      "Select a travel month and year.",
-    );
+    // Fully blank (and month-blank with only the auto-selected
+    // year) means "no timing" — valid, nothing is sent.
+    expect(validateTravelTiming({ ...base, travelMonth: "", travelYear: "" })).toBeNull();
+    expect(validateTravelTiming({ ...base, travelMonth: "", travelYear: "2027" })).toBeNull();
     expect(validateTravelTiming({ ...base, travelMonth: "5", travelYear: "" })).toBe(
-      "Select both a travel month and year.",
-    );
-    expect(validateTravelTiming({ ...base, travelMonth: "", travelYear: "2027" })).toBe(
       "Select both a travel month and year.",
     );
     expect(validateTravelTiming({ ...base, travelMonth: "5", travelYear: "2027" })).toBeNull();

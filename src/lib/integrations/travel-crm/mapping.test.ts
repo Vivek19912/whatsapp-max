@@ -300,6 +300,22 @@ describe("missing / ambiguous / invalid classification", () => {
     expect(noAdults.missing).toContain("adults");
   });
 
+  it("travel date is optional: never missing, never blocks readiness", () => {
+    // Travel Date is optional in Travel CRM (native parity): an
+    // absent date must not appear in missing[] and must not gate
+    // readiness. Provided dates still map normally (covered by
+    // "maps travel date and normalizes to ISO").
+    const noDate = mapLeadToTravelCrm(
+      { ...full(), answers: full().answers.filter((a) => a.key !== "travel_date") },
+      "agent@acme.com",
+    );
+    expect(noDate.missing).not.toContain("travelStartDate");
+    expect(noDate.fields.travelStartDate).toMatchObject({ status: "missing" });
+    expect(noDate.draft.travelStartDate).toBeNull();
+    expect(noDate.draft.travelMonth).toBeNull();
+    expect(noDate.draft.travelYear).toBeNull();
+  });
+
   it("required list covers the Travel CRM contract", () => {
     expect([...TRAVEL_CRM_REQUIRED_FIELDS].sort()).toEqual(
       [
@@ -309,7 +325,6 @@ describe("missing / ambiguous / invalid classification", () => {
         "leadType",
         "leadStage",
         "assignedToEmail",
-        "travelStartDate",
         "adults",
         "services",
         "itinerary",

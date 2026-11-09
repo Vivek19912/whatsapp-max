@@ -206,17 +206,21 @@ function isWholeNumber(text: string): boolean {
   return /^\d+$/.test(text.trim());
 }
 
-/** Inline validation message for an empty Travel Date. */
+/** Inline validation message for an empty Travel Date (legacy export;
+ * kept for compatibility — empty dates no longer error since Travel
+ * Date is optional in Travel CRM). */
 export const TRAVEL_DATE_REQUIRED_ERROR = "Travel Date is required.";
 
 /**
- * Validate the Travel Date value before Create. Returns
- * TRAVEL_DATE_REQUIRED_ERROR when empty/blank, null when a value is
- * present. Date format/payload mapping is untouched — presence only.
+ * Validate the Travel Date value before Create. Travel Date is
+ * OPTIONAL (native Travel CRM parity): empty/blank always passes
+ * (null), and a provided value passes as-is — the date input
+ * constrains format and the server re-validates authoritatively.
+ * Never invents or substitutes a date.
  */
 export function validateTravelDateValue(value: unknown): string | null {
-  const text = typeof value === "string" ? value.trim() : "";
-  return text ? null : TRAVEL_DATE_REQUIRED_ERROR;
+  void value;
+  return null;
 }
 
 /** Travel-timing mode for the creation dialog (mirrors native Travel CRM). */
@@ -273,16 +277,21 @@ export interface TravelTimingSelection {
 
 /**
  * Validate the active travel-timing selection before Create.
- * Exact mode keeps the existing presence-only date behavior;
- * Month mode requires a complete, in-range month/year pair and
- * never invents a day. Returns a message or null when valid.
+ * Travel timing is OPTIONAL (native Travel CRM parity): a fully
+ * blank selection (no date, no month) passes so the lead can be
+ * created without any travel date — nothing is invented. A lone
+ * month with no year is treated as blank (the year auto-selects
+ * on mode entry, so it cannot imply intent); a month with an
+ * explicitly cleared year still errors as an incomplete pair.
+ * Complete pairs keep the existing in-range validation.
+ * Returns a message or null when valid.
  */
 export function validateTravelTiming(sel: TravelTimingSelection): string | null {
   if (sel.mode === "month") {
     const monthText = sel.travelMonth.trim();
     const yearText = sel.travelYear.trim();
-    if (!monthText && !yearText) return "Select a travel month and year.";
-    if (!monthText || !yearText) return "Select both a travel month and year.";
+    if (!monthText) return null;
+    if (!yearText) return "Select both a travel month and year.";
     if (!/^\d+$/.test(monthText)) return "Travel month must be between 1 and 12.";
     const month = Number(monthText);
     if (!Number.isSafeInteger(month) || month < TRAVEL_MONTH_MIN || month > TRAVEL_MONTH_MAX) {
@@ -737,6 +746,14 @@ export function buildDialogInputs(
   // payload only; saved Settings are never modified here.
   wanted.add("departureCountry");
   wanted.add("departureCity");
+  // Travel Date always renders as the Exact Date / Month selector
+  // prefilled from the server prefill — never gated on the mapping
+  // flagging it missing, so the field stays available to fill
+  // optionally. The date itself is optional (never required for
+  // creation): blank stays blank and rides the payload as null.
+  // Provided dates/months keep their existing selection, validation
+  // (when picked), and payload behavior.
+  wanted.add("travelStartDate");
   // Services multi-select always renders every supported service
   // option (the six TRAVEL_CRM_SERVICE_LABELS) as independently
   // selectable checkboxes — never filtered by the per-flow Settings
@@ -1778,8 +1795,9 @@ export function DepartureSearchSelect({
 /**
  * Exact Date / Month travel-timing selector for the creation
  * dialog (mirrors native Travel CRM: exactly one mode active).
- * Exact renders the existing date input unchanged (same format +
- * presence validation); Month renders month (January–December)
+ * Exact renders the existing date input unchanged (same format;
+ * empty allowed — Travel Date is optional); Month renders month
+ * (January–December)
  * and year dropdowns following the native year range/default, and
  * never invents a day. Mode switches clear the inactive
  * representation via selectTravelTiming; the inline error covers
@@ -2065,9 +2083,10 @@ export function TravelCrmAction({
   async function submit() {
     const inputs = dialogInputs();
     const showTiming = inputs.some((i) => i.field === "travelStartDate");
-    // Travel timing is required when shown: validate the ACTIVE mode
+    // Travel timing is OPTIONAL when shown: validate the ACTIVE mode
     // (dialog stays open) with an inline field error instead of
-    // sending. Untouched when the timing field isn't rendered.
+    // sending. A fully blank selection passes — the lead is created
+    // with a null date. Untouched when the timing field isn't rendered.
     if (showTiming) {
       const timingError = validateTravelTiming({
         mode: travelTiming,
@@ -2095,22 +2114,30 @@ export function TravelCrmAction({
     }
     // Month mode sends numeric travelMonth/travelYear (never an
     // exact date — values.travelStartDate was cleared on switch, and
-    // any stale value is deleted defensively below). Only applies
+    // any stale value is deleted defensively below) — but ONLY when
+    // a month is actually picked. A blank month means "no timing":
+    // nothing is sent and no day is invented. Only applies
     // when the timing field is rendered (the only way Month mode
     // can be active). Exact mode keeps sending travelStartDate via
-    // the generic loop above.
+    // the generic loop above (empty stays omitted).
     if (showTiming && travelTiming === "month") {
-      const timing = buildTravelTimingPayload({
-        mode: "month",
-        travelStartDate: "",
-        travelMonth,
-        travelYear,
-      });
-      if (timing.mode === "month") {
-        overrides.travelMonth = timing.travelMonth;
-        overrides.travelYear = timing.travelYear;
-      }
+      // A stale exact date can never ride alongside Month mode.
       delete overrides.travelStartDate;
+      if (travelMonth.trim() === "") {
+        // Blank month means "no timing": nothing is sent and no day
+        // is invented (validation already passed it as blank).
+      } else {
+        const timing = buildTravelTimingPayload({
+          mode: "month",
+          travelStartDate: "",
+          travelMonth,
+          travelYear,
+        });
+        if (timing.mode === "month") {
+          overrides.travelMonth = timing.travelMonth;
+          overrides.travelYear = timing.travelYear;
+        }
+      }
     }
     // Phone: the input shows the display form (Indian +91 stripped
     // for readability). Untouched values restore the exact stored

@@ -368,7 +368,7 @@ describe("Lead Source answers resolve to Travel CRM options", () => {
 
   it("stored bare Facebook prefills the dialog (no Select Lead Source placeholder)", async () => {
     const incomplete: Record<string, unknown> = { ...COMPLETE_VARS };
-    delete incomplete.travel_date;
+    delete incomplete.service;
     seed(incomplete);
     // No source answer, no ad signal — only the row's stored Source.
     setRowValues(null, null, "Facebook");
@@ -459,7 +459,7 @@ describe("Meta Source column end to end (reported bug shape)", () => {
 
   it("dialog preselects the Meta Source value and Create sends it", async () => {
     const incomplete: Record<string, unknown> = { ...COMPLETE_VARS };
-    delete incomplete.travel_date;
+    delete incomplete.service;
     seed(incomplete);
     withMetaSource("Facebook");
     setRowValues(null, null, null);
@@ -489,6 +489,7 @@ describe("Meta Source column end to end (reported bug shape)", () => {
           leadSource: prefill.prefill.leadSource,
           leadType: "FRESH",
           leadStage: "NEW_LEAD",
+          services: "Flight",
         },
       }),
     );
@@ -523,7 +524,7 @@ describe("Meta Source column end to end (reported bug shape)", () => {
 describe("Lead Source dialog prefill and Create", () => {
   it("the dialog offers exactly the 12 Travel CRM options", async () => {
     const incomplete: Record<string, unknown> = { ...COMPLETE_VARS };
-    delete incomplete.travel_date;
+    delete incomplete.service;
     seed(incomplete);
     withSourceAnswer("Facebook");
     setRowValues(null, null, null);
@@ -568,7 +569,7 @@ describe("Lead Source dialog prefill and Create", () => {
 
   it("the dialog-confirmed source is sent when Create is clicked", async () => {
     const incomplete: Record<string, unknown> = { ...COMPLETE_VARS };
-    delete incomplete.travel_date;
+    delete incomplete.service;
     seed(incomplete);
     withSourceAnswer("Facebook");
     setRowValues(null, null, null);
@@ -587,6 +588,7 @@ describe("Lead Source dialog prefill and Create", () => {
           leadSource: prefill.leadSource,
           leadType: "FRESH",
           leadStage: "NEW_LEAD",
+          services: "Flight",
         },
       }),
     );

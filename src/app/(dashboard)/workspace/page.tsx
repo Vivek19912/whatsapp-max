@@ -113,8 +113,6 @@ import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
-import { RecordFollowupResultDialog } from '@/components/workspace/record-followup-result-dialog';
-import { FollowupHistoryDialog } from '@/components/workspace/followup-history-dialog';
 import { isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
 
 /**
@@ -142,8 +140,6 @@ import {
   dialOrderId,
   flowOrderId,
   mergeColumnOrder,
-  resultOrderId,
-  RESULT_ORDER_PREFIX,
   useWorkspaceColumnOrder,
   type ColumnOrderEntry,
 } from '@/lib/flows/workspace-column-order';
@@ -375,64 +371,6 @@ export function cellText(row: FlowTableRow, column: FlowTableColumn): string {
     }
   }
   return row.answers[column.key] ?? '';
-}
-
-/**
- * Read-only Follow-up N Result cell: outcome badge, the actual
- * result-recording timestamp (completed_at, viewer-local), and a
- * two-line result preview (full text on hover via title; complete
- * record in Follow-up History). Completed attempts carry an
- * outcome; unresolved or absent attempts render a clean em dash —
- * never an invented result, never the scheduled time. Stored text
- * is never truncated, only painted.
- */
-export function FollowupResultCell({
-  outcome,
-  resultText,
-  completedAt,
-}: {
-  outcome: string | null;
-  resultText: string | null;
-  completedAt: string | null;
-}) {
-  // Unresolved or absent attempts: clean em dash. A completed
-  // attempt WITHOUT an outcome still shows its timestamp + text
-  // (no badge, never an invented outcome).
-  if (!outcome && !completedAt) {
-    return <span className="text-muted-foreground">—</span>;
-  }
-  const completed = completedAt ? new Date(completedAt) : null;
-  const completedLabel =
-    completed && !Number.isNaN(completed.getTime())
-      ? `${completed.toLocaleDateString(undefined, {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        })} · ${completed.toLocaleTimeString(undefined, {
-          hour: "numeric",
-          minute: "2-digit",
-        })}`
-      : null;
-  return (
-    <span
-      className="grid max-w-56 gap-1"
-      title={resultText ? `${resultText}${completedLabel ? `\nRecorded ${completedLabel}` : ""}` : (outcome ?? undefined)}
-    >
-      <Badge variant="outline" className="w-fit text-xs font-normal">
-        {outcome}
-      </Badge>
-      {completedLabel && (
-        <span className="text-xs text-muted-foreground tabular-nums">
-          {completedLabel}
-        </span>
-      )}
-      {resultText && (
-        <span className="line-clamp-2 text-[13px] break-words whitespace-normal">
-          {resultText}
-        </span>
-      )}
-    </span>
-  );
 }
 
 /**
@@ -1338,102 +1276,29 @@ export default function WorkspacePage() {
     name: string | null;
     phone: string | null;
     initialValue: string | null;
-    attemptNumber: number;
-    rescheduleAttemptId: string | null;
   } | null>(null);
-  // Record-result modal for a due attempt, and the per-lead
-  // follow-up history timeline. Opened from the row actions menu,
-  // from history's contextual actions, or routed from the
-  // follow-up cell when an attempt is already open.
-  const [recordModal, setRecordModal] = useState<{
-    runId: string;
-    attemptId: string;
-    attemptNumber: number;
-    name: string | null;
-    scheduledAt: string;
-  } | null>(null);
-  const [historyModal, setHistoryModal] = useState<{
-    runId: string;
-    name: string | null;
-    phone: string | null;
-  } | null>(null);
-  const [historyRefreshSeq, setHistoryRefreshSeq] = useState(0);
 
-  // Follow-up cell entry point: fetch the lead's sequential state
-  // first, then route — due attempt → record result, scheduled →
-  // history, otherwise schedule the next number. Server remains the
-  // authority on save; this only picks the right dialog. Falls back
-  // to the legacy schedule-first dialog when the fetch fails.
+  // Follow-up cell entry point (simple workflow): open the
+  // schedule dialog directly with the row's identity, column, and
+  // current value. No attempt lookup, no result gating — the
+  // salesperson can always schedule, edit, or clear.
   const openFollowupForRow = useCallback(
-    async (row: {
-      runId: string;
-      name: string | null;
-      phone: string | null;
-    }, fieldId: string, initialValue: string | null) => {
+    (
+      row: {
+        runId: string;
+        name: string | null;
+        phone: string | null;
+      },
+      fieldId: string,
+      initialValue: string | null
+    ) => {
       if (!flowId) return;
-      try {
-        const res = await fetch(
-          `/api/flows/${flowId}/sales-followups?flow_run_id=${encodeURIComponent(row.runId)}`,
-          { cache: 'no-store' },
-        );
-        const json = (await res.json().catch(() => null)) as {
-          attempts?: Array<{
-            id: string;
-            attempt_number: number;
-            scheduled_at: string;
-            completed_at: string | null;
-          }>;
-          closure?: { id: string } | null;
-          state?: {
-            kind: string;
-            activeAttempt?: {
-              id: string;
-              attempt_number: number;
-              scheduled_at: string;
-              completed_at: string | null;
-            } | null;
-            nextAttemptNumber?: number;
-          };
-        } | null;
-        if (res.ok && json?.state) {
-          const kind = json.state.kind;
-          const active = json.state.activeAttempt ?? null;
-          if (active && kind === 'result_required') {
-            setRecordModal({
-              runId: row.runId,
-              attemptId: active.id,
-              attemptNumber: active.attempt_number,
-              name: row.name,
-              scheduledAt: active.scheduled_at,
-            });
-            return;
-          }
-          if (kind === 'scheduled' || kind === 'closed') {
-            setHistoryModal({ runId: row.runId, name: row.name, phone: null });
-            return;
-          }
-          setScheduleModal({
-            runId: row.runId,
-            fieldId,
-            name: row.name,
-            phone: row.phone,
-            initialValue,
-            attemptNumber: json.state.nextAttemptNumber ?? 1,
-            rescheduleAttemptId: null,
-          });
-          return;
-        }
-      } catch {
-        // Fall through to the legacy schedule dialog below.
-      }
       setScheduleModal({
         runId: row.runId,
         fieldId,
         name: row.name,
         phone: row.phone,
         initialValue,
-        attemptNumber: 1,
-        rescheduleAttemptId: null,
       });
     },
     [flowId]
@@ -1602,19 +1467,6 @@ export default function WorkspacePage() {
   // paint from values. Now one ordered id list drives both loops;
   // every entry resolves by stable id (never array index, label,
   // or screen position).
-  //
-  // Sequential sales follow-up results ride along as synthetic
-  // `followup-result:N` entries: they render immediately after the
-  // Customer Response column (or at the end of the business
-  // columns when it is absent), paint from the same positional
-  // sequence, and resolve widths like any column without a saved
-  // width. They never enter the visibility or Columns-menu
-  // systems — display-only, read-only, derived from
-  // sales_followup_attempts.
-  const followupResultCount =
-    payload?.followupResults && payload.followupResults.maxAttempt > 0
-      ? payload.followupResults.maxAttempt
-      : 0;
   // FULL (visibility-independent) order inputs: hiding a column
   // must never move its default slot, so unhiding restores it.
   const allFlowColumns = useMemo(
@@ -1625,9 +1477,6 @@ export default function WorkspacePage() {
     () => orderBusinessColumns(customFieldsScoped),
     [customFieldsScoped]
   );
-  const fullCustomerResponseIdx = allBusinessOrdered.findIndex(
-    (f) => f.name.trim().toLowerCase() === 'customer response'
-  );
   const fullDefaultIds = useMemo(
     () =>
       buildDefaultOrderIds({
@@ -1635,10 +1484,8 @@ export default function WorkspacePage() {
         includeRow: rowVisible,
         flowColumns: allFlowColumns,
         customIds: allBusinessOrdered.map((f) => customFieldVisId(f.id)),
-        customerResponseIdx: fullCustomerResponseIdx,
-        resultCount: followupResultCount,
       }),
-    [canSendMessages, rowVisible, allFlowColumns, allBusinessOrdered, fullCustomerResponseIdx, followupResultCount]
+    [canSendMessages, rowVisible, allFlowColumns, allBusinessOrdered]
   );
   // Pinned first, always: row actions, No., then Name (when the
   // flow carries a system Name column). Identity-based — a
@@ -1718,13 +1565,6 @@ export default function WorkspacePage() {
         if (rowVisible) out.push({ id, kind: 'row', paintIndex: paint++ });
         continue;
       }
-      if (id.startsWith(RESULT_ORDER_PREFIX)) {
-        const n = Number(id.slice(RESULT_ORDER_PREFIX.length));
-        if (Number.isInteger(n) && n >= 1 && n <= followupResultCount) {
-          out.push({ id, kind: 'result', n, paintIndex: paint++ });
-        }
-        continue;
-      }
       const col = flowsById.get(id);
       if (col) {
         if (hidden.has(flowColumnVisId(col.key))) continue;
@@ -1752,7 +1592,6 @@ export default function WorkspacePage() {
     allBusinessOrdered,
     canSendMessages,
     rowVisible,
-    followupResultCount,
     visibility.hiddenIds,
   ]);
   const visibleHeaderOrder = useMemo(
@@ -1778,13 +1617,6 @@ export default function WorkspacePage() {
               label: e.col.label,
               widthId: flowColumnVisId(e.col.key),
               fallbackIds: [flowColumnVisId(e.col.key)],
-            };
-          }
-          if (e.kind === 'result') {
-            return {
-              visId: resultOrderId(e.n ?? 0),
-              label: `Follow-up ${e.n ?? 0} Result`,
-              widthId: resultOrderId(e.n ?? 0),
             };
           }
           return { visId: ROW_VIS_ID, label: 'Row', widthId: ROW_VIS_ID };
@@ -1849,10 +1681,6 @@ export default function WorkspacePage() {
     },
     [visibleHeaderOrder, headerBackgrounds, effectiveColumnWidths]
   );
-
-  // Attempt results for this page's rows, keyed by run id then
-  // attempt number (strings — JSON object keys).
-  const followupResultValues = payload?.followupResults?.values ?? {};
 
   // Shared header/body renderers: BOTH grid loops below iterate
   // orderedColumns, so header cell #k and body cell #k always come
@@ -1972,22 +1800,6 @@ export default function WorkspacePage() {
               }
             />
           )}
-        </SortableWorkspaceHeaderCell>
-      );
-    }
-    if (entry.kind === 'result') {
-      const resultLabel = `Follow-up ${entry.n} Result`;
-      return (
-        <SortableWorkspaceHeaderCell
-          key={entry.id}
-          id={entry.id}
-          label={resultLabel}
-          disabled={dragDisabled}
-          className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
-          style={headStyleAt(entry.paintIndex)}
-          showInsertionBar={insertionFor(entry.id)}
-        >
-          {resultLabel}
         </SortableWorkspaceHeaderCell>
       );
     }
@@ -2145,16 +1957,6 @@ export default function WorkspacePage() {
             pending={rowActionPending.has(row.runId)}
             onTogglePin={() => handleTogglePin(row.runId)}
             onHide={() => handleHideRow(row.runId)}
-            onOpenFollowups={
-              isMetaTable
-                ? () =>
-                    setHistoryModal({
-                      runId: row.runId,
-                      name: row.name ?? null,
-                      phone: row.phone ?? null,
-                    })
-                : undefined
-            }
           />
         </TableCell>
       );
@@ -2196,23 +1998,9 @@ export default function WorkspacePage() {
         </TableCell>
       );
     }
-    if (entry.kind === 'result') {
-      const value = followupResultValues[row.runId]?.[String(entry.n)];
-      return (
-        <TableCell
-          key={entry.id}
-          className="overflow-hidden border-r border-border px-2.5 py-1.5 align-middle last:border-r-0"
-        >
-          <FollowupResultCell
-            outcome={value?.outcome ?? null}
-            resultText={value?.result_text ?? null}
-            completedAt={value?.completed_at ?? null}
-          />
-        </TableCell>
-      );
-    }
     if (entry.kind === 'custom') {
       const f = entry.field;
+      // Body custom cells render only with a selected flow (the
       // Body custom cells render only with a selected flow (the
       // header still paints — same asymmetry as before the shared
       // order refactor).
@@ -2271,15 +2059,15 @@ export default function WorkspacePage() {
             members={teamMembers}
             twoLineClamp={isWideTextColumnName(f.name)}
             // Meta Lead Ads Tables only: clicking the
-            // follow-up cell routes through the lead's
-            // sequential state (record due result,
-            // history, or schedule next). Every other
-            // column — and every Flow Table — keeps
-            // the existing inline editing.
+            // follow-up cell opens the Schedule Follow-up
+            // dialog directly with the row's lead details
+            // and current value. Every other column — and
+            // every Flow Table — keeps the existing inline
+            // editing.
             onEditIntercept={
               isMetaTable && followupFieldId !== null && f.id === followupFieldId
                 ? () =>
-                    void openFollowupForRow(
+                    openFollowupForRow(
                       row,
                       f.id,
                       overridesForRequest[row.runId]?.[f.id] ??
@@ -3045,8 +2833,6 @@ export default function WorkspacePage() {
                           );
                           if (!active) return activeColumnId;
                           if (active.kind === 'row') return 'No.';
-                          if (active.kind === 'result')
-                            return `Follow-up ${active.n} Result`;
                           if (active.kind === 'custom')
                             return formatColumnLabel(active.field.name);
                           if (active.kind === 'flow')
@@ -3346,106 +3132,7 @@ export default function WorkspacePage() {
           leadName={scheduleModal.name}
           leadPhone={scheduleModal.phone}
           initialValue={scheduleModal.initialValue}
-          attemptNumber={scheduleModal.attemptNumber}
-          rescheduleAttemptId={scheduleModal.rescheduleAttemptId}
           onSaved={reloadTable}
-        />
-      )}
-      {/* Mandatory result entry for a due attempt. */}
-      {recordModal !== null && flowId !== null && (
-        <RecordFollowupResultDialog
-          open={recordModal !== null}
-          onOpenChange={(v) => {
-            if (!v) setRecordModal(null);
-          }}
-          flowId={flowId}
-          runId={recordModal.runId}
-          attemptId={recordModal.attemptId}
-          attemptNumber={recordModal.attemptNumber}
-          leadName={recordModal.name}
-          scheduledAt={recordModal.scheduledAt}
-          onSaved={() => {
-            reloadTable();
-            setHistoryRefreshSeq((n) => n + 1);
-          }}
-        />
-      )}
-      {/* Unlimited per-lead attempt timeline with contextual actions. */}
-      {historyModal !== null && flowId !== null && (
-        <FollowupHistoryDialog
-          open={historyModal !== null}
-          onOpenChange={(v) => {
-            if (!v) setHistoryModal(null);
-          }}
-          flowId={flowId}
-          runId={historyModal.runId}
-          leadName={historyModal.name}
-          refreshSeq={historyRefreshSeq}
-          onRecordResult={(attempt) => {
-            setHistoryModal(null);
-            setRecordModal({
-              runId: historyModal.runId,
-              attemptId: attempt.id,
-              attemptNumber: attempt.attempt_number,
-              name: historyModal.name,
-              scheduledAt: attempt.scheduled_at,
-            });
-          }}
-          onScheduleNext={() => {
-            const runId = historyModal.runId;
-            const name = historyModal.name;
-            const phone = historyModal.phone;
-            setHistoryModal(null);
-            void (async () => {
-              try {
-                const res = await fetch(
-                  `/api/flows/${flowId}/sales-followups?flow_run_id=${encodeURIComponent(runId)}`,
-                  { cache: 'no-store' },
-                );
-                const json = (await res.json().catch(() => null)) as {
-                  state?: { nextAttemptNumber?: number };
-                } | null;
-                const nextNumber =
-                  res.ok && typeof json?.state?.nextAttemptNumber === 'number'
-                    ? json.state.nextAttemptNumber
-                    : 1;
-                setScheduleModal({
-                  runId,
-                  fieldId: followupFieldId ?? '',
-                  name,
-                  phone,
-                  initialValue: null,
-                  attemptNumber: nextNumber,
-                  rescheduleAttemptId: null,
-                });
-              } catch {
-                setScheduleModal({
-                  runId,
-                  fieldId: followupFieldId ?? '',
-                  name,
-                  phone,
-                  initialValue: null,
-                  attemptNumber: 1,
-                  rescheduleAttemptId: null,
-                });
-              }
-            })();
-          }}
-          onEditSchedule={(attempt) => {
-            // Reschedule mode: the dialog prefills from the saved
-            // instant (never the tomorrow/1:30 PM defaults) and
-            // PATCHes the same attempt in place.
-            setHistoryModal(null);
-            setScheduleModal({
-              runId: historyModal.runId,
-              fieldId: followupFieldId ?? '',
-              name: historyModal.name,
-              phone: historyModal.phone,
-              initialValue: attempt.scheduled_at,
-              attemptNumber: attempt.attempt_number,
-              rescheduleAttemptId: attempt.id,
-            });
-          }}
         />
       )}
     </div>

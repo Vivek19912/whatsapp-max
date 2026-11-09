@@ -15,7 +15,10 @@
 //   No.          → `core:row` (ROW_VIS_ID, reused)
 //   flow column  → flowColumnRenderKey(c) (`sys:<key>|flow:<key>`)
 //   custom field → customFieldVisId(f.id) (`custom:<uuid>`)
-//   result N     → `followup-result:<N>` (attempt number identity)
+// Saved preferences holding retired ids (e.g. the removed
+// sequential `followup-result:N` columns) are safely ignored by
+// mergeColumnOrder: unknown ids drop, the rest of the saved
+// arrangement is preserved — preferences are never reset.
 // Dial helpers are attached to their phone entry (never
 // independent order entries): moving Phone moves Dial with it.
 // `dialOrderId()` derives their stable React keys + test identity.
@@ -30,17 +33,9 @@ import { ROW_VIS_ID } from './workspace-visibility';
 /** Structural leading column (writers only). Never draggable. */
 export const ACTIONS_ORDER_ID = 'core:actions';
 
-/** Prefix for generated Follow-up N Result column ids. */
-export const RESULT_ORDER_PREFIX = 'followup-result:';
-
 /** Order id for a flow column (stable, unique per render key). */
 export function flowOrderId(column: Pick<FlowTableColumn, 'key' | 'system'>): string {
   return flowColumnRenderKey(column);
-}
-
-/** Order id for attempt N's result column (identity IS the number). */
-export function resultOrderId(n: number): string {
-  return `${RESULT_ORDER_PREFIX}${n}`;
 }
 
 /**
@@ -76,16 +71,13 @@ export type ColumnOrderEntry =
       dialAfter: boolean;
       paintIndex: number;
     }
-  | { id: string; kind: 'custom'; field: WorkspaceField; paintIndex: number }
-  | { id: string; kind: 'result'; n: number; paintIndex: number };
+  | { id: string; kind: 'custom'; field: WorkspaceField; paintIndex: number };
 
 /**
  * Canonical DEFAULT order (today's exact sequence): actions, No.,
- * flow columns in payload order, then business columns with the
- * Follow-up N Result block spliced after Customer Response (or at
- * the business tail when it is absent). Inputs are FULL
- * (visibility-independent) lists so hiding/unhiding never moves a
- * column's default slot.
+ * flow columns in payload order, then business columns.
+ * Inputs are FULL (visibility-independent) lists so
+ * hiding/unhiding never moves a column's default slot.
  */
 export function buildDefaultOrderIds(args: {
   includeActions: boolean;
@@ -93,27 +85,12 @@ export function buildDefaultOrderIds(args: {
   flowColumns: FlowTableColumn[];
   /** Business-ordered custom visIds (FULL list, hidden included). */
   customIds: string[];
-  /** Customer Response index within customIds (-1 when absent). */
-  customerResponseIdx: number;
-  resultCount: number;
 }): string[] {
   const ids: string[] = [];
   if (args.includeActions) ids.push(ACTIONS_ORDER_ID);
   if (args.includeRow) ids.push(ROW_VIS_ID);
   for (const c of args.flowColumns) ids.push(flowOrderId(c));
-  const customs = [...args.customIds];
-  if (args.resultCount > 0) {
-    const synthetic = Array.from(
-      { length: args.resultCount },
-      (_, i) => resultOrderId(i + 1)
-    );
-    const at =
-      args.customerResponseIdx === -1
-        ? customs.length
-        : args.customerResponseIdx + 1;
-    customs.splice(at, 0, ...synthetic);
-  }
-  ids.push(...customs);
+  ids.push(...args.customIds);
   return ids;
 }
 

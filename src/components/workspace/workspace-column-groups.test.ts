@@ -50,12 +50,16 @@ describe("Group 3 pinned order (Assigned To, Received, Type, Stage)", () => {
     expect(pageSrc).toContain("allBusinessOrdered");
   });
 
-  it("default order keeps payload sequence with synthetics after Customer Response", () => {
+  it("default order keeps payload sequence (no synthetic columns)", () => {
     expect(pageSrc).toContain("buildDefaultOrderIds({");
-    expect(pageSrc).toContain("customerResponseIdx");
+    expect(pageSrc).toContain("customIds: allBusinessOrdered.map(");
     // Saved orders merge onto the default; unknown ids drop, new
     // ids append, pinned ids stay first.
     expect(pageSrc).toContain("mergeColumnOrder({");
+    // No synthetic Follow-up N Result columns: the retired
+    // sequential system leaves no trace in the order model.
+    expect(pageSrc).not.toContain("followup-result");
+    expect(pageSrc).not.toContain("Follow-up ${");
   });
 
   it("visibility, widths, colors, and menu keep the stored-order identities", () => {    // Header colors resolve on the DISPLAY order (orderedColumns
@@ -64,14 +68,14 @@ describe("Group 3 pinned order (Assigned To, Received, Type, Stage)", () => {
     // visibility/widths/menu still use stable stored identities.
     expect(pageSrc).toContain("customFields={customFieldsScoped}");
     expect(pageSrc).toContain(": customFields,");
-    // Synthetic result entries join the same positional sequence
-    // right after Customer Response (identity IS the attempt number).
-    expect(pageSrc).toContain("resultOrderId(");
+    // No synthetic result entries anywhere in the order model.
+    expect(pageSrc).not.toContain("resultOrderId(");
     const libSrc = readFileSync(
       `${root}/src/lib/flows/workspace-column-order.ts`,
       "utf8",
     );
-    expect(libSrc).toContain("RESULT_ORDER_PREFIX = 'followup-result:'");
-    expect(libSrc).toContain("resultOrderId(i + 1)");
+    expect(libSrc).not.toContain("RESULT_ORDER_PREFIX");
+    expect(libSrc).not.toContain("resultOrderId");
+    expect(libSrc).not.toContain("kind: 'result'");
   });
 });

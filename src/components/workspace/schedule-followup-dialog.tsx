@@ -62,10 +62,6 @@ export interface ScheduleFollowupDialogProps {
   leadPhone: string | null;
   /** Current cell value (ISO instant) or null when unset. */
   initialValue: string | null;
-  /** Sequential attempt number being scheduled (auto-assigned by the caller). */
-  attemptNumber: number;
-  /** When set, the submit reschedules this open attempt in place. */
-  rescheduleAttemptId?: string | null;
   /** The follow-up datetime field id for the cell write. */
   fieldId: string;
   /** Refresh the table after a successful save or clear. */
@@ -80,8 +76,6 @@ export function ScheduleFollowupDialog({
   leadName,
   leadPhone,
   initialValue,
-  attemptNumber,
-  rescheduleAttemptId,
   fieldId,
   onSaved,
 }: ScheduleFollowupDialogProps) {
@@ -251,34 +245,6 @@ export function ScheduleFollowupDialog({
       setError("Enter a valid date and time.");
       return;
     }
-    // Sequential sales attempt FIRST: the server owns numbering and
-    // rejects past instants, closed sequences, and scheduling while
-    // a previous attempt still needs its result (409 surfaces
-    // below — the cell and reminder are only written when the
-    // attempt is accepted).
-    try {
-      const attemptRes = rescheduleAttemptId
-        ? await fetch(`/api/flows/${flowId}/sales-followups/${rescheduleAttemptId}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ flow_run_id: runId, scheduled_for: iso }),
-          })
-        : await fetch(`/api/flows/${flowId}/sales-followups`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ flow_run_id: runId, scheduled_for: iso }),
-          });
-      if (!attemptRes.ok) {
-        const attemptJson = (await attemptRes.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        setError(attemptJson?.error ?? "Could not schedule the follow-up.");
-        return;
-      }
-    } catch {
-      setError("Could not schedule the follow-up. Try again.");
-      return;
-    }
     setSaving(true);
     setError(null);
     try {
@@ -383,11 +349,7 @@ export function ScheduleFollowupDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>
-            {rescheduleAttemptId
-              ? `Reschedule Follow-up ${attemptNumber}`
-              : `Schedule Follow-up ${attemptNumber}`}
-          </DialogTitle>
+          <DialogTitle>Schedule Follow-up</DialogTitle>
           <DialogDescription>
             Pick a date and time, choose the WhatsApp number that should
             receive the reminder, edit the message if needed, and save —

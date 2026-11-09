@@ -8,8 +8,6 @@ import {
   isDialOrderId,
   mergeColumnOrder,
   normalizeSavedOrder,
-  resultOrderId,
-  RESULT_ORDER_PREFIX,
 } from "./workspace-column-order";
 import { ROW_VIS_ID } from "./workspace-visibility";
 
@@ -33,29 +31,26 @@ describe("stable order identities", () => {
     expect(flowOrderId(flowCol("name", true))).not.toBe(
       flowOrderId(flowCol("name", false)),
     );
-    expect(resultOrderId(3)).toBe(`${RESULT_ORDER_PREFIX}3`);
   });
 
   it("derives dial identity from its phone column", () => {
     expect(dialOrderId("sys:phone")).toBe("dial:sys:phone");
     expect(isDialOrderId("dial:sys:phone")).toBe(true);
     expect(isDialOrderId("sys:phone")).toBe(false);
-    expect(isDialOrderId("followup-result:1")).toBe(false);
+    expect(isDialOrderId("custom:abc")).toBe(false);
   });
 });
 
 describe("buildDefaultOrderIds", () => {
   const customs = ["custom:a", "custom:cr", "custom:b"];
 
-  it("emits today's exact sequence (actions, row, flows, business+synthetics)", () => {
+  it("emits today's exact sequence (actions, row, flows, business)", () => {
     expect(
       buildDefaultOrderIds({
         includeActions: true,
         includeRow: true,
         flowColumns: [flowCol("name", true), flowCol("phone", true)],
         customIds: customs,
-        customerResponseIdx: 1,
-        resultCount: 2,
       }),
     ).toEqual([
       "core:actions",
@@ -64,34 +59,25 @@ describe("buildDefaultOrderIds", () => {
       "sys:phone",
       "custom:a",
       "custom:cr",
-      "followup-result:1",
-      "followup-result:2",
       "custom:b",
     ]);
   });
 
-  it("trails synthetics when Customer Response is absent, honours gates", () => {
+  it("honours the actions/row gates", () => {
     expect(
       buildDefaultOrderIds({
         includeActions: false,
         includeRow: false,
         flowColumns: [flowCol("Budget")],
         customIds: ["custom:a"],
-        customerResponseIdx: -1,
-        resultCount: 1,
       }),
-    ).toEqual(["flow:Budget", "custom:a", "followup-result:1"]);
-  });
-
-  it("emits no synthetic block at zero attempts", () => {
+    ).toEqual(["flow:Budget", "custom:a"]);
     expect(
       buildDefaultOrderIds({
         includeActions: false,
         includeRow: true,
         flowColumns: [],
         customIds: [],
-        customerResponseIdx: -1,
-        resultCount: 0,
       }),
     ).toEqual(["core:row"]);
   });
@@ -140,6 +126,27 @@ describe("mergeColumnOrder", () => {
       "flow:Budget",
       "custom:new",
     ]);
+  });
+
+  it("drops retired followup-result ids without resetting saved arrangements", () => {
+    // Saved preferences from the retired sequential Follow-up N
+    // Result columns must be ignored — the rest of the user's
+    // saved order survives verbatim.
+    expect(
+      mergeColumnOrder({
+        defaultIds: def,
+        savedIds: [
+          "core:actions",
+          "core:row",
+          "sys:name",
+          "followup-result:1",
+          "custom:a",
+          "followup-result:2",
+          "flow:Budget",
+        ],
+        pinnedIds: pinned,
+      }),
+    ).toEqual(["core:actions", "core:row", "sys:name", "custom:a", "flow:Budget"]);
   });
 
   it("strips stray dial ids (they re-derive, never stored)", () => {

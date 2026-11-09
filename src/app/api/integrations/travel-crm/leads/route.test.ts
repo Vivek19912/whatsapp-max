@@ -778,8 +778,9 @@ describe("dialog funnel prefill from the Workspace row", () => {
     prefill: { leadSource: unknown; leadType: unknown; leadStage: unknown };
   };
 
-  // Every case forces MISSING_FIELDS (travel date withheld) so the
+  // Every case forces MISSING_FIELDS (services withheld) so the
   // prepare response carries the dialog prefill with no lead call.
+  // (Travel Date is optional and no longer forces the dialog.)
   const seedPrefillScenario = () => {
     h.lookupsOverride = FULL_LOOKUPS;
     h.workspace_fields = [
@@ -790,7 +791,7 @@ describe("dialog funnel prefill from the Workspace row", () => {
     ];
     h.workspace_values = [{ flow_run_id: "run-1", field_id: "f-asg", value_text: "u-agent" }];
     const vars = (h.flow_runs[0] as Row).vars as Record<string, unknown>;
-    delete vars.travel_date;
+    delete vars.service;
   };
 
   const storeRow = (entries: Array<[string, string]>) => {

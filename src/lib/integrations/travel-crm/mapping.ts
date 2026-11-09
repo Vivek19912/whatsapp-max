@@ -140,7 +140,10 @@ export interface TravelCrmMappingResult {
   ready: boolean;
 }
 
-/** Travel CRM required fields (assignedToEmail resolved server-side). */
+/** Travel CRM required fields (assignedToEmail resolved server-side).
+ * Travel Start Date is NOT required: Travel CRM treats it as
+ * optional (native parity), so it rides the payload as null when
+ * absent and never gates readiness. */
 export const TRAVEL_CRM_REQUIRED_FIELDS: readonly string[] = [
   "customerName",
   "phone",
@@ -148,7 +151,6 @@ export const TRAVEL_CRM_REQUIRED_FIELDS: readonly string[] = [
   "leadType",
   "leadStage",
   "assignedToEmail",
-  "travelStartDate",
   "adults",
   "services",
   "itinerary",
@@ -964,6 +966,10 @@ export function mapLeadToTravelCrm(
   // in the Travel CRM contract (defaults to 0; the WACRM payload
   // schema marks them nullable + optional) — an empty value never
   // blocks creation, so they must not surface in missing[] either.
+  // Travel Start Date is optional in Travel CRM (native parity):
+  // an empty date never blocks creation and never appears in
+  // missing[] — it rides the payload as null. Provided exact
+  // dates and month/year pairs still map normally.
   // Adults stays REQUIRED (the Travel CRM lead schema defaults it
   // to 1; WACRM's dialog confirms it, and the count feeds the
   // traveler summary).
@@ -971,6 +977,7 @@ export function mapLeadToTravelCrm(
     "email",
     "rooms",
     "dateOfBirth",
+    "travelStartDate",
     "childrenWithBed",
     "childrenWithoutBed",
     "infants",
@@ -988,12 +995,13 @@ export function mapLeadToTravelCrm(
   const ready = isTravelCrmReady(fields);
   return { draft, fields, available, missing, ambiguous, invalid, ready };
 }
-/** Required fields WACRM itself can satisfy (excludes funnel fields). */
+/** Required fields WACRM itself can satisfy (excludes funnel fields).
+ * travelStartDate is excluded: optional in Travel CRM, so its
+ * absence never blocks creation (it rides the payload as null). */
 const MAPPABLE_REQUIRED = [
   "customerName",
   "phone",
   "assignedToEmail",
-  "travelStartDate",
   "adults",
   "services",
   "itinerary",

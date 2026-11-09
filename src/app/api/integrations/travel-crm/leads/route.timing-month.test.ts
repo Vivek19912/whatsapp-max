@@ -305,6 +305,34 @@ describe("POST month-based travel timing (Phase 3: enabled)", () => {
     });
   });
 
+  it("creation with no travel timing succeeds with null date and month (optional date)", async () => {
+    const res = await POST(
+      post({ flow_id: "flow-1", flow_run_id: "run-1", overrides: FUNNEL }),
+    );
+    expect(((await res.json()) as Record<string, unknown>).success).toBe(true);
+    expect(h.travelCalls).toHaveLength(1);
+    // Nothing invented or substituted: null date with null
+    // month/year — the optional-field shape Travel CRM accepts
+    // (same null convention as its other optional fields).
+    expect(h.travelCalls[0].body).toMatchObject({
+      travelStartDate: null,
+      travelMonth: null,
+      travelYear: null,
+    });
+  });
+
+  it("the prepare dialog never lists Travel Date as missing", async () => {
+    const res = await POST(post({ flow_id: "flow-1", flow_run_id: "run-1" }));
+    const json = (await res.json()) as {
+      success: boolean;
+      code: string;
+      mapping: { missing: string[] };
+    };
+    expect(json.success).toBe(false);
+    expect(json.code).toBe("MISSING_FIELDS");
+    expect(json.mapping.missing).not.toContain("travelStartDate");
+  });
+
   it("month mode with a full itinerary still maps destinations and cities", async () => {
     const res = await POST(
       post({

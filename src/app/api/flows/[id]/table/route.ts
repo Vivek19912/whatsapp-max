@@ -681,73 +681,6 @@ export async function GET(
       console.error("workspace flow overrides read failed", err);
     }
   }
-  // Sequential sales follow-up results (two batched reads, no
-  // N+1). MAX(attempt_number) over this account+flow fixes the
-  // generated Follow-up N Result columns table-wide, so structure
-  // stays consistent across pages and filters; one attempts read
-  // for this page's runs fills the cells. Page runs are already
-  // permission-filtered by the RPC above, so fetched records never
-  // exceed what the caller may see. Best-effort: a read failure
-  // (e.g. migration not yet applied) degrades to no columns.
-  let followupResults: {
-    maxAttempt: number;
-    values: Record<
-      string,
-      Record<
-        string,
-        { outcome: string | null; result_text: string | null; completed_at: string | null }
-      >
-    >;
-  } = { maxAttempt: 0, values: {} };
-  try {
-    const attemptsAccountId = (flow as { account_id: string }).account_id;
-    const { data: maxRows, error: maxErr } = await supabase
-      .from("sales_followup_attempts")
-      .select("attempt_number")
-      .eq("account_id", attemptsAccountId)
-      .eq("flow_id", id)
-      .order("attempt_number", { ascending: false })
-      .limit(1);
-    if (maxErr) throw maxErr;
-    const maxAttempt =
-      (maxRows ?? []).length > 0
-        ? Number(
-            (maxRows as Array<{ attempt_number: number }>)[0].attempt_number,
-          )
-        : 0;
-    const values: Record<
-      string,
-      Record<
-        string,
-        { outcome: string | null; result_text: string | null; completed_at: string | null }
-      >
-    > = {};
-    if (maxAttempt > 0 && runIds.length > 0) {
-      const { data: attemptRows, error: attemptsErr } = await supabase
-        .from("sales_followup_attempts")
-        .select("flow_run_id, attempt_number, outcome, result_text, completed_at")
-        .eq("account_id", attemptsAccountId)
-        .eq("flow_id", id)
-        .in("flow_run_id", runIds);
-      if (attemptsErr) throw attemptsErr;
-      for (const a of (attemptRows ?? []) as Array<{
-        flow_run_id: string;
-        attempt_number: number;
-        outcome: string | null;
-        result_text: string | null;
-        completed_at: string | null;
-      }>) {
-        (values[a.flow_run_id] ??= {})[String(a.attempt_number)] = {
-          outcome: a.outcome,
-          result_text: a.result_text,
-          completed_at: a.completed_at,
-        };
-      }
-    }
-    followupResults = { maxAttempt, values };
-  } catch (err) {
-    console.error("workspace follow-up results read failed", err);
-  }
   return NextResponse.json({
     meta: {
       flowId: (flow as { id: string }).id,
@@ -782,7 +715,6 @@ export async function GET(
     }),
     customValues,
     flowOverrides,
-    followupResults,
     mediaByConversation,
     latestRecordingByContact,
   });

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
@@ -86,10 +87,6 @@ const h = vi.hoisted(() => ({
   adminScopes: [] as Array<{ accountId: unknown; flowId: unknown }>,
   // Meta form row (questions with option metadata) for Meta tables.
   metaForm: null as Record<string, unknown> | null,
-  // Sequential sales follow-up attempts (sales_followup_attempts rows).
-  attempts: [] as Array<Record<string, unknown>>,
-  // When true, attempts reads fail (e.g. migration not applied).
-  attemptsError: false,
 }));
 
 function tableBuilder(rows: unknown) {
@@ -168,57 +165,6 @@ vi.mock("@/lib/supabase/server", () => {
             }),
           }),
         };
-      }
-      if (table === "sales_followup_attempts") {
-        const filters: Array<{ col: string; val?: unknown; inVals?: unknown[] }> = [];
-        let orderCol = "";
-        let ascending = true;
-        const scoped = () =>
-          h.attempts.filter((r) =>
-            filters.every((f) =>
-              f.inVals !== undefined
-                ? (f.inVals as unknown[]).includes(r[f.col])
-                : r[f.col] === f.val,
-            ),
-          );
-        const sorted = () => {
-          const out = [...scoped()];
-          if (orderCol) {
-            out.sort((a, b) =>
-              ascending
-                ? Number(a[orderCol]) - Number(b[orderCol])
-                : Number(b[orderCol]) - Number(a[orderCol]),
-            );
-          }
-          return out;
-        };
-        const chain: Record<string, (...args: never[]) => unknown> = {};
-        chain.select = () => chain;
-        chain.eq = ((col: string, val: unknown) => {
-          filters.push({ col, val });
-          return chain;
-        }) as never;
-        chain.order = ((col: string, opts?: { ascending?: boolean }) => {
-          orderCol = col;
-          ascending = opts?.ascending !== false;
-          return chain;
-        }) as never;
-        chain.in = ((col: string, vals: unknown[]) => {
-          filters.push({ col, inVals: vals });
-          return chain;
-        }) as never;
-        chain.limit = (async (n: number) => {
-          if (h.attemptsError) return { data: null, error: { code: "42P01" } };
-          return { data: sorted().slice(0, n), error: null };
-        }) as never;
-        chain.then = ((resolve: (v: unknown) => void) => {
-          if (h.attemptsError) {
-            resolve({ data: null, error: { code: "42P01" } });
-            return;
-          }
-          resolve({ data: sorted(), error: null });
-        }) as never;
-        return chain;
       }
       if (table === "meta_lead_forms") {
         const chain: Record<string, unknown> = {};
@@ -327,8 +273,6 @@ beforeEach(() => {
   h.adminInserts = [];
   h.adminScopes = [];
   h.metaForm = null;
-  h.attempts = [];
-  h.attemptsError = false;
 });
 
 describe("GET /api/flows/[id]/table", () => {
@@ -1989,88 +1933,26 @@ describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
   });
 });
 
-describe("GET /api/flows/[id]/table — sequential follow-up results", () => {
+describe("GET /api/flows/[id]/table — no sequential follow-up results", () => {
   async function getTable() {
     const res = await GET(new Request("https://app.test/api/flows/flow-1/table"), {
       params: Promise.resolve({ id: "flow-1" }),
     });
     expect(res.status).toBe(200);
-    return (await res.json()) as {
-      followupResults: {
-        maxAttempt: number;
-        values: Record<
-          string,
-          Record<
-            string,
-            { outcome: string | null; result_text: string | null; completed_at: string | null }
-          >
-        >;
-      };
-    };
+    return (await res.json()) as Record<string, unknown>;
   }
 
-  function attemptRow(over: Record<string, unknown>) {
-    return {
-      account_id: "acct-1",
-      flow_id: "flow-1",
-      outcome: null,
-      result_text: null,
-      completed_at: null,
-      ...over,
-    };
-  }
-
-  it("returns no columns when no attempts exist", async () => {
+  it("omits the retired followupResults payload entirely", async () => {
     const json = await getTable();
-    expect(json.followupResults).toEqual({ maxAttempt: 0, values: {} });
+    expect(json).not.toHaveProperty("followupResults");
   });
 
-  it("derives the table-wide max and maps cells by run + number", async () => {
-    h.attempts = [
-      attemptRow({
-        flow_run_id: "run-1",
-        attempt_number: 1,
-        outcome: "Connected — Interested",
-        result_text: "Wants Kashmir details.",
-        completed_at: "2026-11-07T12:13:00.000Z",
-      }),
-      attemptRow({ flow_run_id: "run-1", attempt_number: 2 }),
-      attemptRow({
-        flow_run_id: "run-2",
-        attempt_number: 1,
-        outcome: "No Answer",
-        result_text: "Rang twice.",
-        completed_at: "2026-11-08T09:00:00.000Z",
-      }),
-      // Foreign account/flow rows never leak in.
-      attemptRow({ account_id: "acct-2", flow_run_id: "run-9", attempt_number: 9 }),
-      attemptRow({ flow_id: "flow-9", flow_run_id: "run-9", attempt_number: 9 }),
-    ];
-    const json = await getTable();
-    expect(json.followupResults.maxAttempt).toBe(2);
-    expect(json.followupResults.values["run-1"]["1"]).toEqual({
-      outcome: "Connected — Interested",
-      result_text: "Wants Kashmir details.",
-      completed_at: "2026-11-07T12:13:00.000Z",
-    });
-    // Unresolved attempts ride along with null outcome (em dash).
-    expect(json.followupResults.values["run-1"]["2"]).toEqual({
-      outcome: null,
-      result_text: null,
-      completed_at: null,
-    });
-    expect(json.followupResults.values["run-2"]["1"]?.outcome).toBe("No Answer");
-    expect(json.followupResults.values["run-2"]["1"]?.completed_at).toBe(
-      "2026-11-08T09:00:00.000Z",
+  it("never reads the attempts table (history preserved, unused)", async () => {
+    const src = readFileSync(
+      `${process.cwd()}/src/app/api/flows/[id]/table/route.ts`,
+      "utf8",
     );
-    // Leads without attempts have no entry (clean em dash).
-    expect(json.followupResults.values["run-2"]["2"]).toBeUndefined();
-  });
-
-  it("degrades to no columns when the attempts table is missing", async () => {
-    h.attempts = [attemptRow({ flow_run_id: "run-1", attempt_number: 1 })];
-    h.attemptsError = true;
-    const json = await getTable();
-    expect(json.followupResults).toEqual({ maxAttempt: 0, values: {} });
+    expect(src).not.toContain("sales_followup_attempts");
+    expect(src).not.toContain("followupResults");
   });
 });
