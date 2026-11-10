@@ -74,6 +74,33 @@ describe('buildMetaTemplatePayload', () => {
     });
   });
 
+  it('emits a DOCUMENT header with header_handle from an uploaded pdf', () => {
+    const payload = buildMetaTemplatePayload({
+      ...base,
+      header_type: 'document',
+      header_handle: '4::doc...',
+      header_media_url: 'https://cdn.test/account-acct-1/terms.pdf',
+    });
+    expect(payload.components[0]).toEqual({
+      type: 'HEADER',
+      format: 'DOCUMENT',
+      example: { header_handle: ['4::doc...'] },
+    });
+  });
+
+  it('keeps the header_url fallback for document urls without a handle', () => {
+    const payload = buildMetaTemplatePayload({
+      ...base,
+      header_type: 'document',
+      header_media_url: 'https://example.com/terms.pdf',
+    });
+    expect(payload.components[0]).toEqual({
+      type: 'HEADER',
+      format: 'DOCUMENT',
+      example: { header_url: ['https://example.com/terms.pdf'] },
+    });
+  });
+
   it('emits footer when present, skips when empty', () => {
     const withFooter = buildMetaTemplatePayload({
       ...base,

@@ -19,6 +19,10 @@ import {
   uploadAccountMedia,
   MEDIA_MAX_BYTES_BY_KIND,
 } from '@/lib/storage/upload-media';
+import {
+  humanDocumentSize,
+  validateTemplateDocumentFile,
+} from '@/lib/whatsapp/template-document';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -241,6 +245,28 @@ export function TemplateManager() {
   const [uploadingHeader, setUploadingHeader] = useState(false);
   const headerFileRef = useRef<HTMLInputElement>(null);
 
+  // Document (PDF) header sample — two mutually exclusive sources: an
+  // uploaded PDF staged in the account-scoped template-media bucket
+  // via the upload API, or a pasted public HTTPS link. Only one
+  // source is active at a time; switching clears the other (and
+  // best-effort deletes an orphaned staged file). The submit route
+  // turns either URL into Meta's example.header_handle server-side,
+  // so the browser never sees Meta tokens.
+  const [docSource, setDocSource] = useState<'upload' | 'url'>('upload');
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [docProgress, setDocProgress] = useState(0);
+  const [docError, setDocError] = useState<string | null>(null);
+  // Storage path of the staged PDF (for replace/remove cleanup).
+  // Null for pasted links and pre-existing template URLs — those are
+  // never deleted, only cleared from the field.
+  const [docPath, setDocPath] = useState<string | null>(null);
+  const [docFileMeta, setDocFileMeta] = useState<{
+    name: string;
+    size: number;
+  } | null>(null);
+  const [docDragOver, setDocDragOver] = useState(false);
+  const docFileRef = useRef<HTMLInputElement>(null);
+
   // Body variable indices — `[1, 2, 3]` for "{{1}} {{2}} {{3}}". We
   // re-run the extractor on every render to keep the sample-value rows
   // in sync with what the user typed.
@@ -325,6 +351,17 @@ export function TemplateManager() {
 
   function openEdit(template: MessageTemplate) {
     setEditingId(template.id);
+    const headerFormat = (template.header_type ?? 'none') as HeaderFormat;
+    setDocSource(
+      headerFormat === 'document' && template.header_media_url
+        ? 'url'
+        : 'upload',
+    );
+    setDocPath(null);
+    setDocFileMeta(null);
+    setDocError(null);
+    setDocProgress(0);
+    setDocDragOver(false);
     setForm({
       name: template.name,
       category: template.category,
@@ -344,13 +381,35 @@ export function TemplateManager() {
   function openCreate() {
     setEditingId(null);
     setForm(emptyForm);
+    setDocSource('upload');
+    setDocPath(null);
+    setDocFileMeta(null);
+    setDocError(null);
+    setDocProgress(0);
+    setDocDragOver(false);
     setDialogOpen(true);
+  }
+
+  function resetDocState() {
+    setDocSource('upload');
+    setDocPath(null);
+    setDocFileMeta(null);
+    setDocError(null);
+    setDocProgress(0);
+    setDocDragOver(false);
   }
 
   async function handleSubmit() {
     // AUTHENTICATION is blocked by the persistent banner + disabled
     // submit button; this is a defensive second line of defense.
     if (form.category === 'Authentication') return;
+    // Never submit mid-upload — the header_media_url would point at
+    // nothing (or a stale file) and Meta would reject the sample.
+    // The form is preserved so the user can retry after it finishes.
+    if (uploadingDoc) {
+      toast.error('Wait for the PDF upload to finish before submitting.');
+      return;
+    }
     try {
       setSubmitting(true);
       const isEdit = editingId !== null;
@@ -571,6 +630,137 @@ export function TemplateManager() {
     }
   }
 
+  /**
+   * Upload a PDF through the authenticated upload API with real
+   * progress (XHR — fetch has no upload-progress events). Client
+   * pre-validates extension/MIME/size; the API re-validates plus the
+   * `%PDF-` content check. Other form inputs are never touched, so a
+   * failed upload preserves everything the user typed.
+   */
+  function uploadTemplateDocument(
+    file: File,
+    onProgress: (pct: number) => void,
+  ): Promise<{ publicUrl: string; path: string }> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/whatsapp/templates/header-document/upload');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        let data: { publicUrl?: string; path?: string; error?: string } = {};
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          reject(new Error(`Upload failed (HTTP ${xhr.status}).`));
+          return;
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && data.publicUrl && data.path) {
+          resolve({ publicUrl: data.publicUrl, path: data.path });
+        } else {
+          reject(
+            new Error(data.error || `Upload failed (HTTP ${xhr.status}).`),
+          );
+        }
+      };
+      xhr.onerror = () =>
+        reject(new Error('Upload failed. Check your connection and try again.'));
+      const fd = new FormData();
+      fd.append('file', file);
+      xhr.send(fd);
+    });
+  }
+
+  /** Best-effort cleanup of a staged PDF — never surfaces errors. */
+  async function deleteStagedDoc(path: string) {
+    try {
+      await fetch('/api/whatsapp/templates/header-document/upload', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+    } catch {
+      // A missed delete is a storage nit, not a user-facing error.
+    }
+  }
+
+  async function handleDocFile(file: File) {
+    // Client pre-check (extension/MIME/size) — the API re-validates
+    // plus the content check, and its message wins on failure.
+    const problem = validateTemplateDocumentFile({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    });
+    if (problem) {
+      setDocError(problem);
+      toast.error(problem);
+      return;
+    }
+    // Replacing: the previous staged file is cleaned up only after
+    // the new upload succeeds, so a failed retry never loses the
+    // working reference.
+    const previousPath = docPath;
+    setUploadingDoc(true);
+    setDocProgress(0);
+    setDocError(null);
+    setDocFileMeta({ name: file.name, size: file.size });
+    try {
+      const { publicUrl, path } = await uploadTemplateDocument(file, (pct) =>
+        setDocProgress(pct),
+      );
+      if (previousPath && previousPath !== path) void deleteStagedDoc(previousPath);
+      setDocPath(path);
+      setDocSource('upload');
+      setForm((f) => ({ ...f, header_media_url: publicUrl }));
+      toast.success('PDF uploaded.');
+    } catch (err) {
+      // Preserve the previous staged reference (if any) and every
+      // other form input — only the error is surfaced.
+      const message = err instanceof Error ? err.message : 'Upload failed.';
+      setDocError(message);
+      toast.error(message);
+      if (!previousPath) setDocFileMeta(null);
+    } finally {
+      setUploadingDoc(false);
+    }
+  }
+
+  function removeStagedDoc() {
+    const path = docPath;
+    setDocPath(null);
+    setDocFileMeta(null);
+    setDocError(null);
+    setDocProgress(0);
+    setForm((f) => ({ ...f, header_media_url: '' }));
+    if (docFileRef.current) docFileRef.current.value = '';
+    if (path) void deleteStagedDoc(path);
+  }
+
+  /**
+   * Switch the document source. Only one source is active: leaving
+   * Upload deletes an orphaned staged file, and entering either side
+   * clears the other side's URL so the submit payload can only ever
+   * carry one reference.
+   */
+  function switchDocSource(source: 'upload' | 'url') {
+    if (source === docSource) return;
+    if (docSource === 'upload' && docPath) {
+      void deleteStagedDoc(docPath);
+      setDocPath(null);
+    }
+    setDocFileMeta(null);
+    setDocError(null);
+    setDocProgress(0);
+    setDocDragOver(false);
+    setDocSource(source);
+    // Clear the shared URL field so a stale reference from the other
+    // source can never be submitted accidentally.
+    setForm((f) => ({ ...f, header_media_url: '' }));
+  }
+
   return (
     <section className="animate-in fade-in-50 space-y-4 duration-200">
       <SettingsPanelHead
@@ -733,6 +923,7 @@ export function TemplateManager() {
           if (!open) {
             setEditingId(null);
             setForm(emptyForm);
+            resetDocState();
           }
         }}
       >
@@ -933,14 +1124,169 @@ export function TemplateManager() {
                       </span>
                     </div>
                   )}
-                  <Input
-                    placeholder={`https://… (or paste a public ${form.header_format} link)`}
-                    value={form.header_media_url}
-                    onChange={(e) =>
-                      setForm({ ...form, header_media_url: e.target.value })
-                    }
-                    className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
-                  />
+                  {form.header_format === 'document' ? (
+                    <div className="space-y-2">
+                      <div
+                        className="flex gap-2"
+                        role="tablist"
+                        aria-label="Document source"
+                      >
+                        <Button
+                          type="button"
+                          variant={docSource === 'upload' ? 'default' : 'outline'}
+                          size="sm"
+                          disabled={uploadingDoc}
+                          onClick={() => switchDocSource('upload')}
+                        >
+                          <Upload className="h-3.5 w-3.5" />
+                          Upload PDF
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={docSource === 'url' ? 'default' : 'outline'}
+                          size="sm"
+                          disabled={uploadingDoc}
+                          onClick={() => switchDocSource('url')}
+                        >
+                          Paste URL
+                        </Button>
+                      </div>
+                      {docSource === 'upload' ? (
+                        <div className="space-y-2">
+                          <input
+                            ref={docFileRef}
+                            type="file"
+                            accept=".pdf,application/pdf"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              if (f) void handleDocFile(f);
+                              e.target.value = '';
+                            }}
+                          />
+                          {form.header_media_url ? (
+                            <div className="flex items-center gap-2 rounded-md border border-border bg-muted/50 px-2.5 py-2">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-xs font-medium text-foreground">
+                                  {docFileMeta?.name ?? 'Staged PDF'}
+                                </p>
+                                <p className="text-[11px] text-muted-foreground">
+                                  {docFileMeta
+                                    ? humanDocumentSize(docFileMeta.size)
+                                    : 'Ready for Meta review'}
+                                </p>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={uploadingDoc}
+                                onClick={() => docFileRef.current?.click()}
+                              >
+                                Replace
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={uploadingDoc}
+                                onClick={removeStagedDoc}
+                                aria-label="Remove staged PDF"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          ) : (
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              aria-label="Upload a PDF document"
+                              onClick={() => {
+                                if (!uploadingDoc) docFileRef.current?.click();
+                              }}
+                              onKeyDown={(e) => {
+                                if (
+                                  !uploadingDoc &&
+                                  (e.key === 'Enter' || e.key === ' ')
+                                ) {
+                                  e.preventDefault();
+                                  docFileRef.current?.click();
+                                }
+                              }}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                if (!uploadingDoc) setDocDragOver(true);
+                              }}
+                              onDragLeave={() => setDocDragOver(false)}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                setDocDragOver(false);
+                                if (uploadingDoc) return;
+                                const f = e.dataTransfer.files?.[0];
+                                if (f) void handleDocFile(f);
+                              }}
+                              className={`flex cursor-pointer flex-col items-center justify-center gap-1 rounded-md border border-dashed px-3 py-5 text-center transition-colors ${
+                                docDragOver
+                                  ? 'border-primary bg-primary/5'
+                                  : 'border-border bg-muted/30 hover:bg-muted/50'
+                              }`}
+                            >
+                              {uploadingDoc ? (
+                                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                              ) : (
+                                <Upload className="h-5 w-5 text-muted-foreground" />
+                              )}
+                              <p className="text-xs font-medium text-foreground">
+                                {uploadingDoc
+                                  ? `Uploading… ${docProgress}%`
+                                  : 'Click to browse or drag and drop a PDF'}
+                              </p>
+                              <p className="text-[11px] text-muted-foreground">
+                                PDF only, ≤100 MB
+                              </p>
+                              {uploadingDoc && (
+                                <div
+                                  className="mt-1 h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-muted"
+                                  role="progressbar"
+                                  aria-valuenow={docProgress}
+                                  aria-valuemin={0}
+                                  aria-valuemax={100}
+                                >
+                                  <div
+                                    className="h-full rounded-full bg-primary transition-all"
+                                    style={{ width: `${docProgress}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {docError && (
+                            <p role="alert" className="text-xs text-red-400">
+                              {docError}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <Input
+                          placeholder="https://… (paste a public document link)"
+                          value={form.header_media_url}
+                          onChange={(e) =>
+                            setForm({ ...form, header_media_url: e.target.value })
+                          }
+                          className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+                        />
+                      )}
+                    </div>
+                  ) : (
+                    <Input
+                      placeholder={`https://… (or paste a public ${form.header_format} link)`}
+                      value={form.header_media_url}
+                      onChange={(e) =>
+                        setForm({ ...form, header_media_url: e.target.value })
+                      }
+                      className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+                    />
+                  )}
                   {form.header_format === 'image' && form.header_media_url && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
@@ -952,11 +1298,13 @@ export function TemplateManager() {
                   <p className="text-[11px] text-muted-foreground leading-relaxed">
                     {form.header_format === 'image'
                       ? 'Upload a JPEG/PNG (≤5 MB, ≥800×418 px recommended) or paste a public HTTPS link — we upload it to Meta for review automatically.'
-                      : 'Must be a publicly accessible HTTPS link. Meta fetches it once during review, so it needs to stay live for ~24 hrs.'}
+                      : form.header_format === 'document'
+                        ? docSource === 'upload'
+                          ? 'Upload a PDF (≤100 MB) from your computer — we store it securely and upload it to Meta for review automatically.'
+                          : 'Must be a publicly accessible HTTPS link to a PDF. Meta fetches it once during review, so it needs to stay live for ~24 hrs.'
+                        : 'Must be a publicly accessible HTTPS link. Meta fetches it once during review, so it needs to stay live for ~24 hrs.'}
                     {form.header_format === 'video' &&
                       ' Recommended: MP4 / 3GPP, ≤16 MB, ≤60 seconds.'}
-                    {form.header_format === 'document' &&
-                      ' Recommended: PDF, ≤100 MB.'}
                   </p>
                 </div>
               )}
@@ -1165,7 +1513,11 @@ export function TemplateManager() {
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={submitting || form.category === 'Authentication'}
+              disabled={
+                submitting ||
+                uploadingDoc ||
+                form.category === 'Authentication'
+              }
               className="bg-primary hover:bg-primary/90 text-primary-foreground"
             >
               {submitting ? (
