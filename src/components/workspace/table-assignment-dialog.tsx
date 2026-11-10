@@ -365,6 +365,71 @@ const emptyDraft = (): Draft => ({
   sequenceLoadedKey: null,
 });
 
+/**
+ * Validate the open assignee editor exactly the way Done does:
+ * display name required, some contact channel required, no duplicate
+ * team link. Returns the user-facing error or null. Pure.
+ */
+export function validateAssigneeForm(
+  form: Pick<Draft, "key" | "user_id" | "display_name" | "email" | "phone">,
+  drafts: ReadonlyArray<Pick<Draft, "key" | "user_id">>,
+): string | null {
+  if (!form.display_name.trim()) {
+    return "Give the assignee a display name.";
+  }
+  if (!form.user_id && !form.email.trim() && !form.phone.trim()) {
+    return "Link a team member or enter an email address or phone number.";
+  }
+  if (form.user_id) {
+    const clash = drafts.some(
+      (d) => d.key !== form.key && d.user_id === form.user_id,
+    );
+    if (clash) {
+      return "That team member is already on this table.";
+    }
+  }
+  return null;
+}
+
+/**
+ * True when the Add panel was opened but nothing was typed — saving
+ * must silently disregard it rather than block on an empty form.
+ * Pure.
+ */
+export function isPristineNewAssigneeForm(
+  form: Pick<
+    Draft,
+    "user_id" | "display_name" | "email" | "phone" | "whatsapp_numbers"
+  >,
+): boolean {
+  return (
+    !form.user_id &&
+    form.display_name.trim() === "" &&
+    form.email.trim() === "" &&
+    form.phone.trim() === "" &&
+    form.whatsapp_numbers.length === 0
+  );
+}
+
+/**
+ * Merge the open editor form into the draft list (what Done does),
+ * computed synchronously so Save can validate + submit the merged
+ * list in the same tick instead of validating the stale drafts while
+ * the panel is open. Caller must run validateAssigneeForm first.
+ * `newKey` is used for the "__new__" case. Pure.
+ */
+export function mergeOpenFormEdit<T extends { key: string }>(
+  drafts: T[],
+  editingKey: string | null,
+  form: T,
+  newKey: string,
+): T[] {
+  if (editingKey === "__new__") {
+    return [...drafts, { ...form, key: newKey }];
+  }
+  return drafts.map((d) => (d.key === form.key ? { ...form } : d));
+}
+
 export function TableAssignmentDialog({
   flowId,
   flowName,
@@ -842,30 +907,21 @@ export function TableAssignmentDialog({
 
   const confirmEdit = () => {
     if (readOnly) return;
-    const name = form.display_name.trim();
-    if (!name) {
-      toast.error("Give the assignee a display name.");
-      return;
-    }
-    if (!form.user_id && !form.email.trim() && !form.phone.trim()) {
-      toast.error("Link a team member or enter an email address or phone number.");
+    const problem = validateAssigneeForm(form, drafts);
+    if (problem) {
+      toast.error(problem);
       return;
     }
     if (form.user_id) {
-      const clash = drafts.some((d) => d.key !== form.key && d.user_id === form.user_id);
-      if (clash) {
-        toast.error("That team member is already on this table.");
-        return;
-      }
       const member = rosterById.get(form.user_id);
       if (member && !form.display_name.trim()) {
         form.display_name = member.full_name?.trim() || member.email || form.user_id;
       }
     }
     if (editingKey === "__new__") {
-      setDrafts((prev) => [...prev, { ...form, key: `new-${Date.now()}` }]);
+      setDrafts((prev) => mergeOpenFormEdit(prev, editingKey, form, `new-${Date.now()}`));
     } else {
-      setDrafts((prev) => prev.map((d) => (d.key === form.key ? { ...form } : d)));
+      setDrafts((prev) => mergeOpenFormEdit(prev, editingKey, form, form.key));
     }
     cancelEdit();
   };
@@ -925,8 +981,56 @@ export function TableAssignmentDialog({
 
   const save = async () => {
     if (readOnly || busy !== null) return;
-    if (weightError) {
-      toast.error(weightError);
+    // Commit the open assignee editor first. Save validates and
+    // submits `drafts`, but the editor edits a separate `form` state
+    // that only merges on Done — saving with the panel open used to
+    // silently drop the typed phone and validate the stale draft
+    // instead (e.g. a freshly typed +91 number rejected as
+    // "invalid"). A pristine Add panel is disregarded, not committed.
+    let activeDrafts = drafts;
+    if (editingKey) {
+      if (editingKey === "__new__" && isPristineNewAssigneeForm(form)) {
+        setEditingKey(null);
+        setForm(emptyDraft());
+      } else {
+        const problem = validateAssigneeForm(form, drafts);
+        if (problem) {
+          setSaveError(problem);
+          toast.error(problem);
+          return;
+        }
+        if (form.user_id) {
+          const member = rosterById.get(form.user_id);
+          if (member && !form.display_name.trim()) {
+            form.display_name =
+              member.full_name?.trim() || member.email || form.user_id;
+          }
+        }
+        activeDrafts = mergeOpenFormEdit(
+          drafts,
+          editingKey,
+          form,
+          `new-${Date.now()}`,
+        );
+        setDrafts(activeDrafts);
+        setEditingKey(null);
+        setForm(emptyDraft());
+      }
+    }
+    // Weight totals are recomputed from the committed drafts (the
+    // memo above still reflects the pre-commit list while the panel
+    // is open).
+    const activeWeightTotal = activeDrafts
+      .filter((d) => d.is_active)
+      .reduce((sum, d) => sum + (Number.parseInt(d.weight, 10) || 0), 0);
+    const activeWeightError =
+      mode === "percentage" &&
+      activeDrafts.some((d) => d.is_active) &&
+      activeWeightTotal !== 100
+        ? `Active percentages must total exactly 100% (currently ${activeWeightTotal}%).`
+        : null;
+    if (activeWeightError) {
+      toast.error(activeWeightError);
       return;
     }
     if (templateStale) {
@@ -940,7 +1044,7 @@ export function TableAssignmentDialog({
     // persisting the misconfiguration. Internal members fall back
     // to the linked roster email; external recipients need a typed
     // address. Drafts are preserved so nothing is lost.
-    for (const d of drafts) {
+    for (const d of activeDrafts) {
       if (!d.notify_email || d.email.trim() !== "") continue;
       const rosterEmail =
         (d.user_id ? rosterById.get(d.user_id)?.email : null)?.trim() || "";
@@ -955,7 +1059,7 @@ export function TableAssignmentDialog({
     // way the server validates them (E.164, cap, no duplicates);
     // the server re-validates and rejects the whole save on any
     // problem. Email behavior is untouched.
-    for (const d of drafts) {
+    for (const d of activeDrafts) {
       const numbersError = validateWhatsappNumberDrafts(
         d.whatsapp_numbers,
         d.phone,
@@ -970,7 +1074,7 @@ export function TableAssignmentDialog({
     // Client-side sequence guard (the server re-validates templates,
     // mappings, and delay): a malformed delay must never be sent.
     if (isMetaTable) {
-      for (const d of drafts) {
+      for (const d of activeDrafts) {
         if (!d.sequenceDirty || !d.sequence || d.sequence.items.length === 0) continue;
         const delayNum = Number(d.sequence.delay_seconds);
         if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
@@ -983,12 +1087,12 @@ export function TableAssignmentDialog({
     setSaveError(null);
     try {
       const isNewConfig = !payload?.config;
-      const hasActiveAssignee = drafts.some((d) => d.is_active);
+      const hasActiveAssignee = activeDrafts.some((d) => d.is_active);
       const enabledToSave = resolveEnabledOnSave({
         isNew: isNewConfig,
         persistedEnabled: enabled,
         hasActiveAssignee,
-        weightInvalid: weightError !== null,
+        weightInvalid: activeWeightError !== null,
       });
       const json = (await readJson(
         await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment`, {
@@ -1000,7 +1104,7 @@ export function TableAssignmentDialog({
             timezone: ASSIGNMENT_TIMEZONE,
             whatsapp_template_name: templateName.trim() || null,
             whatsapp_template_language: templateLanguage.trim() || "en_US",
-            assignees: drafts.map((d) => ({
+            assignees: activeDrafts.map((d) => ({
               user_id: d.user_id,
               display_name: d.display_name.trim(),
               email: d.email.trim() || null,
@@ -1030,7 +1134,7 @@ export function TableAssignmentDialog({
       // so saving one never overwrites another's sequence. Failures
       // are surfaced without undoing the assignment save.
       if (isMetaTable) {
-        const dirty = drafts.filter((d) => d.sequenceDirty && d.sequence);
+        const dirty = activeDrafts.filter((d) => d.sequenceDirty && d.sequence);
         for (const d of dirty) {
           const key = draftKey(d);
           if (!key) continue;

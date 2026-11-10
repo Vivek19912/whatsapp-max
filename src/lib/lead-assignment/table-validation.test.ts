@@ -255,6 +255,59 @@ describe("validateTableConfig", () => {
     ).toThrow(/only once/);
   });
 
+  it("accepts valid Indian E.164 numbers (Assignee-2 regression)", () => {
+    // The dialog once validated the stale draft instead of the open
+    // editor, so a freshly typed +91 number was rejected as
+    // "Assignee 2 has an invalid phone number". These cases pin the
+    // validator itself: the visible value was always legitimate.
+    const cases: Array<[string, string]> = [
+      ["+917795020122", "+917795020122"],
+      ["+911234567890", "+911234567890"],
+      ["+919876543210", "+919876543210"],
+      ["+91 7795020122", "+917795020122"],
+      ["+91-77950-20122", "+917795020122"],
+      ["+91 (77950) 20122", "+917795020122"],
+    ];
+    for (const [raw, normalized] of cases) {
+      expect(normalizeAssigneePhone(raw)).toBe(normalized);
+    }
+    const valid = validateTableConfig({
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        { user_id: "u1", display_name: "Assignee 1" },
+        { display_name: "amra", phone: "+917795020122", notify_email: false },
+      ],
+    });
+    expect(valid.assignees).toHaveLength(2);
+    expect(valid.assignees[1].phone).toBe("+917795020122");
+  });
+
+  it("still rejects genuinely invalid phone numbers", () => {
+    for (const phone of [
+      "7795020122",
+      "917795020122",
+      "+91",
+      "+91123",
+      "+917795020122456789",
+      "+91-ABC-DEF",
+      "++917795020122",
+      "+91 77950 2012a",
+    ]) {
+      expect(normalizeAssigneePhone(phone)).toBeNull();
+    }
+    expect(() =>
+      validateTableConfig({
+        enabled: true,
+        mode: "round_robin",
+        assignees: [
+          { user_id: "u1", display_name: "A" },
+          { display_name: "B", phone: "7795020122", notify_email: false },
+        ],
+      }),
+    ).toThrow(/Assignee 2 has an invalid phone number/);
+  });
+
   it("requires an email address for external assignees with email alerts on", () => {
     // A phone-only external contact can never receive an email —
     // block the misconfiguration at save time instead of failing

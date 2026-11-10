@@ -498,6 +498,59 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
   });
 });
 
+describe("assignment dialog open-editor commit on save (Assignee-2 phone regression)", () => {
+  const dialogSrc = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("validates the open form with the same rules as Done", async () => {
+    const { validateAssigneeForm } = await import("./table-assignment-dialog");
+    const drafts = [{ key: "a-1", user_id: "u-1" }];
+    expect(
+      validateAssigneeForm({ key: "a-1", user_id: null, display_name: "amra", email: "", phone: "+917795020122" }, drafts),
+    ).toBeNull();
+    expect(
+      validateAssigneeForm({ key: "a-1", user_id: null, display_name: "  ", email: "", phone: "+917795020122" }, drafts),
+    ).toBe("Give the assignee a display name.");
+    expect(
+      validateAssigneeForm({ key: "a-1", user_id: null, display_name: "amra", email: "", phone: "  " }, drafts),
+    ).toBe("Link a team member or enter an email address or phone number.");
+    expect(
+      validateAssigneeForm({ key: "a-2", user_id: "u-1", display_name: "B", email: "", phone: "" }, drafts),
+    ).toBe("That team member is already on this table.");
+  });
+
+  it("detects pristine Add panels and merges edits synchronously", async () => {
+    const { isPristineNewAssigneeForm, mergeOpenFormEdit } = await import("./table-assignment-dialog");
+    const blank = { user_id: null, display_name: "", email: "", phone: "", whatsapp_numbers: [] };
+    expect(isPristineNewAssigneeForm(blank)).toBe(true);
+    expect(isPristineNewAssigneeForm({ ...blank, phone: "+917795020122" })).toBe(false);
+    const drafts = [
+      { key: "a-1", user_id: null, display_name: "One", email: "", phone: "", whatsapp_numbers: [] },
+      { key: "a-2", user_id: null, display_name: "amra", email: "", phone: "", whatsapp_numbers: [] },
+    ];
+    // Editing Assignee 2's phone merges into the same index — the
+    // value the server validates is the value shown in the editor.
+    const merged = mergeOpenFormEdit(drafts, "edit", { ...drafts[1], phone: "+917795020122" }, "a-2");
+    expect(merged).toHaveLength(2);
+    expect(merged[1].phone).toBe("+917795020122");
+    expect(merged[0]).toBe(drafts[0]);
+    const added = mergeOpenFormEdit(drafts, "__new__", { key: "__new__", user_id: null, display_name: "N", email: "", phone: "+911234567890", whatsapp_numbers: [] }, "new-1");
+    expect(added).toHaveLength(3);
+    expect(added[2].key).toBe("new-1");
+  });
+
+  it("save commits the open editor before validating the payload", () => {
+    // The save path must operate on the merged drafts (activeDrafts),
+    // never on the stale pre-edit list.
+    expect(dialogSrc).toContain("let activeDrafts = drafts;");
+    expect(dialogSrc).toContain("mergeOpenFormEdit(");
+    expect(dialogSrc).toContain("assignees: activeDrafts.map((d) => ({");
+    expect(dialogSrc).toContain("phone: d.phone.trim() || null,");
+    // Validation itself is untouched: strict E.164 on both tiers.
+    expect(dialogSrc).toContain("validateAssigneeForm(form, drafts)");
+    expect(dialogSrc).not.toContain("normalizeAssigneePhone = ");
+  });
+});
+
 describe("assignment dialog Contact column (every WhatsApp number shown)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
   it("lists each configured number instead of a generic count label", () => {
