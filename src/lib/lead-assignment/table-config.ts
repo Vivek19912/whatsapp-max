@@ -400,6 +400,47 @@ export async function saveTableConfig(
 }
 
 /**
+ * Flip only this table's activation flag. Assignees, mode,
+ * templates, and algorithm state are never touched — pausing or
+ * resuming can never overwrite unsaved distribution settings.
+ * Only future arrivals are affected; existing lead owners are
+ * never rewritten here.
+ */
+export async function setTableConfigEnabled(
+  db: SupabaseClient,
+  args: {
+    accountId: string;
+    flowId: string;
+    enabled: boolean;
+  },
+): Promise<TableConfigDetail> {
+  const flow = await resolveTableFlow(db, args.accountId, args.flowId);
+  if (!flow) {
+    const err = new Error("Table not found.") as Error & { status: number };
+    err.status = 404;
+    throw err;
+  }
+  const { error } = await db
+    .from("lead_assignment_table_configs")
+    .update({
+      enabled: args.enabled,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("account_id", args.accountId)
+    .eq("flow_id", args.flowId);
+  if (error) throw error;
+  const detail = await getTableConfig(db, args.accountId, args.flowId);
+  if (!detail) {
+    const err = new Error("No assignment configuration yet.") as Error & {
+      status: number;
+    };
+    err.status = 404;
+    throw err;
+  }
+  return detail;
+}
+
+/**
  * Pause or resume one assignee of THIS table. The assignee id is
  * resolved strictly under this table's config — a guessed id from
  * another table (or tenant) resolves to 404. Resuming clears the

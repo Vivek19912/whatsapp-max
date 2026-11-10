@@ -154,13 +154,16 @@ describe("assignment dialog view mode (read-only inspection)", () => {
   });
 
   it("disables every editable control in view mode", () => {
-    // Master switch, radio cards, template selector, and share
-    // inputs render disabled — values stay readable, nothing is
-    // focusable or changeable. (Template language lives only in
-    // state; it has no visible field at all.)
+    // Radio cards, template selector, and share inputs render
+    // disabled — values stay readable, nothing is focusable or
+    // changeable. (Template language lives only in state; it has
+    // no visible field at all. The Automatic section has no toggle
+    // switch: activation lives in the footer Pause/Resume row in
+    // edit mode, while the section heading remains.)
     const hits = dialog.split("disabled={readOnly}").length - 1;
     expect(hits).toBeGreaterThanOrEqual(4);
-    expect(dialog).toContain('aria-label="Automatic assignment"');
+    expect(dialog).toContain('<section aria-label="Automatic assignment">');
+    expect(dialog).not.toContain("onCheckedChange={setEnabled}");
     expect(dialog).toContain('id="assign-mode-rr"');
     expect(dialog).toContain("Share percentage for");
     expect(dialog).toContain('ariaLabel="WhatsApp template (optional)"');
@@ -186,7 +189,8 @@ describe("assignment dialog view mode (read-only inspection)", () => {
     // Close-only footer in view mode; the Save pair stays for edit.
     expect(dialog).toContain("readOnly ? (");
     expect(dialog).toContain("onClick={() => onOpenChange(false)}");
-    expect(dialog).toContain('saveLabel="Save Assignment Settings"');
+    expect(dialog).toContain("Save Assignment Settings");
+    expect(dialog).not.toContain("ConfigFooterActions");
   });
 });
 
@@ -227,7 +231,8 @@ describe("assignment dialog assignee lookups (Add-crash regression)", () => {
     // is disabled while saving, and the handler itself bails when
     // a save is in flight.
     expect(dialog).toContain("if (readOnly || busy !== null) return;");
-    expect(dialog).toContain("saving={busy === ");
+    expect(dialog).toContain('busy === "save"');
+    expect(dialog).toContain("disabled={loading || busy !== null}");
     // Drafts are rebuilt from the server only after a successful
     // save; the catch path only surfaces the error, so the form
     // values survive for a retry.
@@ -493,8 +498,7 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
   });
 });
 
-describe("assignment dialog Contact column (every WhatsApp number shown)", () => {
-  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+describe("assignment dialog Contact column (every WhatsApp number shown)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
   it("lists each configured number instead of a generic count label", () => {
     // Desktop table cell maps over the saved numbers (actual data,
@@ -518,6 +522,59 @@ describe("assignment dialog Contact column (every WhatsApp number shown)", () =>
 
   it("mobile card stacks every number instead of a count suffix", () => {
     expect(dialog).not.toContain("(+${d.whatsapp_numbers.length} WhatsApp)");
+  });
+});
+
+describe("assignment dialog footer activation (no toggle, Pause/Resume row)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("removes the Automatic assignment toggle and keeps a simple section", () => {
+    expect(dialog).toContain('aria-label="Automatic assignment"');
+    // The section heading + hint remain, with no Switch action.
+    expect(dialog).toContain('title="Automatic assignment"');
+    expect(dialog).toContain("New leads are distributed to eligible assignees.");
+    expect(dialog).not.toContain("onCheckedChange={setEnabled}");
+    expect(dialog).not.toContain("Off — new leads stay unassigned");
+  });
+
+  it("renders a separate right-aligned status row above Cancel/Save", () => {
+    expect(dialog).toContain('aria-label="Assignment status"');
+    expect(dialog).toContain('aria-label="Pause automatic assignment"');
+    expect(dialog).toContain('aria-label="Resume automatic assignment"');
+    // Pill + action on their own row, divider, then footer actions.
+    expect(dialog).toContain("Active");
+    expect(dialog).toContain("Paused");
+    expect(dialog).toContain('role="separator"');
+    expect(dialog).toContain("Save Assignment Settings");
+    // Right-edge alignment: both rows justify-end in one column.
+    expect(dialog).toContain("justify-end");
+  });
+
+  it("auto-activates new valid configs and preserves existing state", async () => {
+    const { resolveEnabledOnSave } = await import("./table-assignment-dialog");
+    expect(
+      resolveEnabledOnSave({ isNew: true, persistedEnabled: false, hasActiveAssignee: true, weightInvalid: false }),
+    ).toBe(true);
+    expect(
+      resolveEnabledOnSave({ isNew: true, persistedEnabled: false, hasActiveAssignee: false, weightInvalid: false }),
+    ).toBe(false);
+    expect(
+      resolveEnabledOnSave({ isNew: true, persistedEnabled: false, hasActiveAssignee: true, weightInvalid: true }),
+    ).toBe(false);
+    expect(
+      resolveEnabledOnSave({ isNew: false, persistedEnabled: true, hasActiveAssignee: true, weightInvalid: false }),
+    ).toBe(true);
+    expect(
+      resolveEnabledOnSave({ isNew: false, persistedEnabled: false, hasActiveAssignee: true, weightInvalid: false }),
+    ).toBe(false);
+  });
+
+  it("pauses/resumes through a narrow status endpoint without touching drafts", () => {
+    expect(dialog).toContain("/assignment/status");
+    expect(dialog).toContain('JSON.stringify({ action })');
+    expect(dialog).toContain("submitStatus");
+    // Status updates only after the backend confirms (then reload).
+    expect(dialog).toContain("await load();");
   });
 });
 

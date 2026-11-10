@@ -28,7 +28,6 @@ import {
 import { cn } from "@/lib/utils";
 import {
   ConfigDialog,
-  ConfigFooterActions,
   ConfigSection,
   ConfigStatusBadge,
 } from "./config-dialog";
@@ -167,6 +166,27 @@ export function payloadAssignees(
   payload: AssignmentPayload | null | undefined,
 ): AssigneeView[] {
   return Array.isArray(payload?.assignees) ? payload.assignees : [];
+}
+
+/**
+ * Resolve the `enabled` flag to persist on save.
+ *
+ * New configurations (no persisted config yet) with at least one
+ * active assignee and no weight error activate automatically — the
+ * user never needs a separate toggle. Invalid or empty drafts stay
+ * paused. Existing configurations always preserve their persisted
+ * state so ordinary settings edits never flip activation. Pure.
+ */
+export function resolveEnabledOnSave(args: {
+  isNew: boolean;
+  persistedEnabled: boolean;
+  hasActiveAssignee: boolean;
+  weightInvalid: boolean;
+}): boolean {
+  if (!args.isNew) return args.persistedEnabled;
+  if (!args.hasActiveAssignee) return false;
+  if (args.weightInvalid) return false;
+  return true;
 }
 
 /** One send-eligible WhatsApp template from the templates endpoint. */
@@ -962,12 +982,20 @@ export function TableAssignmentDialog({
     setBusy("save");
     setSaveError(null);
     try {
+      const isNewConfig = !payload?.config;
+      const hasActiveAssignee = drafts.some((d) => d.is_active);
+      const enabledToSave = resolveEnabledOnSave({
+        isNew: isNewConfig,
+        persistedEnabled: enabled,
+        hasActiveAssignee,
+        weightInvalid: weightError !== null,
+      });
       const json = (await readJson(
         await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            enabled,
+            enabled: enabledToSave,
             mode,
             timezone: ASSIGNMENT_TIMEZONE,
             whatsapp_template_name: templateName.trim() || null,
@@ -995,6 +1023,7 @@ export function TableAssignmentDialog({
         setPayload((p) =>
           p ? { ...p, config: { ...json.config!, }, assignees: p.assignees } : p,
         );
+        setEnabled(json.config.enabled);
       }
       // Persist customer sequences for the drafts the user actually
       // changed. Each is keyed by that salesperson's own identity,
@@ -1054,6 +1083,41 @@ export function TableAssignmentDialog({
     }
   };
 
+  /**
+   * Pause or resume automatic assignment for this table. Narrowly
+   * scoped: only the enabled flag is persisted server-side, so
+   * unsaved distribution or assignee edits are never overwritten.
+   * Displayed status updates only after the backend confirms.
+   */
+  const submitStatus = async (action: "pause" | "resume") => {
+    if (readOnly || busy !== null) return;
+    setBusy("status");
+    setSaveError(null);
+    try {
+      const json = (await readJson(
+        await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment/status`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action }),
+        }),
+      )) as unknown as { config: { enabled: boolean } };
+      setEnabled(json.config.enabled);
+      toast.success(
+        action === "pause"
+          ? "Automatic assignment paused. New leads will stay unassigned."
+          : "Automatic assignment resumed.",
+      );
+      await load();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to update assignment status.";
+      setSaveError(message);
+      toast.error(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const loadNotifications = async () => {
     setShowNotifications(true);
     try {
@@ -1102,14 +1166,84 @@ export function TableAssignmentDialog({
             Close
           </Button>
         ) : (
-          <ConfigFooterActions
-            onClose={() => onOpenChange(false)}
-            closeLabel="Cancel"
-            onSave={save}
-            saveLabel="Save Assignment Settings"
-            saving={busy === "save"}
-            saveDisabled={loading}
-          />
+          <div className="flex flex-col items-end gap-2">
+            <div
+              className="flex items-center justify-end gap-2"
+              aria-label="Assignment status"
+            >
+              {enabled ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                  <span
+                    className="size-1.5 rounded-full bg-emerald-500"
+                    aria-hidden
+                  />
+                  Active
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-400">
+                  <span
+                    className="size-1.5 rounded-full bg-amber-500"
+                    aria-hidden
+                  />
+                  Paused
+                </span>
+              )}
+              {enabled ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void submitStatus("pause")}
+                  disabled={loading || busy !== null}
+                  aria-label="Pause automatic assignment"
+                >
+                  <Pause className="mr-1.5 size-4" aria-hidden />
+                  Pause
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void submitStatus("resume")}
+                  disabled={loading || busy !== null}
+                  aria-label="Resume automatic assignment"
+                >
+                  <Play className="mr-1.5 size-4" aria-hidden />
+                  Resume
+                </Button>
+              )}
+            </div>
+            <div
+              className="w-full border-t border-border"
+              aria-hidden
+              role="separator"
+            />
+            <div className="flex items-center justify-end gap-2 pt-0.5">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={busy !== null}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={save}
+                disabled={loading || busy !== null}
+              >
+                {busy === "save" ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                    Saving…
+                  </>
+                ) : (
+                  "Save Assignment Settings"
+                )}
+              </Button>
+            </div>
+          </div>
         )
       }
     >
@@ -1118,19 +1252,7 @@ export function TableAssignmentDialog({
           <section aria-label="Automatic assignment">
             <ConfigSection
               title="Automatic assignment"
-              hint={
-                enabled
-                  ? "New leads are distributed to eligible assignees."
-                  : "Off — new leads stay unassigned until someone assigns them."
-              }
-              action={
-                <Switch
-                  checked={enabled}
-                  onCheckedChange={setEnabled}
-                  aria-label="Automatic assignment"
-                  disabled={readOnly}
-                />
-              }
+              hint="New leads are distributed to eligible assignees."
             >
               <div />
             </ConfigSection>
