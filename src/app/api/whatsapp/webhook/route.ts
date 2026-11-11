@@ -895,21 +895,33 @@ async function processMessage(
   if (!convResult) return
   const conversation = convResult.conversation
 
-  // Adopt-on-thread-open: a lead assigned in the Workspace (manual or
-  // auto-assign at ingestion) whose thread only opens now must show
-  // the same owner in the Inbox. Only on creation, only a real member
-  // UUID, best-effort — never fails message processing.
-  if (convResult.created) {
+  // Workspace-owner adoption: a lead assigned in the Workspace
+  // (manual or auto-assign at ingestion) whose thread opens now —
+  // or whose existing thread is still unowned (e.g. created by an
+  // outbound send) — must show the same owner in the Inbox. Runs
+  // BEFORE general chat auto-assign so the Workspace owner wins;
+  // never overwrites an explicit assignment. Best-effort — never
+  // fails message processing.
+  if (
+    convResult.created ||
+    !(
+      typeof conversation.assigned_agent_id === 'string' &&
+      conversation.assigned_agent_id.trim() !== ''
+    )
+  ) {
     try {
-      const { adoptContactAssignmentForConversation } = await import(
+      const { adoptWorkspaceOwnerForConversation } = await import(
         '@/lib/inbox/assignment-sync'
       )
-      await adoptContactAssignmentForConversation(
+      const outcome = await adoptWorkspaceOwnerForConversation(
         supabaseAdmin(),
         accountId,
         contactRecord.id,
         conversation.id
       )
+      if (outcome.adopted) {
+        conversation.assigned_agent_id = outcome.ownerId
+      }
     } catch {
       // Adopt-only; the thread already exists.
     }

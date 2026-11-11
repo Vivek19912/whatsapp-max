@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { findAssigneeField } from "@/lib/lead-assignment/table-helpers";
+import { findAssigneeField, readAssignment } from "@/lib/lead-assignment/table-helpers";
 import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
 
 // ============================================================
@@ -158,11 +158,137 @@ export async function mirrorConversationAssignmentToWorkspace(
 }
 
 /**
+ * Outcome of the strict Workspace-owner adoption. `adopted` is true
+ * only when this call wrote `assigned_agent_id`; every other case
+ * leaves the thread untouched. `conflict` means distinct runs name
+ * different owners — the caller must not guess.
+ */
+export type AdoptWorkspaceOwnerOutcome =
+  | { adopted: true; ownerId: string }
+  | {
+      adopted: false;
+      reason:
+        | "already-owned"
+        | "no-run"
+        | "no-field"
+        | "no-owner"
+        | "conflict"
+        | "error";
+    };
+
+/**
+ * Adopt the contact's Workspace owner onto a conversation that is
+ * new or currently unowned. Ownership rules (never violated):
+ *
+ * - Only fills `assigned_agent_id IS NULL` — an explicit (manual)
+ *   assignment is always preserved, including against a concurrent
+ *   writer (the NULL predicate rides in the UPDATE itself).
+ * - Only writes a real member UUID; "Unassigned"/legacy/cleared
+ *   values are ignored.
+ * - Requires exactly one distinct owner across the contact's runs;
+ *   conflicting owners leave the thread unchanged (`conflict`).
+ * - Everything is account-scoped. Best-effort: failures resolve to
+ *   `{ adopted: false, reason: "error" }`, never throw.
+ */
+export async function adoptWorkspaceOwnerForConversation(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string,
+  conversationId: string,
+): Promise<AdoptWorkspaceOwnerOutcome> {
+  try {
+    const { data: conv, error: convErr } = await db
+      .from("conversations")
+      .select("assigned_agent_id")
+      .eq("id", conversationId)
+      .eq("account_id", accountId)
+      .maybeSingle();
+    if (convErr) return { adopted: false, reason: "error" };
+    const current = (conv as { assigned_agent_id: string | null } | null)
+      ?.assigned_agent_id;
+    // Never overwrite an explicit assignment (manual Inbox
+    // assignment always wins over automatic adoption).
+    if (typeof current === "string" && current.trim() !== "") {
+      return { adopted: false, reason: "already-owned" };
+    }
+
+    const { data: runs, error: runsErr } = await db
+      .from("flow_runs")
+      .select("id, flow_id, status, started_at")
+      .eq("account_id", accountId)
+      .eq("contact_id", contactId)
+      .order("started_at", { ascending: false })
+      .limit(25);
+    if (runsErr) return { adopted: false, reason: "error" };
+    const list = (runs ?? []) as Array<{
+      id: string;
+      flow_id: string;
+      status: string;
+      started_at: string;
+    }>;
+    if (list.length === 0) return { adopted: false, reason: "no-run" };
+
+    // Resolve the Assigned To field per flow (cached — a contact's
+    // runs almost always share one flow).
+    const fieldByFlow = new Map<string, { id: string } | null>();
+    const owners = new Set<string>();
+    for (const run of list) {
+      if (!run.flow_id) continue;
+      let field = fieldByFlow.get(run.flow_id);
+      if (field === undefined) {
+        try {
+          field = await findAssigneeField(db, accountId, run.flow_id);
+        } catch {
+          return { adopted: false, reason: "error" };
+        }
+        fieldByFlow.set(run.flow_id, field);
+      }
+      if (!field) continue;
+      let stored: string | null;
+      try {
+        stored = await readAssignment(db, accountId, field.id, run.id);
+      } catch {
+        return { adopted: false, reason: "error" };
+      }
+      if (
+        typeof stored === "string" &&
+        stored.trim() !== "" &&
+        stored.trim() !== ASSIGNED_TO_UNASSIGNED &&
+        UUID_RE.test(stored.trim())
+      ) {
+        owners.add(stored.trim());
+      }
+    }
+    if (fieldByFlow.size > 0 && [...fieldByFlow.values()].every((f) => !f)) {
+      return { adopted: false, reason: "no-field" };
+    }
+    if (owners.size === 0) return { adopted: false, reason: "no-owner" };
+    if (owners.size > 1) return { adopted: false, reason: "conflict" };
+    const [ownerId] = [...owners];
+
+    // Conditional write: NULL predicate in the UPDATE itself, so a
+    // concurrent manual assignment between the read above and this
+    // write cannot be clobbered.
+    const { error: updateErr } = await db
+      .from("conversations")
+      .update({ assigned_agent_id: ownerId })
+      .eq("id", conversationId)
+      .eq("account_id", accountId)
+      .is("assigned_agent_id", null);
+    if (updateErr) return { adopted: false, reason: "error" };
+    return { adopted: true, ownerId };
+  } catch {
+    return { adopted: false, reason: "error" };
+  }
+}
+/**
  * Adopt-on-thread-open: when a conversation is newly created, copy
  * the contact's current Workspace owner (if any) onto it. Covers
  * leads assigned at ingestion/auto-assign whose thread only opens
- * later. Only sets a real member UUID; "Unassigned"/legacy/cleared
- * leave the fresh thread unassigned. Best-effort.
+ * later. Delegates to the strict adopter: only fills unowned
+ * threads, only writes a real member UUID, never overwrites an
+ * explicit assignment, and leaves conflicting owners untouched.
+ * Best-effort: always resolves true/false, never throws.
  */
 export async function adoptContactAssignmentForConversation(
   db: SupabaseClient,
@@ -170,57 +296,11 @@ export async function adoptContactAssignmentForConversation(
   contactId: string,
   conversationId: string,
 ): Promise<boolean> {
-  try {
-    const { data: runs, error: runsErr } = await db
-      .from("flow_runs")
-      .select("id, status, started_at")
-      .eq("account_id", accountId)
-      .eq("contact_id", contactId)
-      .order("started_at", { ascending: false })
-      .limit(25);
-    if (runsErr || !runs || runs.length === 0) return true;
-    const list = runs as Array<{ id: string; status: string; started_at: string }>;
-    const active = list.filter((r) => r.status === "active");
-    const newest = (a: (typeof list)[number], b: (typeof list)[number]) =>
-      a.started_at >= b.started_at ? a : b;
-    const picked = (active.length > 0 ? active : list).reduce(newest);
-
-    const { data: runDetail, error: runErr } = await db
-      .from("flow_runs")
-      .select("flow_id")
-      .eq("id", picked.id)
-      .eq("account_id", accountId)
-      .maybeSingle();
-    if (runErr || !runDetail) return false;
-    const flowId = (runDetail as { flow_id: string }).flow_id;
-
-    const field = await findAssigneeField(db, accountId, flowId);
-    if (!field) return true;
-
-    const { data: cell, error: cellErr } = await db
-      .from("workspace_values")
-      .select("value_text")
-      .eq("account_id", accountId)
-      .eq("field_id", field.id)
-      .eq("flow_run_id", picked.id)
-      .maybeSingle();
-    if (cellErr) return false;
-    const stored = (cell as { value_text: string | null } | null)?.value_text ?? null;
-    if (
-      typeof stored !== "string" ||
-      stored === ASSIGNED_TO_UNASSIGNED ||
-      !UUID_RE.test(stored.trim())
-    ) {
-      return true;
-    }
-
-    const { error: updateErr } = await db
-      .from("conversations")
-      .update({ assigned_agent_id: stored.trim() })
-      .eq("id", conversationId)
-      .eq("account_id", accountId);
-    return !updateErr;
-  } catch {
-    return false;
-  }
+  const outcome = await adoptWorkspaceOwnerForConversation(
+    db,
+    accountId,
+    contactId,
+    conversationId,
+  );
+  return outcome.adopted;
 }

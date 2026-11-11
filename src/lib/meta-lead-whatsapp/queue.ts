@@ -37,6 +37,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { isUniqueViolation } from "@/lib/contacts/dedupe";
 import { getOrCreateConversation } from "@/lib/conversations/get-or-create";
+import { adoptWorkspaceOwnerForConversation } from "@/lib/inbox/assignment-sync";
 import { decrypt } from "@/lib/whatsapp/encryption";
 import { sendTemplateMessage } from "@/lib/whatsapp/meta-api";
 import {
@@ -680,6 +681,19 @@ export async function sendTemplateToLeadContact(
     throw new Error("Message sent but the Inbox thread could not be resolved.");
   }
   const conversationId = resolved.conversation.id as string;
+
+  // Ownership gap fix: an outbound send may CREATE the thread after
+  // the Workspace assignment mirror already (correctly) no-oped on
+  // the missing thread — and the send itself never sets an owner.
+  // Adopt the unique Workspace owner onto newly created or still
+  // unowned threads. Never overwrites an explicit assignment;
+  // never fails the send (best-effort).
+  await adoptWorkspaceOwnerForConversation(
+    db,
+    args.accountId,
+    args.contactId,
+    conversationId,
+  );
 
   // Idempotency: a retried row carrying the same provider message
   // id must not duplicate the Inbox row.

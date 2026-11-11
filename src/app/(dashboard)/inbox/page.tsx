@@ -20,6 +20,9 @@ import { canViewConversation, NO_INBOX_CAPS, type InboxViewerCaps } from "@/lib/
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
+import { AssignedLeadsSection } from "@/components/inbox/assigned-leads-section";
+import { LeadDetailPanel } from "@/components/inbox/lead-detail-panel";
+import type { AssignedLead } from "@/components/inbox/assigned-leads";
 import { toast } from "sonner";
 import { WifiOff , X} from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -49,6 +52,17 @@ export default function InboxPage() {
     useState<Conversation | null>(null);
   const [activeContact, setActiveContact] = useState<Contact | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  /**
+   * Lead-only selection: an assigned Meta Lead Ads lead with no
+   * WhatsApp conversation yet. Mutually exclusive with
+   * `activeConversation` — the center pane shows one or the other.
+   */
+  const [activeLead, setActiveLead] = useState<AssignedLead | null>(null);
+  /**
+   * Live conversation search text, mirrored up from ConversationList
+   * so the Assigned Leads section can filter by the same query.
+   */
+  const [leadSearchQuery, setLeadSearchQuery] = useState("");
   const [whatsappConnected, setWhatsappConnected] = useState<boolean | null>(
     null
   );
@@ -703,6 +717,8 @@ export default function InboxPage() {
       // when conversationId changes — so messages would stay empty until
       // the user navigated away and back. Bail out early instead.
       if (activeConversation?.id === conv.id) return;
+      // Lead and conversation selections are mutually exclusive.
+      setActiveLead(null);
       setActiveConversation(conv);
       setActiveContact(conv.contact ?? null);
       setMessages([]);
@@ -744,12 +760,57 @@ export default function InboxPage() {
   const handleCloseConversation = useCallback(() => {
     setActiveConversation(null);
     setActiveContact(null);
+    setActiveLead(null);
     setMessages([]);
     // Clearing the ref lets the deep-link auto-selector fire again if
     // the user later visits /inbox?c=<same-id> — desirable UX.
     autoSelectedForDeepLinkRef.current = null;
     router.replace("/inbox", { scroll: false });
   }, [router]);
+
+  /**
+   * Lead-only selection: mutually exclusive with conversations. The
+   * center pane swaps the thread for the lead detail panel; the URL
+   * deep-link (`?c=`) is cleared since it addresses conversations.
+   */
+  const handleSelectLead = useCallback(
+    (lead: AssignedLead) => {
+      if (activeLead?.run_id === lead.run_id) return;
+      setActiveConversation(null);
+      setActiveContact(null);
+      setMessages([]);
+      setActiveLead(lead);
+      autoSelectedForDeepLinkRef.current = null;
+      router.replace("/inbox", { scroll: false });
+    },
+    [activeLead?.run_id, router]
+  );
+
+  const handleCloseLead = useCallback(() => {
+    setActiveLead(null);
+  }, []);
+
+  /**
+   * Contacts that already have a thread. Drives the Assigned Leads
+   * section: a lead whose first message just created its thread
+   * drops out of the lead-only list (the thread renders in the
+   * normal list instead) without a manual refresh.
+   */
+  const threadContactIds = useMemo(
+    () => [
+      ...new Set(
+        conversations
+          .map((c) => c.contact_id)
+          .filter((id): id is string => typeof id === "string" && id !== "")
+      ),
+    ],
+    [conversations]
+  );
+
+  /** Thread that appeared for the open lead, if any. */
+  const threadForActiveLead = activeLead?.contact_id
+    ? (conversations.find((c) => c.contact_id === activeLead.contact_id) ?? null)
+    : null;
 
 
   const handleMessagesLoaded = useCallback((loaded: Message[]) => {
@@ -821,6 +882,8 @@ export default function InboxPage() {
   // it back to the list. On lg+ both panes render side-by-side as
   // before, unchanged.
   const hasActiveConv = !!activeConversation;
+  // Either selection (thread or lead-only) occupies the center pane.
+  const hasSelection = hasActiveConv || !!activeLead;
 
   return (
     <div className="-m-4 flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden sm:-m-6">
@@ -841,18 +904,28 @@ export default function InboxPage() {
             thread can occupy the full width. Always visible on lg+. */}
         <div
           className={cn(
-            "flex h-full min-w-0 flex-1 lg:flex-none",
-            hasActiveConv ? "hidden lg:flex" : "flex",
+            "flex h-full min-w-0 flex-1 flex-col lg:flex-none",
+            hasSelection ? "hidden lg:flex" : "flex",
           )}
           style={isDesktop ? { width: sidebarWidth, minWidth: SIDEBAR_MIN, maxWidth: SIDEBAR_MAX } : undefined}
         >
-          <ConversationList
-            activeConversationId={activeConversation?.id ?? null}
-            onSelect={handleSelectConversation}
-            conversations={conversations}
-            onConversationsLoaded={handleConversationsLoaded}
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ConversationList
+              activeConversationId={activeConversation?.id ?? null}
+              onSelect={handleSelectConversation}
+              conversations={conversations}
+              onConversationsLoaded={handleConversationsLoaded}
+              resyncToken={resyncToken}
+              viewerCaps={viewerCaps}
+              onSearchQueryChange={setLeadSearchQuery}
+            />
+          </div>
+          <AssignedLeadsSection
+            searchQuery={leadSearchQuery}
             resyncToken={resyncToken}
-            viewerCaps={viewerCaps}
+            threadContactIds={threadContactIds}
+            activeLeadRunId={activeLead?.run_id ?? null}
+            onSelectLead={handleSelectLead}
           />
         </div>
 
@@ -877,24 +950,33 @@ export default function InboxPage() {
         <div
           className={cn(
             "flex h-full min-w-0 flex-1 lg:flex",
-            hasActiveConv ? "flex" : "hidden lg:flex",
+            hasSelection ? "flex" : "hidden lg:flex",
           )}
         >
-          <MessageThread
-            conversation={activeConversation}
-            contact={activeContact}
-            messages={messages}
-            onMessagesLoaded={handleMessagesLoaded}
-            onNewMessage={handleNewMessage}
-            onUpdateMessage={handleUpdateMessage}
-            onAssignChange={handleAssignChange}
-            onBack={handleCloseConversation}
-            resyncToken={resyncToken}
-            onRefresh={handleManualRefresh}
-            contactPanelOpen={contactPanelOpen}
-            onToggleContactPanel={handleToggleContactPanel}
-            viewerCaps={viewerCaps}
-          />
+          {activeLead && !activeConversation ? (
+            <LeadDetailPanel
+              lead={activeLead}
+              threadConversation={threadForActiveLead}
+              onOpenConversation={handleSelectConversation}
+              onBack={handleCloseLead}
+            />
+          ) : (
+            <MessageThread
+              conversation={activeConversation}
+              contact={activeContact}
+              messages={messages}
+              onMessagesLoaded={handleMessagesLoaded}
+              onNewMessage={handleNewMessage}
+              onUpdateMessage={handleUpdateMessage}
+              onAssignChange={handleAssignChange}
+              onBack={handleCloseConversation}
+              resyncToken={resyncToken}
+              onRefresh={handleManualRefresh}
+              contactPanelOpen={contactPanelOpen}
+              onToggleContactPanel={handleToggleContactPanel}
+              viewerCaps={viewerCaps}
+            />
+          )}
         </div>
 
         {/* Right panel: Contact sidebar — desktop only, only when a

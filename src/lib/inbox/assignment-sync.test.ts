@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adoptContactAssignmentForConversation,
+  adoptWorkspaceOwnerForConversation,
   mirrorConversationAssignmentToWorkspace,
   mirrorRunAssignmentToConversation,
 } from "./assignment-sync";
@@ -44,6 +45,10 @@ class FakeDb {
         db.log.push(`order:${table}:${String(k)}:${JSON.stringify(opts)}`);
         return chain;
       },
+      is: (k: unknown, v: unknown) => {
+        db.log.push(`is:${table}:${String(k)}=${String(v)}`);
+        return chain;
+      },
       limit: (n: unknown) => {
         db.log.push(`limit:${table}:${String(n)}`);
         return chain;
@@ -74,6 +79,7 @@ interface FakeChain {
   select(cols: unknown): FakeChain;
   eq(k: unknown, v: unknown): FakeChain;
   order(k: unknown, opts: unknown): FakeChain;
+  is(k: unknown, v: unknown): FakeChain;
   limit(n: unknown): FakeChain;
   update(values: unknown): FakeChain;
   upsert(values: unknown, options?: unknown): FakeChain;
@@ -219,17 +225,24 @@ describe("mirrorConversationAssignmentToWorkspace (Inbox -> Workspace)", () => {
 
 describe("adoptContactAssignmentForConversation (thread open)", () => {
   const runs = [
-    { id: "run-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+    { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
   ];
+  const OWNER = "22222222-2222-4222-8222-222222222222";
 
-  it("copies the contact's current owner onto the new thread", async () => {
-    const db = new FakeDb().script(
+  // New query sequence: conversation owner read -> runs -> Assigned
+  // To field -> cell -> conditional (NULL-guarded) update.
+  function dbWithOwnerStored(stored: { value_text: string } | null) {
+    return new FakeDb().script(
+      ok({ assigned_agent_id: null }), // thread is unowned
       ok(runs),
-      ok({ flow_id: "flow-1" }),
       ok([{ id: "field-1", name: "Assigned To" }]),
-      ok({ value_text: "22222222-2222-4222-8222-222222222222" }),
+      ok(stored),
       ok({})
     );
+  }
+
+  it("copies the contact's current owner onto the new thread", async () => {
+    const db = dbWithOwnerStored({ value_text: OWNER });
     const res = await adoptContactAssignmentForConversation(
       db as never,
       "acc-1",
@@ -238,26 +251,152 @@ describe("adoptContactAssignmentForConversation (thread open)", () => {
     );
     expect(res).toBe(true);
     expect(db.writes.find((w) => w.op === "update")?.values).toEqual({
-      assigned_agent_id: "22222222-2222-4222-8222-222222222222",
+      assigned_agent_id: OWNER,
     });
+    // Never overwrites: the NULL predicate rides in the UPDATE.
+    expect(db.log).toContain("is:conversations:assigned_agent_id=null");
   });
 
   it("leaves the thread unassigned when the cell is Unassigned/cleared", async () => {
     for (const value_text of ["Unassigned", null]) {
-      const db = new FakeDb().script(
-        ok(runs),
-        ok({ flow_id: "flow-1" }),
-        ok([{ id: "field-1", name: "Assigned To" }]),
-        ok(value_text ? { value_text } : null)
-      );
+      const db = dbWithOwnerStored(value_text ? { value_text } : null);
       const res = await adoptContactAssignmentForConversation(
         db as never,
         "acc-1",
         "ct-1",
         "conv-9"
       );
-      expect(res).toBe(true);
+      // No member owner exists, so nothing is adopted — and nothing
+      // is written.
+      expect(res).toBe(false);
       expect(db.writes).toHaveLength(0);
     }
+  });
+
+  it("preserves an existing explicit assignment and stops reading", async () => {
+    const db = new FakeDb().script(
+      ok({ assigned_agent_id: "33333333-3333-4333-8333-333333333333" })
+    );
+    const res = await adoptContactAssignmentForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(res).toBe(false);
+    expect(db.writes).toHaveLength(0);
+    // No run/field/cell lookups once ownership is known.
+    expect(db.log).toHaveLength(3); // select + 2 eq on conversations
+  });
+
+  it("leaves conflicting owners untouched", async () => {
+    const db = new FakeDb().script(
+      ok({ assigned_agent_id: null }),
+      ok([
+        { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+        { id: "run-2", flow_id: "flow-1", status: "completed", started_at: "2026-02-01T10:00:00Z" },
+      ]),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok({ value_text: OWNER }),
+      ok({ value_text: "44444444-4444-4444-8444-444444444444" })
+    );
+    const res = await adoptContactAssignmentForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(res).toBe(false);
+    expect(db.writes).toHaveLength(0);
+  });
+});
+
+describe("adoptWorkspaceOwnerForConversation (strict outcome)", () => {
+  const OWNER = "22222222-2222-4222-8222-222222222222";
+  const runs = [
+    { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+  ];
+
+  it("reports already-owned without touching the row", async () => {
+    const db = new FakeDb().script(ok({ assigned_agent_id: OWNER }));
+    const outcome = await adoptWorkspaceOwnerForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(outcome).toEqual({ adopted: false, reason: "already-owned" });
+    expect(db.writes).toHaveLength(0);
+  });
+
+  it("reports no-owner when no run names a member UUID", async () => {
+    const db = new FakeDb().script(
+      ok({ assigned_agent_id: null }),
+      ok(runs),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok(null)
+    );
+    const outcome = await adoptWorkspaceOwnerForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(outcome).toEqual({ adopted: false, reason: "no-owner" });
+    expect(db.writes).toHaveLength(0);
+  });
+
+  it("reports no-field when the flow has no Assigned To column", async () => {
+    const db = new FakeDb().script(ok({ assigned_agent_id: null }), ok(runs), ok([]));
+    const outcome = await adoptWorkspaceOwnerForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(outcome).toEqual({ adopted: false, reason: "no-field" });
+  });
+
+  it("reports conflict instead of guessing an owner", async () => {
+    const db = new FakeDb().script(
+      ok({ assigned_agent_id: null }),
+      ok([
+        { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+        { id: "run-2", flow_id: "flow-1", status: "completed", started_at: "2026-02-01T10:00:00Z" },
+      ]),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok({ value_text: OWNER }),
+      ok({ value_text: "44444444-4444-4444-8444-444444444444" })
+    );
+    const outcome = await adoptWorkspaceOwnerForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(outcome).toEqual({ adopted: false, reason: "conflict" });
+    expect(db.writes).toHaveLength(0);
+  });
+
+  it("ignores external (non-UUID) values and adopts the member owner", async () => {
+    const db = new FakeDb().script(
+      ok({ assigned_agent_id: null }),
+      ok([
+        { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+        { id: "run-2", flow_id: "flow-2", status: "completed", started_at: "2026-02-01T10:00:00Z" },
+      ]),
+      ok([{ id: "field-1", name: "Assigned To" }]), // flow-1 field
+      ok({ value_text: "Some External Name" }), // not a member UUID
+      ok([{ id: "field-2", name: "Assigned To" }]), // flow-2 field
+      ok({ value_text: OWNER }),
+      ok({})
+    );
+    const outcome = await adoptWorkspaceOwnerForConversation(
+      db as never,
+      "acc-1",
+      "ct-1",
+      "conv-9"
+    );
+    expect(outcome).toEqual({ adopted: true, ownerId: OWNER });
   });
 });
