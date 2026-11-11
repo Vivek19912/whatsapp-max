@@ -94,12 +94,6 @@ interface ConversationListProps {
    * matching thread. Defaults deny both.
    */
   viewerCaps?: InboxViewerCaps;
-  /**
-   * Mirrors the debounced list search text up to the parent so the
-   * Assigned Leads section can filter by the same query. Optional;
-   * the list works unchanged without it.
-   */
-  onSearchQueryChange?: (query: string) => void;
 }
 
 type InboxFilter = "all" | "unread";
@@ -128,7 +122,6 @@ export function ConversationList({
   onConversationsLoaded,
   resyncToken = 0,
   viewerCaps = NO_INBOX_CAPS,
-  onSearchQueryChange,
 }: ConversationListProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<InboxFilter>("all");
@@ -560,12 +553,6 @@ export function ConversationList({
     // `searchRetry` forces a refetch of the identical key.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searching, searchKey, resyncToken, searchRetry]);
-
-  // Mirror the debounced search text to the parent (Assigned Leads
-  // section) — fire-and-forget, never affects this list.
-  useEffect(() => {
-    onSearchQueryChange?.(activeQuery);
-  }, [activeQuery, onSearchQueryChange]);
 
   // Company options are derived from the loaded conversations — there's no
   // separate companies table, and only companies with a live conversation
