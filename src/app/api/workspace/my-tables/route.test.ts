@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   role: "agent",
   accountId: "acct-1",
   userId: "u-agent",
+  // Inbox permission grant for the caller (null = no grants).
+  perm: null as null | { can_view_all: boolean; can_manage_assignments: boolean },
   flows: [] as Array<Record<string, unknown>>,
   fields: [] as Array<Record<string, unknown>>,
   values: [] as Array<Record<string, unknown>>,
@@ -61,7 +63,19 @@ function fakeSupabase() {
       return api;
     },
     order: () => api,
-    maybeSingle: async () => ({ data: null as unknown, error: null }),
+    maybeSingle: async () => {
+      if (state.table === "agent_inbox_permissions") {
+        if (!h.perm) return { data: null, error: null };
+        return {
+          data: {
+            can_manage_assignments: h.perm.can_manage_assignments,
+            can_view_all: h.perm.can_view_all,
+          },
+          error: null,
+        };
+      }
+      return { data: null as unknown, error: null };
+    },
     then: (resolve: (v: unknown) => void) => {
       const matched = rows().filter((r) =>
         state.filters.every((f) =>
@@ -87,6 +101,7 @@ beforeEach(() => {
   h.role = "agent";
   h.accountId = "acct-1";
   h.userId = "u-agent";
+  h.perm = null;
   h.flows = [
     { id: "flow-own", account_id: "acct-1", kind: "meta_lead_ads", name: "Hiring" },
     { id: "flow-other", account_id: "acct-1", kind: "meta_lead_ads", name: "Travel" },
@@ -106,7 +121,25 @@ beforeEach(() => {
 });
 
 describe("GET /api/workspace/my-tables", () => {
-  it("lists all Meta tables with the agent's assigned counts", async () => {
+  it("agent WITHOUT View All sees only tables with own assigned leads", async () => {
+    h.perm = null;
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      tables: [{ flow_id: "flow-own", name: "Hiring", assigned_count: 2 }],
+    });
+  });
+
+  it("agent WITHOUT View All and no own leads sees no tables", async () => {
+    h.values = [];
+    h.perm = null;
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ tables: [] });
+  });
+
+  it("agent WITH View All sees all tables with own counts", async () => {
+    h.perm = { can_view_all: true, can_manage_assignments: false };
     const res = await GET();
     expect(res.status).toBe(200);
     // Mock preserves insertion order (real DB orders by name).
@@ -119,8 +152,9 @@ describe("GET /api/workspace/my-tables", () => {
     });
   });
 
-  it("returns all tables with zero counts when the agent owns nothing", async () => {
+  it("agent WITH View All and no own leads still sees all tables", async () => {
     h.values = [];
+    h.perm = { can_view_all: true, can_manage_assignments: false };
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
@@ -132,10 +166,30 @@ describe("GET /api/workspace/my-tables", () => {
     });
   });
 
-  it("ignores other accounts' rows (counts stay zero, tables still listed)", async () => {
+  it("Manage Assignments alone does not broaden the table list", async () => {
+    h.perm = { can_view_all: false, can_manage_assignments: true };
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      tables: [{ flow_id: "flow-own", name: "Hiring", assigned_count: 2 }],
+    });
+  });
+
+  it("ignores other accounts' rows (restricted agent sees nothing)", async () => {
     h.values = [
       { account_id: "other-acct", field_id: "f-own", flow_run_id: "run-x", value_text: "u-agent" },
     ];
+    h.perm = null;
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ tables: [] });
+  });
+
+  it("agent WITH View All still lists all tables when only foreign rows exist", async () => {
+    h.values = [
+      { account_id: "other-acct", field_id: "f-own", flow_run_id: "run-x", value_text: "u-agent" },
+    ];
+    h.perm = { can_view_all: true, can_manage_assignments: false };
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({

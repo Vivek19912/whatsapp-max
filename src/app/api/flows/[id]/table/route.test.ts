@@ -81,6 +81,11 @@ const h = vi.hoisted(() => ({
   recordings: [] as Array<Record<string, unknown>>,
   // Uploader profiles (profiles rows).
   profiles: [] as Array<Record<string, unknown>>,
+  // Inbox permission grants keyed by user_id.
+  perms: {} as Record<
+    string,
+    { can_view_all: boolean; can_manage_assignments: boolean }
+  >,
   // Service-role provisioning capture (default business columns).
   adminFields: [] as Array<Record<string, unknown>>,
   adminInserts: [] as Array<Record<string, unknown>[]>,
@@ -229,6 +234,29 @@ vi.mock("@/lib/supabase/server", () => {
             }),
           }),
         };
+      }
+      if (table === "agent_inbox_permissions") {
+        let userId: unknown = null;
+        const chain: Record<string, unknown> = {};
+        chain.select = () => chain;
+        chain.eq = (col: string, val: unknown) => {
+          if (col === "user_id") userId = val;
+          return chain;
+        };
+        chain.maybeSingle = async () => {
+          const grant =
+            typeof userId === "string" ? h.perms[userId] : undefined;
+          return {
+            data: grant
+              ? {
+                  can_manage_assignments: grant.can_manage_assignments,
+                  can_view_all: grant.can_view_all,
+                }
+              : null,
+            error: null,
+          };
+        };
+        return chain;
       }
       return {
         select: () => ({
@@ -1833,7 +1861,7 @@ describe("GET table – Meta Source column position", () => {
   });
 });
 
-describe("GET table – account-wide visibility on Meta Lead Ads Tables", () => {
+describe("GET table – View All-gated visibility on Meta Lead Ads Tables", () => {
   const metaFlow = () => {
     h.flow = {
       id: "flow-meta",
@@ -1852,13 +1880,59 @@ describe("GET table – account-wide visibility on Meta Lead Ads Tables", () => 
   const asRole = (role: string) => {
     h.profiles = [{ user_id: "u-1", account_role: role }];
   };
+  beforeEach(() => {
+    h.perms = {};
+  });
 
-  it("agents see all leads: query assignee passes through, never forced", async () => {
+  it("agent WITHOUT View All is forced to own id, ignoring the query param", async () => {
     const previousFlow = h.flow;
     const previousUser = h.user;
     try {
       metaFlow();
       asAgent();
+      h.perms = {}; // no grant row
+      const res = await GET(
+        new Request(
+          "https://app.test/api/flows/flow-meta/table?assignee=u-other",
+        ),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("agent WITHOUT View All and no assignee param defaults to own id", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      metaFlow();
+      asAgent();
+      h.perms = {};
+      const res = await GET(
+        new Request("https://app.test/api/flows/flow-meta/table"),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("agent WITH View All sees all leads: query assignee passes through", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      metaFlow();
+      asAgent();
+      h.perms = {
+        "u-agent": { can_view_all: true, can_manage_assignments: false },
+      };
       const res = await GET(
         new Request(
           "https://app.test/api/flows/flow-meta/table?assignee=u-other",
@@ -1873,18 +1947,44 @@ describe("GET table – account-wide visibility on Meta Lead Ads Tables", () => 
     }
   });
 
-  it("defaults an agent with no assignee param to all leads", async () => {
+  it("agent WITH View All and no assignee param defaults to all leads", async () => {
     const previousFlow = h.flow;
     const previousUser = h.user;
     try {
       metaFlow();
       asAgent();
+      h.perms = {
+        "u-agent": { can_view_all: true, can_manage_assignments: false },
+      };
       const res = await GET(
         new Request("https://app.test/api/flows/flow-meta/table"),
         { params: Promise.resolve({ id: "flow-meta" }) },
       );
       expect(res.status).toBe(200);
       expect(h.rpcArgs).toMatchObject({ p_assignee: "all" });
+    } finally {
+      h.flow = previousFlow;
+      h.user = previousUser;
+    }
+  });
+
+  it("Manage Assignments alone does not broaden visibility", async () => {
+    const previousFlow = h.flow;
+    const previousUser = h.user;
+    try {
+      metaFlow();
+      asAgent();
+      h.perms = {
+        "u-agent": { can_view_all: false, can_manage_assignments: true },
+      };
+      const res = await GET(
+        new Request(
+          "https://app.test/api/flows/flow-meta/table?assignee=u-other",
+        ),
+        { params: Promise.resolve({ id: "flow-meta" }) },
+      );
+      expect(res.status).toBe(200);
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
     } finally {
       h.flow = previousFlow;
       h.user = previousUser;

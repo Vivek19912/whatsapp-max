@@ -113,13 +113,26 @@ export async function GET(request: Request) {
     )
   }
 
-  // Agents work only their own assigned Meta leads: non-Meta
-  // flows are skipped for them, and the RPC itself is forced to
-  // their assignment so a located row is owned by construction.
-  // Owners/admins/viewers scan exactly as before.
+  // Agents WITHOUT View All Conversations locate only their own
+  // assigned Meta leads: non-Meta flows are skipped for them, and the
+  // RPC itself is forced to their assignment so a located row is owned
+  // by construction. Agents WITH View All, owners, admins, and
+  // viewers scan exactly as before.
   const isAgent = role === "agent";
-  let metaFlowIds: Set<string> | null = null
+  let restrictAgent = false;
   if (isAgent) {
+    const { resolveWorkspaceVisibility } = await import(
+      "@/lib/inbox/assignment-access"
+    );
+    ({ restricted: restrictAgent } = await resolveWorkspaceVisibility(
+      supabase,
+      accountId,
+      userId,
+      role,
+    ));
+  }
+  let metaFlowIds: Set<string> | null = null
+  if (restrictAgent) {
     const { data: kindRows, error: kindErr } = await supabase
       .from("flows")
       .select("id, kind")
@@ -137,12 +150,12 @@ export async function GET(request: Request) {
 
   for (const flowId of flowIds) {
     const forceAssignee =
-      isAgent && metaFlowIds !== null
+      restrictAgent && metaFlowIds !== null
         ? metaFlowIds.has(flowId)
           ? userId
           : null
         : null
-    if (isAgent && metaFlowIds !== null && !metaFlowIds.has(flowId)) continue
+    if (restrictAgent && metaFlowIds !== null && !metaFlowIds.has(flowId)) continue
     for (const view of VIEWS) {
       for (let page = 0; page < MAX_LOCATE_PAGES; page++) {
         let rows: RpcRow[]

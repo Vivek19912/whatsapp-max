@@ -41,6 +41,8 @@ const h = vi.hoisted(() => ({
   rpcError: null as { code: string; message: string } | null,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
   failTable: null as string | null,
+  // Inbox permission grant for the caller (null = no grants).
+  perm: null as null | { can_view_all: boolean; can_manage_assignments: boolean },
 }));
 
 function statusError(status: number, message: string) {
@@ -62,6 +64,17 @@ function rowsFor(table: string): Array<Record<string, unknown>> {
     return h.fields as Array<Record<string, unknown>>;
   if (table === "workspace_values")
     return h.values as Array<Record<string, unknown>>;
+  if (table === "agent_inbox_permissions")
+    return h.perm
+      ? [
+          {
+            user_id: h.userId,
+            account_id: h.accountId,
+            can_view_all: h.perm.can_view_all,
+            can_manage_assignments: h.perm.can_manage_assignments,
+          },
+        ]
+      : [];
   throw new Error(`unexpected table ${table}`);
 }
 
@@ -178,7 +191,8 @@ function fakeSupabase() {
       table === "contacts" ||
       table === "workspace_row_prefs" ||
       table === "workspace_fields" ||
-      table === "workspace_values"
+      table === "workspace_values" ||
+      table === "agent_inbox_permissions"
     ) {
       return { select: () => selectQuery(table) };
     }
@@ -264,6 +278,7 @@ beforeEach(() => {
   h.role = "agent";
   h.accountId = "acct-1";
   h.userId = USER_1;
+  h.perm = null;
   h.flow = { id: "flow-1", account_id: "acct-1" };
   h.runs = [
     { id: RUN_1, flow_id: "flow-1", account_id: "acct-1", contact_id: "c-1" },
@@ -470,6 +485,15 @@ describe("agent ownership on Meta Lead Ads Tables", () => {
       hidden: Array<{ flow_run_id: string }>;
     };
     expect(json.hidden.map((r) => r.flow_run_id)).toEqual([RUN_1]);
+  });
+
+  it("GET with View All shows hidden leads assigned to anyone", async () => {
+    seedMetaOwned();
+    h.perm = { can_view_all: true, can_manage_assignments: false };
+    const json = (await (await get("flow-1")).json()) as {
+      hidden: Array<{ flow_run_id: string }>;
+    };
+    expect(json.hidden.map((r) => r.flow_run_id).sort()).toEqual([RUN_1, RUN_2].sort());
   });
 
   it("PUT rejects pinning another agent's Meta lead", async () => {

@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   contact: { id: "c-1", account_id: "acct-1" } as Record<string, unknown> | null,
   runs: [] as Array<Record<string, unknown>>,
   flows: [] as Array<Record<string, unknown>>,
+  // Inbox permission grant for the caller (null = no grants).
+  perm: null as null | { can_view_all: boolean; can_manage_assignments: boolean },
   // RPC pages keyed `${flowId}|${view}|${page}` → rows.
   pages: {} as Record<string, Array<Record<string, unknown>>>,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
@@ -50,6 +52,16 @@ function builder(table: string) {
       return api;
     },
     maybeSingle: async () => {
+      if (table === "agent_inbox_permissions") {
+        if (!h.perm) return { data: null, error: null };
+        return {
+          data: {
+            can_manage_assignments: h.perm.can_manage_assignments,
+            can_view_all: h.perm.can_view_all,
+          },
+          error: null,
+        };
+      }
       if (table === "contacts") {
         h.contactFilters.push(
           state.filters.map((f) => [f.col, f.val] as [string, unknown]),
@@ -310,6 +322,7 @@ describe("agent scoping on Meta Lead Ads Tables", () => {
 
   function seedAgent() {
     h.role = "agent";
+    h.perm = null;
     h.flows = [
       { id: META, account_id: "acct-1", kind: "meta_lead_ads" },
       { id: WA, account_id: "acct-1", kind: "whatsapp_flow" },
@@ -345,6 +358,25 @@ describe("agent scoping on Meta Lead Ads Tables", () => {
     );
     expect(await res.json()).toEqual({ found: false });
     expect(h.rpcCalls[0]?.args).toMatchObject({ p_assignee: "u-1" });
+  });
+
+  it("agent WITH View All locates any account lead unfiltered", async () => {
+    seedAgent();
+    h.perm = { can_view_all: true, can_manage_assignments: false };
+    h.runs = [run("r-1", META, "2026-09-12T10:00:00.000Z")];
+    h.pages = { [`${META}|completed|0`]: [pageRow("r-1")] };
+    const res = await get(
+      `https://app.test/api/workspace/locate-contact?contact_id=${C1}`,
+    );
+    expect(await res.json()).toMatchObject({
+      found: true,
+      flow_id: META,
+      run_id: "r-1",
+    });
+    expect(h.rpcCalls[0]?.args).toMatchObject({
+      p_flow_id: META,
+      p_assignee: null,
+    });
   });
 
   it("skips non-Meta flows entirely for agents", async () => {

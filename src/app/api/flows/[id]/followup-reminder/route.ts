@@ -233,6 +233,19 @@ export async function GET(
       return bad("Run not found.", 404);
     }
     if (role === "agent") {
+      // Agents WITHOUT View All Conversations may only read their own
+      // assigned leads (same not-found shape as a foreign run).
+      // Agents WITH View All read any account lead, like owners/admins.
+      const { resolveWorkspaceVisibility } = await import(
+        "@/lib/inbox/assignment-access"
+      );
+      const { restricted } = await resolveWorkspaceVisibility(
+        supabase,
+        accountId,
+        userId,
+        role,
+      );
+      if (restricted) {
       const owned = await isRunOwnedByUser(supabase, {
         accountId,
         flowId: id,
@@ -240,6 +253,7 @@ export async function GET(
         userId,
       });
       if (!owned) return bad("Run not found.", 404);
+      }
     }
     const linked = await findManageableOpenLink(supabase, {
       accountId,

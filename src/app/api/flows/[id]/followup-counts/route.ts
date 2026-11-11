@@ -107,13 +107,25 @@ export async function GET(
     }
 
     // Agent isolation (Meta Lead Ads tables only — mirrors the
-    // table route's forced assignee): agents count only their OWN
-    // assigned leads (Assigned To cell = authenticated user id),
-    // so workspace-wide totals never leak. Owners, admins,
-    // viewers, and every Flow Table keep existing behavior.
-    // The assignment id is derived server-side from the session —
-    // never a client-supplied value.
+    // table route's forced assignee): agents WITHOUT View All
+    // Conversations count only their OWN assigned leads (Assigned To
+    // cell = authenticated user id), so workspace-wide totals never
+    // leak. Agents WITH View All, owners, admins, viewers, and every
+    // Flow Table keep existing behavior. The assignment id is derived
+    // server-side from the session — never a client-supplied value.
     if (role === "agent" && (flow as { kind?: string | null } | null)?.kind === "meta_lead_ads") {
+      const { resolveWorkspaceVisibility } = await import(
+        "@/lib/inbox/assignment-access"
+      );
+      const { restricted } = await resolveWorkspaceVisibility(
+        supabase,
+        accountId,
+        userId,
+        role,
+      );
+      if (!restricted) {
+        // View All: fall through to account-wide counts below.
+      } else {
       const { data: assigneeFields, error: assigneeErr } = await supabase
         .from("workspace_fields")
         .select("id, name")
@@ -146,6 +158,7 @@ export async function GET(
       runIds = runIds.filter((id) => owned.has(id));
       if (runIds.length === 0) {
         return NextResponse.json({ overdue: 0, today: 0, tomorrow: 0, upcoming: 0 });
+      }
       }
     }
 

@@ -28,6 +28,8 @@ const h = vi.hoisted(() => ({
     string,
     unknown
   > | null,
+  // Inbox permission grant for the caller (null = no grants).
+  perm: null as null | { can_view_all: boolean; can_manage_assignments: boolean },
   profileError: false,
   uniqueViolationOnce: false,
   seq: 0,
@@ -127,6 +129,16 @@ function fakeSupabase() {
         if (h.profileError)
           return { data: null, error: { message: "column missing" } };
         return { data: h.agentProfile, error: null };
+      }
+      if (state.table === "agent_inbox_permissions") {
+        if (!h.perm) return { data: null, error: null };
+        return {
+          data: {
+            can_manage_assignments: h.perm.can_manage_assignments,
+            can_view_all: h.perm.can_view_all,
+          },
+          error: null,
+        };
       }
       const list = matched();
       return { data: list[0] ?? null, error: null };
@@ -232,6 +244,7 @@ function reset() {
   };
   h.reminders = [];
   h.agentProfile = { whatsapp_number: "+91 98765 43210" };
+  h.perm = null;
   h.profileError = false;
   h.uniqueViolationOnce = false;
   h.seq = 0;
@@ -880,6 +893,27 @@ describe("GET followup-reminder (prefill for the single modal)", () => {
     h.values["f-assign:run-1"] = "u-teammate";
     expect((await get("run-1")).status).toBe(404);
     expect((await get(null)).status).toBe(400);
+  });
+
+  it("agent WITH View All opens another agent's lead in create mode", async () => {
+    h.perm = { can_view_all: true, can_manage_assignments: false };
+    h.values["f-assign:run-1"] = "u-teammate";
+    h.reminders.push({
+      id: "fu-other",
+      account_id: "acct-1",
+      status: "scheduled",
+      created_by: "u-teammate",
+      source_kind: "meta_workspace_followup",
+      source_run_id: "run-1",
+      scheduled_for: FUTURE,
+      message_text: "Teammate note",
+    });
+    // Lead is visible (200, not 404); prefill shows no manageable row
+    // for the caller, so the dialog opens in create mode. The
+    // teammate's row is never taken over.
+    const res = await get("run-1");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reminder: null });
   });
 
   it("404s non-Meta tables", async () => {

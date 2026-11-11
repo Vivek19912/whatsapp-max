@@ -2,21 +2,30 @@ import { NextResponse } from "next/server";
 
 import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { isAssigneeField } from "@/lib/flows/workspace-assignee";
+import { resolveWorkspaceVisibility } from "@/lib/inbox/assignment-access";
 
 /**
  * GET /api/workspace/my-tables — Meta Lead Ads Tables for the caller.
  * Agent+.
  *
- * Workspace visibility is account-wide for every role: agents see all
- * Meta tables and all leads within them (own, others', unassigned,
- * owner/admin). Each entry carries its assigned-lead count so the UI
- * can render an honest empty state. Owners/admins/viewers keep using
- * /api/flows; this endpoint now mirrors that scope for agents (it
- * previously listed only tables containing the caller's own leads).
+ * Table listing follows the View All Conversations permission:
+ * agents WITH it see every authorized Meta table (with per-table
+ * assigned counts for the empty state); agents WITHOUT it see only
+ * tables containing at least one of their own assigned leads, with
+ * counts scoped to their own leads (never other agents' counts).
+ * Owners/admins/viewers keep using /api/flows.
  */
 export async function GET() {
   try {
-    const { supabase, accountId, userId } = await requireRole("agent");
+    const { supabase, accountId, userId, role } = await requireRole("agent");
+
+    const { restricted } = await resolveWorkspaceVisibility(
+      supabase,
+      accountId,
+      userId,
+      role,
+    );
+    const scopeToOwn = role === "agent" && restricted;
 
     const { data: flows, error: flowsErr } = await supabase
       .from("flows")
@@ -68,11 +77,13 @@ export async function GET() {
     }
 
     return NextResponse.json({
-      tables: metaFlows.map((f) => ({
-        flow_id: f.id,
-        name: f.name,
-        assigned_count: counts.get(f.id) ?? 0,
-      })),
+      tables: metaFlows
+        .filter((f) => !scopeToOwn || (counts.get(f.id) ?? 0) > 0)
+        .map((f) => ({
+          flow_id: f.id,
+          name: f.name,
+          assigned_count: counts.get(f.id) ?? 0,
+        })),
     });
   } catch (err) {
     return toErrorResponse(err);

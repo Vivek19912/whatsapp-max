@@ -505,9 +505,10 @@ function useColumnDragAutoscroll(
 
 export default function WorkspacePage() {
   const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();
-  // Agents see Workspace with all account Meta leads (own, others',
-  // unassigned, owner/admin) — the table APIs enforce account scope
-  // server-side; Inbox assignment + view_all stay separate.
+  // Agents see Workspace Meta leads according to their View All
+  // Conversations grant (server-enforced per table): with it, all
+  // account leads; without it, only their own assigned leads. Inbox
+  // assignment + Manage Assignments stay separate.
   const isAgent = accountRole === 'agent';
   // Manage Assignments grant (same permission as Inbox reassignment):
   // agents holding it may reassign Workspace Meta leads to any
@@ -656,8 +657,9 @@ export default function WorkspacePage() {
   useEffect(() => {
     if (accountId === null) return;
     const ctrl = new AbortController();
-    // Agents list all Meta tables (account-wide, server-scoped);
-    // everyone else lists every flow.
+    // Agents list Meta tables via the scoped endpoint (View All
+    // agents see every table; others see only tables with their own
+    // assigned leads); everyone else lists every flow.
     const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';
     fetch(flowsUrl, { signal: ctrl.signal, cache: 'no-store' })
       .then(async (res) => {

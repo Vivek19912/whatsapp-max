@@ -13,6 +13,8 @@ const h = vi.hoisted(() => ({
   role: "agent",
   accountId: "acct-1",
   userId: "user-A",
+  // Inbox permission grant for the caller (null = no grants).
+  perm: null as null | { can_view_all: boolean; can_manage_assignments: boolean },
   flowKind: "meta_lead_ads" as string | null,
   runs: [] as Array<Record<string, unknown>>,
   fields: [] as Array<Record<string, unknown>>,
@@ -72,7 +74,19 @@ function fakeSupabase() {
         filters.push({ col, op: "in", val: vals });
         return q;
       },
-      maybeSingle: async () => ({ data: matched()[0] ?? null, error: null }),
+      maybeSingle: async () => {
+        if (table === "agent_inbox_permissions") {
+          if (!h.perm) return { data: null, error: null };
+          return {
+            data: {
+              can_manage_assignments: h.perm.can_manage_assignments,
+              can_view_all: h.perm.can_view_all,
+            },
+            error: null,
+          };
+        }
+        return { data: matched()[0] ?? null, error: null };
+      },
       then: (resolve: (v: unknown) => void) => resolve({ data: matched(), error: null }),
     };
     return q;
@@ -118,6 +132,7 @@ beforeEach(() => {
   h.role = "agent";
   h.accountId = "acct-1";
   h.userId = "user-A";
+  h.perm = null;
   seed();
 });
 
@@ -136,6 +151,24 @@ describe("GET /api/flows/[id]/followup-counts agent isolation", () => {
     const res = await GET(get(), params("flow-1"));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ overdue: 1, today: 0, tomorrow: 0, upcoming: 1 });
+  });
+
+  it("agent WITH View All Conversations counts all leads", async () => {
+    h.userId = "user-A";
+    h.role = "agent";
+    h.perm = { can_view_all: true, can_manage_assignments: false };
+    const res = await GET(get(), params("flow-1"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ overdue: 2, today: 1, tomorrow: 0, upcoming: 1 });
+  });
+
+  it("Manage Assignments alone does not broaden counts", async () => {
+    h.userId = "user-A";
+    h.role = "agent";
+    h.perm = { can_view_all: false, can_manage_assignments: true };
+    const res = await GET(get(), params("flow-1"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ overdue: 1, today: 1, tomorrow: 0, upcoming: 0 });
   });
 
   it("owner keeps workspace-wide totals", async () => {

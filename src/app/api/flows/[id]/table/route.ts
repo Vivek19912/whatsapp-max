@@ -274,7 +274,7 @@ export async function GET(
   if (!guard.ok) {
     return NextResponse.json(guard.body, { status: guard.status })
   }
-  const { supabase } = guard
+  const { supabase, userId: callerUserId } = guard
 
   const { data: flow, error: flowErr } = await supabase
     .from('flows')
@@ -289,12 +289,45 @@ export async function GET(
   }
   const flowKind = (flow as { kind?: string | null }).kind ?? null
 
-  // Workspace visibility is account-wide for every role: agents see
-  // all leads in Meta Lead Ads tables (own, others', unassigned,
-  // owner/admin), exactly like owners/admins/viewers. The Assigned To
-  // column still shows the actual salesperson, and Inbox access stays
-  // governed separately by assignment + view_all. No per-role row
-  // forcing here — the assignee query param is an opt-in filter.
+  // Workspace visibility follows the View All Conversations permission:
+  // agents WITHOUT it see only their own assigned Meta leads (the
+  // assignee filter is forced to their user id so search, filters,
+  // pagination, counts, and every enrichment below compose over the
+  // owned set and the client cannot override it). Agents WITH View
+  // All, owners, admins, viewers, and every Flow Table keep
+  // account-wide reads; the assignee param stays an opt-in filter.
+  if (flowKind === 'meta_lead_ads') {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('account_id, account_role')
+      .eq('user_id', callerUserId)
+      .maybeSingle()
+    const prow = profile as {
+      account_id?: string | null
+      account_role?: string | null
+    } | null
+    const flowAccountId = (flow as { account_id?: string | null }).account_id
+    // Use the row only when it belongs to this flow's account (older
+    // rows may lack account_id — those still apply, matching the
+    // previous single-eq lookup).
+    if (
+      prow?.account_role === 'agent' &&
+      (!prow.account_id || !flowAccountId || prow.account_id === flowAccountId)
+    ) {
+      const { resolveWorkspaceVisibility } = await import(
+        '@/lib/inbox/assignment-access'
+      )
+      const { restricted } = await resolveWorkspaceVisibility(
+        supabase,
+        (flow as { account_id: string }).account_id,
+        callerUserId,
+        'agent',
+      )
+      if (restricted) {
+        assignee = { type: 'member', userId: callerUserId }
+      }
+    }
+  }
 
   const { data: nodes, error: nodesErr } = await supabase
     .from('flow_nodes')

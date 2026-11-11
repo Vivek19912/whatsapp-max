@@ -99,6 +99,34 @@ export function isAgentOrAbove(role: string | null | undefined): boolean {
 }
 
 /**
+ * Workspace visibility for Meta Lead Ads tables. View All Conversations
+ * is the single permission controlling account-wide read access to
+ * Workspace leads AND Inbox conversations:
+ *
+ *   - owner/admin/viewer: never restricted (existing account-wide access).
+ *   - agent with canViewAll: not restricted (sees all account leads).
+ *   - agent without canViewAll: restricted to their own assigned leads.
+ *
+ * Manage Assignments never affects this: it grants reassignment
+ * authority, not visibility. Read failures fail closed (restricted).
+ */
+export async function resolveWorkspaceVisibility(
+  db: SupabaseClient,
+  accountId: string,
+  userId: string | null | undefined,
+  role: string | null | undefined,
+): Promise<{ restricted: boolean }> {
+  if (role !== "agent") return { restricted: false };
+  if (!userId) return { restricted: true };
+  try {
+    const caps = await resolveViewerCaps(db, accountId, userId, role);
+    return { restricted: !caps.canViewAll };
+  } catch {
+    return { restricted: true };
+  }
+}
+
+/**
  * Resolve a viewer's effective Inbox capabilities. Owners/admins get
  * everything and viewers keep legacy read-all without a row; only
  * agents consult agent_inbox_permissions (missing row = no grants).

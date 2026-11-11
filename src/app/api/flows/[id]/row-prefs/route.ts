@@ -117,15 +117,26 @@ export async function GET(
     // moved away or became inaccessible simply drops out, and no
     // unauthorized information is ever exposed.
     //
-    // Agents on Meta tables additionally see only their own
-    // assigned leads here: hidden ids resolving to someone else's
-    // (or unassigned) leads are dropped like moved-away runs.
+    // Agents WITHOUT View All Conversations on Meta tables
+    // additionally see only their own assigned leads here: hidden ids
+    // resolving to someone else's (or unassigned) leads are dropped
+    // like moved-away runs. Agents WITH View All keep full visibility.
     let visibleHiddenIds = hiddenIds;
     if (
       hiddenIds.length > 0 &&
       role === "agent" &&
       (flow as { kind?: string | null }).kind === "meta_lead_ads"
     ) {
+      const { resolveWorkspaceVisibility } = await import(
+        "@/lib/inbox/assignment-access"
+      );
+      const { restricted } = await resolveWorkspaceVisibility(
+        supabase,
+        accountId,
+        userId,
+        role,
+      );
+      if (restricted) {
       const { data: assigneeFields } = await supabase
         .from("workspace_fields")
         .select("id, name")
@@ -151,6 +162,7 @@ export async function GET(
         visibleHiddenIds = hiddenIds.filter((runId) => owned.has(runId));
       } else {
         visibleHiddenIds = [];
+      }
       }
     }
     const hidden: HiddenRowInfo[] = [];
