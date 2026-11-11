@@ -234,10 +234,20 @@ beforeEach(() => {
  *  for the recipient snapshot). Reads cover the recipient snapshot's
  *  window evidence (contacts/conversations/messages), the creator's
  *  current number (profiles — stale-snapshot refresh only), plus
- *  sender config — never customer threads selected via contact_id,
- *  never flow runs. */
+ *  sender config — never customer threads selected via contact_id.
+ *  Ownership adoption (Workspace -> Inbox) may READ flow_runs /
+ *  workspace_values / profiles for the RECIPIENT contact only
+ *  (best-effort, no writes); it must never write outside the
+ *  recipient thread. */
 function expectNoCustomerSideEffects(recipientPhone = "919876543210") {
-  expect(h.tablesRead).not.toContain("flow_runs");
+  for (const w of h.writes) {
+    expect([
+      "whatsapp_followups",
+      "contacts",
+      "conversations",
+      "messages",
+    ]).toContain(w.table);
+  }
   for (const w of h.writes) {
     expect([
       "whatsapp_followups",

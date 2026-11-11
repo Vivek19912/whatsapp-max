@@ -675,6 +675,24 @@ async function executeHandoff(
       .from("conversations")
       .update(convUpdate)
       .eq("id", run.conversation_id);
+    // Inbox -> Workspace edge (Rule 2): an explicit flow handoff that
+    // sets an owner mirrors into the contact's Meta Workspace leads
+    // so both surfaces converge. Best-effort, never fails the handoff.
+    if (cfg.assign_to) {
+      try {
+        const { mirrorConversationAssignmentToWorkspace } = await import(
+          "@/lib/inbox/assignment-sync"
+        );
+        await mirrorConversationAssignmentToWorkspace(
+          db as never,
+          run.account_id,
+          run.conversation_id,
+          cfg.assign_to,
+        );
+      } catch {
+        // Mirror-only.
+      }
+    }
   }
   await logEvent(db, run.id, "handoff", node.node_key, {
     note: cfg.note ?? null,

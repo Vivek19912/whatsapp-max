@@ -156,6 +156,23 @@ export async function resolveConversationByPhone(
     );
   }
 
+  // Ownership gap fix (Rule 6A/6C): public-API sends may CREATE the
+  // thread for a Meta lead before any Inbox view. Adopt the unique
+  // Workspace owner onto new or still-unowned threads. Best-effort.
+  try {
+    const { adoptWorkspaceOwnerForConversation } = await import(
+      '@/lib/inbox/assignment-sync'
+    );
+    await adoptWorkspaceOwnerForConversation(
+      db as never,
+      accountId,
+      contactId,
+      convResult.conversation.id as string,
+    );
+  } catch {
+    // Adopt-only.
+  }
+
   return {
     conversationId: convResult.conversation.id as string,
     contactId,

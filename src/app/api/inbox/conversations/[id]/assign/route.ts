@@ -6,7 +6,10 @@ import {
   resolveViewerCaps,
 } from "@/lib/inbox/assignment-access";
 import { supabaseAdmin } from "@/lib/flows/admin-client";
-import { mirrorConversationAssignmentToWorkspace } from "@/lib/inbox/assignment-sync";
+import {
+  countDistinctMetaTablesForContact,
+  mirrorConversationAssignmentToWorkspace,
+} from "@/lib/inbox/assignment-sync";
 
 // ============================================================
 // POST /api/inbox/conversations/[id]/assign — assign (or unassign)
@@ -27,9 +30,12 @@ import { mirrorConversationAssignmentToWorkspace } from "@/lib/inbox/assignment-
 // Writes BOTH stores so the two surfaces can never disagree:
 //   1. conversations.assigned_agent_id (what the Inbox header and
 //      list render; realtime postgres_changes notifies open tabs),
-//   2. the contact's active flow run's Assigned To workspace cell
-//      (what the Workspace table renders; the workspace realtime
-//      hook picks up the change).
+//   2. the contact's Assigned To workspace cell(s) (what the Workspace
+//      table renders; the workspace realtime hook picks up the change).
+// Multi-table safety: a contact linked to MORE THAN ONE distinct Meta
+// Lead Ads table is rejected with 409 BEFORE any write, so one Inbox
+// action can never bulk-overwrite independent Workspace leads. The
+// user must reassign from the relevant Workspace table instead.
 // Agent+ entry (viewers 403 via requireRole); the authority gate
 // below admits only owners/admins and Manage Assignments holders.
 // The conversation must belong to the caller's account or the
@@ -103,11 +109,51 @@ export async function POST(
   }
   const { data: conv, error: convErr } = await admin
     .from("conversations")
-    .select("id, account_id, assigned_agent_id")
+    .select("id, account_id, assigned_agent_id, contact_id")
     .eq("id", id)
     .eq("account_id", ctx.accountId)
     .maybeSingle();
   if (convErr || !conv) return notFound();
+
+  // Multi-table ambiguity gate — BEFORE any ownership write, for
+  // every role (owner/admin/Manage Assignments cannot bypass). Counts
+  // DISTINCT Meta Lead Ads tables for this contact; duplicates in the
+  // same table count as one, non-Meta tables are ignored.
+  //   0 tables → existing non-Meta behavior (no Workspace mirror).
+  //   1 table  → allow; mirror syncs that table's leads.
+  //   >1 table → 409, no writes at all.
+  // Lookup failures fail safely (503): never allow a blind write when
+  // the ambiguity check itself could not be determined.
+  {
+    const contactId = (conv as { contact_id: string | null }).contact_id ?? null;
+    if (contactId) {
+      const tableCheck = await countDistinctMetaTablesForContact(
+        admin as never,
+        ctx.accountId,
+        contactId,
+      );
+      if (tableCheck.error) {
+        return NextResponse.json(
+          {
+            error: "Could not verify lead table ownership. Please try again.",
+            code: "TABLE_CHECK_FAILED",
+          },
+          { status: 503 },
+        );
+      }
+      if (tableCheck.count > 1) {
+        return NextResponse.json(
+          {
+            error:
+              "This contact exists in multiple Meta Lead Ads tables. Please reassign this lead from the relevant Workspace table.",
+            code: "CONTACT_IN_MULTIPLE_META_LEAD_ADS_TABLES",
+            distinctMetaTables: tableCheck.count,
+          },
+          { status: 409 },
+        );
+      }
+    }
+  }
 
   // Defense in depth: owners/admins may touch any thread; agents
   // here always hold Manage Assignments (see the gate above), which

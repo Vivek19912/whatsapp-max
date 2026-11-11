@@ -30,6 +30,7 @@ import {
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import { getOrCreateConversation } from '@/lib/conversations/get-or-create';
+import { adoptWorkspaceOwnerForConversation } from '@/lib/inbox/assignment-sync';
 import {
   findOrCreateContact,
   ContactError,
@@ -542,6 +543,20 @@ export async function persistBroadcastOutboundMessage(
     }
     const conversationId = resolved.conversation.id as string;
 
+    // Ownership gap fix (Rule 6A/6C): outbound may CREATE the thread
+    // after assignment. Adopt the unique Workspace owner onto new or
+    // still-unowned threads. Best-effort, never fails persistence.
+    try {
+      await adoptWorkspaceOwnerForConversation(
+        db as never,
+        accountId,
+        contactId,
+        conversationId,
+      );
+    } catch {
+      // Adopt-only.
+    }
+
     // Idempotency: a retried send/recipient loop carrying the same
     // Meta message id must not duplicate the Inbox row. message_id
     // repeats across numbers by design (migration 009), so scope the
@@ -700,6 +715,19 @@ export async function persistReminderOutboundMessage(
       return null;
     }
     const conversationId = resolved.conversation.id as string;
+
+    // Ownership gap fix (Rule 6A/6C): adopt the unique Workspace owner
+    // onto new or still-unowned threads. Best-effort.
+    try {
+      await adoptWorkspaceOwnerForConversation(
+        db as never,
+        accountId,
+        contactId,
+        conversationId,
+      );
+    } catch {
+      // Adopt-only.
+    }
 
     // Idempotency: a retried send carrying the same Meta message
     // id must not duplicate the Inbox row. message_id repeats

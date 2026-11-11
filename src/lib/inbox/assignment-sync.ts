@@ -25,6 +25,31 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Best-effort membership check: true when `userId` is a live profile
+ * in this account. External notification-only contacts (user_id NULL,
+ * never in profiles) and removed members resolve false. DB errors
+ * fail OPEN (return true) so a transient profiles outage never blocks
+ * an otherwise valid ownership write — the route-level roster check
+ * remains the hard gate.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function isLiveMember(db: any, accountId: string, userId: string): Promise<boolean> {
+  try {
+    const { data, error } = await db
+      .from("profiles")
+      .select("user_id")
+      .eq("account_id", accountId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) return true;
+    if (!data) return false;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Workspace -> Inbox: after the Assigned To cell for `runId` becomes
  * `stored` ("Unassigned"/null clears, member user_id assigns), apply
  * the same value to the linked conversation's `assigned_agent_id`.
@@ -32,6 +57,10 @@ const UUID_RE =
  * map to null (clear). Resolves true when there was nothing to do
  * (no contact / no thread yet — e.g. assigned at ingestion before
  * the first WhatsApp message creates the thread).
+ *
+ * Direction-aware: this is the Workspace-initiated edge only. It
+ * writes `conversations` directly and never calls the reverse
+ * mirror, so no update loop is possible (last writer wins per row).
  */
 export async function mirrorRunAssignmentToConversation(
   db: SupabaseClient,
@@ -60,12 +89,21 @@ export async function mirrorRunAssignmentToConversation(
     if (convErr || !conv) return true;
     const conversationId = (conv as { id: string }).id;
 
-    const assignedAgentId =
+    let assignedAgentId =
       typeof stored === "string" &&
       stored !== ASSIGNED_TO_UNASSIGNED &&
       UUID_RE.test(stored.trim())
         ? stored.trim()
         : null;
+
+    // Never orphan a thread to a removed/external user: a UUID that is
+    // no longer a live profile in this account clears instead of
+    // writing a dead owner (renders as unassigned, stays accessible
+    // to owner/admin via RLS).
+    if (assignedAgentId !== null) {
+      const live = await isLiveMember(db, accountId, assignedAgentId);
+      if (!live) assignedAgentId = null;
+    }
 
     const { error: updateErr } = await db
       .from("conversations")
@@ -81,16 +119,22 @@ export async function mirrorRunAssignmentToConversation(
 
 /**
  * Inbox -> Workspace: after a conversation is (un)assigned, write the
- * same owner into the contact's active flow run's Assigned To cell
- * (active run first, else most recent — the same resolution the
- * Inbox flow filter uses). `agentId` null clears the cell (row
- * delete, mirroring the Workspace Clear action). Returns false when
- * there is nothing to mirror to (no run, or the run's flow has no
- * Assigned To column) — the Inbox write itself is unaffected.
+ * same owner into the contact's Meta Lead Ads Workspace lead(s).
+ * Updates EVERY Meta run for the contact that has an Assigned To
+ * column (all tables), so Workspace and Inbox converge on ONE owner
+ * even when a contact appears in several Meta tables. Non-Meta
+ * (Flow Table) runs are left untouched.
+ *
+ * Direction-aware: this is the Inbox-initiated edge only. It writes
+ * `workspace_values` directly and never calls the reverse mirror, so
+ * no update loop is possible. Idempotent (upsert/delete by
+ * (field_id, flow_run_id)); safe to retry.
  *
  * The caller validates membership (400 on non-members); every query
  * below is additionally account-scoped, so cross-account writes are
- * impossible even if miscalled.
+ * impossible even if miscalled. Non-UUID agentIds are rejected
+ * (return false, Inbox write unaffected); removed/external users are
+ * rejected the same way.
  */
 export async function mirrorConversationAssignmentToWorkspace(
   db: SupabaseClient,
@@ -99,6 +143,10 @@ export async function mirrorConversationAssignmentToWorkspace(
   agentId: string | null,
 ): Promise<boolean> {
   try {
+    // Reject non-UUID targets (legacy display strings must never land
+    // in workspace_values as an "owner" via this path).
+    if (agentId !== null && !UUID_RE.test(agentId.trim())) return false;
+    const normalized = agentId === null ? null : (agentId as string).trim();
     const { data: conv, error: convErr } = await db
       .from("conversations")
       .select("contact_id")
@@ -108,6 +156,12 @@ export async function mirrorConversationAssignmentToWorkspace(
     if (convErr || !conv) return false;
     const contactId = (conv as { contact_id: string | null }).contact_id;
     if (!contactId) return false;
+    // Removed/external users must not become Workspace owners.
+    if (normalized !== null) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const live = await isLiveMember(db as any, accountId, normalized);
+      if (!live) return false;
+    }
 
     const { data: runs, error: runsErr } = await db
       .from("flow_runs")
@@ -124,36 +178,157 @@ export async function mirrorConversationAssignmentToWorkspace(
       started_at: string;
     }>;
     if (list.length === 0) return true;
-    const active = list.filter((r) => r.status === "active");
-    const newest = (a: (typeof list)[number], b: (typeof list)[number]) =>
-      a.started_at >= b.started_at ? a : b;
-    const picked = (active.length > 0 ? active : list).reduce(newest);
 
-    const field = await findAssigneeField(db, accountId, picked.flow_id);
-    if (!field) return true;
-
-    if (agentId === null) {
-      const { error } = await db
-        .from("workspace_values")
-        .delete()
-        .eq("account_id", accountId)
-        .eq("field_id", field.id)
-        .eq("flow_run_id", picked.id);
-      return !error;
+    // Restrict to Meta Lead Ads flows: Flow Table assignments live in
+    // the same cell shape but are owned by a different engine. When
+    // the contact has at least one Meta run, only Meta runs converge;
+    // otherwise fall back to whatever runs exist (preserves legacy
+    // single-run behavior for non-Meta contacts → no-op via no-field).
+    let candidateRuns = list;
+    let metaRunsIdentified = false;
+    try {
+      const flowIds = [...new Set(list.map((r) => r.flow_id).filter(Boolean))];
+      if (flowIds.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: flows } = await (db as any)
+          .from("flows")
+          .select("id, kind")
+          .eq("account_id", accountId)
+          .in("id", flowIds);
+        const kindById = new Map(
+          ((flows ?? []) as Array<{ id: string; kind: string | null }>).map(
+            (f) => [f.id, f.kind] as const,
+          ),
+        );
+        const metaRuns = list.filter((r) => kindById.get(r.flow_id) === "meta_lead_ads");
+        // Only narrow when we positively identified Meta runs; if the
+        // flows lookup failed/empty, keep the full list so the legacy
+        // single-pick path still applies.
+        if (metaRuns.length > 0) {
+          candidateRuns = metaRuns;
+          metaRunsIdentified = true;
+        }
+      }
+    } catch {
+      // Best-effort narrowing; fall through with the full list.
     }
 
-    const { error } = await db.from("workspace_values").upsert(
-      {
-        account_id: accountId,
-        field_id: field.id,
-        flow_run_id: picked.id,
-        value_text: agentId,
-      },
-      { onConflict: "field_id,flow_run_id" },
+    // Resolve the Assigned To field per flow (cached).
+    // Safety: never bulk-write across multiple distinct Meta tables.
+    // Inbox-originated reassignment for multi-table contacts is
+    // rejected by the assign route before any write; this guard
+    // protects every other caller (e.g. flow handoff) that reaches
+    // the mirror directly. Single-table contacts (even with many
+    // runs) converge that table's leads; multi-table contacts refuse.
+    const distinctMetaFlows = new Set(
+      candidateRuns.map((r) => r.flow_id).filter(Boolean),
     );
-    return !error;
+    // Only enforce when we positively narrowed to Meta runs; when the
+    // flows lookup failed we kept the full list (legacy fail-open) and
+    // must not newly block on it.
+    if (metaRunsIdentified && distinctMetaFlows.size > 1) return false;
+    const fieldByFlow = new Map<string, { id: string } | null>();
+    const targets: Array<{ fieldId: string; runId: string }> = [];
+    for (const run of candidateRuns) {
+      if (!run.flow_id) continue;
+      let field = fieldByFlow.get(run.flow_id);
+      if (field === undefined) {
+        try {
+          field = await findAssigneeField(db, accountId, run.flow_id);
+        } catch {
+          return false;
+        }
+        fieldByFlow.set(run.flow_id, field);
+      }
+      if (!field) continue;
+      targets.push({ fieldId: field.id, runId: run.id });
+    }
+    if (targets.length === 0) return true;
+
+    if (normalized === null) {
+      for (const t of targets) {
+        const { error } = await db
+          .from("workspace_values")
+          .delete()
+          .eq("account_id", accountId)
+          .eq("field_id", t.fieldId)
+          .eq("flow_run_id", t.runId);
+        if (error) return false;
+      }
+      return true;
+    }
+
+    for (const t of targets) {
+      const { error } = await db.from("workspace_values").upsert(
+        {
+          account_id: accountId,
+          field_id: t.fieldId,
+          flow_run_id: t.runId,
+          value_text: normalized,
+        },
+        { onConflict: "field_id,flow_run_id" },
+      );
+      if (error) return false;
+    }
+    return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Distinct Meta Lead Ads table count for a contact (Inbox safety gate).
+ *
+ * Counts DISTINCT `flows.id` where `flows.kind='meta_lead_ads'` among
+ * the contact's account-scoped `flow_runs`. Duplicate submissions in
+ * the same table count as ONE. Non-Meta (Flow Table) runs are ignored.
+ * All queries account-scoped; contact matching is by stable
+ * (account_id, contact_id), never names/phones. Never throws:
+ * lookup failures resolve `{ count: 0, flowIds: [], error: true }` so
+ * callers fail safely (block reassignment until the check succeeds).
+ */
+export interface MetaTableCount {
+  count: number;
+  flowIds: string[];
+  error: boolean;
+}
+
+export async function countDistinctMetaTablesForContact(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: any,
+  accountId: string,
+  contactId: string,
+): Promise<MetaTableCount> {
+  try {
+    const { data: runs, error: runsErr } = await db
+      .from("flow_runs")
+      .select("flow_id")
+      .eq("account_id", accountId)
+      .eq("contact_id", contactId)
+      .limit(100);
+    if (runsErr) return { count: 0, flowIds: [], error: true };
+    const flowIds = [
+      ...new Set(
+        (((runs ?? []) as Array<{ flow_id: string | null }>).map((r) => r.flow_id).filter(Boolean) as string[]),
+      ),
+    ];
+    if (flowIds.length === 0) return { count: 0, flowIds: [], error: false };
+    const { data: flows, error: flowsErr } = await db
+      .from("flows")
+      .select("id, kind")
+      .eq("account_id", accountId)
+      .in("id", flowIds);
+    if (flowsErr) return { count: 0, flowIds: [], error: true };
+    const metaIds = [
+      ...new Set(
+        (((flows ?? []) as Array<{ id: string; kind: string | null }>)
+          .filter((f) => f.kind === "meta_lead_ads")
+          .map((f) => f.id)),
+      ),
+    ];
+    return { count: metaIds.length, flowIds: metaIds, error: false };
+  } catch {
+    return { count: 0, flowIds: [], error: true };
   }
 }
 
@@ -296,6 +471,14 @@ export async function adoptWorkspaceOwnerForConversation(
       return { adopted: false, reason: resolved.reason };
     }
     const ownerId = resolved.ownerId;
+
+    // Removed/external users must never become Inbox owners via
+    // adoption: verify the resolved UUID is still a live profile.
+    // Fail-closed here (no adoption) — the thread stays unowned and
+    // visible to owner/admin rather than orphaned to a dead user.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const live = await isLiveMember(db as any, accountId, ownerId);
+    if (!live) return { adopted: false, reason: "no-owner" };
 
     // Conditional write: NULL predicate in the UPDATE itself, so a
     // concurrent manual assignment between the read above and this

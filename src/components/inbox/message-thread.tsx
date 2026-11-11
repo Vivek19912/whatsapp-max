@@ -176,6 +176,12 @@ export function MessageThread({
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<AccountMember[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
+  // Multi-table safety gate: when the contact spans >1 distinct Meta
+  // Lead Ads tables, Inbox reassignment is disabled and the user is
+  // directed to the relevant Workspace table. Fail-safe: lookup
+  // failures also disable the action until the check succeeds.
+  const [metaTablesBlocked, setMetaTablesBlocked] = useState(false);
+  const [metaTablesLoading, setMetaTablesLoading] = useState(false);
   // Approved-template header metadata for rendering template bubbles.
   // Outbound template rows persist content_type/template_name/content_text
   // but no media_url, so without this client-side lookup an image-header
@@ -256,6 +262,46 @@ export function MessageThread({
       cancelled = true;
     };
   }, []);
+
+  // Multi-table gate read model: disabled when the contact spans >1
+  // Meta tables, or when the check itself failed (fail-safe). Runs
+  // per conversation; stale responses are ignored via cancellation.
+  useEffect(() => {
+    let cancelled = false;
+    const conversationId = conversation?.id;
+    if (!conversationId) {
+      setMetaTablesBlocked(false);
+      setMetaTablesLoading(false);
+      return;
+    }
+    setMetaTablesLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/inbox/conversations/${conversationId}/meta-tables`,
+          { cache: "no-store" },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) {
+          // Fail safe: block until the check succeeds. Do not confuse
+          // a failed lookup with a confirmed multi-table contact.
+          setMetaTablesBlocked(true);
+        } else if (data?.checkFailed) {
+          setMetaTablesBlocked(true);
+        } else {
+          setMetaTablesBlocked((data?.distinctMetaTables ?? 0) > 1);
+        }
+      } catch {
+        if (!cancelled) setMetaTablesBlocked(true);
+      } finally {
+        if (!cancelled) setMetaTablesLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversation?.id]);
 
   // 24-hour session timer
   const sessionInfo = useMemo(() => {
@@ -970,12 +1016,28 @@ export function MessageThread({
 
           {/* Assign control: editable dropdown for assignment
               authorities (owner/admin/Manage Assignments grant);
-              read-only assignee name for everyone else. */}
+              read-only assignee name for everyone else. Multi-table
+              contacts disable Inbox reassignment with an explanation. */}
           {canManageAssignments ? (
+          metaTablesBlocked ? (
+            <span
+              className={cn(
+                "inline-flex h-7 cursor-not-allowed items-center justify-center gap-1 rounded-md px-2 text-xs opacity-60",
+                assignedAgentId ? "text-primary" : "text-muted-foreground"
+              )}
+              title="This contact exists in multiple Meta Lead Ads tables. To avoid changing the wrong lead, please reassign it from the relevant Workspace table."
+              aria-label="Inbox reassignment disabled for multi-table contact"
+              aria-disabled="true"
+            >
+              <UserPlus className="h-3 w-3" />
+              <span className="hidden sm:inline">{assignLabel}</span>
+            </span>
+          ) : (
           <DropdownMenu>
             <DropdownMenuTrigger
+              disabled={metaTablesLoading}
               className={cn(
-                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
+                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted disabled:cursor-wait disabled:opacity-60",
                 assignedAgentId ? "text-primary" : "text-muted-foreground"
               )}
             >
@@ -1035,6 +1097,7 @@ export function MessageThread({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+          )
           ) : (
             <span
               className={cn(
@@ -1054,6 +1117,15 @@ export function MessageThread({
           )}
         </div>
       </div>
+
+      {/* Multi-table reassignment guard notice */}
+      {metaTablesBlocked && (
+        <p className="border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] leading-snug text-muted-foreground sm:px-4">
+          This contact exists in multiple Meta Lead Ads tables. To avoid
+          changing the wrong lead, please reassign it from the relevant
+          Workspace table.
+        </p>
+      )}
 
       {/* Messages Area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">

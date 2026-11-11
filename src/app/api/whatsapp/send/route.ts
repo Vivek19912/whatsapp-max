@@ -249,5 +249,24 @@ async function findOrCreateConversation(
     return null
   }
 
+  // Ownership gap fix (Rule 6A/6C): a manual/composer send may CREATE
+  // the thread after the Workspace assignment mirror no-oped on the
+  // missing thread. Adopt the unique Workspace owner onto new or
+  // still-unowned threads. Never overwrites an explicit assignment;
+  // best-effort, never fails the send.
+  try {
+    const { adoptWorkspaceOwnerForConversation } = await import(
+      '@/lib/inbox/assignment-sync'
+    )
+    await adoptWorkspaceOwnerForConversation(
+      supabase as never,
+      accountId,
+      contactId,
+      result.conversation.id as string,
+    )
+  } catch {
+    // Adopt-only; the thread already exists.
+  }
+
   return result.conversation.id as string
 }

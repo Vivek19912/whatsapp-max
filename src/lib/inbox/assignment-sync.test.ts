@@ -50,6 +50,10 @@ class FakeDb {
         db.log.push(`is:${table}:${String(k)}=${String(v)}`);
         return chain;
       },
+      in: (k: unknown, v: unknown) => {
+        db.log.push(`in:${table}:${String(k)}=${JSON.stringify(v)}`);
+        return chain;
+      },
       limit: (n: unknown) => {
         db.log.push(`limit:${table}:${String(n)}`);
         return chain;
@@ -81,6 +85,7 @@ interface FakeChain {
   eq(k: unknown, v: unknown): FakeChain;
   order(k: unknown, opts: unknown): FakeChain;
   is(k: unknown, v: unknown): FakeChain;
+  in(k: unknown, v: unknown): FakeChain;
   limit(n: unknown): FakeChain;
   update(values: unknown): FakeChain;
   upsert(values: unknown, options?: unknown): FakeChain;
@@ -93,10 +98,12 @@ interface FakeChain {
 const ok = (data: unknown = null) => ({ data, error: null });
 
 describe("mirrorRunAssignmentToConversation (Workspace -> Inbox)", () => {
+  const MEMBER = "11111111-1111-4111-8111-111111111111";
   it("writes a member UUID to the linked thread, account-scoped", async () => {
     const db = new FakeDb().script(
       ok({ contact_id: "ct-1" }),
       ok({ id: "conv-1" }),
+      ok({ user_id: MEMBER }),
       ok({})
     );
     const res = await mirrorRunAssignmentToConversation(
@@ -164,16 +171,20 @@ describe("mirrorConversationAssignmentToWorkspace (Inbox -> Workspace)", () => {
 
   // Minimal findAssigneeField stub is internal; exercise through a db
   // whose workspace_fields select returns the field row.
+  // Query order (new): conversation -> profiles membership -> flow_runs
+  // -> flows kind narrowing -> workspace_fields -> workspace_values.
   function dbWithRunAndField() {
     return new FakeDb().script(
       ok({ contact_id: "ct-1" }), // conversation lookup
+      ok({ user_id: "11111111-1111-4111-8111-111111111111" }), // live-member check
       ok(runs), // flow_runs list
+      ok([{ id: "flow-1", kind: "meta_lead_ads" }]), // flows kind narrowing
       ok(fieldRows) // workspace_fields lookup
     );
   }
 
   it("upserts the member id into the active run's Assigned To cell", async () => {
-    const db = dbWithRunAndField().script(ok({}));
+    const db = dbWithRunAndField().script(ok({}), ok({}));
     const res = await mirrorConversationAssignmentToWorkspace(
       db as never,
       "acc-1",
@@ -181,22 +192,38 @@ describe("mirrorConversationAssignmentToWorkspace (Inbox -> Workspace)", () => {
       "11111111-1111-4111-8111-111111111111"
     );
     expect(res).toBe(true);
-    const upsert = db.writes.find((w) => w.op === "upsert");
-    expect(upsert?.table).toBe("workspace_values");
-    expect(upsert?.values).toEqual({
-      account_id: "acc-1",
-      field_id: "field-1",
-      flow_run_id: "run-new",
-      value_text: "11111111-1111-4111-8111-111111111111",
-    });
-    // Account scoping rides in the upserted row itself.
-    expect((upsert?.values as Record<string, unknown>)?.account_id).toBe(
-      "acc-1"
+    const upserts = db.writes.filter((w) => w.op === "upsert");
+    // Multi-run convergence: EVERY Meta run for the contact converges
+    // to the same owner (prevents future adopt conflicts).
+    expect(upserts.length).toBe(2);
+    const runIds = new Set(
+      upserts.map((u) => (u.values as Record<string, unknown>).flow_run_id),
     );
+    expect(runIds).toEqual(new Set(["run-old", "run-new"]));
+    const upsert = upserts[0];
+    expect(upsert?.table).toBe("workspace_values");
+    // Both runs converge to the same owner; order follows flow_runs order.
+    for (const u of upserts) {
+      expect((u.values as Record<string, unknown>).account_id).toBe("acc-1");
+      expect((u.values as Record<string, unknown>).field_id).toBe("field-1");
+      expect((u.values as Record<string, unknown>).value_text).toBe(
+        "11111111-1111-4111-8111-111111111111",
+      );
+    }
   });
 
   it("clears the cell (delete) when the thread is unassigned", async () => {
-    const db = dbWithRunAndField().script(ok({}));
+    // Clear path skips the live-member check (normalized null), so the
+    // scripted sequence is: conversation -> flow_runs -> flows -> field
+    // -> deletes (one per Meta run).
+    const db = new FakeDb().script(
+      ok({ contact_id: "ct-1" }),
+      ok(runs),
+      ok([{ id: "flow-1", kind: "meta_lead_ads" }]),
+      ok(fieldRows),
+      ok({}),
+      ok({}),
+    );
     const res = await mirrorConversationAssignmentToWorkspace(
       db as never,
       "acc-1",
@@ -210,13 +237,27 @@ describe("mirrorConversationAssignmentToWorkspace (Inbox -> Workspace)", () => {
   });
 
   it("is a no-op when the contact has no runs or no Assigned To field", async () => {
-    const noRuns = new FakeDb().script(ok({ contact_id: "ct-1" }), ok([]));
+    const MEMBER = "11111111-1111-4111-8111-111111111111";
+    const noRuns = new FakeDb().script(
+      ok({ contact_id: "ct-1" }),
+      ok({ user_id: MEMBER }),
+      ok([]),
+    );
     expect(
-      await mirrorConversationAssignmentToWorkspace(noRuns as never, "acc-1", "conv-1", "11111111-1111-4111-8111-111111111111")
+      await mirrorConversationAssignmentToWorkspace(noRuns as never, "acc-1", "conv-1", MEMBER)
     ).toBe(true);
     expect(noRuns.writes).toHaveLength(0);
 
-    const noField = new FakeDb().script(ok({ contact_id: "ct-1" }), ok(runs), ok([]));
+    // No-field: conversation -> member -> runs -> flows (empty) -> no field.
+    // Flows lookup fails open (null) so the legacy path still resolves
+    // the field lookup and reports no-field.
+    const noField = new FakeDb().script(
+      ok({ contact_id: "ct-1" }),
+      ok({ user_id: MEMBER }),
+      ok(runs),
+      ok(null),
+      ok([]),
+    );
     expect(
       await mirrorConversationAssignmentToWorkspace(noField as never, "acc-1", "conv-1", "11111111-1111-4111-8111-111111111111")
     ).toBe(true);
@@ -295,13 +336,14 @@ describe("adoptContactAssignmentForConversation (thread open)", () => {
   const OWNER = "22222222-2222-4222-8222-222222222222";
 
   // New query sequence: conversation owner read -> runs -> Assigned
-  // To field -> cell -> conditional (NULL-guarded) update.
+  // To field -> cell -> live-member check -> conditional (NULL-guarded) update.
   function dbWithOwnerStored(stored: { value_text: string } | null) {
     return new FakeDb().script(
       ok({ assigned_agent_id: null }), // thread is unowned
       ok(runs),
       ok([{ id: "field-1", name: "Assigned To" }]),
       ok(stored),
+      ok({ user_id: OWNER }), // live-member check
       ok({})
     );
   }
@@ -454,6 +496,7 @@ describe("adoptWorkspaceOwnerForConversation (strict outcome)", () => {
       ok({ value_text: "Some External Name" }), // not a member UUID
       ok([{ id: "field-2", name: "Assigned To" }]), // flow-2 field
       ok({ value_text: OWNER }),
+      ok({ user_id: OWNER }), // live-member check
       ok({})
     );
     const outcome = await adoptWorkspaceOwnerForConversation(
