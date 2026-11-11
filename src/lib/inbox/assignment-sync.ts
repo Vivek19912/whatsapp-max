@@ -158,6 +158,85 @@ export async function mirrorConversationAssignmentToWorkspace(
 }
 
 /**
+ * Resolution of a contact's Workspace owner without writing
+ * anything. Exactly one distinct member UUID across the contact's
+ * runs → that owner; zero → `no-owner`; several → `conflict` (the
+ * caller must not guess); no Assigned To column → `no-field`.
+ * All queries account-scoped. Never throws.
+ */
+export type WorkspaceOwnerResolution =
+  | { ownerId: string; reason?: undefined }
+  | {
+      ownerId: null;
+      reason: "no-run" | "no-field" | "no-owner" | "conflict" | "error";
+    };
+
+export async function resolveWorkspaceOwnerForContact(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string,
+): Promise<WorkspaceOwnerResolution> {
+  try {
+    const { data: runs, error: runsErr } = await db
+      .from("flow_runs")
+      .select("id, flow_id, status, started_at")
+      .eq("account_id", accountId)
+      .eq("contact_id", contactId)
+      .order("started_at", { ascending: false })
+      .limit(25);
+    if (runsErr) return { ownerId: null, reason: "error" };
+    const list = (runs ?? []) as Array<{
+      id: string;
+      flow_id: string;
+      status: string;
+      started_at: string;
+    }>;
+    if (list.length === 0) return { ownerId: null, reason: "no-run" };
+
+    // Resolve the Assigned To field per flow (cached — a contact's
+    // runs almost always share one flow).
+    const fieldByFlow = new Map<string, { id: string } | null>();
+    const owners = new Set<string>();
+    for (const run of list) {
+      if (!run.flow_id) continue;
+      let field = fieldByFlow.get(run.flow_id);
+      if (field === undefined) {
+        try {
+          field = await findAssigneeField(db, accountId, run.flow_id);
+        } catch {
+          return { ownerId: null, reason: "error" };
+        }
+        fieldByFlow.set(run.flow_id, field);
+      }
+      if (!field) continue;
+      let stored: string | null;
+      try {
+        stored = await readAssignment(db, accountId, field.id, run.id);
+      } catch {
+        return { ownerId: null, reason: "error" };
+      }
+      if (
+        typeof stored === "string" &&
+        stored.trim() !== "" &&
+        stored.trim() !== ASSIGNED_TO_UNASSIGNED &&
+        UUID_RE.test(stored.trim())
+      ) {
+        owners.add(stored.trim());
+      }
+    }
+    if (fieldByFlow.size > 0 && [...fieldByFlow.values()].every((f) => !f)) {
+      return { ownerId: null, reason: "no-field" };
+    }
+    if (owners.size === 0) return { ownerId: null, reason: "no-owner" };
+    if (owners.size > 1) return { ownerId: null, reason: "conflict" };
+    const [ownerId] = [...owners];
+    return { ownerId };
+  } catch {
+    return { ownerId: null, reason: "error" };
+  }
+}
+
+/**
  * Outcome of the strict Workspace-owner adoption. `adopted` is true
  * only when this call wrote `assigned_agent_id`; every other case
  * leaves the thread untouched. `conflict` means distinct runs name
@@ -212,59 +291,11 @@ export async function adoptWorkspaceOwnerForConversation(
       return { adopted: false, reason: "already-owned" };
     }
 
-    const { data: runs, error: runsErr } = await db
-      .from("flow_runs")
-      .select("id, flow_id, status, started_at")
-      .eq("account_id", accountId)
-      .eq("contact_id", contactId)
-      .order("started_at", { ascending: false })
-      .limit(25);
-    if (runsErr) return { adopted: false, reason: "error" };
-    const list = (runs ?? []) as Array<{
-      id: string;
-      flow_id: string;
-      status: string;
-      started_at: string;
-    }>;
-    if (list.length === 0) return { adopted: false, reason: "no-run" };
-
-    // Resolve the Assigned To field per flow (cached — a contact's
-    // runs almost always share one flow).
-    const fieldByFlow = new Map<string, { id: string } | null>();
-    const owners = new Set<string>();
-    for (const run of list) {
-      if (!run.flow_id) continue;
-      let field = fieldByFlow.get(run.flow_id);
-      if (field === undefined) {
-        try {
-          field = await findAssigneeField(db, accountId, run.flow_id);
-        } catch {
-          return { adopted: false, reason: "error" };
-        }
-        fieldByFlow.set(run.flow_id, field);
-      }
-      if (!field) continue;
-      let stored: string | null;
-      try {
-        stored = await readAssignment(db, accountId, field.id, run.id);
-      } catch {
-        return { adopted: false, reason: "error" };
-      }
-      if (
-        typeof stored === "string" &&
-        stored.trim() !== "" &&
-        stored.trim() !== ASSIGNED_TO_UNASSIGNED &&
-        UUID_RE.test(stored.trim())
-      ) {
-        owners.add(stored.trim());
-      }
+    const resolved = await resolveWorkspaceOwnerForContact(db, accountId, contactId);
+    if (resolved.ownerId === null) {
+      return { adopted: false, reason: resolved.reason };
     }
-    if (fieldByFlow.size > 0 && [...fieldByFlow.values()].every((f) => !f)) {
-      return { adopted: false, reason: "no-field" };
-    }
-    if (owners.size === 0) return { adopted: false, reason: "no-owner" };
-    if (owners.size > 1) return { adopted: false, reason: "conflict" };
-    const [ownerId] = [...owners];
+    const ownerId = resolved.ownerId;
 
     // Conditional write: NULL predicate in the UPDATE itself, so a
     // concurrent manual assignment between the read above and this

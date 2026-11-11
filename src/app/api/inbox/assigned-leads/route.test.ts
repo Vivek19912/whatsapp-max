@@ -151,6 +151,16 @@ describe("GET /api/inbox/assigned-leads", () => {
     expect(leads.some((l) => l.run_id === RUN_NOPHONE)).toBe(true);
   });
 
+  it("excludes unowned-thread leads from the lead-only list (adoption path owns them)", async () => {
+    // A thread exists but nobody owns it yet: the lead must not
+    // duplicate into the lead-only list — the adoption paths
+    // (outbound send, inbound reply, drift repair) converge it
+    // into the normal conversation list instead.
+    h.convs = [{ contact_id: CT_G, assigned_agent_id: null, account_id: ACC }];
+    const { leads } = await getLeads();
+    expect(leads.some((l) => l.run_id === RUN_G)).toBe(false);
+  });
+
   it("excludes Unassigned and non-UUID cells", async () => {
     h.values.push(
       { field_id: FIELD, flow_run_id: "run-x", value_text: "Unassigned", account_id: ACC },

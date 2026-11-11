@@ -52,6 +52,15 @@ describe("Assigned Leads inbox wiring", () => {
     expect(section).not.toContain("last_message");
     expect(section).not.toContain("unread_count");
   });
+
+  it("refetches when threads appear so entries transition without refresh", () => {
+    // The thread-contact set drives refetch + client-side exclusion:
+    // when a first message creates the thread, the entry leaves the
+    // lead-only list and the conversation appears in the normal list.
+    const section = src("src/components/inbox/assigned-leads-section.tsx");
+    expect(section).toContain("threadContactIds");
+    expect(section).toContain("resyncToken");
+  });
 });
 
 describe("LeadDetailPanel (rendered output)", () => {

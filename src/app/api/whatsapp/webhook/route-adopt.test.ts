@@ -34,4 +34,13 @@ describe("webhook Workspace-owner adoption ordering", () => {
     // could overwrite the just-adopted Workspace owner.
     expect(src).toContain("conversation.assigned_agent_id = outcome.ownerId");
   });
+
+  it("converges engine-driven changes to the unique Workspace owner", () => {
+    // When chat auto-assign proposes a new owner, a Meta-linked
+    // thread with exactly one Workspace owner keeps that owner
+    // instead of moving to an unrelated salesperson.
+    expect(src).toContain("resolveWorkspaceOwnerForContact");
+    // Tenant-scoped write: the auto-assign UPDATE is account-scoped.
+    expect(src).toContain(".eq('account_id', accountId)");
+  });
 });

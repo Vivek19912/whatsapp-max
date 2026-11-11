@@ -944,11 +944,35 @@ async function processMessage(
       currentAgentId: conversation.assigned_agent_id ?? null,
     })
     if (agentId && agentId !== conversation.assigned_agent_id) {
+      // Meta-linked threads follow Workspace ownership: if the
+      // contact has exactly one Workspace owner and the engine
+      // picked someone else (e.g. reassign-on-offline while the
+      // owner was away), converge to the Workspace owner instead
+      // of moving the thread to an unrelated salesperson. No
+      // unique owner -> existing engine behavior. Never invents
+      // ownership, never touches an already-correct assignment.
+      let targetId = agentId
+      try {
+        const { resolveWorkspaceOwnerForContact } = await import(
+          '@/lib/inbox/assignment-sync'
+        )
+        const wsOwner = await resolveWorkspaceOwnerForContact(
+          supabaseAdmin(),
+          accountId,
+          contactRecord.id
+        )
+        if (wsOwner.ownerId && wsOwner.ownerId !== agentId) {
+          targetId = wsOwner.ownerId
+        }
+      } catch {
+        // Resolution is best-effort; fall back to the engine pick.
+      }
       await supabaseAdmin()
         .from('conversations')
-        .update({ assigned_agent_id: agentId })
+        .update({ assigned_agent_id: targetId })
         .eq('id', conversation.id)
-      conversation.assigned_agent_id = agentId
+        .eq('account_id', accountId)
+      conversation.assigned_agent_id = targetId
     }
   } catch (err) {
     console.error('[webhook] auto-assignment failed:', err)

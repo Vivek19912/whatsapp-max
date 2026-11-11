@@ -26,6 +26,7 @@ import {
   resolveFlowRunId,
 } from './assignment'
 import { enrichAssignmentSheets } from '@/lib/sheets/assign-enrich'
+import { resolveWorkspaceOwnerForContact } from '@/lib/inbox/assignment-sync'
 import { DEFAULT_CURRENCY } from '@/lib/currency'
 // The Flows engine's media sender is fully shared: it performs the same
 // account-scoped contact/config lookup, phone-variant retry, Meta send,
@@ -691,12 +692,30 @@ async function runStep(step: AutomationStep, args: ExecuteArgs): Promise<string>
         agentId = profiles?.[0]?.user_id
       }
       if (!agentId) return 'no agent resolved'
+      // Meta-linked threads follow Workspace ownership: when the
+      // contact has exactly one Workspace owner, the thread stays
+      // with them instead of moving to the automation target. No
+      // unique owner -> the configured target stands (existing
+      // behavior for unrelated conversations).
+      let targetId = agentId
+      try {
+        const wsOwner = await resolveWorkspaceOwnerForContact(
+          db,
+          args.automation.account_id,
+          args.contactId
+        )
+        if (wsOwner.ownerId && wsOwner.ownerId !== agentId) {
+          targetId = wsOwner.ownerId
+        }
+      } catch {
+        // Resolution is best-effort; fall back to the configured target.
+      }
       await db
         .from('conversations')
-        .update({ assigned_agent_id: agentId })
+        .update({ assigned_agent_id: targetId })
         .eq('account_id', args.automation.account_id)
         .eq('contact_id', args.contactId)
-      return `assigned to ${agentId}`
+      return `assigned to ${targetId}`
     }
 
     case 'assign_person': {

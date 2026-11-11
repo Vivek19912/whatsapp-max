@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   adoptContactAssignmentForConversation,
   adoptWorkspaceOwnerForConversation,
+  resolveWorkspaceOwnerForContact,
   mirrorConversationAssignmentToWorkspace,
   mirrorRunAssignmentToConversation,
 } from "./assignment-sync";
@@ -223,6 +224,70 @@ describe("mirrorConversationAssignmentToWorkspace (Inbox -> Workspace)", () => {
   });
 });
 
+describe("resolveWorkspaceOwnerForContact (pure resolution)", () => {
+  const OWNER = "22222222-2222-4222-8222-222222222222";
+  const runs = [
+    { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+  ];
+
+  it("returns the unanimous member owner", async () => {
+    const db = new FakeDb().script(
+      ok(runs),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok({ value_text: OWNER })
+    );
+    expect(
+      await resolveWorkspaceOwnerForContact(db as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: OWNER });
+  });
+
+  it("combines owners across flows and reports conflict", async () => {
+    const db = new FakeDb().script(
+      ok([
+        { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
+        { id: "run-2", flow_id: "flow-2", status: "completed", started_at: "2026-02-01T10:00:00Z" },
+      ]),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok({ value_text: OWNER }),
+      ok([{ id: "field-2", name: "Assigned To" }]),
+      ok({ value_text: "44444444-4444-4444-8444-444444444444" })
+    );
+    expect(
+      await resolveWorkspaceOwnerForContact(db as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: null, reason: "conflict" });
+  });
+
+  it("ignores non-member values when a real owner exists", async () => {
+    const db = new FakeDb().script(
+      ok(runs),
+      ok([{ id: "field-1", name: "Assigned To" }]),
+      ok({ value_text: "Some External Name" })
+    );
+    // Only non-UUID values -> no owner (not a conflict).
+    expect(
+      await resolveWorkspaceOwnerForContact(db as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: null, reason: "no-owner" });
+  });
+
+  it("reports no-run and no-field distinctly", async () => {
+    const noRuns = new FakeDb().script(ok([]));
+    expect(
+      await resolveWorkspaceOwnerForContact(noRuns as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: null, reason: "no-run" });
+
+    const noField = new FakeDb().script(ok(runs), ok([]));
+    expect(
+      await resolveWorkspaceOwnerForContact(noField as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: null, reason: "no-field" });
+  });
+
+  it("never throws: DB errors resolve to error", async () => {
+    const db = new FakeDb().script({ data: null, error: { message: "boom" } });
+    expect(
+      await resolveWorkspaceOwnerForContact(db as never, "acc-1", "ct-1")
+    ).toEqual({ ownerId: null, reason: "error" });
+  });
+});
 describe("adoptContactAssignmentForConversation (thread open)", () => {
   const runs = [
     { id: "run-1", flow_id: "flow-1", status: "completed", started_at: "2026-01-01T10:00:00Z" },
