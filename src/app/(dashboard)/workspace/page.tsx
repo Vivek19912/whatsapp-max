@@ -2777,6 +2777,27 @@ export default function WorkspacePage() {
           ) : (
             <>
               <div className="border-border bg-card overflow-hidden rounded-xl border">
+              {/*
+                  Column drag-and-drop context wraps the whole scroll
+                  viewport — never the native <table> itself. dnd-kit
+                  renders screen-reader live-region divs as direct
+                  children of DndContext, and a <div> may not appear
+                  inside table/thead/tbody/tr (invalid HTML +
+                  hydration warnings). Sortable headers below still
+                  resolve through the same context.
+              */}
+              <DndContext
+                sensors={columnSensors}
+                collisionDetection={closestCenter}
+                onDragStart={handleColumnDragStart}
+                onDragOver={handleColumnDragOver}
+                onDragEnd={handleColumnDragEnd}
+                onDragCancel={handleColumnDragCancel}
+              >
+              <SortableContext
+                items={sortableColumnIds}
+                strategy={horizontalListSortingStrategy}
+              >
               <div
                 ref={viewportRef}
                 className={cn(
@@ -2800,18 +2821,6 @@ export default function WorkspacePage() {
                       strip sits below the vertical viewport as a
                       card-level sibling (see after </Table>) — always
                       visible, never in the row flow. */}
-                  <DndContext
-                    sensors={columnSensors}
-                    collisionDetection={closestCenter}
-                    onDragStart={handleColumnDragStart}
-                    onDragOver={handleColumnDragOver}
-                    onDragEnd={handleColumnDragEnd}
-                    onDragCancel={handleColumnDragCancel}
-                  >
-                  <SortableContext
-                    items={sortableColumnIds}
-                    strategy={horizontalListSortingStrategy}
-                  >
                   <TableHeader className="[&_tr]:border-b-0">
                     <TableRow>
                       {/* One shared column order drives every header
@@ -2822,27 +2831,6 @@ export default function WorkspacePage() {
                       {orderedColumns.map((entry) => renderHeaderEntry(entry))}
                     </TableRow>
                   </TableHeader>
-                  </SortableContext>
-                  <DragOverlay>
-                    {activeColumnId ? (
-                      <span className="bg-popover text-popover-foreground border-border inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] font-semibold whitespace-nowrap">
-                        <GripVertical className="size-3.5" aria-hidden />
-                        {(() => {
-                          const active = orderedColumns.find(
-                            (e) => e.id === activeColumnId
-                          );
-                          if (!active) return activeColumnId;
-                          if (active.kind === 'row') return 'No.';
-                          if (active.kind === 'custom')
-                            return formatColumnLabel(active.field.name);
-                          if (active.kind === 'flow')
-                            return formatColumnLabel(active.col.label);
-                          return activeColumnId;
-                        })()}
-                      </span>
-                    ) : null}
-                  </DragOverlay>
-                  </DndContext>
                   <TableBody>
                     {visibleRows.map((row, rowIndex) => (
                       <TableRow
@@ -2875,6 +2863,27 @@ export default function WorkspacePage() {
                   </TableBody>
                 </Table>
               </div>
+              <DragOverlay>
+                {activeColumnId ? (
+                  <span className="bg-popover text-popover-foreground border-border inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] font-semibold whitespace-nowrap">
+                    <GripVertical className="size-3.5" aria-hidden />
+                    {(() => {
+                      const active = orderedColumns.find(
+                        (e) => e.id === activeColumnId
+                      );
+                      if (!active) return activeColumnId;
+                      if (active.kind === 'row') return 'No.';
+                      if (active.kind === 'custom')
+                        return formatColumnLabel(active.field.name);
+                      if (active.kind === 'flow')
+                        return formatColumnLabel(active.col.label);
+                      return activeColumnId;
+                    })()}
+                  </span>
+                ) : null}
+              </DragOverlay>
+              </SortableContext>
+              </DndContext>
               {/* Single bottom thumb strip: a sibling BELOW the
                   vertical viewport — never inside the row flow — so
                   it is structurally always visible at the table's

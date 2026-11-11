@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Pause, Play, Plus, Trash2, UserPlus } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Eye, Loader2, Pause, Play, Plus, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -320,33 +320,40 @@ function draftKey(d: { user_id: string | null; email: string; phone: string }): 
 }
 
 /**
- * Compact, read-only customer-sequence summary for the assignee
- * table/cards: "No customer templates" when unconfigured, else the
- * ordered template names (with language) joined by arrows. Keeps
- * the main list dense; the full editor carries category/status.
+ * Compact avatar for the member list: initials on a tinted circle.
+ * Pure presentation — no images, no extra requests.
  */
-function SequenceSummary({ draft }: { draft: Draft }) {
-  const seq = draft.sequence;
-  if (seq === null) {
-    // Not loaded yet (or load failed) — distinct from "configured
-    // empty" so a saved sequence never flashes as "No templates".
-    return <span className="text-xs text-muted-foreground">—</span>;
-  }
-  if (seq.items.length === 0) {
-    return (
-      <span className="text-xs text-muted-foreground">No customer templates</span>
-    );
-  }
+function MemberInitials({ name }: { name: string }) {
+  const initials =
+    name
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join("")
+      .toUpperCase() || "?";
   return (
-    <span className="flex min-w-0 flex-col items-start gap-0.5 text-xs">
-      <span className="text-muted-foreground">
-        {seq.items.length} template{seq.items.length === 1 ? "" : "s"}
-      </span>
-      <span className="max-w-56 truncate text-foreground" title={seq.items.map((t) => `${t.template_name} (${t.template_language})`).join(" → ")}>
-        {seq.items.map((t) => `${t.template_name} (${t.template_language})`).join(" → ")}
-      </span>
+    <span
+      aria-hidden
+      className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary"
+    >
+      {initials}
     </span>
   );
+}
+
+/**
+ * One-line customer-sequence status for the "Messages to leads"
+ * section and the inline member editor: how many templates the
+ * salesperson will send a newly assigned lead, or that none is
+ * configured. Pure.
+ */
+export function sequenceStatusText(draft: {
+  sequence: { items: unknown[] } | null;
+}): string {
+  if (!draft.sequence) return "No sequence configured";
+  if (draft.sequence.items.length === 0) return "No sequence configured";
+  return `Sequence configured · ${draft.sequence.items.length} template${draft.sequence.items.length === 1 ? "" : "s"}`;
 }
 
 const emptyDraft = (): Draft => ({
@@ -430,6 +437,281 @@ export function mergeOpenFormEdit<T extends { key: string }>(
   return drafts.map((d) => (d.key === form.key ? { ...form } : d));
 }
 
+/**
+ * The wizard's three logical stages. A single authoritative assignment
+ * draft (drafts + mode + notify + template + sequences) flows through
+ * all three — steps never keep parallel copies of any field.
+ */
+export type AssignmentStep = "assign" | "notifications" | "review";
+
+export const ASSIGNMENT_STEPS: ReadonlyArray<{ key: AssignmentStep; label: string }> = [
+  { key: "assign", label: "Assign leads" },
+  { key: "notifications", label: "Notifications" },
+  { key: "review", label: "Review" },
+];
+
+/** Minimal shape validateAssignStep needs (Draft-compatible). */
+export type AssignStepDraft = Pick<Draft, "key" | "is_active" | "weight">;
+
+/**
+ * Validate STEP 1 (assign): at least one member, at least one
+ * eligible (active) member, and — for percentage mode — active
+ * shares totalling exactly 100%. Returns the user-facing error or
+ * null. Pure.
+ */
+export function validateAssignStep(
+  drafts: ReadonlyArray<AssignStepDraft>,
+  mode: "round_robin" | "percentage",
+): string | null {
+  if (drafts.length === 0) {
+    return "Add at least one team member to continue.";
+  }
+  if (!drafts.some((d) => d.is_active)) {
+    return "At least one member must receive new leads — turn on “Receives new leads” for a member.";
+  }
+  if (mode === "percentage") {
+    const total = drafts
+      .filter((d) => d.is_active)
+      .reduce((sum, d) => sum + (Number.parseInt(d.weight, 10) || 0), 0);
+    if (total !== 100) {
+      return `Active percentages must total exactly 100% (currently ${total}%).`;
+    }
+  }
+  return null;
+}
+
+/** Minimal shape validateNotifyStep needs (Draft-compatible). */
+export type NotifyStepDraft = Pick<
+  Draft,
+  | "display_name"
+  | "user_id"
+  | "email"
+  | "phone"
+  | "whatsapp_numbers"
+  | "notify_email"
+  | "sequence"
+  | "sequenceDirty"
+>;
+
+/**
+ * Validate STEP 2 (notifications): team template selected when
+ * enabled (and still approved), every email alert has a reachable
+ * recipient, every phone number is valid E.164, and edited customer
+ * sequences carry a sane delay. Returns the first problem or null.
+ * Pure — the same function gates Continue and the final save.
+ */
+export function validateNotifyStep(args: {
+  notifyEnabled: boolean;
+  templateName: string;
+  templateStale: boolean;
+  drafts: ReadonlyArray<NotifyStepDraft>;
+  rosterEmailFor: (userId: string | null) => string;
+  checkSequences: boolean;
+}): string | null {
+  if (args.notifyEnabled && args.templateName.trim() === "") {
+    return "Choose a notification template or turn notifications off.";
+  }
+  if (args.notifyEnabled && args.templateStale) {
+    return `Template "${args.templateName.trim()}" is no longer approved or available — choose a replacement before saving.`;
+  }
+  for (const d of args.drafts) {
+    const name = d.display_name.trim() || "Unnamed assignee";
+    if (d.notify_email && d.email.trim() === "" && !args.rosterEmailFor(d.user_id)) {
+      return `Email alerts are on for "${name}" but there is no email address — enter one or turn Email alerts off.`;
+    }
+    if (d.phone.trim() !== "" && !normalizeWhatsappNumberInput(d.phone)) {
+      return `${name}: phone number is invalid. Use international format with country code, e.g. +911234567890.`;
+    }
+    const numbersError = validateWhatsappNumberDrafts(
+      d.whatsapp_numbers,
+      d.phone,
+      name,
+    );
+    if (numbersError) return numbersError;
+  }
+  if (args.checkSequences) {
+    for (const d of args.drafts) {
+      if (!d.sequenceDirty || !d.sequence || d.sequence.items.length === 0) continue;
+      const delayNum = Number(d.sequence.delay_seconds);
+      if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
+        return "Delay must be a whole number of seconds between 0 and 86400.";
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Compact three-step progress indicator for the wizard header:
+ * current step (blue), completed steps (green check, clickable to
+ * go back), upcoming steps (neutral gray). Pure presentation.
+ */
+export function AssignmentStepper({
+  step,
+  completedSteps,
+  onStepClick,
+}: {
+  step: AssignmentStep;
+  completedSteps: ReadonlyArray<AssignmentStep>;
+  onStepClick?: (target: AssignmentStep) => void;
+}) {
+  const order: AssignmentStep[] = ["assign", "notifications", "review"];
+  const activeIndex = order.indexOf(step);
+  return (
+    <ol aria-label="Assignment progress" className="flex items-center gap-1 sm:gap-2">
+      {ASSIGNMENT_STEPS.map((s, i) => {
+        const index = order.indexOf(s.key);
+        const completed = completedSteps.includes(s.key);
+        const current = s.key === step;
+        const clickable = !current && index < activeIndex && completed && !!onStepClick;
+        const circleClass = current
+          ? "bg-primary text-primary-foreground"
+          : completed
+            ? "bg-emerald-500 text-white"
+            : "bg-muted text-muted-foreground";
+        const content =
+          current || !completed ? (
+            <span aria-hidden>{index + 1}</span>
+          ) : (
+            <Check aria-hidden className="size-3.5" />
+          );
+        const inner = (
+          <>
+            <span
+              aria-hidden
+              className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${circleClass}`}
+            >
+              {content}
+            </span>
+            <span
+              className={`hidden text-xs font-medium sm:inline ${current ? "text-foreground" : "text-muted-foreground"}`}
+            >
+              {s.label}
+            </span>
+            <span className="sr-only">{`Step ${index + 1}: ${s.label}${current ? " (current step)" : completed ? " (completed)" : ""}`}</span>
+          </>
+        );
+        return (
+          <li key={s.key} data-step={s.key} className="flex items-center gap-1 sm:gap-2">
+            {i > 0 ? (
+              <span aria-hidden className={`h-px w-4 sm:w-8 ${index <= activeIndex ? "bg-primary/60" : "bg-border"}`} />
+            ) : null}
+            {clickable ? (
+              <button
+                type="button"
+                onClick={() => onStepClick?.(s.key)}
+                aria-label={`Go back to Step ${index + 1}: ${s.label}`}
+                className="flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-muted/60"
+              >
+                {inner}
+              </button>
+            ) : (
+              <span
+                aria-current={current ? "step" : undefined}
+                aria-label={current ? `Step ${index + 1}: ${s.label} (current step)` : undefined}
+                className="flex items-center gap-1.5 px-1 py-0.5"
+              >
+                {inner}
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * Read-only STEP 3 summary of the complete draft: distribution,
+ * members, team notifications, customer sequences, and the
+ * activation state. Pure presentation — values come from the live
+ * draft so the review can never drift from what Save submits.
+ */
+export function AssignmentReviewSummary({
+  mode,
+  drafts,
+  activeWeightTotal,
+  notifyEnabled,
+  templateName,
+  templateLanguage,
+  enabled,
+  isNew,
+}: {
+  mode: "round_robin" | "percentage";
+  drafts: ReadonlyArray<Pick<Draft, "display_name" | "weight" | "is_active" | "notify_email" | "sequence">>;
+  activeWeightTotal: number;
+  notifyEnabled: boolean;
+  templateName: string;
+  templateLanguage: string;
+  enabled: boolean;
+  isNew: boolean;
+}) {
+  const emailOn = drafts.filter((d) => d.notify_email).length;
+  return (
+    <div className="flex flex-col gap-4">
+      <section aria-label="Review assignment">
+        <p className="text-sm font-semibold text-foreground">Assignment</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Distribution method: {mode === "percentage" ? "Percentage-based" : "Round robin"}
+          {mode === "percentage" ? ` · Total allocation: ${activeWeightTotal}%` : ""}
+        </p>
+        <ul className="mt-2 flex flex-col gap-1.5">
+          {drafts.map((d, i) => (
+            <li
+              key={`${d.display_name}-${i}`}
+              className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm"
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <MemberInitials name={d.display_name} />
+                <span className="truncate font-medium text-foreground">
+                  {d.display_name || "—"}
+                </span>
+              </span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {mode === "percentage" ? `${d.weight}% · ` : ""}
+                {d.is_active ? "Receives new leads" : "Paused"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section aria-label="Review notifications">
+        <p className="text-sm font-semibold text-foreground">Notifications</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Team WhatsApp notifications: {notifyEnabled ? "Enabled" : "Disabled"}
+          {notifyEnabled && templateName.trim() !== ""
+            ? ` · Template: ${templateName.trim()}${templateLanguage.trim() ? ` (${templateLanguage.trim()})` : ""}`
+            : ""}
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Email notifications: {emailOn === 0 ? "Disabled" : `${emailOn} of ${drafts.length} members`}
+        </p>
+      </section>
+      <section aria-label="Review customer messages">
+        <p className="text-sm font-semibold text-foreground">Customer messages</p>
+        <ul className="mt-1 flex flex-col gap-1">
+          {drafts.map((d, i) => (
+            <li key={`${d.display_name}-${i}`} className="text-xs text-muted-foreground">
+              {d.display_name || "—"} —{" "}
+              {d.sequence && d.sequence.items.length > 0
+                ? `${d.sequence.items.length} message${d.sequence.items.length === 1 ? "" : "s"} configured`
+                : "No sequence configured"}
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section aria-label="Review activation">
+        <p className="text-sm font-semibold text-foreground">Activation</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Status: {enabled ? "Active" : "Paused"}
+          {isNew && enabled ? " — this assignment activates on save." : ""}
+          {isNew && !enabled ? " — resolve the errors above to activate on save." : ""}
+        </p>
+      </section>
+    </div>
+  );
+}
+
 export function TableAssignmentDialog({
   flowId,
   flowName,
@@ -468,6 +750,37 @@ export function TableAssignmentDialog({
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [form, setForm] = useState<Draft>(emptyDraft());
+  // Table-level team notification switch. On load it mirrors whether
+  // a notification template is saved; the template itself is kept in
+  // memory while off so re-enabling restores the previous pick.
+  // Saving while off persists a null template.
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  // Inline member editor disclosure (everything lives in this one
+  // dialog — no Sheet, no drawer, no nested modal). Add opens with
+  // only the essential fields visible; Edit reveals the advanced
+  // toggle. Advanced groups stay collapsed until explicitly opened.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [openGroup, setOpenGroup] = useState<null | "contact" | "notify" | "avail" | "msg">(null);
+  // Two-click inline remove confirmation (no modal): first click arms
+  // the row, second click removes the draft. Closing or saving the
+  // dialog without saving discards everything anyway.
+  const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
+  // Wizard navigation: exactly one step's content renders at a time.
+  // The single authoritative draft (drafts + mode + notify +
+  // template + sequences) is shared across steps — Continue commits
+  // the open editor, validates the step, then advances.
+  const [step, setStep] = useState<AssignmentStep>("assign");
+  const [completedSteps, setCompletedSteps] = useState<AssignmentStep[]>([]);
+  // Which inline-editor slot owns the open editor: the STEP 1 member
+  // list, the STEP 2 message list, or the STEP 2 advanced list. One
+  // editor is ever open, so only that slot renders it.
+  const [editorSlot, setEditorSlot] = useState<"members" | "messages" | "advanced">("members");
+  // Collapsed "Advanced notification settings" disclosure in STEP 2.
+  const [showStepAdvanced, setShowStepAdvanced] = useState(false);
+  // Inline preview of the selected notification template (name,
+  // language, category, status — the picker endpoint carries no body
+  // text, so details are the honest preview).
+  const [templatePreviewOpen, setTemplatePreviewOpen] = useState(false);
   const [pauseFor, setPauseFor] = useState<string | null>(null);
   const [pauseMode, setPauseMode] = useState<"today" | "days" | "until" | "resume">("today");
   const [pauseDays, setPauseDays] = useState("1");
@@ -685,6 +998,7 @@ export function TableAssignmentDialog({
       setEnabled(data.config?.enabled ?? false);
       setMode(data.config?.mode ?? "round_robin");
       setTemplateName(data.config?.whatsapp_template_name ?? "");
+      setNotifyEnabled(!!(data.config?.whatsapp_template_name ?? "").trim());
       // Show a language only when a template is saved; the save
       // path falls back to "en_US" for the empty state.
       setTemplateLanguage(
@@ -756,6 +1070,15 @@ export function TableAssignmentDialog({
     if (open) {
       setEditingKey(null);
       setForm(emptyDraft());
+      setNotifyEnabled(false);
+      setStep("assign");
+      setCompletedSteps([]);
+      setEditorSlot("members");
+      setShowStepAdvanced(false);
+      setShowAdvanced(false);
+      setOpenGroup(null);
+      setConfirmRemoveKey(null);
+      setTemplatePreviewOpen(false);
       setPauseFor(null);
       setShowNotifications(false);
       setNotifications(null);
@@ -891,26 +1214,88 @@ export function TableAssignmentDialog({
   };
 
   const startAdd = () => {
+    if (readOnly) return;
+    if (!commitOpenEditor()) return;
     setEditingKey("__new__");
+    setEditorSlot("members");
     setForm(emptyDraft());
+    // Add opens with only the essential fields visible; advanced
+    // groups stay collapsed until explicitly requested.
+    setShowAdvanced(false);
+    setOpenGroup(null);
+    setConfirmRemoveKey(null);
   };
 
-  const startEdit = (d: Draft) => {
+  const startEdit = (d: Draft, slot: "members" | "messages" | "advanced" = "members") => {
+    if (readOnly) return;
+    if (!commitOpenEditor()) return;
     setEditingKey(d.key);
+    setEditorSlot(slot);
     setForm({ ...d });
+    setShowAdvanced(false);
+    setOpenGroup(null);
+    setConfirmRemoveKey(null);
+  };
+
+  /**
+   * Open the inline row editor with the customer-messages group
+   * expanded, from the "Messages to leads" section. Same editor,
+   * same persistence — just a focused entry point.
+   */
+  const openMessages = (d: Draft) => {
+    if (readOnly) return;
+    if (!commitOpenEditor()) return;
+    setEditingKey(d.key);
+    setEditorSlot("messages");
+    setForm({ ...d });
+    setShowAdvanced(true);
+    setOpenGroup("msg");
+    setConfirmRemoveKey(null);
   };
 
   const cancelEdit = () => {
     setEditingKey(null);
     setForm(emptyDraft());
+    setShowAdvanced(false);
+    setOpenGroup(null);
+    setPauseFor(null);
   };
 
-  const confirmEdit = () => {
-    if (readOnly) return;
+  /**
+   * Commit the open inline editor into the drafts (what Done does),
+   * synchronously so Save — and opening another editor — can
+   * validate + submit the merged list in the same tick instead of
+   * validating a stale draft while the panel is open. Returns the
+   * merged drafts, or null when validation blocks (the form stays
+   * open with the error surfaced). A pristine Add panel is
+   * disregarded, not committed. Callers must not run this in
+   * view mode (all entry points are readOnly-guarded).
+   */
+  const commitOpenEditor = (): Draft[] | null => {
+    if (!editingKey) return drafts;
+    if (editingKey === "__new__" && isPristineNewAssigneeForm(form)) {
+      cancelEdit();
+      return drafts;
+    }
     const problem = validateAssigneeForm(form, drafts);
     if (problem) {
+      setSaveError(problem);
       toast.error(problem);
-      return;
+      return null;
+    }
+    // Percentage shares are edited in the Add/Edit form (the member
+    // list shows them read-only). Validate the typed value on commit
+    // so a bad share blocks with the form preserved — Never
+    // rebalance or overwrite other members silently. Round Robin
+    // ignores the field entirely.
+    if (mode === "percentage") {
+      const share = Number.parseInt(form.weight, 10);
+      if (form.weight.trim() === "" || !Number.isInteger(share) || share < 0 || share > 100) {
+        const shareProblem = `Enter a share percentage between 0 and 100 for "${form.display_name.trim() || "Unnamed assignee"}".`;
+        setSaveError(shareProblem);
+        toast.error(shareProblem);
+        return null;
+      }
     }
     if (form.user_id) {
       const member = rosterById.get(form.user_id);
@@ -918,12 +1303,105 @@ export function TableAssignmentDialog({
         form.display_name = member.full_name?.trim() || member.email || form.user_id;
       }
     }
-    if (editingKey === "__new__") {
-      setDrafts((prev) => mergeOpenFormEdit(prev, editingKey, form, `new-${Date.now()}`));
-    } else {
-      setDrafts((prev) => mergeOpenFormEdit(prev, editingKey, form, form.key));
-    }
+    const next =
+      editingKey === "__new__"
+        ? mergeOpenFormEdit(drafts, editingKey, form, `new-${Date.now()}`)
+        : mergeOpenFormEdit(drafts, editingKey, form, form.key);
+    setDrafts(next);
     cancelEdit();
+    return next;
+  };
+
+  const confirmEdit = () => {
+    if (readOnly) return;
+    commitOpenEditor();
+  };
+
+  /**
+   * Wizard navigation. Continue commits the open inline editor first
+   * (same stale-state fix as Save: the visible form merges into the
+   * draft before anything validates), validates the current step, and
+   * advances only on success. Back preserves every entered value.
+   * The stepper can return to completed steps but never skip ahead.
+   */
+  const markStepComplete = (done: AssignmentStep) => {
+    setCompletedSteps((prev) => (prev.includes(done) ? prev : [...prev, done]));
+  };
+
+  const notifyArgsFor = (activeDrafts: Draft[]) => ({
+    notifyEnabled,
+    templateName,
+    templateStale,
+    drafts: activeDrafts,
+    rosterEmailFor: (userId: string | null) =>
+      (userId ? rosterById.get(userId)?.email : null)?.trim() || "",
+    checkSequences: isMetaTable,
+  });
+
+  const goNext = () => {
+    if (readOnly || busy !== null) return;
+    // Commit-before-validate: a typed-but-unconfirmed editor merges
+    // into the drafts before the step validates them.
+    const activeDrafts = commitOpenEditor();
+    if (!activeDrafts) return;
+    if (step === "assign") {
+      const problem = validateAssignStep(activeDrafts, mode);
+      if (problem) {
+        setSaveError(problem);
+        toast.error(problem);
+        return;
+      }
+      setSaveError(null);
+      markStepComplete("assign");
+      setStep("notifications");
+    } else if (step === "notifications") {
+      const problem = validateNotifyStep(notifyArgsFor(activeDrafts));
+      if (problem) {
+        setSaveError(problem);
+        toast.error(problem);
+        return;
+      }
+      setSaveError(null);
+      markStepComplete("notifications");
+      setStep("review");
+    }
+  };
+
+  const goBack = () => {
+    if (readOnly || busy !== null || step === "assign") return;
+    const activeDrafts = commitOpenEditor();
+    if (!activeDrafts) return;
+    setSaveError(null);
+    setStep(step === "review" ? "notifications" : "assign");
+  };
+
+  const goToStep = (target: AssignmentStep) => {
+    if (readOnly || busy !== null || target === step) return;
+    const order: AssignmentStep[] = ["assign", "notifications", "review"];
+    // Only completed earlier steps are reachable via the stepper —
+    // never skip uncompleted required steps.
+    if (order.indexOf(target) >= order.indexOf(step)) return;
+    if (!completedSteps.includes(target)) return;
+    const activeDrafts = commitOpenEditor();
+    if (!activeDrafts) return;
+    setSaveError(null);
+    setStep(target);
+  };
+
+  /**
+   * Two-click inline remove confirmation (no modal): the first click
+   * arms the row ("Confirm?"), the second removes the draft. Removal
+   * only takes effect on the main Save — closing the dialog without
+   * saving restores the member.
+   */
+  const requestRemove = (d: Draft) => {
+    if (readOnly) return;
+    if (confirmRemoveKey === d.key) {
+      removeDraft(d.key);
+      setConfirmRemoveKey(null);
+      return;
+    }
+    setConfirmRemoveKey(d.key);
   };
 
   const linkMember = (userId: string) => {
@@ -981,42 +1459,15 @@ export function TableAssignmentDialog({
 
   const save = async () => {
     if (readOnly || busy !== null) return;
-    // Commit the open assignee editor first. Save validates and
-    // submits `drafts`, but the editor edits a separate `form` state
-    // that only merges on Done — saving with the panel open used to
-    // silently drop the typed phone and validate the stale draft
-    // instead (e.g. a freshly typed +91 number rejected as
-    // "invalid"). A pristine Add panel is disregarded, not committed.
-    let activeDrafts = drafts;
-    if (editingKey) {
-      if (editingKey === "__new__" && isPristineNewAssigneeForm(form)) {
-        setEditingKey(null);
-        setForm(emptyDraft());
-      } else {
-        const problem = validateAssigneeForm(form, drafts);
-        if (problem) {
-          setSaveError(problem);
-          toast.error(problem);
-          return;
-        }
-        if (form.user_id) {
-          const member = rosterById.get(form.user_id);
-          if (member && !form.display_name.trim()) {
-            form.display_name =
-              member.full_name?.trim() || member.email || form.user_id;
-          }
-        }
-        activeDrafts = mergeOpenFormEdit(
-          drafts,
-          editingKey,
-          form,
-          `new-${Date.now()}`,
-        );
-        setDrafts(activeDrafts);
-        setEditingKey(null);
-        setForm(emptyDraft());
-      }
-    }
+    // Commit the open inline editor first (add form, row editor, or
+    // message configuration). Save validates and submits `drafts`,
+    // but the editor edits a separate `form` state that only merges
+    // on commit — saving with a panel open used to silently drop the
+    // typed values and validate the stale draft instead. A pristine
+    // Add panel is disregarded, not committed. Null (blocked
+    // validation) leaves the editor open with the error surfaced.
+    const activeDrafts = commitOpenEditor();
+    if (!activeDrafts) return;
     // Weight totals are recomputed from the committed drafts (the
     // memo above still reflects the pre-commit list while the panel
     // is open).
@@ -1033,58 +1484,20 @@ export function TableAssignmentDialog({
       toast.error(activeWeightError);
       return;
     }
-    if (templateStale) {
-      const message = `Template "${templateName.trim()}" is no longer approved or available — choose a replacement before saving.`;
-      setSaveError(message);
-      toast.error(message);
+    // Notification validation is shared with STEP 2's Continue gate
+    // (template required/stale, email recipients, E.164 numbers,
+    // sequence delays) so the review step can never submit something
+    // the wizard itself would have blocked. Off persists null but
+    // keeps the in-memory pick so re-enabling restores it.
+    const notifyProblem = validateNotifyStep(notifyArgsFor(activeDrafts));
+    if (notifyProblem) {
+      setSaveError(notifyProblem);
+      toast.error(notifyProblem);
       return;
-    }
-    // An enabled email alert with no possible recipient can never
-    // deliver: block the save with an actionable message instead of
-    // persisting the misconfiguration. Internal members fall back
-    // to the linked roster email; external recipients need a typed
-    // address. Drafts are preserved so nothing is lost.
-    for (const d of activeDrafts) {
-      if (!d.notify_email || d.email.trim() !== "") continue;
-      const rosterEmail =
-        (d.user_id ? rosterById.get(d.user_id)?.email : null)?.trim() || "";
-      if (!rosterEmail) {
-        const message = `Email alerts are on for "${d.display_name.trim() || "Unnamed assignee"}" but there is no email address — enter one or turn Email alerts off.`;
-        setSaveError(message);
-        toast.error(message);
-        return;
-      }
-    }
-    // Extra WhatsApp numbers are validated client-side the same
-    // way the server validates them (E.164, cap, no duplicates);
-    // the server re-validates and rejects the whole save on any
-    // problem. Email behavior is untouched.
-    for (const d of activeDrafts) {
-      const numbersError = validateWhatsappNumberDrafts(
-        d.whatsapp_numbers,
-        d.phone,
-        d.display_name.trim() || "Unnamed assignee",
-      );
-      if (numbersError) {
-        setSaveError(numbersError);
-        toast.error(numbersError);
-        return;
-      }
-    }
-    // Client-side sequence guard (the server re-validates templates,
-    // mappings, and delay): a malformed delay must never be sent.
-    if (isMetaTable) {
-      for (const d of activeDrafts) {
-        if (!d.sequenceDirty || !d.sequence || d.sequence.items.length === 0) continue;
-        const delayNum = Number(d.sequence.delay_seconds);
-        if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
-          toast.error("Delay must be a whole number of seconds between 0 and 86400.");
-          return;
-        }
-      }
     }
     setBusy("save");
     setSaveError(null);
+    setConfirmRemoveKey(null);
     try {
       const isNewConfig = !payload?.config;
       const hasActiveAssignee = activeDrafts.some((d) => d.is_active);
@@ -1102,7 +1515,8 @@ export function TableAssignmentDialog({
             enabled: enabledToSave,
             mode,
             timezone: ASSIGNMENT_TIMEZONE,
-            whatsapp_template_name: templateName.trim() || null,
+            whatsapp_template_name:
+              notifyEnabled && templateName.trim() !== "" ? templateName.trim() : null,
             whatsapp_template_language: templateLanguage.trim() || "en_US",
             assignees: activeDrafts.map((d) => ({
               user_id: d.user_id,
@@ -1236,12 +1650,627 @@ export function TableAssignmentDialog({
     }
   };
 
+  /**
+   * Inline member editor shared by the Add form (below the member
+   * list) and the per-row Edit form (below that member's row). Only
+   * one editor is ever open (single `editingKey`), so this renders in
+   * at most one slot. Basic fields stay visible; Contact,
+   * Notifications, Availability, and Customer messages live behind
+   * collapsed toggles. Uses the same form state, validation, and
+   * persistence as the main Save — no parallel source of truth.
+   *
+   * STEP 1 passes `basicOnly` so member selection stays compact:
+   * link, display name, contact essentials, and the "Receives new
+   * leads" switch only. Advanced notification, availability pause,
+   * and customer-message groups live in STEP 2.
+   */
+  const renderMemberEditor = (isNew: boolean, basicOnly = false) => (
+    <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
+      <div className="flex flex-col gap-4">
+        <p className="text-sm font-medium text-foreground">
+          {isNew ? "Add member" : "Edit member"}
+        </p>
+        <section aria-label="Member">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <Label>Link team member (optional)</Label>
+              <SearchableSelect
+                value={form.user_id ?? ""}
+                options={[
+                  { value: "", label: "External contact (no login)" },
+                  ...rosterOptions,
+                ]}
+                onChange={(v) => linkMember(v)}
+                placeholder="External contact (no login)"
+                searchPlaceholder="Search team members…"
+                emptyText="No team members match."
+                ariaLabel="Link team member"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label>Display name</Label>
+              <Input
+                value={form.display_name}
+                onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
+                placeholder="Priya Sharma"
+                autoFocus
+              />
+            </div>
+            {mode === "percentage" ? (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="assign-share">Share percentage</Label>
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    id="assign-share"
+                    value={form.weight}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) }))
+                    }
+                    placeholder="20"
+                    inputMode="numeric"
+                    aria-label={`Share percentage for ${form.display_name.trim() || "member"}`}
+                    className="text-right"
+                  />
+                  <span className="text-xs text-muted-foreground">%</span>
+                </div>
+              </div>
+            ) : null}
+            {isNew ? (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="assign-email">Email for notifications (optional)</Label>
+                  <Input
+                    id="assign-email"
+                    value={form.email}
+                    onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                    placeholder="priya@example.com"
+                    inputMode="email"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label>Phone (with country code)</Label>
+                  <Input
+                    value={form.phone}
+                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                    placeholder="+911234567890"
+                    inputMode="tel"
+                  />
+                </div>
+              </>
+            ) : null}
+          </div>
+        </section>
+        {form.user_id && (
+          <p className="-mt-2 text-xs text-muted-foreground">
+            Linked members take ownership in the Assigned To column. External
+            contacts receive notifications only — the lead stays Unassigned.
+          </p>
+        )}
+        {basicOnly && !isNew ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <Label>Email for notifications (optional)</Label>
+              <Input
+                value={form.email}
+                onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                placeholder="priya@example.com"
+                inputMode="email"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label>Phone (with country code)</Label>
+              <Input
+                value={form.phone}
+                onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                placeholder="+911234567890"
+                inputMode="tel"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-sm sm:col-span-2">
+              <Switch
+                checked={form.is_active}
+                onCheckedChange={(v) => setForm((f) => ({ ...f, is_active: v }))}
+                aria-label="Member receives new leads"
+              />
+              Receives new leads
+            </label>
+          </div>
+        ) : null}
+        {isNew || basicOnly ? null : (
+          <>
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAdvanced((v) => !v)}
+                aria-expanded={showAdvanced}
+              >
+                {showAdvanced ? "Hide advanced options" : "Show advanced options"}
+              </Button>
+            </div>
+            {showAdvanced ? (
+              <div className="flex flex-col gap-4">
+                <section aria-label="Contact details">
+                  <div className="mb-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2 text-sm font-semibold"
+                      onClick={() => setOpenGroup(openGroup === "contact" ? null : "contact")}
+                      aria-expanded={openGroup === "contact"}
+                    >
+                      Contact details
+                    </Button>
+                  </div>
+                  {openGroup === "contact" ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="flex flex-col gap-1.5">
+                        <Label htmlFor="assign-email">Email for notifications (optional)</Label>
+                        <Input
+                          id="assign-email"
+                          value={form.email}
+                          onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+                          placeholder="priya@example.com"
+                          inputMode="email"
+                        />
+                        <p className="text-xs leading-snug text-muted-foreground">
+                          This address receives notifications. If left empty, the linked team
+                          member&apos;s roster email is used.
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label>Phone (with country code)</Label>
+                        <Input
+                          value={form.phone}
+                          onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
+                          placeholder="+911234567890"
+                          inputMode="tel"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1.5 sm:col-span-2">
+                        <Label>
+                          Extra WhatsApp numbers
+                          {form.whatsapp_numbers.length > 0
+                            ? ` (${form.whatsapp_numbers.length})`
+                            : ""}
+                        </Label>
+                        <p className="text-xs leading-snug text-muted-foreground">
+                          Each number gets its own template below. Empty template =
+                          this table&apos;s default WhatsApp template. The main phone
+                          above stays the primary number.
+                        </p>
+                        {form.whatsapp_numbers.map((n, i) => {
+                          const numberKey =
+                            n.template_name.trim() === ""
+                              ? ""
+                              : encodeTemplateKey({
+                                  name: n.template_name.trim(),
+                                  language: n.template_language.trim() || "en_US",
+                                });
+                          return (
+                            <div
+                              key={i}
+                              className="flex flex-col gap-2 rounded-lg border border-border p-2 sm:flex-row sm:items-start"
+                            >
+                              <Input
+                                value={n.phone}
+                                onChange={(e) =>
+                                  setForm((f) => ({
+                                    ...f,
+                                    whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
+                                      j === i ? { ...m, phone: e.target.value } : m,
+                                    ),
+                                  }))
+                                }
+                                placeholder="+911234567891"
+                                inputMode="tel"
+                                aria-label={`Extra WhatsApp number ${i + 1}`}
+                                className="sm:max-w-44"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <SearchableSelect
+                                  value={numberKey}
+                                  options={templateOptions}
+                                  onChange={(v) => {
+                                    const parsed = decodeTemplateKey(v);
+                                    setForm((f) => ({
+                                      ...f,
+                                      whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
+                                        j === i
+                                          ? {
+                                              ...m,
+                                              template_name: parsed ? parsed.name : "",
+                                              template_language: parsed
+                                                ? parsed.language
+                                                : "en_US",
+                                            }
+                                          : m,
+                                      ),
+                                    }));
+                                  }}
+                                  placeholder="Table default template"
+                                  searchPlaceholder="Search templates…"
+                                  emptyText={
+                                    templatesError
+                                      ? "Could not load templates."
+                                      : "No approved templates found."
+                                  }
+                                  ariaLabel={`Template for extra WhatsApp number ${i + 1}`}
+                                  disabled={readOnly}
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                aria-label={`Remove extra WhatsApp number ${i + 1}`}
+                                onClick={() =>
+                                  setForm((f) => ({
+                                    ...f,
+                                    whatsapp_numbers: f.whatsapp_numbers.filter((_, j) => j !== i),
+                                  }))
+                                }
+                              >
+                                <Trash2 className="size-4" aria-hidden />
+                              </Button>
+                            </div>
+                          );
+                        })}
+                        {form.whatsapp_numbers.length < MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="self-start"
+                            onClick={() =>
+                              setForm((f) => ({
+                                ...f,
+                                whatsapp_numbers: [
+                                  ...f.whatsapp_numbers,
+                                  { phone: "", template_name: "", template_language: "en_US" },
+                                ],
+                              }))
+                            }
+                          >
+                            <Plus className="mr-1.5 size-4" aria-hidden /> Add WhatsApp number
+                          </Button>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            Maximum {MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} numbers per assignee.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+                <section aria-label="Notification preferences">
+                  <div className="mb-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2 text-sm font-semibold"
+                      onClick={() => setOpenGroup(openGroup === "notify" ? null : "notify")}
+                      aria-expanded={openGroup === "notify"}
+                    >
+                      Notifications
+                    </Button>
+                  </div>
+                  {openGroup === "notify" ? (
+                    <div className="flex flex-wrap items-center gap-4">
+                      <label className="flex items-center gap-2 text-sm">
+                        <Switch
+                          checked={form.notify_email}
+                          onCheckedChange={(v) => setForm((f) => ({ ...f, notify_email: v }))}
+                        />
+                        Email alerts
+                      </label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <Switch
+                          checked={form.notify_whatsapp}
+                          onCheckedChange={(v) => setForm((f) => ({ ...f, notify_whatsapp: v }))}
+                        />
+                        WhatsApp alerts
+                      </label>
+                    </div>
+                  ) : null}
+                </section>
+                <section aria-label="Availability">
+                  <div className="mb-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2 text-sm font-semibold"
+                      onClick={() => setOpenGroup(openGroup === "avail" ? null : "avail")}
+                      aria-expanded={openGroup === "avail"}
+                    >
+                      Availability
+                    </Button>
+                  </div>
+                  {openGroup === "avail" ? (
+                    <div className="flex flex-col gap-2">
+                      <label className="flex items-center gap-2 text-sm">
+                        <Switch
+                          checked={form.is_active}
+                          onCheckedChange={(v) => setForm((f) => ({ ...f, is_active: v }))}
+                          aria-label="Member receives new leads"
+                        />
+                        Receives new leads
+                      </label>
+                      {editingSaved ? (
+                        !form.is_active ? (
+                          <p className="text-xs text-muted-foreground">
+                            Inactive — this member won&apos;t receive new leads.
+                          </p>
+                        ) : editingSaved.paused_until ? (
+                          <p className="text-xs text-muted-foreground">
+                            Paused until {formatPausedUntilFull(editingSaved.paused_until)}
+                            {editingSaved.pause_reason ? ` — ${editingSaved.pause_reason}` : ""}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            {editingSaved.available ? "Available — eligible for new leads." : editingSaved.status_label}
+                          </p>
+                        )
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Availability applies after the first save.
+                        </p>
+                      )}
+                      {editingSaved ? (
+                        <div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setPauseFor(pauseFor ? null : editingSaved.id)}
+                          >
+                            {pauseFor
+                              ? "Close pause controls"
+                              : editingSaved.paused_until
+                                ? "Resume / extend pause"
+                                : "Pause temporarily"}
+                          </Button>
+                        </div>
+                      ) : null}
+                      {pausingSaved ? (
+                        <Card className="border-dashed">
+                          <CardContent className="flex flex-col gap-3 pt-4">
+                            <p className="text-sm font-medium">
+                              Pause {pausingSaved.display_name}
+                            </p>
+                                <p className="text-xs text-muted-foreground">
+                                  Pauses take effect immediately for new leads. Existing ownership never changes. All times are in Indian Standard Time (IST).
+                                </p>
+                            {pausingSaved.paused_until ? (
+                              <p className="text-muted-foreground text-xs">
+                                Current: Paused until{" "}
+                                {formatPausedUntilFull(pausingSaved.paused_until)}
+                                {pausingSaved.pause_reason ? ` — ${pausingSaved.pause_reason}` : ""} (
+                                {pausingSaved.pause_scope === "account" ? "whole account" : "this table"})
+                              </p>
+                            ) : null}
+                                <div className="flex flex-wrap gap-2">
+                                  {(
+                                    [
+                                      ["today", "Pause for today"],
+                                      ["days", "Pause N days"],
+                                      ["until", "Pause until…"],
+                                      ["resume", "Resume now"],
+                                    ] as const
+                                  ).map(([value, label]) => (
+                                    <Button
+                                      key={value}
+                                      type="button"
+                                      variant={pauseMode === value ? "default" : "outline"}
+                                      size="sm"
+                                      onClick={() => setPauseMode(value)}
+                                    >
+                                      {label}
+                                    </Button>
+                                  ))}
+                                </div>
+                                {pauseMode === "days" && (
+                                  <div className="flex flex-col gap-1.5">
+                                    <Label>Days (1–365)</Label>
+                                    <Input
+                                      value={pauseDays}
+                                      inputMode="numeric"
+                                      className="w-28"
+                                      onChange={(e) =>
+                                        setPauseDays(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
+                                      }
+                                    />
+                                  </div>
+                                )}
+                                {pauseMode === "until" && (
+                                  <div className="flex flex-col gap-1.5">
+                                    <Label>Resume date and time (IST)</Label>
+                                    <Input
+                                      type="datetime-local"
+                                      value={pauseUntil}
+                                      onChange={(e) => setPauseUntil(e.target.value)}
+                                    />
+                                  </div>
+                                )}
+                                {pauseMode !== "resume" && (
+                                  <>
+                                    <div className="flex flex-col gap-1.5">
+                                      <Label>Reason (optional)</Label>
+                                      <Input
+                                        value={pauseReason}
+                                        onChange={(e) => setPauseReason(e.target.value)}
+                                        placeholder="On leave"
+                                        maxLength={280}
+                                      />
+                                    </div>
+                                    <div className="flex gap-2">
+                                      <Button
+                                        type="button"
+                                        variant={pauseScope === "table" ? "default" : "outline"}
+                                        size="sm"
+                                        onClick={() => setPauseScope("table")}
+                                      >
+                                        This table only
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant={pauseScope === "account" ? "default" : "outline"}
+                                        size="sm"
+                                        onClick={() => setPauseScope("account")}
+                                      >
+                                        Whole account
+                                      </Button>
+                                    </div>
+                                  </>
+                                )}
+                                <div className="flex justify-end gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setPauseFor(null)}
+                                  >
+                                    Cancel
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    disabled={busy === "pause"}
+                                    onClick={submitPause}
+                                  >
+                                    {pauseMode === "resume" ? "Resume" : "Pause"}
+                                  </Button>
+                                </div>
+                              </CardContent>
+                            </Card>
+                          ) : null}
+                      </div>
+                  ) : null}
+                </section>
+                {isMetaTable ? (
+                  <section aria-label="Customer messages">
+                    <div className="mb-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 px-2 text-sm font-semibold"
+                        onClick={() => setOpenGroup(openGroup === "msg" ? null : "msg")}
+                        aria-expanded={openGroup === "msg"}
+                      >
+                        WhatsApp messages to lead
+                      </Button>
+                    </div>
+                    <p className="text-xs leading-snug text-muted-foreground">
+                      {sequenceStatusText(form)} These templates are sent to a
+                      lead on initial assignment only — reassignment does not
+                      resend them.
+                    </p>
+                    {openGroup === "msg" ? (
+                      <div className="mt-2 flex flex-col gap-2">
+                        {!formKey ? (
+                          <p className="text-xs text-muted-foreground">
+                            Link a team member or enter an email address or phone number to
+                            configure customer templates.
+                          </p>
+                        ) : sequenceCatalogLoading && sequenceCatalog === null ? (
+                          <p className="text-xs text-muted-foreground">
+                            Loading customer templates…
+                          </p>
+                        ) : sequenceCatalog === null ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p role="alert" className="text-xs text-destructive">
+                              Could not load customer templates.
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void loadSequenceCatalog()}
+                            >
+                              Retry
+                            </Button>
+                          </div>
+                        ) : (
+                          <AssigneeSequenceEditor
+                            templates={sequenceCatalog.templates}
+                            fields={sequenceCatalog.fields}
+                            sample={sequenceCatalog.sample}
+                            delay={form.sequence?.delay_seconds ?? "0"}
+                            items={form.sequence?.items ?? []}
+                            readOnly={false}
+                            onDelayChange={(v) =>
+                              setForm((f) => ({
+                                ...f,
+                                sequence: {
+                                  delay_seconds: v,
+                                  items: f.sequence?.items ?? [],
+                                },
+                                sequenceDirty: true,
+                              }))
+                            }
+                            onItemsChange={(items) =>
+                              setForm((f) => ({
+                                ...f,
+                                sequence: {
+                                  delay_seconds: f.sequence?.delay_seconds ?? "0",
+                                  items,
+                                },
+                                sequenceDirty: true,
+                              }))
+                            }
+                          />
+                        )}
+                      </div>
+                    ) : null}
+                  </section>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" onClick={confirmEdit}>
+            {isNew ? "Add member" : "Save member"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
   const kindLabel = tableKind === "meta_lead_ads" ? "Meta Lead Ads table" : "Flow table";
   // View mode renders the same saved state with every mutation
   // path closed: disabled inputs, hidden action buttons, a
   // Close-only footer, and guarded submitters (so no keyboard
   // path can persist anything either).
   const readOnly = viewMode === true;
+
+  // Saved row for the member open in the editor (availability and
+  // pause controls exist only for persisted assignees).
+  const editingSaved =
+    editingKey && editingKey !== "__new__" ? savedById.get(editingKey) : undefined;
+
+  // Pause target for the inline pause card: only when the editor is
+  // open on the saved member currently being paused. Hoisted out of
+  // the JSX so the card needs no inline IIFE.
+  const pausingSaved =
+    pauseFor && editingSaved && pauseFor === editingSaved.id
+      ? savedById.get(pauseFor)
+      : undefined;
+
+  // STEP 3 validation summary: recomputed from the live drafts so
+  // the review can never drift from what Save submits. Reaching the
+  // review step implies committed editors (Continue commits first),
+  // so these mirror the save-time checks.
+  const reviewAssignProblem = validateAssignStep(drafts, mode);
+  const reviewNotifyProblem = validateNotifyStep(notifyArgsFor(drafts));
 
   return (
     <ConfigDialog
@@ -1257,9 +2286,11 @@ export function TableAssignmentDialog({
           : "Settings apply to this table only. Saving never rewrites existing lead owners."
       }
       status={
-        <ConfigStatusBadge tone={enabled ? "default" : "secondary"}>
-          {enabled ? "Automatic" : "Manual"}
-        </ConfigStatusBadge>
+        readOnly ? (
+          <ConfigStatusBadge tone={enabled ? "default" : "secondary"}>
+            {enabled ? "Automatic" : "Manual"}
+          </ConfigStatusBadge>
+        ) : undefined
       }
       loading={loading}
       loadingText="Loading assignment settings…"
@@ -1269,7 +2300,7 @@ export function TableAssignmentDialog({
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>
-        ) : (
+        ) : step === "review" ? (
           <div className="flex flex-col items-end gap-2">
             <div
               className="flex items-center justify-end gap-2"
@@ -1334,6 +2365,14 @@ export function TableAssignmentDialog({
               </Button>
               <Button
                 type="button"
+                variant="outline"
+                onClick={goBack}
+                disabled={loading || busy !== null}
+              >
+                ← Back
+              </Button>
+              <Button
+                type="button"
                 onClick={save}
                 disabled={loading || busy !== null}
               >
@@ -1343,40 +2382,59 @@ export function TableAssignmentDialog({
                     Saving…
                   </>
                 ) : (
-                  "Save Assignment Settings"
+                  "Save Assignment"
                 )}
               </Button>
             </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={busy !== null}
+            >
+              Cancel
+            </Button>
+            {step === "notifications" ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={goBack}
+                disabled={loading || busy !== null}
+              >
+                ← Back
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              onClick={goNext}
+              disabled={loading || busy !== null}
+            >
+              Continue →
+            </Button>
           </div>
         )
       }
     >
       {!loading && (
         <div className="flex flex-col gap-5">
-          <section aria-label="Automatic assignment">
-            <ConfigSection
-              title="Automatic assignment"
-              hint="New leads are distributed to eligible assignees."
-            >
-              <div />
-            </ConfigSection>
-          </section>
-
-          <section aria-label="Distribution method">
-            <ConfigSection
-              title="Distribution method"
-              hint={
-                mode === "round_robin"
-                  ? "Leads go to each eligible assignee in turn."
-                  : "A paused assignee's share is redistributed across the remaining eligible assignees; shares always total 100% of the active pool."
-              }
-            >
+          <AssignmentStepper
+            step={readOnly ? "review" : step}
+            completedSteps={readOnly ? ["assign", "notifications"] : completedSteps}
+            onStepClick={readOnly ? undefined : goToStep}
+          />
+          {!readOnly && step === "assign" ? (
+          <>
+          <section aria-label="How should leads be assigned?">
+            <ConfigSection title="How should leads be assigned?">
               <RadioGroup
                 value={mode}
                 onValueChange={(v) => {
                   if (v === "round_robin" || v === "percentage") setMode(v);
                 }}
-                aria-label="Distribution method"
+                aria-label="How should leads be assigned?"
                 className="grid gap-2 sm:grid-cols-2"
               >
                 <label
@@ -1392,7 +2450,7 @@ export function TableAssignmentDialog({
                   <span>
                     <span className="block text-sm font-medium text-foreground">Round robin</span>
                     <span className="block text-xs text-muted-foreground">
-                      Equal rotation across everyone eligible.
+                      Distribute leads equally among team members.
                     </span>
                   </span>
                 </label>
@@ -1411,7 +2469,7 @@ export function TableAssignmentDialog({
                       Percentage-based
                     </span>
                     <span className="block text-xs text-muted-foreground">
-                      Weighted shares; paused members drop out and the rest absorb their share.
+                      Distribute leads according to each member&apos;s assigned share.
                     </span>
                   </span>
                 </label>
@@ -1419,108 +2477,18 @@ export function TableAssignmentDialog({
             </ConfigSection>
           </section>
 
-          <section aria-label="WhatsApp notifications">
+          <section aria-label="Assigned team members">
             <ConfigSection
-              title="WhatsApp notifications"
-              hint="Separate from assignment ownership: these alerts notify assignees without changing who owns the lead. They send only when the template below is set, APPROVED, and the account sender is connected. Email alerts use SMTP."
-            >
-              <div className="flex flex-col gap-3">
-                    <div className="flex flex-col gap-1.5">
-                      <Label>WhatsApp template (optional)</Label>
-                      {templatesLoading && templates === null ? (
-                        <div
-                          className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-sm text-muted-foreground"
-                          role="status"
-                        >
-                          <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
-                          Loading templates…
-                        </div>
-                      ) : (
-                        <div className="flex items-start gap-2">
-                          <div className="min-w-0 flex-1">
-                            <SearchableSelect
-                              value={templateKey}
-                              options={templateOptions}
-                              onChange={selectTemplate}
-                              placeholder="Select a template…"
-                              searchPlaceholder="Search templates…"
-                              emptyText={
-                                templatesError
-                                  ? "Could not load templates."
-                                  : "No approved templates found."
-                              }
-                              ariaLabel="WhatsApp template (optional)"
-                              disabled={readOnly}
-                            />
-                          </div>
-                          {templateName.trim() !== "" && !readOnly ? (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={clearTemplate}
-                              aria-label="Clear template selection"
-                              className="h-9 shrink-0 px-2.5"
-                            >
-                              Clear
-                            </Button>
-                          ) : null}
-                        </div>
-                      )}
-                      {templatesError ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p role="alert" className="text-xs text-destructive">
-                            {templatesError}
-                          </p>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void loadTemplates()}
-                            disabled={templatesLoading}
-                          >
-                            Retry
-                          </Button>
-                        </div>
-                      ) : null}
-                      {templates !== null &&
-                      templateOptions.length === 0 &&
-                      !templatesError ? (
-                        <p className="text-xs text-muted-foreground">
-                          No APPROVED templates for this account yet — sync them from
-                          WhatsApp Templates.
-                        </p>
-                      ) : null}
-                      {senderConnected === false ? (
-                        <p className="text-xs text-muted-foreground">
-                          WhatsApp sender is not connected for this account — connect it
-                          in Settings → WhatsApp before relying on these alerts.
-                        </p>
-                      ) : null}
-                      {templateStale ? (
-                        <p role="alert" className="text-xs font-medium text-amber-600 dark:text-amber-400">
-                          Saved template “{templateName.trim()}” (
-                          {templateLanguage.trim() || "unknown language"}) is no longer
-                          approved or available — choose a replacement below.
-                        </p>
-                      ) : null}
-                    </div>
-              </div>
-            </ConfigSection>
-          </section>
-
-          <section aria-label="Assignees">
-            <ConfigSection
-              title={`Assignees (${drafts.length})`}
+              title="Assigned team members"
               hint={
                 mode === "percentage"
-                  ? `Active shares must total exactly 100% — current active total: ${activeWeightTotal}%.`
-                  : "Everyone listed takes turns receiving new leads while eligible."
+                  ? "Set each member's share in the Add/Edit form. Shares must total exactly 100%."
+                  : undefined
               }
               action={
                 !readOnly ? (
                   <Button type="button" variant="outline" size="sm" onClick={startAdd}>
-                    <Plus className="mr-1.5 size-4" aria-hidden /> Add assignee
+                    <Plus className="mr-1.5 size-4" aria-hidden /> Add member
                   </Button>
                 ) : undefined
               }
@@ -1532,682 +2500,379 @@ export function TableAssignmentDialog({
               ) : null}
               {drafts.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-3 py-5 text-center">
-                  <p className="text-sm font-medium text-foreground">No assignees yet</p>
+                  <p className="text-sm font-medium text-foreground">No members yet</p>
                   <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
-                    Link a team member or add an external contact. New leads stay
-                    unassigned until someone is eligible.
+                    Add team members to start distributing new leads automatically.
                   </p>
                 </div>
               ) : (
-                <>
-                <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Name</TableHead>
-                        <TableHead>Contact</TableHead>
-                        {mode === "percentage" && <TableHead className="w-20">Share %</TableHead>}
-                        <TableHead>Status</TableHead>
-                        {isMetaTable ? <TableHead>Customer sequence</TableHead> : null}
-                        {readOnly ? null : <TableHead className="text-right">Actions</TableHead>}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {drafts.map((d) => {
-                        const saved = savedById.get(d.key);
-                        return (
-                          <TableRow key={d.key} className={cn(!d.is_active && "opacity-60")}>
-                            <TableCell>
-                              <p className="text-sm font-medium">{d.display_name || "—"}</p>
-                              <p className="text-muted-foreground text-xs">
-                                {d.user_id
-                                  ? `Team member${rosterById.get(d.user_id)?.full_name ? ` · ${rosterById.get(d.user_id)?.full_name}` : ""}`
-                                  : "External recipient"}
-                              </p>
-                            </TableCell>
-                            <TableCell>
-                              <p className="text-xs">{d.email || "—"}</p>
-                              <p className="text-muted-foreground text-xs">{d.phone || ""}</p>
-                              {d.whatsapp_numbers.map((n, i) => (
-                                <p
-                                  key={`${n.phone}-${i}`}
-                                  className="text-muted-foreground text-xs break-all"
-                                >
-                                  {n.phone}
-                                </p>
-                              ))}
-                              <p className="text-muted-foreground text-xs">
-                                {d.notify_email ? "Email on" : "Email off"} ·{" "}
-                                {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
-                              </p>
-                            </TableCell>
-                            {mode === "percentage" && (
-                              <TableCell>
-                              <Input
-                                value={d.weight}
-                                inputMode="numeric"
-                                className="w-16"
-                                aria-label={`Share percentage for ${d.display_name}`}
-                                disabled={readOnly}
-                                onChange={(e) =>
-                                  patchDraft(d.key, { weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) })
-                                }
-                              />
-                              </TableCell>
-                            )}
-                      <TableCell>
-                        {saved ? (
-                          <div className="flex flex-col items-start gap-1">
-                            <span className="flex items-center gap-1">
-                              <Badge variant={saved.available ? "default" : "secondary"}>
-                                {saved.available ? "Available" : saved.status_label}
-                              </Badge>
-                              {!d.is_active && (
-                                <Badge variant="secondary">
-                                  Inactive
-                                </Badge>
-                              )}
-                            </span>
-                            {saved.paused_until && (
-                              <span className="text-[11px] tabular-nums text-muted-foreground">
-                                until {formatPausedUntilFull(saved.paused_until)}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <Badge variant="outline">Unsaved</Badge>
-                        )}
-                      </TableCell>
-                      {isMetaTable ? (
-                        <TableCell>
-                          <SequenceSummary draft={d} />
-                        </TableCell>
+                <div className="flex flex-col gap-1.5">
+                  {drafts.map((d) => (
+                    <Fragment key={d.key}>
+                    <div
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2",
+                        !d.is_active && "opacity-60"
+                      )}
+                    >
+                      <MemberInitials name={d.display_name} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-foreground">
+                          {d.display_name || "—"}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {d.user_id ? "Team member" : "External contact"}
+                        </p>
+                      </div>
+                      {mode === "percentage" ? (
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {d.weight}%
+                        </span>
                       ) : null}
-                            {readOnly ? null : (
-                            <TableCell className="text-right">
-                              <div className="flex justify-end gap-1">
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => patchDraft(d.key, { is_active: !d.is_active })}
-                                  aria-label={d.is_active ? "Deactivate" : "Activate"}
-                                >
-                                  {d.is_active ? "Deactivate" : "Activate"}
-                                </Button>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => startEdit(d)}
-                                >
-                                  Edit
-                                </Button>
-                                {saved && (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => setPauseFor(saved.id)}
-                                    aria-label={saved.paused_until ? "Resume or extend pause" : "Pause"}
-                                  >
-                                    {saved.paused_until ? <Play className="size-4" /> : <Pause className="size-4" />}
-                                  </Button>
-                                )}
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => removeDraft(d.key)}
-                                  aria-label="Remove"
-                                >
-                                  <Trash2 className="size-4" />
-                                </Button>
-                              </div>
-                            </TableCell>
-                            )}
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                    </Table>
-                  </div>
-                  <div className="flex flex-col gap-2 md:hidden">
-                    {drafts.map((d) => {
-                      const saved = savedById.get(d.key);
-                      return (
-                        <div
-                          key={d.key}
-                          className={cn(
-                            "rounded-lg border border-border bg-card p-3",
-                            !d.is_active && "opacity-60"
-                          )}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-medium text-foreground">
-                                {d.display_name || "—"}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {d.user_id ? "Team member" : "External recipient"}
-                              </p>
-                            </div>
-                            {saved ? (
-                              <Badge variant={saved.available ? "default" : "secondary"} className="shrink-0">
-                                {saved.status_label}
-                              </Badge>
+                      {readOnly ? null : (
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs"
+                            onClick={() => startEdit(d)}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => requestRemove(d)}
+                            aria-label={confirmRemoveKey === d.key ? `Confirm remove ${d.display_name || "member"}` : `Remove ${d.display_name || "member"}`}
+                            className={confirmRemoveKey === d.key ? "h-8 px-2 text-xs text-destructive" : "h-8 w-8 px-0 text-destructive"}
+                          >
+                            {confirmRemoveKey === d.key ? (
+                              "Confirm?"
                             ) : (
-                              <Badge variant="outline" className="shrink-0">
-                                Unsaved
-                              </Badge>
+                              <Trash2 className="size-4" aria-hidden />
                             )}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                    {editingKey === d.key && editorSlot === "members" ? renderMemberEditor(false, true) : null}
+                    </Fragment>
+                  ))}
+                  {mode === "percentage" ? (
+                    <p className="pt-1 text-xs text-muted-foreground">
+                      Total allocation: {activeWeightTotal}%
+                    </p>
+                  ) : null}
+                </div>
+              )}
+              {editingKey === "__new__" ? renderMemberEditor(true) : null}
+              </ConfigSection>
+            </section>
+          </>
+          ) : null}
+          {!readOnly && step === "notifications" ? (
+          <>
+          <section aria-label="Notify assigned team member">
+            <ConfigSection
+              title="Notify assigned team member"
+              hint="Send a WhatsApp notification when a new lead is assigned."
+            >
+              <div className="flex flex-col gap-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <Switch
+                    checked={notifyEnabled}
+                    onCheckedChange={setNotifyEnabled}
+                    aria-label="Notify assigned team member"
+                    disabled={readOnly}
+                  />
+                  WhatsApp notifications
+                </label>
+                {notifyEnabled ? (
+                  <div className="flex flex-col gap-1.5">
+                    <Label>WhatsApp template</Label>
+                    {templatesLoading && templates === null ? (
+                      <div
+                        className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card px-2.5 text-sm text-muted-foreground"
+                        role="status"
+                      >
+                        <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                        Loading templates…
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <SearchableSelect
+                            value={templateKey}
+                            options={templateOptions}
+                            onChange={selectTemplate}
+                            placeholder="Select a template…"
+                            searchPlaceholder="Search templates…"
+                            emptyText={
+                              templatesError
+                                ? "Could not load templates."
+                                : "No approved templates found."
+                            }
+                            ariaLabel="WhatsApp template (optional)"
+                            disabled={readOnly}
+                          />
+                        </div>
+                        {templateKey !== "" ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setTemplatePreviewOpen((v) => !v)}
+                            aria-label="Preview notification template"
+                            aria-expanded={templatePreviewOpen}
+                            className="h-9 shrink-0 px-2.5"
+                          >
+                            <Eye className="size-4" aria-hidden />
+                          </Button>
+                        ) : null}
+                        {templateName.trim() !== "" && !readOnly ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={clearTemplate}
+                            aria-label="Clear template selection"
+                            className="h-9 shrink-0 px-2.5"
+                          >
+                            Clear
+                          </Button>
+                        ) : null}
+                      </div>
+                    )}
+                    {templatePreviewOpen && templateKey !== "" ? (() => {
+                      const selected = templateOptions.find((o) => o.value === templateKey);
+                      return (
+                        <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
+                          <p className="font-medium text-foreground">
+                            {selected?.label ?? templateName.trim()}
+                          </p>
+                          <p className="mt-0.5 text-muted-foreground">
+                            {selected?.hint ?? templateLanguage.trim()}
+                          </p>
+                        </div>
+                      );
+                    })() : null}
+                    {templatesError ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p role="alert" className="text-xs text-destructive">
+                          {templatesError}
+                        </p>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void loadTemplates()}
+                          disabled={templatesLoading}
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    ) : null}
+                    {templates !== null &&
+                    templateOptions.length === 0 &&
+                    !templatesError ? (
+                      <p className="text-xs text-muted-foreground">
+                        No APPROVED templates for this account yet — sync them from
+                        WhatsApp Templates.
+                      </p>
+                    ) : null}
+                    {senderConnected === false ? (
+                      <p className="text-xs text-muted-foreground">
+                        WhatsApp sender is not connected for this account — connect it
+                        in Settings → WhatsApp before relying on these alerts.
+                      </p>
+                    ) : null}
+                    {templateStale ? (
+                      <p role="alert" className="text-xs font-medium text-amber-600 dark:text-amber-400">
+                        Saved template “{templateName.trim()}” (
+                        {templateLanguage.trim() || "unknown language"}) is no longer
+                        approved or available — choose a replacement below.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  Email alerts are set for each member.
+                </p>
+              </div>
+            </ConfigSection>
+          </section>
+
+          {isMetaTable ? (
+            <section aria-label="Messages to leads">
+              <ConfigSection
+                title="Messages to leads"
+                hint="Automatically send WhatsApp messages to customers after lead assignment."
+              >
+                {drafts.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Add members above to configure customer messages.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {drafts.map((d) => (
+                      <Fragment key={d.key}>
+                      <div
+                        className="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2"
+                      >
+                        <MemberInitials name={d.display_name} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-foreground">
+                            {d.display_name || "—"}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {d.sequence === null && savedById.get(d.key)
+                              ? "Loading…"
+                              : sequenceStatusText(d)}
+                          </p>
+                        </div>
+                        {readOnly ? null : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 shrink-0 px-2.5 text-xs"
+                            onClick={() => openMessages(d)}
+                          >
+                            Configure
+                          </Button>
+                        )}
+                      </div>
+                      {editingKey === d.key && editorSlot === "messages" ? renderMemberEditor(false) : null}
+                      </Fragment>
+                    ))}
+                  </div>
+                )}
+              </ConfigSection>
+            </section>
+          ) : null}
+
+          <section aria-label="Advanced notification settings">
+            <ConfigSection
+              title="Advanced notification settings"
+              hint="Per-member email and WhatsApp preferences, contact details, and extra numbers."
+            >
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowStepAdvanced((v) => !v)}
+                  aria-expanded={showStepAdvanced}
+                >
+                  {showStepAdvanced ? "Hide advanced notification settings" : "Show advanced notification settings"}
+                </Button>
+              </div>
+              {showStepAdvanced ? (
+                drafts.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Add members in Step 1 to configure advanced settings.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {drafts.map((d) => (
+                      <Fragment key={d.key}>
+                        <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2">
+                          <MemberInitials name={d.display_name} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-foreground">
+                              {d.display_name || "—"}
+                            </p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {d.user_id ? "Team member" : "External contact"}
+                              {d.whatsapp_numbers.length > 0
+                                ? ` · ${d.whatsapp_numbers.length} extra number${d.whatsapp_numbers.length === 1 ? "" : "s"}`
+                                : ""}
+                            </p>
                           </div>
-                          <dl className="mt-2 space-y-1 text-xs">
-                            <div className="flex gap-1.5">
-                              <dt className="w-16 shrink-0 text-muted-foreground">Contact</dt>
-                              <dd className="min-w-0 flex-1 text-foreground">
-                                <span className="block truncate">
-                                  {[d.email, d.phone].filter(Boolean).join(" · ") || "—"}
-                                </span>
-                                {d.whatsapp_numbers.map((n, i) => (
-                                  <span
-                                    key={`${n.phone}-${i}`}
-                                    className="block break-all"
-                                  >
-                                    {n.phone}
-                                  </span>
-                                ))}
-                              </dd>
-                            </div>
-                            {mode === "percentage" ? (
-                              <div className="flex items-center gap-1.5">
-                                <dt className="w-16 shrink-0 text-muted-foreground">Share</dt>
-                                <dd className="flex flex-1 items-center gap-1">
-                                  <Input
-                                    value={d.weight}
-                                    inputMode="numeric"
-                                    className="h-8 w-20"
-                                    aria-label={`Share percentage for ${d.display_name}`}
-                                    disabled={readOnly}
-                                    onChange={(e) =>
-                                      patchDraft(d.key, {
-                                        weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3),
-                                      })
-                                    }
-                                  />
-                                  <span className="text-muted-foreground">%</span>
-                                </dd>
-                              </div>
-                            ) : null}
-                            <div className="flex gap-1.5">
-                              <dt className="w-16 shrink-0 text-muted-foreground">Alerts</dt>
-                              <dd className="flex-1 text-foreground">
-                                {d.notify_email ? "Email on" : "Email off"} ·{" "}
-                                {d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off"}
-                              </dd>
-                            </div>
-                            {isMetaTable ? (
-                              <div className="flex gap-1.5">
-                                <dt className="w-16 shrink-0 text-muted-foreground">To lead</dt>
-                                <dd className="min-w-0 flex-1">
-                                  <SequenceSummary draft={d} />
-                                </dd>
-                              </div>
-                            ) : null}
-                          </dl>
-                            <div className="mt-2 flex flex-wrap gap-1">
-                              {readOnly ? null : (
-                              <>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() => patchDraft(d.key, { is_active: !d.is_active })}
-                              >
-                                {d.is_active ? "Deactivate" : "Activate"}
-                              </Button>
+                          <label className="flex items-center gap-1.5 text-xs">
+                            <Switch
+                              checked={d.notify_email}
+                              onCheckedChange={(v) => patchDraft(d.key, { notify_email: v })}
+                              aria-label={`Email alerts for ${d.display_name || "member"}`}
+                              disabled={readOnly}
+                            />
+                            Email
+                          </label>
+                          <label className="flex items-center gap-1.5 text-xs">
+                            <Switch
+                              checked={d.notify_whatsapp}
+                              onCheckedChange={(v) => patchDraft(d.key, { notify_whatsapp: v })}
+                              aria-label={`WhatsApp alerts for ${d.display_name || "member"}`}
+                              disabled={readOnly}
+                            />
+                            WhatsApp
+                          </label>
+                          {readOnly ? null : (
                             <Button
                               type="button"
                               variant="ghost"
                               size="sm"
                               className="h-8 px-2 text-xs"
-                              onClick={() => startEdit(d)}
+                              onClick={() => startEdit(d, "advanced")}
                             >
                               Edit
                             </Button>
-                            {saved ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() => setPauseFor(saved.id)}
-                              >
-                                {saved.paused_until ? "Resume / extend" : "Pause"}
-                              </Button>
-                            ) : null}
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 px-2 text-xs text-destructive"
-                              onClick={() => removeDraft(d.key)}
-                              aria-label={`Remove ${d.display_name || "assignee"}`}
-                            >
-                              <Trash2 className="size-4" aria-hidden /> Remove
-                            </Button>
-                              </>
-                              )}
-                            </div>
-                          </div>
-                      );
-                    })}
+                          )}
+                        </div>
+                        {editingKey === d.key && editorSlot === "advanced" ? renderMemberEditor(false) : null}
+                      </Fragment>
+                    ))}
                   </div>
-                  </>
-                )}
-              </ConfigSection>
-            </section>
-
-                {!readOnly && (editingKey || pauseFor) && (
-                  <section aria-label="Assignee editor">
-                    <ConfigSection
-                      title={pauseFor ? "Pause controls" : editingKey === "__new__" ? "Add assignee" : "Edit assignee"}
-                      hint={
-                        pauseFor
-                          ? "Pauses take effect immediately for new leads. Existing ownership never changes."
-                          : "Link a team member for ownership, or enter contact details for a notification-only recipient."
-                      }
-                    >
-                      <div className="flex flex-col gap-3">
-                  {editingKey && (
-                  <Card className="border-dashed">
-                    <CardContent className="flex flex-col gap-3 pt-4">
-                      <p className="text-sm font-medium">
-                        {editingKey === "__new__" ? "Add assignee" : "Edit assignee"}
-                      </p>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="flex flex-col gap-1.5 sm:col-span-2">
-                          <Label>Link team member (optional)</Label>
-                          <SearchableSelect
-                            value={form.user_id ?? ""}
-                            options={[
-                              { value: "", label: "External contact (no login)" },
-                              ...rosterOptions,
-                            ]}
-                            onChange={(v) => linkMember(v)}
-                            placeholder="External contact (no login)"
-                            searchPlaceholder="Search team members…"
-                            emptyText="No team members match."
-                            ariaLabel="Link team member"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <Label>Display name</Label>
-                          <Input
-                            value={form.display_name}
-                            onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                            placeholder="Priya Sharma"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <Label htmlFor="assign-email">Email for notifications (optional)</Label>
-                          <Input
-                            id="assign-email"
-                            value={form.email}
-                            onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                            placeholder="priya@example.com"
-                            inputMode="email"
-                          />
-                          <p className="text-xs leading-snug text-muted-foreground">
-                            This address receives notifications. If left empty, the linked team
-                            member&apos;s roster email is used.
-                          </p>
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <Label>Phone (with country code)</Label>
-                          <Input
-                            value={form.phone}
-                            onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                            placeholder="+911234567890"
-                            inputMode="tel"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1.5 sm:col-span-2">
-                          <Label>
-                            Extra WhatsApp numbers
-                            {form.whatsapp_numbers.length > 0
-                              ? ` (${form.whatsapp_numbers.length})`
-                              : ""}
-                          </Label>
-                          <p className="text-xs leading-snug text-muted-foreground">
-                            Each number gets its own template below. Empty template =
-                            this table&apos;s default WhatsApp template. The main phone
-                            above stays the primary number.
-                          </p>
-                          {form.whatsapp_numbers.map((n, i) => {
-                            const numberKey =
-                              n.template_name.trim() === ""
-                                ? ""
-                                : encodeTemplateKey({
-                                    name: n.template_name.trim(),
-                                    language: n.template_language.trim() || "en_US",
-                                  });
-                            return (
-                              <div
-                                key={i}
-                                className="flex flex-col gap-2 rounded-lg border border-border p-2 sm:flex-row sm:items-start"
-                              >
-                                <Input
-                                  value={n.phone}
-                                  onChange={(e) =>
-                                    setForm((f) => ({
-                                      ...f,
-                                      whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
-                                        j === i ? { ...m, phone: e.target.value } : m,
-                                      ),
-                                    }))
-                                  }
-                                  placeholder="+911234567891"
-                                  inputMode="tel"
-                                  aria-label={`Extra WhatsApp number ${i + 1}`}
-                                  className="sm:max-w-44"
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <SearchableSelect
-                                    value={numberKey}
-                                    options={templateOptions}
-                                    onChange={(v) => {
-                                      const parsed = decodeTemplateKey(v);
-                                      setForm((f) => ({
-                                        ...f,
-                                        whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
-                                          j === i
-                                            ? {
-                                                ...m,
-                                                template_name: parsed ? parsed.name : "",
-                                                template_language: parsed
-                                                  ? parsed.language
-                                                  : "en_US",
-                                              }
-                                            : m,
-                                        ),
-                                      }));
-                                    }}
-                                    placeholder="Table default template"
-                                    searchPlaceholder="Search templates…"
-                                    emptyText={
-                                      templatesError
-                                        ? "Could not load templates."
-                                        : "No approved templates found."
-                                    }
-                                    ariaLabel={`Template for extra WhatsApp number ${i + 1}`}
-                                    disabled={readOnly}
-                                  />
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  aria-label={`Remove extra WhatsApp number ${i + 1}`}
-                                  onClick={() =>
-                                    setForm((f) => ({
-                                      ...f,
-                                      whatsapp_numbers: f.whatsapp_numbers.filter((_, j) => j !== i),
-                                    }))
-                                  }
-                                >
-                                  <Trash2 className="size-4" aria-hidden />
-                                </Button>
-                              </div>
-                            );
-                          })}
-                          {form.whatsapp_numbers.length < MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="self-start"
-                              onClick={() =>
-                                setForm((f) => ({
-                                  ...f,
-                                  whatsapp_numbers: [
-                                    ...f.whatsapp_numbers,
-                                    { phone: "", template_name: "", template_language: "en_US" },
-                                  ],
-                                }))
-                              }
-                            >
-                              <Plus className="mr-1.5 size-4" aria-hidden /> Add WhatsApp number
-                            </Button>
-                          ) : (
-                            <p className="text-xs text-muted-foreground">
-                              Maximum {MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} numbers per assignee.
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                      {form.user_id && (
-                        <p className="text-muted-foreground text-xs">
-                          Linked members take ownership in the Assigned To column. External
-                          contacts receive notifications only — the lead stays Unassigned.
-                        </p>
-                      )}
-                      <div className="flex flex-wrap items-center gap-4">
-                        <label className="flex items-center gap-2 text-sm">
-                          <Switch
-                            checked={form.notify_email}
-                            onCheckedChange={(v) => setForm((f) => ({ ...f, notify_email: v }))}
-                          />
-                          Email alerts
-                        </label>
-                        <label className="flex items-center gap-2 text-sm">
-                          <Switch
-                            checked={form.notify_whatsapp}
-                            onCheckedChange={(v) => setForm((f) => ({ ...f, notify_whatsapp: v }))}
-                          />
-                          WhatsApp alerts
-                        </label>
-                      </div>
-                      {isMetaTable ? (
-                        <div className="flex flex-col gap-2 border-t border-border pt-3">
-                          <div className="flex flex-col gap-0.5">
-                            <p className="text-sm font-semibold text-foreground">
-                              WhatsApp messages to lead
-                            </p>
-                            <p className="text-xs leading-snug text-muted-foreground">
-                              These templates are sent to a lead when this salesperson receives
-                              the lead&apos;s initial assignment. Reassignment does not send
-                              customer-facing templates.
-                            </p>
-                          </div>
-                          {!formKey ? (
-                            <p className="text-xs text-muted-foreground">
-                              Link a team member or enter an email address or phone number to
-                              configure customer templates.
-                            </p>
-                          ) : sequenceCatalogLoading && sequenceCatalog === null ? (
-                            <p className="text-xs text-muted-foreground">
-                              Loading customer templates…
-                            </p>
-                          ) : sequenceCatalog === null ? (
-                            <div className="flex flex-wrap items-center gap-2">
-                              <p role="alert" className="text-xs text-destructive">
-                                Could not load customer templates.
-                              </p>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => void loadSequenceCatalog()}
-                              >
-                                Retry
-                              </Button>
-                            </div>
-                          ) : (
-                            <AssigneeSequenceEditor
-                              templates={sequenceCatalog.templates}
-                              fields={sequenceCatalog.fields}
-                              sample={sequenceCatalog.sample}
-                              delay={form.sequence?.delay_seconds ?? "0"}
-                              items={form.sequence?.items ?? []}
-                              readOnly={false}
-                              onDelayChange={(v) =>
-                                setForm((f) => ({
-                                  ...f,
-                                  sequence: {
-                                    delay_seconds: v,
-                                    items: f.sequence?.items ?? [],
-                                  },
-                                  sequenceDirty: true,
-                                }))
-                              }
-                              onItemsChange={(items) =>
-                                setForm((f) => ({
-                                  ...f,
-                                  sequence: {
-                                    delay_seconds: f.sequence?.delay_seconds ?? "0",
-                                    items,
-                                  },
-                                  sequenceDirty: true,
-                                }))
-                              }
-                            />
-                          )}
-                        </div>
-                      ) : null}
-                      <div className="flex justify-end gap-2">
-                        <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
-                          Cancel
-                        </Button>
-                        <Button type="button" size="sm" onClick={confirmEdit}>
-                          {editingKey === "__new__" ? "Add" : "Done"}
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-
-                {pauseFor &&
-                  (() => {
-                    const target = savedById.get(pauseFor);
-                    return (
-                      <Card className="border-dashed">
-                        <CardContent className="flex flex-col gap-3 pt-4">
-                          <p className="text-sm font-medium">
-                            {target ? `Pause ${target.display_name}` : "Pause assignee"}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            All times are in Indian Standard Time (IST).
-                          </p>
-                      {target?.paused_until ? (
-                        <p className="text-muted-foreground text-xs">
-                          Current: Paused until{" "}
-                          {formatPausedUntilFull(target.paused_until)}
-                          {target.pause_reason ? ` — ${target.pause_reason}` : ""} (
-                          {target.pause_scope === "account" ? "whole account" : "this table"})
-                        </p>
-                      ) : null}
-                          <div className="flex flex-wrap gap-2">
-                            {(
-                              [
-                                ["today", "Pause for today"],
-                                ["days", "Pause N days"],
-                                ["until", "Pause until…"],
-                                ["resume", "Resume now"],
-                              ] as const
-                            ).map(([value, label]) => (
-                              <Button
-                                key={value}
-                                type="button"
-                                variant={pauseMode === value ? "default" : "outline"}
-                                size="sm"
-                                onClick={() => setPauseMode(value)}
-                              >
-                                {label}
-                              </Button>
-                            ))}
-                          </div>
-                          {pauseMode === "days" && (
-                            <div className="flex flex-col gap-1.5">
-                              <Label>Days (1–365)</Label>
-                              <Input
-                                value={pauseDays}
-                                inputMode="numeric"
-                                className="w-28"
-                                onChange={(e) =>
-                                  setPauseDays(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
-                                }
-                              />
-                            </div>
-                          )}
-                          {pauseMode === "until" && (
-                            <div className="flex flex-col gap-1.5">
-                              <Label>Resume date and time (IST)</Label>
-                              <Input
-                                type="datetime-local"
-                                value={pauseUntil}
-                                onChange={(e) => setPauseUntil(e.target.value)}
-                              />
-                            </div>
-                          )}
-                          {pauseMode !== "resume" && (
-                            <>
-                              <div className="flex flex-col gap-1.5">
-                                <Label>Reason (optional)</Label>
-                                <Input
-                                  value={pauseReason}
-                                  onChange={(e) => setPauseReason(e.target.value)}
-                                  placeholder="On leave"
-                                  maxLength={280}
-                                />
-                              </div>
-                              <div className="flex gap-2">
-                                <Button
-                                  type="button"
-                                  variant={pauseScope === "table" ? "default" : "outline"}
-                                  size="sm"
-                                  onClick={() => setPauseScope("table")}
-                                >
-                                  This table only
-                                </Button>
-                                <Button
-                                  type="button"
-                                  variant={pauseScope === "account" ? "default" : "outline"}
-                                  size="sm"
-                                  onClick={() => setPauseScope("account")}
-                                >
-                                  Whole account
-                                </Button>
-                              </div>
-                            </>
-                          )}
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setPauseFor(null)}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={busy === "pause"}
-                              onClick={submitPause}
-                            >
-                              {pauseMode === "resume" ? "Resume" : "Pause"}
-                            </Button>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    );
-                  })()}
-                    </div>
-                  </ConfigSection>
-                </section>
+                )
+              ) : null}
+            </ConfigSection>
+          </section>
+          </>
+          ) : null}
+          {(readOnly || step === "review") ? (
+          <>
+          <section aria-label="Review and save">
+            <ConfigSection
+              title="Review & save"
+              hint="Confirm the complete configuration before saving."
+            >
+              <AssignmentReviewSummary
+                mode={mode}
+                drafts={drafts}
+                activeWeightTotal={
+                  drafts
+                    .filter((d) => d.is_active)
+                    .reduce((sum, d) => sum + (Number.parseInt(d.weight, 10) || 0), 0)
+                }
+                notifyEnabled={notifyEnabled}
+                templateName={templateName}
+                templateLanguage={templateLanguage}
+                enabled={enabled}
+                isNew={!payload?.config}
+              />
+              {reviewAssignProblem || reviewNotifyProblem ? (
+                <div className="flex flex-col gap-1.5" role="alert">
+                  {reviewAssignProblem ? (
+                    <p className="text-xs font-medium text-destructive">{reviewAssignProblem}</p>
+                  ) : null}
+                  {reviewNotifyProblem ? (
+                    <p className="text-xs font-medium text-destructive">{reviewNotifyProblem}</p>
+                  ) : null}
+                  {!readOnly ? (
+                    <p className="text-xs text-muted-foreground">
+                      Go back to fix the highlighted configuration before saving.
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Everything looks good — save to apply this configuration to the table.
+                </p>
               )}
+            </ConfigSection>
+          </section>
 
           <section aria-label="Alert deliveries">
             <Accordion
@@ -2274,6 +2939,8 @@ export function TableAssignmentDialog({
               </AccordionItem>
             </Accordion>
           </section>
+          </>
+          ) : null}
         </div>
       )}
     </ConfigDialog>

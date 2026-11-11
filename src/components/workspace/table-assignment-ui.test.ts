@@ -71,23 +71,50 @@ describe("assignment entry points in the workspace actions menu", () => {
   });
 });
 
-describe("assignment dialog is a single panel", () => {
+describe("assignment dialog is a three-step wizard", () => {
   const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
-  it("covers status, method, assignees, pauses, and deliveries (no timezone section)", () => {
+  it("covers method, members, notifications, customer messages, and deliveries", () => {
     for (const section of [
-      "Automatic assignment",
-      "Distribution method",
-      "WhatsApp template",
-      "Add assignee",
+      "How should leads be assigned?",
+      "Assigned team members",
+      "Notify assigned team member",
+      "Messages to leads",
+      "Advanced notification settings",
+      "Add member",
       "Recent alert deliveries",
+      "Review & save",
     ]) {
       expect(dialog).toContain(section);
     }
-    expect(dialog).not.toContain("Step 1");
     expect(dialog).not.toContain("Step 4");
-    expect(dialog).not.toContain("multi-step");
-    expect(dialog).not.toContain("drawer");
+    // Member editing is inline within the wizard steps — no side
+    // panel, no nested dialog or modal.
+    expect(dialog).not.toContain("<Sheet");
+    expect(dialog).not.toContain("SheetContent");
+    expect(dialog).not.toContain("@/components/ui/sheet");
+    expect(dialog).not.toContain("Drawer");
+    expect(dialog).not.toContain("<Dialog");
+    expect(dialog).toContain("renderMemberEditor");
+    expect(dialog).not.toContain("Nested tabs");
+  });
+
+  it("renders only the active step with Back/Continue navigation", () => {
+    expect(dialog).toContain("AssignmentStepper");
+    expect(dialog).toContain("ASSIGNMENT_STEPS");
+    expect(dialog).toContain('step === "assign"');
+    expect(dialog).toContain('step === "notifications"');
+    expect(dialog).toContain('step === "review"');
+    expect(dialog).toContain("Assignment progress");
+    expect(dialog).toContain("Step ${index + 1}: ${s.label}");
+    expect(dialog).toContain("Continue →");
+    expect(dialog).toContain("← Back");
+    expect(dialog).toContain('"Save Assignment"');
+    // Navigation commits the open editor before validating.
+    expect(dialog).toContain("const activeDrafts = commitOpenEditor();");
+    expect(dialog).toContain("validateAssignStep");
+    expect(dialog).toContain("validateNotifyStep");
+    expect(dialog).toContain("AssignmentReviewSummary");
   });
 
   it("is India-only: no timezone selector, IST everywhere", () => {
@@ -115,10 +142,12 @@ describe("assignment dialog is a single panel", () => {
     expect(dialog).toContain("toast.error");
   });
 
-  it("distinguishes linked members from external recipients", () => {
+  it("distinguishes linked members from external contacts without leaking details", () => {
+    expect(dialog).toContain("External contact (no login)");
     expect(dialog).toContain("External contact");
-    expect(dialog).toContain("External recipient");
-    expect(dialog).toContain("notifications only — the lead stays Unassigned");
+    expect(dialog).toContain("contacts receive notifications only — the lead stays Unassigned");
+    // Contact details live in the inline member editor, not the main list.
+    expect(dialog).toContain("Contact details");
   });
 
   it("labels the email field as the notification recipient with a roster fallback", () => {
@@ -140,7 +169,7 @@ describe("assignment dialog is a single panel", () => {
 
   it("blocks saving an enabled email alert with no possible recipient", () => {
     expect(dialog).toContain("but there is no email address — enter one or turn Email alerts off");
-    expect(dialog).toContain("rosterById.get(d.user_id)?.email");
+    expect(dialog).toContain("rosterById.get(userId)?.email");
   });
 });
 
@@ -154,15 +183,16 @@ describe("assignment dialog view mode (read-only inspection)", () => {
   });
 
   it("disables every editable control in view mode", () => {
-    // Radio cards, template selector, and share inputs render
-    // disabled — values stay readable, nothing is focusable or
-    // changeable. (Template language lives only in state; it has
-    // no visible field at all. The Automatic section has no toggle
-    // switch: activation lives in the footer Pause/Resume row in
-    // edit mode, while the section heading remains.)
+    // Radio cards, share inputs, the notify switch, and the template
+    // selector render disabled — values stay readable, nothing is
+    // focusable or changeable. (Template language lives only in
+    // state; it has no visible field at all. Activation lives in the
+    // footer Pause/Resume row in edit mode; view mode keeps a
+    // read-only header badge instead.)
     const hits = dialog.split("disabled={readOnly}").length - 1;
     expect(hits).toBeGreaterThanOrEqual(4);
-    expect(dialog).toContain('<section aria-label="Automatic assignment">');
+    expect(dialog).not.toContain('aria-label="Automatic assignment"');
+    expect(dialog).not.toContain('title="Automatic assignment"');
     expect(dialog).not.toContain("onCheckedChange={setEnabled}");
     expect(dialog).toContain('id="assign-mode-rr"');
     expect(dialog).toContain("Share percentage for");
@@ -171,15 +201,15 @@ describe("assignment dialog view mode (read-only inspection)", () => {
   });
 
   it("hides every mutating action in view mode and keeps the saved readouts", () => {
-    // Add/Edit/Deactivate/Remove/Pause controls and the editor
-    // cards render only outside view mode...
-    expect(dialog).toContain("{readOnly ? null : <TableHead className=\"text-right\">Actions</TableHead>}");
-    expect(dialog).toContain("!readOnly && (editingKey || pauseFor)");
-    // ...while names, contact channels, notify flags, badges, and
-    // the paused-until line stay visible.
-    expect(dialog).toContain("notify_email ? \"Email on\" : \"Email off\"");
-    expect(dialog).toContain("until {formatPausedUntilFull(saved.paused_until)}");
-    expect(dialog).toContain("saved.available ? \"Available\" : saved.status_label");
+    // Add/Edit/Remove/Configure controls render only outside view
+    // mode (no inline editor ever opens read-only)...
+    expect(dialog).toContain("{readOnly ? null : (");
+    expect(dialog).toContain("if (readOnly) return;");
+    expect(dialog).toContain("onClick={confirmEdit}");
+    // ...while names, sequence statuses, and the paused-until line
+    // stay visible.
+    expect(dialog).toContain("Paused until {formatPausedUntilFull(");
+    expect(dialog).toContain("sequenceStatusText(");
   });
 
   it("swaps the footer to Close-only and blocks the mutating submitters", () => {
@@ -189,7 +219,7 @@ describe("assignment dialog view mode (read-only inspection)", () => {
     // Close-only footer in view mode; the Save pair stays for edit.
     expect(dialog).toContain("readOnly ? (");
     expect(dialog).toContain("onClick={() => onOpenChange(false)}");
-    expect(dialog).toContain("Save Assignment Settings");
+    expect(dialog).toContain('"Save Assignment"');
     expect(dialog).not.toContain("ConfigFooterActions");
   });
 });
@@ -351,8 +381,9 @@ describe("assignment template selector (searchable, approved-only)", () => {
     expect(dialog).not.toContain("Select a template above");
     expect(dialog).toContain("setTemplateLanguage(parsed.language)");
     expect(dialog).toContain("data.config?.whatsapp_template_name");
-    // Save contract unchanged: actual name + language strings.
-    expect(dialog).toContain("whatsapp_template_name: templateName.trim() || null");
+    // Save contract: the template persists only while team
+    // notifications are enabled.
+    expect(dialog).toContain("notifyEnabled && templateName.trim()");
     expect(dialog).toContain('whatsapp_template_language: templateLanguage.trim() || "en_US"');
     // Saved settings still reopen with the stored language intact.
     expect(dialog).toContain("whatsapp_template_language ?? ");
@@ -376,23 +407,22 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
     "src/app/api/integrations/meta-lead-ads/whatsapp/tables/[flowId]/config/route.ts",
   );
 
-  it("adds a clearly labelled customer-facing section inside the assignee form", () => {
+  it("adds a clearly labelled customer-facing section in the inline member editor", () => {
     expect(dialog).toContain("WhatsApp messages to lead");
-    expect(dialog).toContain(
-      "These templates are sent to a lead when this salesperson receives",
-    );
-    expect(dialog).toContain("Reassignment does not send");
-    expect(dialog).toContain("customer-facing templates");
+    expect(dialog).toContain("on initial assignment only");
+    expect(dialog).toContain("reassignment does not");
+    expect(dialog).toContain("openGroup");
+    expect(dialog).toContain("Show advanced options");
     expect(dialog).toContain("<AssigneeSequenceEditor");
   });
 
   it("keeps the salesperson notification template separate from the customer sequence", () => {
-    // The notification template (WhatsApp alerts) stays its own
-    // section; the customer sequence is a distinct labelled section.
-    expect(dialog).toContain("WhatsApp notifications");
+    // The team notification template stays its own section; the
+    // customer sequence lives in the inline member editor. The
+    // sequence is never the notification template.
+    expect(dialog).toContain("Notify assigned team member");
     expect(dialog).toContain("WhatsApp template (optional)");
     expect(dialog).toContain("WhatsApp messages to lead");
-    // The customer sequence is never the notification template.
     expect(dialog).toContain("whatsapp_template_name");
     expect(dialog).toContain("assignee_key");
   });
@@ -436,12 +466,15 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
     expect(dialog).toContain("{isMetaTable ? (");
   });
 
-  it("shows the sequence order in the compact list and stays read-only in view mode", () => {
-    // Compact per-assignee summary with ordered names; the full
-    // editor is edit-only (hidden behind the readOnly gate).
-    expect(dialog).toContain("<SequenceSummary");
-    expect(dialog).toContain("Customer sequence");
-    expect(dialog).toContain("No customer templates");
+  it("shows the sequence status in the messages section and stays read-only in view mode", () => {
+    // One-line per-member status with a Configure entry point; the
+    // full editor opens inline below the member row and is edit-only
+    // (hidden behind the readOnly gate).
+    expect(dialog).toContain("sequenceStatusText");
+    expect(dialog).toContain("No sequence configured");
+    expect(dialog).toContain("Sequence configured");
+    expect(dialog).toContain("Configure");
+    expect(dialog).toContain("openMessages(");
     expect(dialog).toContain("const readOnly = viewMode === true");
   });
 
@@ -541,7 +574,7 @@ describe("assignment dialog open-editor commit on save (Assignee-2 phone regress
   it("save commits the open editor before validating the payload", () => {
     // The save path must operate on the merged drafts (activeDrafts),
     // never on the stale pre-edit list.
-    expect(dialogSrc).toContain("let activeDrafts = drafts;");
+    expect(dialogSrc).toContain("const activeDrafts = commitOpenEditor();");
     expect(dialogSrc).toContain("mergeOpenFormEdit(");
     expect(dialogSrc).toContain("assignees: activeDrafts.map((d) => ({");
     expect(dialogSrc).toContain("phone: d.phone.trim() || null,");
@@ -551,43 +584,58 @@ describe("assignment dialog open-editor commit on save (Assignee-2 phone regress
   });
 });
 
-describe("assignment dialog Contact column (every WhatsApp number shown)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+describe("assignment dialog member rows stay compact (details live in the inline editor)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
-  it("lists each configured number instead of a generic count label", () => {
-    // Desktop table cell maps over the saved numbers (actual data,
-    // never hardcoded) with wrapping so long numbers are not cut.
-    expect(dialog).toContain("d.whatsapp_numbers.map((n, i) => (");
-    expect(dialog).toContain("{n.phone}");
-    expect(dialog).toContain("break-all");
-    // No generic count labels anywhere in the Contact displays.
+  it("lists members with avatar, name, share, edit, and remove only", () => {
+    // One compact row per member: avatar initials, display name,
+    // linked/external caption, read-only share text, Edit, Remove.
+    expect(dialog).toContain("MemberInitials");
+    expect(dialog).toContain("Add member");
+    expect(dialog).toContain("Share percentage for");
+    // The share is read-only text in the row — the editable input
+    // lives in the Add/Edit member form (assign-share).
+    expect(dialog).toContain("assign-share");
+    expect(dialog).not.toContain("patchDraft(d.key, { weight");
+    // No activate/deactivate toggles in the list — availability
+    // moved to the inline member editor.
+    expect(dialog).not.toContain("Deactivate");
+    // No contact columns in the list — emails, phones, and extra
+    // numbers live in the inline member editor.
+    expect(dialog).not.toContain("<TableHead>Name</TableHead>");
     expect(dialog).not.toContain("WhatsApp number{");
-    expect(dialog).not.toContain("+${d.whatsapp_numbers.length}");
   });
 
-  it("keeps the primary contact number and email separate", () => {
-    // Primary phone/email render on their own lines above the extras.
-    expect(dialog).toContain("{d.email ||");
-    expect(dialog).toContain("{d.phone ||");
-    // Notification status indicators are untouched.
-    expect(dialog).toContain("Email on");
-    expect(dialog).toContain("WhatsApp on");
+  it("keeps allocation totals visible with inline validation", () => {
+    expect(dialog).toContain("Total allocation:");
+    expect(dialog).toContain("must total exactly 100%");
   });
 
-  it("mobile card stacks every number instead of a count suffix", () => {
-    expect(dialog).not.toContain("(+${d.whatsapp_numbers.length} WhatsApp)");
+  it("member editor holds contact, alerts, availability, and messages", () => {
+    // The inline editor groups every advanced field: link, name,
+    // email, phone, extra numbers, alert switches, availability,
+    // pause, and customer sequences.
+    expect(dialog).toContain("Contact details");
+    expect(dialog).toContain("Notification preferences");
+    expect(dialog).toContain("Availability");
+    expect(dialog).toContain("Receives new leads");
+    expect(dialog).toContain("Show advanced options");
+    expect(dialog).toContain("form.whatsapp_numbers.map((n, i) => {");
+    expect(dialog).toContain("Email alerts");
+    expect(dialog).toContain("WhatsApp alerts");
   });
 });
 
 describe("assignment dialog footer activation (no toggle, Pause/Resume row)", () => {
   const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
-  it("removes the Automatic assignment toggle and keeps a simple section", () => {
-    expect(dialog).toContain('aria-label="Automatic assignment"');
-    // The section heading + hint remain, with no Switch action.
-    expect(dialog).toContain('title="Automatic assignment"');
-    expect(dialog).toContain("New leads are distributed to eligible assignees.");
+  it("has no Automatic toggle or section — activation lives in the footer", () => {
+    expect(dialog).not.toContain('aria-label="Automatic assignment"');
+    // No configuration section for activation; the footer pill and
+    // Pause/Resume buttons are the only activation UI (plus a
+    // read-only header badge in view mode).
+    expect(dialog).not.toContain('title="Automatic assignment"');
     expect(dialog).not.toContain("onCheckedChange={setEnabled}");
-    expect(dialog).not.toContain("Off — new leads stay unassigned");
+    expect(dialog).toContain('aria-label="Assignment status"');
   });
 
   it("renders a separate right-aligned status row above Cancel/Save", () => {
@@ -598,7 +646,7 @@ describe("assignment dialog footer activation (no toggle, Pause/Resume row)", ()
     expect(dialog).toContain("Active");
     expect(dialog).toContain("Paused");
     expect(dialog).toContain('role="separator"');
-    expect(dialog).toContain("Save Assignment Settings");
+    expect(dialog).toContain('"Save Assignment"');
     // Right-edge alignment: both rows justify-end in one column.
     expect(dialog).toContain("justify-end");
   });
@@ -628,6 +676,164 @@ describe("assignment dialog footer activation (no toggle, Pause/Resume row)", ()
     expect(dialog).toContain("submitStatus");
     // Status updates only after the backend confirms (then reload).
     expect(dialog).toContain("await load();");
+  });
+});
+
+describe("simplified assignment UX (three sections + inline member editor)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("defaults new configurations to Round Robin and preserves the saved method", () => {
+    expect(dialog).toContain('useState<"round_robin" | "percentage">("round_robin")');
+    expect(dialog).toContain('setMode(data.config?.mode ?? "round_robin")');
+  });
+
+  it("switches between Round Robin and Percentage-based without touching members", () => {
+    expect(dialog).toContain('if (v === "round_robin" || v === "percentage") setMode(v)');
+    // Switching never rewrites drafts — only the mode flag changes.
+    expect(dialog).not.toContain("setDrafts([])");
+  });
+
+  it("adds and removes members with sensible defaults", () => {
+    expect(dialog).toContain("onClick={startAdd}");
+    expect(dialog).toContain("onClick={() => requestRemove(d)}");
+    expect(dialog).toContain("Confirm?");
+    expect(dialog).toContain("is_active: true,");
+    expect(dialog).toContain("notify_email: true,");
+  });
+
+  it("validates percentage allocation with a visible total", () => {
+    expect(dialog).toContain("Total allocation:");
+    expect(dialog).toContain("must total exactly 100%");
+    expect(dialog).toContain("Share percentage for");
+    // The share is typed in the Add/Edit form and validated on
+    // commit (0–100); the wizard step gate still requires exactly
+    // 100% across active members.
+    expect(dialog).toContain('id="assign-share"');
+    expect(dialog).toContain("between 0 and 100");
+  });
+
+  it("commits an open member editor before validating the payload", () => {
+    // The stale-editor regression stays fixed under the new layout:
+    // save merges the open inline editor, then validates + submits.
+    expect(dialog).toContain("const activeDrafts = commitOpenEditor();");
+    expect(dialog).toContain("mergeOpenFormEdit(");
+    expect(dialog).toContain("assignees: activeDrafts.map((d) => ({");
+  });
+
+  it("gates the team notification template behind an enable switch", () => {
+    expect(dialog).toContain("setNotifyEnabled(!!(data.config?.whatsapp_template_name ?? \"\").trim())");
+    expect(dialog).toContain('aria-label="Notify assigned team member"');
+    expect(dialog).toContain("Choose a notification template or turn notifications off.");
+    expect(dialog).toContain("notifyEnabled && templateName.trim()");
+    expect(dialog).toContain('"Preview notification template"');
+  });
+
+  it("reports customer-sequence status per member and configures inline", () => {
+    expect(dialog).toContain("sequenceStatusText");
+    expect(dialog).toContain("No sequence configured");
+    expect(dialog).toContain("openMessages(");
+    expect(dialog).toContain('openGroup === "msg"');
+    expect(dialog).toContain("Configure");
+  });
+
+  it("computes the customer-message status line", async () => {
+    const { sequenceStatusText } = await import("./table-assignment-dialog");
+    expect(sequenceStatusText({ sequence: null })).toBe("No sequence configured");
+    expect(sequenceStatusText({ sequence: { items: [] } })).toBe("No sequence configured");
+    expect(sequenceStatusText({ sequence: { items: [{}, {}] } })).toBe(
+      "Sequence configured · 2 templates",
+    );
+    expect(sequenceStatusText({ sequence: { items: [{}] } })).toBe(
+      "Sequence configured · 1 template",
+    );
+  });
+
+  it("preserves per-assignee templates, delays, and notification channels", () => {
+    expect(dialog).toContain("Template for extra WhatsApp number");
+    expect(dialog).toContain("delay_seconds");
+    expect(dialog).toContain("onDelayChange");
+    expect(dialog).toContain('ariaLabel="Link team member"');
+    expect(dialog).toContain("Email alerts");
+    expect(dialog).toContain("WhatsApp alerts");
+  });
+
+  it("keeps external notification-only recipients supported", () => {
+    expect(dialog).toContain("External contact (no login)");
+    expect(dialog).toContain(
+      "Link a team member or enter an email address or phone number.",
+    );
+  });
+
+  it("exposes pause controls per saved member without rewriting owners", () => {
+    expect(dialog).toContain("Pause temporarily");
+    expect(dialog).toContain("Resume / extend pause");
+    expect(dialog).toContain("submitPause");
+    expect(dialog).toContain("Saving never rewrites existing lead owners.");
+  });
+
+  it("keeps assignment scoped to the table and persisted through the same API", () => {
+    expect(dialog).toContain("/api/flows/${encodeURIComponent(flowId)}/assignment");
+    expect(dialog).toContain('method: "PUT"');
+    expect(dialog).toContain("phone: d.phone.trim() || null,");
+    expect(dialog).toContain("resolveEnabledOnSave");
+  });
+});
+
+describe("assignment inline editing contract (one dialog, no panels)", () => {
+  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
+
+  it("renders exactly one dialog and never a nested dialog or sheet", () => {
+    expect(dialog).toContain("<ConfigDialog");
+    expect(dialog).not.toContain("<Dialog");
+    expect(dialog).not.toContain("<Sheet");
+    expect(dialog).not.toContain("SheetContent");
+    expect(dialog).not.toContain("@/components/ui/sheet");
+    expect(dialog).not.toContain("Drawer");
+  });
+
+  it("adds members through an inline form below the member list", () => {
+    expect(dialog).toContain("renderMemberEditor(true)");
+    expect(dialog).toContain("Add member");
+    expect(dialog).toContain("Show advanced options");
+  });
+
+  it("edits a member inline directly below that member's row", () => {
+    // STEP 1 edits use the compact editor; STEP 2 message/advanced
+    // rows open the full editor. A single editingKey + editorSlot
+    // keeps at most one editor visible across all steps.
+    expect(dialog).toContain("editorSlot");
+    expect(dialog).toContain("renderMemberEditor(false, true)");
+    expect(dialog).toContain("renderMemberEditor(false)");
+    expect(dialog).toContain("Save member");
+  });
+
+  it("keeps at most one editor open and never silently drops edits", () => {
+    // Opening another editor first commits the current one; a failed
+    // validation keeps the editor open with the error shown.
+    expect(dialog).toContain("if (!commitOpenEditor()) return;");
+    expect(dialog).toContain("const activeDrafts = commitOpenEditor();");
+    expect(dialog).toContain("isPristineNewAssigneeForm");
+  });
+
+  it("collapses advanced groups by default and exposes them on demand", () => {
+    expect(dialog).toContain("useState(false)");
+    expect(dialog).toContain('useState<null | "contact" | "notify" | "avail" | "msg">(null)');
+    expect(dialog).toContain('aria-label="Contact details"');
+    expect(dialog).toContain('aria-label="Notification preferences"');
+    expect(dialog).toContain('aria-label="Availability"');
+    expect(dialog).toContain('aria-label="Customer messages"');
+    expect(dialog).toContain("aria-expanded={openGroup");
+  });
+
+  it("confirms removal inline without a modal", () => {
+    expect(dialog).toContain("requestRemove");
+    expect(dialog).toContain("Confirm?");
+    expect(dialog).toContain("Confirm remove");
+  });
+
+  it("opens the messages group from the Messages to leads section", () => {
+    expect(dialog).toContain("openMessages");
+    expect(dialog).toContain("setOpenGroup(\"msg\")");
   });
 });
 

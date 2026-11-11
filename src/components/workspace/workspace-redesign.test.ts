@@ -180,18 +180,20 @@ describe("workspace redesign — assignment dialog structure", () => {
     expect(dialog).toContain("IST");
   });
 
-  it("shows assignees as a table on desktop and cards on mobile", () => {
+  it("shows members as compact rows with inline editing (no side drawer)", () => {
     const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
-    expect(dialog).toContain("hidden overflow-x-auto rounded-lg border border-border md:block");
-    expect(dialog).toContain("md:hidden");
+    expect(dialog).toContain("Assigned team members");
+    expect(dialog).toContain("MemberInitials");
+    expect(dialog).toContain("renderMemberEditor");
+    expect(dialog).toContain("Show advanced options");
   });
 
-  it("collapses delivery history and keeps the footer visible", () => {
+  it("collapses delivery history and keeps the simplified footer visible", () => {
     const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
     expect(dialog).toContain("Accordion");
     expect(dialog).toContain("Recent alert deliveries");
-    expect(dialog).toContain("ConfigFooterActions");
-    expect(dialog).toContain('saveLabel="Save Assignment Settings"');
+    expect(dialog).toContain('aria-label="Assignment status"');
+    expect(dialog).toContain('"Save Assignment"');
   });
 });
 

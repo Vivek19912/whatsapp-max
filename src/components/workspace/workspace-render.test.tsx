@@ -241,7 +241,7 @@ describe("assignment dialog props are table-scoped", () => {
     expect(src).toContain('title="Assignment"');
     expect(src).toContain("flowName ??");
     expect(src).toContain("Meta Lead Ads table");
-    expect(src).toContain("Save Assignment Settings");
+    expect(src).toContain('"Save Assignment"');
     expect(src).toContain("/api/flows/${encodeURIComponent(flowId)}/assignment");
   });
 });
