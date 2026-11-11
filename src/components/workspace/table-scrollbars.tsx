@@ -32,9 +32,9 @@ type ScrollerGetter = () => HTMLElement | null;
 
 /** Grey thumb on a neutral track, shared by both strips. */
 const TRACK_CLASS =
-  'relative h-2 min-w-0 flex-1 cursor-pointer rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring';
+  'relative h-4 min-w-0 flex-1 cursor-pointer rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring';
 const THUMB_CLASS =
-  'absolute top-0 left-0 h-2 rounded-full bg-neutral-400 hover:bg-neutral-500 dark:bg-neutral-500 dark:hover:bg-neutral-400';
+  'absolute top-0 left-0 h-4 rounded-full bg-neutral-400 hover:bg-neutral-500 dark:bg-neutral-500 dark:hover:bg-neutral-400';
 
 /**
  * Draggable + keyboard-operable horizontal scrollbar bound to the
