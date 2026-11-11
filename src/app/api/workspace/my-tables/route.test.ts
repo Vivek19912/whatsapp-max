@@ -1,4 +1,4 @@
-// GET /api/workspace/my-tables — agent-scoped Meta table list.
+// GET /api/workspace/my-tables — account-wide Meta table list for agents.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -106,28 +106,45 @@ beforeEach(() => {
 });
 
 describe("GET /api/workspace/my-tables", () => {
-  it("lists only Meta tables with the agent's assigned leads + counts", async () => {
+  it("lists all Meta tables with the agent's assigned counts", async () => {
     const res = await GET();
     expect(res.status).toBe(200);
+    // Mock preserves insertion order (real DB orders by name).
     expect(await res.json()).toEqual({
-      tables: [{ flow_id: "flow-own", name: "Hiring", assigned_count: 2 }],
+      tables: [
+        { flow_id: "flow-own", name: "Hiring", assigned_count: 2 },
+        { flow_id: "flow-other", name: "Travel", assigned_count: 0 },
+        { flow_id: "flow-empty", name: "Empty", assigned_count: 0 },
+      ],
     });
   });
 
-  it("returns an empty list when the agent owns nothing", async () => {
+  it("returns all tables with zero counts when the agent owns nothing", async () => {
     h.values = [];
     const res = await GET();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ tables: [] });
+    expect(await res.json()).toEqual({
+      tables: [
+        { flow_id: "flow-own", name: "Hiring", assigned_count: 0 },
+        { flow_id: "flow-other", name: "Travel", assigned_count: 0 },
+        { flow_id: "flow-empty", name: "Empty", assigned_count: 0 },
+      ],
+    });
   });
 
-  it("ignores other accounts' rows", async () => {
+  it("ignores other accounts' rows (counts stay zero, tables still listed)", async () => {
     h.values = [
       { account_id: "other-acct", field_id: "f-own", flow_run_id: "run-x", value_text: "u-agent" },
     ];
     const res = await GET();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ tables: [] });
+    expect(await res.json()).toEqual({
+      tables: [
+        { flow_id: "flow-own", name: "Hiring", assigned_count: 0 },
+        { flow_id: "flow-other", name: "Travel", assigned_count: 0 },
+        { flow_id: "flow-empty", name: "Empty", assigned_count: 0 },
+      ],
+    });
   });
 
   it("requires sign-in; viewers are rejected", async () => {

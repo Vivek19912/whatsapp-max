@@ -1833,7 +1833,7 @@ describe("GET table – Meta Source column position", () => {
   });
 });
 
-describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
+describe("GET table – account-wide visibility on Meta Lead Ads Tables", () => {
   const metaFlow = () => {
     h.flow = {
       id: "flow-meta",
@@ -1853,7 +1853,7 @@ describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
     h.profiles = [{ user_id: "u-1", account_role: role }];
   };
 
-  it("forces p_assignee to the agent's own id, ignoring the query param", async () => {
+  it("agents see all leads: query assignee passes through, never forced", async () => {
     const previousFlow = h.flow;
     const previousUser = h.user;
     try {
@@ -1866,14 +1866,14 @@ describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
         { params: Promise.resolve({ id: "flow-meta" }) },
       );
       expect(res.status).toBe(200);
-      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-other" });
     } finally {
       h.flow = previousFlow;
       h.user = previousUser;
     }
   });
 
-  it("defaults an agent with no assignee param to their own id", async () => {
+  it("defaults an agent with no assignee param to all leads", async () => {
     const previousFlow = h.flow;
     const previousUser = h.user;
     try {
@@ -1884,7 +1884,7 @@ describe("GET table – agent scoping on Meta Lead Ads Tables", () => {
         { params: Promise.resolve({ id: "flow-meta" }) },
       );
       expect(res.status).toBe(200);
-      expect(h.rpcArgs).toMatchObject({ p_assignee: "u-agent" });
+      expect(h.rpcArgs).toMatchObject({ p_assignee: "all" });
     } finally {
       h.flow = previousFlow;
       h.user = previousUser;

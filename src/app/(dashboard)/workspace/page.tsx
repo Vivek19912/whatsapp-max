@@ -505,8 +505,9 @@ function useColumnDragAutoscroll(
 
 export default function WorkspacePage() {
   const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();
-  // Agents see Workspace with ONLY their own assigned Meta leads
-  // (the table APIs enforce the same ownership server-side).
+  // Agents see Workspace with all account Meta leads (own, others',
+  // unassigned, owner/admin) — the table APIs enforce account scope
+  // server-side; Inbox assignment + view_all stay separate.
   const isAgent = accountRole === 'agent';
   // Manage Assignments grant (same permission as Inbox reassignment):
   // agents holding it may reassign Workspace Meta leads to any
@@ -655,8 +656,8 @@ export default function WorkspacePage() {
   useEffect(() => {
     if (accountId === null) return;
     const ctrl = new AbortController();
-    // Agents list only Meta tables containing their own assigned
-    // leads (server-scoped); everyone else lists every flow.
+    // Agents list all Meta tables (account-wide, server-scoped);
+    // everyone else lists every flow.
     const flowsUrl = isAgent ? '/api/workspace/my-tables' : '/api/flows';
     fetch(flowsUrl, { signal: ctrl.signal, cache: 'no-store' })
       .then(async (res) => {
@@ -2577,10 +2578,10 @@ export default function WorkspacePage() {
       ) : flows.length === 0 ? (
         <EmptyState
           icon={Table2}
-          title={isAgent ? "No leads assigned to you yet" : "No flows yet"}
+          title={isAgent ? "No leads yet" : "No flows yet"}
           hint={
             isAgent
-              ? "Leads assigned to you will appear here."
+              ? "Leads in your account's Meta tables will appear here."
               : "Create a flow first — each flow gets its own table here."
           }
         />

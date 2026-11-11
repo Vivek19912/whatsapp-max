@@ -4,15 +4,15 @@ import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { isAssigneeField } from "@/lib/flows/workspace-assignee";
 
 /**
- * GET /api/workspace/my-tables — Meta Lead Ads Tables containing
- * leads assigned to the caller. Agent+.
+ * GET /api/workspace/my-tables — Meta Lead Ads Tables for the caller.
+ * Agent+.
  *
- * The agent Workspace shows ONLY these tables (the selector never
- * lists Flow Tables or unassigned tables for agents). Each entry
- * carries its assigned-lead count so the UI can render an honest
- * empty state when the agent owns nothing. Owners/admins/viewers
- * keep using /api/flows; this endpoint exists solely to scope the
- * agent's view without touching shared behavior.
+ * Workspace visibility is account-wide for every role: agents see all
+ * Meta tables and all leads within them (own, others', unassigned,
+ * owner/admin). Each entry carries its assigned-lead count so the UI
+ * can render an honest empty state. Owners/admins/viewers keep using
+ * /api/flows; this endpoint now mirrors that scope for agents (it
+ * previously listed only tables containing the caller's own leads).
  */
 export async function GET() {
   try {
@@ -68,13 +68,11 @@ export async function GET() {
     }
 
     return NextResponse.json({
-      tables: metaFlows
-        .filter((f) => (counts.get(f.id) ?? 0) > 0)
-        .map((f) => ({
-          flow_id: f.id,
-          name: f.name,
-          assigned_count: counts.get(f.id) ?? 0,
-        })),
+      tables: metaFlows.map((f) => ({
+        flow_id: f.id,
+        name: f.name,
+        assigned_count: counts.get(f.id) ?? 0,
+      })),
     });
   } catch (err) {
     return toErrorResponse(err);

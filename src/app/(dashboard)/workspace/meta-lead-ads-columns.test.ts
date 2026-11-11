@@ -249,8 +249,8 @@ describe("workspace page — Meta sidebar hides the metadata section", () => {
   });
 });
 
-describe("workspace page — agent-scoped Meta tables", () => {
-  it("loads assigned tables from the agent endpoint, not the full list", () => {
+describe("workspace page — agent Meta tables (account-wide visibility)", () => {
+  it("loads Meta tables from the agent endpoint, not the full list", () => {
     const src = page();
     expect(src).toContain("const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();");
     expect(src).toContain("const isAgent = accountRole === 'agent';");
@@ -259,9 +259,9 @@ describe("workspace page — agent-scoped Meta tables", () => {
     expect(src).toContain("fetch(flowsUrl,");
   });
 
-  it("shows an agent-specific empty state with no assigned leads", () => {
+  it("shows an agent empty state for no Meta tables", () => {
     const src = page();
-    expect(src).toContain("No leads assigned to you yet");
+    expect(src).toContain("No leads yet");
     expect(src).toContain("will appear here");
   });
 

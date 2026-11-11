@@ -274,7 +274,7 @@ export async function GET(
   if (!guard.ok) {
     return NextResponse.json(guard.body, { status: guard.status })
   }
-  const { supabase, userId: callerUserId } = guard
+  const { supabase } = guard
 
   const { data: flow, error: flowErr } = await supabase
     .from('flows')
@@ -289,24 +289,12 @@ export async function GET(
   }
   const flowKind = (flow as { kind?: string | null }).kind ?? null
 
-  // Agents on Meta Lead Ads Tables see only their own assigned
-  // leads. The assignee filter is forced to the caller's user id
-  // here, so search, filters, pagination, counts, and every
-  // enrichment below compose over the owned set and the client
-  // cannot override it. Owners, admins, viewers, and every Flow
-  // Table keep existing behavior exactly.
-  if (flowKind === 'meta_lead_ads') {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('account_role')
-      .eq('user_id', callerUserId)
-      .maybeSingle()
-    if (
-      (profile as { account_role?: string } | null)?.account_role === 'agent'
-    ) {
-      assignee = { type: 'member', userId: callerUserId }
-    }
-  }
+  // Workspace visibility is account-wide for every role: agents see
+  // all leads in Meta Lead Ads tables (own, others', unassigned,
+  // owner/admin), exactly like owners/admins/viewers. The Assigned To
+  // column still shows the actual salesperson, and Inbox access stays
+  // governed separately by assignment + view_all. No per-role row
+  // forcing here — the assignee query param is an opt-in filter.
 
   const { data: nodes, error: nodesErr } = await supabase
     .from('flow_nodes')
