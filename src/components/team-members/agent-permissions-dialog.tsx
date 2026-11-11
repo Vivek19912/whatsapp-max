@@ -24,8 +24,8 @@ interface AgentPermissionsDialogProps {
  * Owner-only per-agent Inbox permission editor. Two independent
  * checkboxes, each with its exact access description:
  *
- * - Manage Assignments: assign/reassign any conversation (Workspace +
- *   Inbox). Read access is NOT granted.
+ * - Manage Assignments: reassign Workspace leads and Inbox
+ *   conversations to any salesperson. Read access is NOT granted.
  * - View All Conversations: read every Inbox conversation, including
  *   other agents' and unassigned chats. Assignment rights NOT granted.
  *
@@ -149,7 +149,7 @@ export function AgentPermissionsDialog({
                   Manage Assignments
                 </span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Can assign any conversation to any salesperson.
+                  Can reassign Workspace leads and Inbox conversations to any salesperson.
                 </span>
               </span>
             </label>

@@ -132,7 +132,7 @@ export async function PUT(
           }
           if (isAssigneeField(field)) {
             return NextResponse.json(
-              { error: "Only admins can reassign leads." },
+              { error: "Only admins or agents with Manage Assignments can reassign leads." },
               { status: 403 },
             );
           }

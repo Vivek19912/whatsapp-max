@@ -78,7 +78,7 @@ describe("assignment enforcement on conversation actions", () => {
       "route.ts"
     );
     expect(ws).toContain("canManageAssignments");
-    expect(ws).toContain("Only admins can reassign leads");
+    expect(ws).toContain("Only admins or agents with Manage Assignments can reassign leads");
     const manual = src(
       "src",
       "app",

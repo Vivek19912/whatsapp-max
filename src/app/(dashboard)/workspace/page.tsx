@@ -508,6 +508,35 @@ export default function WorkspacePage() {
   // Agents see Workspace with ONLY their own assigned Meta leads
   // (the table APIs enforce the same ownership server-side).
   const isAgent = accountRole === 'agent';
+  // Manage Assignments grant (same permission as Inbox reassignment):
+  // agents holding it may reassign Workspace Meta leads to any
+  // salesperson. Fetched once; owner/admin always allowed (true).
+  const [canManageAssignments, setCanManageAssignments] = useState(
+    accountRole === 'owner' || accountRole === 'admin',
+  );
+  useEffect(() => {
+    let cancelled = false;
+    if (accountRole === 'owner' || accountRole === 'admin') {
+      setCanManageAssignments(true);
+      return;
+    }
+    if (accountRole !== 'agent') return;
+    (async () => {
+      try {
+        const res = await fetch('/api/account/agent-permissions/me', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok) {
+          setCanManageAssignments(data?.can_manage_assignments === true);
+        }
+      } catch {
+        // Fail closed: keep reassignment disabled on lookup failure.
+        if (!cancelled) setCanManageAssignments(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [accountRole]);
   const [flows, setFlows] = useState<FlowOption[] | null>(null);
   const [flowsError, setFlowsError] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
@@ -2047,13 +2076,17 @@ export default function WorkspacePage() {
                 : null)
             }
             canEdit={
-              // Agents work their own Meta leads but
-              // can never reassign them (the Assigned
-              // To cell stays read-only; reassignment
-              // is admin-only). Everything else keeps
-              // the existing edit permissions.
+              // Agents work their own Meta leads; reassignment of the
+              // Assigned To cell requires the Manage Assignments grant
+              // (same permission as Inbox reassignment — no View All
+              // needed). Owners/admins keep existing access.
               canSendMessages &&
-              !(isAgent && isMetaTable && isAssigneeField(f))
+              !(
+                isAgent &&
+                isMetaTable &&
+                isAssigneeField(f) &&
+                !canManageAssignments
+              )
             }
             onSaved={handleCustomSaved}
             members={teamMembers}

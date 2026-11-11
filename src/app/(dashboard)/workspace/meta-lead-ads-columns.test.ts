@@ -265,11 +265,14 @@ describe("workspace page — agent-scoped Meta tables", () => {
     expect(src).toContain("will appear here");
   });
 
-  it("keeps the Assigned To cell read-only for agents on Meta tables", () => {
+  it("gates the Assigned To cell on Manage Assignments for agents on Meta tables", () => {
     const src = page();
-    expect(src).toContain("isAgent && isMetaTable && isAssigneeField(f)");
+    expect(src).toContain("isMetaTable");
+    expect(src).toContain("isAssigneeField(f)");
+    expect(src).toContain("canManageAssignments");
+    expect(src).toContain("!canManageAssignments");
     expect(src).toContain("canEdit={");
-    // Admins keep the audited manual-assign path.
+    // Admins/owners and managing agents keep the audited manual-assign path.
     expect(src).toContain("manualAssignMetaLead");
   });
 });

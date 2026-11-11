@@ -34,7 +34,7 @@ describe("Team Members inbox-permissions UI", () => {
     const src = dialogSrc();
     expect(src).toContain("Manage Assignments");
     expect(src).toContain(
-      "Can assign any conversation to any salesperson."
+      "Can reassign Workspace leads and Inbox conversations to any salesperson."
     );
     expect(src).toContain("View All Conversations");
     // (JSX wraps the line; assert the phrases, not the whitespace.)
