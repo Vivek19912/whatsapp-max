@@ -205,8 +205,10 @@ describe("10. Google Sheets navigation unchanged", () => {
     expect(collapsed).toContain('href="/data-export"');
     expect(collapsed).toContain('href="/all-sheets"');
     expect(collapsed).not.toContain('href="/chat-assignment"');
-    // Lead Assignment stays visible while Chat Assignment is hidden.
-    expect(collapsed).toContain('href="/lead-assignment"');
+    // Lead Assignment is gone from the sidebar entirely (the
+    // page, route, and APIs are untouched).
+    expect(expanded).not.toContain('href="/lead-assignment"');
+    expect(collapsed).not.toContain('href="/lead-assignment"');
     // No duplicates even with the group header inline.
     expect(collapsed.split("Flow Sheets").length - 1).toBe(1);
     expect(collapsed.split("All Sheets").length - 1).toBe(1);

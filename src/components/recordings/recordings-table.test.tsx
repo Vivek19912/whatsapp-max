@@ -6,7 +6,11 @@ import {
   RecordingsTable,
   PAGE_SIZE,
 } from "./recordings-table";
-import type { CallRecording } from "@/lib/recordings/recordings";
+import type {
+  CallRecording,
+  MissedCallRow,
+  RecordingTableRow,
+} from "@/lib/recordings/recordings";
 
 const root = process.cwd();
 
@@ -44,8 +48,30 @@ function recording(over: Partial<CallRecording> = {}): CallRecording {
   };
 }
 
+function missed(over: Partial<MissedCallRow> = {}): MissedCallRow {
+  const at = new Date(2026, 9, 6, 23, 25).toISOString();
+  return {
+    row_kind: "missed",
+    id: "e-1",
+    account_id: "acct-1",
+    contact_id: "c-2",
+    uploaded_by: "u-1",
+    uploader_name: "Vikas",
+    contact_name: "Sagar",
+    contact_phone: "+911234567890",
+    workspace_table_name: "Leads",
+    direction: "in",
+    phone_number: "+911234567890",
+    call_type: "phone",
+    duration_seconds: null,
+    recorded_at: at,
+    created_at: at,
+    ...over,
+  };
+}
+
 function html(
-  recordings: CallRecording[] = [recording()],
+  recordings: RecordingTableRow[] = [recording()],
   extra: Record<string, unknown> = {},
 ) {
   return renderToStaticMarkup(
@@ -611,5 +637,41 @@ describe("Floating player popover", () => {
       "utf8",
     );
     expect(pageSrc).toContain("LinkCallDrawer");
+  });
+});
+
+describe("RecordingsTable missed-call rows", () => {
+  it("renders the red Missed treatment with lead, table, and salesperson", () => {
+    const out = html([missed()]);
+    expect(out).toContain("Missed");
+    expect(out).toContain("Sagar");
+    expect(out).toContain("Leads");
+    // Unlinked missed rows fall back to the Unlinked convention.
+    const unlinked = html([missed({ id: "e-2", contact_id: null, contact_name: null })]);
+    expect(unlinked).toContain("Unlinked");
+  });
+
+  it("shows No recording and never a player, audio element, or duration", () => {
+    const out = html([recording({ id: "r-1" }), missed({ id: "e-1" })]);
+    expect(out).toContain("No recording");
+    expect(out).not.toContain("<audio");
+    // The recording row keeps its player affordance; the missed
+    // row adds no Play button, seek bar, or time readout.
+    expect(out).toContain('aria-label="Play recording of Akash"');
+    expect(out).not.toContain("Playback speed");
+  });
+
+  it("keeps missed rows playable-state-free (no popover trigger)", () => {
+    const out = html([missed({ id: "e-9" })]);
+    expect(out).not.toContain("Recording audio player");
+    expect(out).not.toContain("Close player");
+  });
+
+  it("never offers Find / Link Lead for missed rows", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("isMissedCallRow(r)");
   });
 });

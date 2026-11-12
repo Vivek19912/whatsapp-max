@@ -187,6 +187,7 @@ import {
 } from '@/lib/flows/workspace-selected-flow';
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { Skeleton } from '@/components/dashboard/skeleton';
+import { RecordingPlayerPopover } from '@/components/recordings/recording-player-popover';
 
 interface FlowOption {
   id: string;
@@ -211,12 +212,20 @@ function formatDateTime(iso: string | null): string {
 }
 
 /**
- * Compact latest-recording cell: `▶ 00:35 · Akash`, playable
- * in place. The player lazy-loads (`preload="none"` — no request
- * until Play), and player clicks never bubble to the row (the
- * row opens the lead drawer). No recording → "No recording".
+ * Latest-recording header cell: same shared player popover as the
+ * Recordings page (one blue Play button + duration; the full
+ * player floats in a portaled popover, never a native audio
+ * element in the row). Player clicks never bubble to the row
+ * (the row opens the lead drawer). No recording → "No
+ * recording".
  */
 function LatestRecordingCell({ entry }: { entry: LatestRecordingEntry | null }) {
+  const [open, setOpen] = useState(false);
+  const [autoplay, setAutoplay] = useState(false);
+  const closePlayer = () => {
+    setOpen(false);
+    setAutoplay(false);
+  };
   if (!entry) {
     return <span className="text-muted-foreground text-sm">No recording</span>;
   }
@@ -225,15 +234,19 @@ function LatestRecordingCell({ entry }: { entry: LatestRecordingEntry | null }) 
       className="flex items-center gap-2"
       onClick={(e) => e.stopPropagation()}
     >
-      <audio
-        src={`/api/recordings/${entry.id}/audio`}
-        controls
-        preload="none"
-        className="h-8 w-full max-w-[180px]"
+      <RecordingPlayerPopover
+        recordingId={entry.id}
+        open={open}
+        autoplay={autoplay}
+        onOpenChange={(next) => {
+          if (next) setOpen(true);
+          else closePlayer();
+        }}
+        onPlayIntent={() => setAutoplay(true)}
+        onClose={closePlayer}
+        playLabel="Play latest recording"
+        durationText={formatRecordingDuration(entry.duration_seconds)}
       />
-      <span className="text-sm whitespace-nowrap tabular-nums">
-        {formatRecordingDuration(entry.duration_seconds)}
-      </span>
       <span className="text-muted-foreground max-w-[120px] truncate text-sm">
         {entry.uploader_name ?? 'Unknown'}
       </span>
@@ -250,6 +263,14 @@ function LatestRecordingCell({ entry }: { entry: LatestRecordingEntry | null }) 
  */
 function LeadRecordings({ contactId }: { contactId: string }) {
   const [recordings, setRecordings] = useState<CallRecording[] | null>(null);
+  // Single floating player across the drawer list — opening one
+  // recording unmounts (and pauses) any other.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [autoplay, setAutoplay] = useState(false);
+  const closePlayer = () => {
+    setOpenId(null);
+    setAutoplay(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -296,15 +317,21 @@ function LeadRecordings({ contactId }: { contactId: string }) {
                   {formatDateTime(r.recorded_at ?? r.created_at)}
                 </span>
                 <span className="truncate">
-                  {formatRecordingDuration(r.duration_seconds)} ·{' '}
                   {r.uploader_name ?? 'Unknown'}
                 </span>
               </div>
-              <audio
-                src={`/api/recordings/${r.id}/audio`}
-                controls
-                preload="none"
-                className="h-8 w-full"
+              <RecordingPlayerPopover
+                recordingId={r.id}
+                open={openId === r.id}
+                autoplay={openId === r.id && autoplay}
+                onOpenChange={(next) => {
+                  if (next) setOpenId(r.id);
+                  else if (openId === r.id) closePlayer();
+                }}
+                onPlayIntent={() => setAutoplay(true)}
+                onClose={closePlayer}
+                playLabel={`Play recording from ${formatDateTime(r.recorded_at ?? r.created_at)}`}
+                durationText={formatRecordingDuration(r.duration_seconds)}
               />
             </li>
           ))}

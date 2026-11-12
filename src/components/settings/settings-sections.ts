@@ -5,7 +5,6 @@ import {
   Megaphone,
   KeyRound,
   LayoutGrid,
-  Mic,
   Palette,
   Phone,
   PlugZap,
@@ -40,7 +39,6 @@ export const SETTINGS_SECTIONS = [
   'google-sheets-meta',
   'whatsapp',
   'reminder-number',
-  'call-recording',
   'fields',
   'deals',
   'api',
@@ -82,7 +80,6 @@ export const SECTION_META: Record<SettingsSection, SectionMeta> = {
   'google-sheets-meta': { id: 'google-sheets-meta', label: 'Google Sheets — Meta Lead Ads', icon: Table2, group: 'integrations', hideFromRail: true },
   whatsapp: { id: 'whatsapp', label: 'WhatsApp', icon: PlugZap, group: 'workspace' },
   'reminder-number': { id: 'reminder-number', label: 'Reminder WhatsApp Number', icon: Smartphone, group: 'workspace' },
-  'call-recording': { id: 'call-recording', label: 'Call Recording', icon: Mic, group: 'account' },
   'business-profile': { id: 'business-profile', label: 'Business Profile', icon: Store, group: 'account' },
   fields: { id: 'fields', label: 'Fields & tags', icon: Tags, group: 'workspace' },
   // Navigation-only: hidden from the left rail but still reachable

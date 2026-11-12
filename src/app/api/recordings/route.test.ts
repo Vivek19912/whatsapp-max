@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   accountId: "acct-1",
   contact: { id: "c-1", account_id: "acct-1" } as Record<string, unknown> | null,
   recordings: [] as Array<Record<string, unknown>>,
+  events: [] as Array<Record<string, unknown>>,
   profiles: [] as Array<Record<string, unknown>>,
   contacts: [] as Array<Record<string, unknown>>,
   flowRuns: [] as Array<Record<string, unknown>>,
@@ -52,7 +53,9 @@ function fakeSupabase() {
           ? h.flowRuns
           : state.table === "flows"
             ? h.flows
-            : h.recordings;
+            : state.table === "call_events"
+              ? h.events
+              : h.recordings;
     return source
       .filter(
         (r) =>
@@ -101,6 +104,14 @@ function fakeSupabase() {
     },
     or: (group: string) => {
       state.orGroups.push(group);
+      return api;
+    },
+    gte: (col: string, val: unknown) => {
+      state.orGroups.push(`${col}.gte.${val}`);
+      return api;
+    },
+    lt: (col: string, val: unknown) => {
+      state.orGroups.push(`${col}.lt.${val}`);
       return api;
     },
     limit: () => api,
@@ -199,6 +210,7 @@ beforeEach(() => {
   h.accountId = "acct-1";
   h.contact = { id: "c-1", account_id: "acct-1" };
   h.recordings = [];
+  h.events = [];
   h.profiles = [{ user_id: "u-9", full_name: "Akash", email: "a@x.com" }];
   h.contacts = [{ id: "c-1", account_id: "acct-1", name: "Akash" }];
   h.flowRuns = [];
@@ -746,5 +758,188 @@ describe("GET /api/recordings search and filters", () => {
       unlinked: 0,
     });
     expect(h.rpcCalls).toHaveLength(0);
+  });
+});
+
+describe("GET /api/recordings missed-call merge", () => {
+  const USER_9 = "123e4567-e89b-12d3-a456-426614174000";
+  type Row = {
+    id: string;
+    row_kind?: string;
+    contact_id: string | null;
+    direction: string | null;
+    uploader_name?: string | null;
+    contact_name?: string | null;
+    workspace_table_name?: string | null;
+    recorded_at?: string | null;
+  };
+  const seed = () => {
+    h.contacts = [
+      { id: "c-1", account_id: "acct-1", name: "Akash", phone: "+919876543210", phone_normalized: "919876543210" },
+      { id: "c-2", account_id: "acct-1", name: "Sagar", phone: "+911234567890", phone_normalized: "911234567890" },
+    ];
+    h.profiles = [{ user_id: USER_9, full_name: "Akash", email: "a@x.com" }];
+    h.recordings = [
+      recording({
+        id: "r-1",
+        contact_id: "c-1",
+        direction: "out",
+        call_type: "phone",
+        recorded_at: "2026-10-06T10:37:00.000Z",
+        uploaded_by: USER_9,
+      }),
+    ];
+    h.events = [
+      {
+        id: "e-1",
+        account_id: "acct-1",
+        contact_id: "c-2",
+        user_id: USER_9,
+        direction: "in",
+        call_type: "phone",
+        outcome: "missed",
+        phone_number: "+911234567890",
+        occurred_at: "2026-10-06T23:25:00.000Z",
+        created_at: "2026-10-06T23:25:00.000Z",
+      },
+      {
+        id: "e-2",
+        account_id: "acct-1",
+        contact_id: null,
+        user_id: null,
+        direction: "in",
+        call_type: "phone",
+        outcome: "missed",
+        phone_number: "+915555555555",
+        occurred_at: "2026-10-05T10:00:00.000Z",
+        created_at: "2026-10-05T10:00:00.000Z",
+      },
+    ];
+  };
+  const rows = async (qs: string) => {
+    const res = await GET(new Request(`https://app.test/api/recordings?${qs}`));
+    const json = (await res.json()) as { recordings: Row[]; total: number; missedTotal: number };
+    return { res, json };
+  };
+
+  it("merges missed events with recordings, newest call first", async () => {
+    seed();
+    const { res, json } = await rows("");
+    expect(res.status).toBe(200);
+    // e-1 (Oct 6 23:25) > r-1 (Oct 6 10:37) > e-2 (Oct 5).
+    expect(json.recordings.map((r) => r.id)).toEqual(["e-1", "r-1", "e-2"]);
+    expect(json.total).toBe(3);
+    expect(json.missedTotal).toBe(2);
+  });
+
+  it("marks missed rows with no audio affordance and stable ids", async () => {
+    seed();
+    const { json } = await rows("");
+    const missed = json.recordings.filter((r) => r.row_kind === "missed");
+    expect(missed).toHaveLength(2);
+    expect(missed.map((r) => r.id).sort()).toEqual(["e-1", "e-2"]);
+    for (const m of missed) {
+      expect(m).not.toHaveProperty("storage_path");
+      expect(m).not.toHaveProperty("storage_bucket");
+    }
+    const rec = json.recordings.find((r) => r.id === "r-1");
+    expect(rec).not.toHaveProperty("row_kind");
+  });
+
+  it("joins lead, salesperson, and workspace names for missed rows", async () => {
+    seed();
+    h.flowRuns = [{ contact_id: "c-2", account_id: "acct-1", flow_id: "f-1", started_at: "2026-10-06T00:00:00.000Z" }];
+    h.flows = [{ id: "f-1", account_id: "acct-1", name: "Leads" }];
+    const { json } = await rows("");
+    const e1 = json.recordings.find((r) => r.id === "e-1")!;
+    expect(e1.contact_name).toBe("Sagar");
+    expect(e1.uploader_name).toBe("Akash");
+    expect(e1.workspace_table_name).toBe("Leads");
+    const e2 = json.recordings.find((r) => r.id === "e-2")!;
+    expect(e2.contact_name).toBeNull();
+    expect(e2.uploader_name).toBeNull();
+    expect(e2.workspace_table_name).toBeNull();
+  });
+
+  it("never duplicates: recordings and missed events are disjoint populations", async () => {
+    seed();
+    const { json } = await rows("");
+    const ids = json.recordings.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // A missed event can never have a recording by construction —
+    // the merge shows both kinds side by side, never merged away.
+    expect(ids).toContain("r-1");
+    expect(ids).toContain("e-1");
+  });
+
+  it("scopes missed events to the account (no cross-tenant leak)", async () => {
+    seed();
+    h.events = h.events.map((e) => ({ ...e, account_id: "acct-evil" }));
+    const { json } = await rows("");
+    expect(json.recordings.map((r) => r.id)).toEqual(["r-1"]);
+    expect(json.total).toBe(1);
+    expect(json.missedTotal).toBe(0);
+  });
+
+  it("applies search to missed rows by lead name and phone digits", async () => {
+    seed();
+    expect((await rows("q=Sagar")).json.recordings.map((r) => r.id)).toEqual(["e-1"]);
+    expect((await rows("q=9155555555")).json.recordings.map((r) => r.id)).toEqual(["e-2"]);
+  });
+
+  it("applies date, direction, salesperson, table, and status filters to both", async () => {
+    seed();
+    // Date window keeps r-1 and e-1, drops e-2 (Oct 5).
+    expect(
+      (await rows("from=2026-10-06T00:00:00.000Z&to=2026-10-07T00:00:00.000Z")).json.recordings.map((r) => r.id)
+    ).toEqual(["e-1", "r-1"]);
+    // Missed events are inherently incoming: out/unknown match no events.
+    expect((await rows("direction=out")).json.recordings.map((r) => r.id)).toEqual(["r-1"]);
+    expect((await rows("direction=unknown")).json.recordings.map((r) => r.id)).toEqual([]);
+    expect((await rows("direction=in")).json.recordings.map((r) => r.id)).toEqual(["e-1", "e-2"]);
+    // Same uploader on r-1 and e-1.
+    expect((await rows(`uploaded_by=${USER_9}`)).json.recordings.map((r) => r.id).sort()).toEqual(["e-1", "r-1"]);
+    // Unlinked: e-2 only.
+    expect((await rows("status=unlinked")).json.recordings.map((r) => r.id)).toEqual(["e-2"]);
+    expect((await rows("status=linked")).json.recordings.map((r) => r.id).sort()).toEqual(["e-1", "r-1"]);
+    // Table membership: only c-2's table matches e-1.
+    const FLOW = "123e4567-e89b-12d3-a456-426614174099";
+    h.flowRuns = [{ contact_id: "c-2", account_id: "acct-1", flow_id: FLOW }];
+    h.flows = [{ id: FLOW, account_id: "acct-1", name: "Leads" }];
+    expect((await rows(`workspace_table=${FLOW}`)).json.recordings.map((r) => r.id)).toEqual(["e-1"]);
+  });
+
+  it("excludes missed events for whatsapp filters and the lead view", async () => {
+    seed();
+    const wa = await rows("call_type=whatsapp");
+    expect(wa.json.recordings.map((r) => r.id)).toEqual([]);
+    expect(wa.json.missedTotal).toBe(0);
+    const lead = await GET(new Request("https://app.test/api/recordings?contact_id=c-2"));
+    const leadJson = (await lead.json()) as { recordings: Row[]; total: number };
+    expect(leadJson.recordings.map((r) => r.id)).toEqual([]);
+    expect(leadJson.total).toBe(0);
+  });
+
+  it("keeps the summary recordings-only when missed events exist", async () => {
+    seed();
+    h.rpcResult = {
+      total: 1,
+      totalDurationSecs: 16,
+      phone: 1,
+      whatsapp: 0,
+      whatsappBusiness: 0,
+      unlinked: 0,
+    };
+    const res = await GET(new Request("https://app.test/api/recordings?summary=1"));
+    const json = (await res.json()) as { summary: Record<string, number> };
+    expect(json.summary).toEqual({
+      total: 1,
+      totalDurationSecs: 16,
+      phone: 1,
+      whatsapp: 0,
+      unlinked: 0,
+    });
+    expect(json).not.toHaveProperty("recordings");
+    expect(json).not.toHaveProperty("missedTotal");
   });
 });

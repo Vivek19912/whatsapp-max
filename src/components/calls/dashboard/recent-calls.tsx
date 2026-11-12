@@ -6,16 +6,15 @@ import {
   PhoneIncoming,
   PhoneMissed,
   PhoneOutgoing,
-  Play,
 } from 'lucide-react';
 import { useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { Skeleton } from '@/components/dashboard/skeleton';
 import { Button } from '@/components/ui/button';
+import { RecordingPlayerPopover } from '@/components/recordings/recording-player-popover';
 import type { RecentMissedRow, RecentRecordingRow } from '@/lib/calls/client';
 import { formatTalkTime } from '@/lib/calls/formatters';
-import { cn } from '@/lib/utils';
 
 export interface RecentCallRow {
   key: string;
@@ -118,7 +117,18 @@ export function RecentCallsTable({
   missed: RecentMissedRow[] | null;
   loading: boolean;
 }) {
-  const [playingId, setPlayingId] = useState<string | null>(null);
+  // Single floating player: at most one popover open at a time.
+  // `autoplay` is set only by Play/cell clicks; both reset on
+  // close so a reopened player never inherits stale intent.
+  // Unmounting the previous keyed RecordingPlayer pauses its
+  // audio — recordings never play simultaneously.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [autoplay, setAutoplay] = useState(false);
+
+  const closePlayer = () => {
+    setOpenId(null);
+    setAutoplay(false);
+  };
 
   const rows: RecentCallRow[] = (() => {
     if (!recent && !missed) return [];
@@ -215,8 +225,8 @@ export function RecentCallsTable({
             </thead>
             <tbody>
               {rows.map((r) => {
-                const playing =
-                  playingId === r.recordingId && r.recordingId !== null;
+                const playerOpen =
+                  openId === r.recordingId && r.recordingId !== null;
                 return (
                   <tr
                     key={r.key}
@@ -257,45 +267,31 @@ export function RecentCallsTable({
                     </td>
                     <td className="px-4 py-2.5">
                       {r.recordingId ? (
-                        <span className="inline-flex items-center gap-2">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={
-                              playing ? 'Stop playback' : `Play recording`
+                        <RecordingPlayerPopover
+                          recordingId={r.recordingId}
+                          open={playerOpen}
+                          autoplay={autoplay}
+                          onOpenChange={(next) => {
+                            if (next) {
+                              setOpenId(r.recordingId);
+                            } else if (openId === r.recordingId) {
+                              closePlayer();
                             }
-                            onClick={() =>
-                              setPlayingId(playing ? null : r.recordingId)
-                            }
-                            className={cn(
-                              'h-8 w-8 rounded-full',
-                              playing
-                                ? 'bg-blue-600 text-white hover:bg-blue-600'
-                                : 'bg-blue-600/10 text-blue-600 hover:bg-blue-600/20 dark:text-blue-400'
-                            )}
-                          >
-                            <Play className="h-3.5 w-3.5" />
-                          </Button>
-                          <span className="text-muted-foreground tabular-nums">
-                            {r.durationSecs === null
+                          }}
+                          onPlayIntent={() => setAutoplay(true)}
+                          onClose={closePlayer}
+                          playLabel={`Play recording of ${r.leadName}`}
+                          durationText={
+                            r.durationSecs === null
                               ? ''
-                              : formatTalkTime(r.durationSecs)}
-                          </span>
-                        </span>
+                              : formatTalkTime(r.durationSecs)
+                          }
+                        />
                       ) : (
                         <span className="text-muted-foreground text-xs">
                           No recording
                         </span>
                       )}
-                      {playing && r.recordingId ? (
-                        <audio
-                          className="mt-1 h-8 w-44"
-                          src={`/api/recordings/${r.recordingId}/audio`}
-                          controls
-                          autoPlay
-                          preload="none"
-                        />
-                      ) : null}
                     </td>
                   </tr>
                 );

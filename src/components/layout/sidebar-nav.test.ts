@@ -25,7 +25,7 @@ describe('Features removal — sidebar', () => {
 
   it('places Calls after the Meta Lead Ads entry and Inbox', () => {
     expect(navItems[1]).toMatchObject({ href: '/inbox' });
-    expect(navItems[2]).toMatchObject({ href: '/calls', label: 'Calls' });
+    expect(navItems[2]).toMatchObject({ href: '/calls', label: 'Call Analytics' });
   });
 
   it('keeps every other entry in the required order', () => {
@@ -45,7 +45,6 @@ describe('Features removal — sidebar', () => {
       '/data-export',
       '/all-sheets',
       '/chat-assignment',
-      '/lead-assignment',
     ]);
   });
 
@@ -88,14 +87,15 @@ describe('Features removal — sidebar', () => {
     );
   });
 
-  it('places Lead Assignment directly after Chat Assignment', () => {
+  it('contains no Lead Assignment entry (sidebar-only visibility change)', () => {
+    // The /lead-assignment page, route, APIs, and configuration
+    // are untouched — only its sidebar entry is gone.
     const hrefs = navItems.map((i) => i.href);
-    expect(hrefs.indexOf('/lead-assignment')).toBe(
-      hrefs.indexOf('/chat-assignment') + 1
-    );
-    expect(navItems[hrefs.indexOf('/lead-assignment')]).toMatchObject({
-      label: 'Lead Assignment',
-    });
+    expect(hrefs).not.toContain('/lead-assignment');
+    expect(
+      navItems.some((i) => i.label === 'Lead Assignment')
+    ).toBe(false);
+    expect(existsSync(join(root, 'src/app/(dashboard)/lead-assignment/page.tsx'))).toBe(true);
   });
 });
 

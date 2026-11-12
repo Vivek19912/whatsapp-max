@@ -147,11 +147,11 @@ export default function CallsPage() {
           </div>
           <div>
             <h1 className="text-foreground text-2xl font-semibold tracking-tight">
-              Calls Dashboard
+              Call Analytics Dashboard
             </h1>
             <p className="text-muted-foreground mt-0.5 text-sm">
-              Complete call insights for your team. Track volume, performance
-              and calling activity.
+              Understand call activity, team performance and customer
+              engagement.
             </p>
           </div>
         </div>

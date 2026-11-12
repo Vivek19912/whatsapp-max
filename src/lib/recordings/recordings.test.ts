@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { RecordingTableRow } from './recordings';
 import {
   RECORDING_ALLOWED_MIME_TYPES,
   RECORDING_BUCKET,
@@ -8,10 +9,13 @@ import {
   formatRecordingDuration,
   formatRecordedIndia,
   formatRecordedIndiaParts,
+  isMissedCallRow,
   latestByContact,
   recordingSortTime,
   resolveUploaderName,
+  rowTimeMs,
   toCallRecording,
+  toMissedCallRow,
   validateRecordingFile,
   validateRecordingMetadata,
 } from './recordings';
@@ -406,5 +410,46 @@ describe('formatRecordingDuration', () => {
     expect(formatRecordingDuration(72)).toBe('1:12');
     expect(formatRecordingDuration(null)).toBe('—');
     expect(formatRecordingDuration(undefined)).toBe('—');
+  });
+});
+
+describe('missed-call rows', () => {
+  const event = (over: Record<string, unknown> = {}) => ({
+    id: 'e-1',
+    account_id: 'acct-1',
+    contact_id: 'c-2',
+    user_id: 'u-1',
+    direction: 'in',
+    call_type: 'phone',
+    phone_number: '+911234567890',
+    occurred_at: '2026-10-06T23:25:00.000Z',
+    created_at: '2026-10-06T23:25:01.000Z',
+    ...over,
+  });
+
+  it('builds a player-free row keyed by the event id', () => {
+    const row = toMissedCallRow(event(), 'Vikas', 'Sagar', '+911234567890', 'Leads');
+    expect(row.row_kind).toBe('missed');
+    expect(row.id).toBe('e-1');
+    expect(row.duration_seconds).toBeNull();
+    expect(row.recorded_at).toBe('2026-10-06T23:25:00.000Z');
+    expect(row.uploader_name).toBe('Vikas');
+    expect(row.contact_name).toBe('Sagar');
+    expect(row.workspace_table_name).toBe('Leads');
+    expect(row).not.toHaveProperty('storage_path');
+  });
+
+  it('narrows the union and times both populations on the same clock', () => {
+    const missedRow = toMissedCallRow(event());
+    expect(isMissedCallRow(missedRow)).toBe(true);
+    expect(isMissedCallRow({ row_kind: undefined } as unknown as RecordingTableRow)).toBe(false);
+    expect(rowTimeMs(missedRow)).toBe(Date.parse('2026-10-06T23:25:00.000Z'));
+    const legacyRow = {
+      recorded_at: null,
+      created_at: '2026-10-06T10:00:00.000Z',
+    } as RecordingTableRow;
+    expect(rowTimeMs(legacyRow)).toBe(Date.parse('2026-10-06T10:00:00.000Z'));
+    const badRow = { recorded_at: null, created_at: 'nope' } as RecordingTableRow;
+    expect(Number.isFinite(rowTimeMs(badRow))).toBe(false);
   });
 });

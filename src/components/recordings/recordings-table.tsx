@@ -4,6 +4,7 @@ import {
   Link2,
   Minus,
   Pause,
+  PhoneMissed,
   Play,
   X,
 } from 'lucide-react';
@@ -36,7 +37,7 @@ import {
   DEFAULT_WORKSPACE_PAGE_SIZE,
   type WorkspacePageSize,
 } from '@/lib/flows/workspace-pagination';
-import { formatRecordedIndiaParts, type CallRecording } from '@/lib/recordings/recordings';
+import { formatRecordedIndiaParts, isMissedCallRow, type CallRecording, type RecordingTableRow } from '@/lib/recordings/recordings';
 import { RecordingPlayer } from './recording-player';
 
 export const PAGE_SIZE: WorkspacePageSize = DEFAULT_WORKSPACE_PAGE_SIZE;
@@ -150,6 +151,21 @@ function CallLabel({
   );
 }
 
+/**
+ * Missed-call cell: red missed icon + "Missed", matching the
+ * Calls dashboard's missed-row treatment. Missed events never
+ * carry a playable direction/type story — the outcome is the
+ * whole message.
+ */
+function MissedCallLabel() {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium whitespace-nowrap text-rose-600 dark:text-rose-400">
+      <PhoneMissed className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      Missed
+    </span>
+  );
+}
+
 function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; createdAt: string }) {
   const parts = formatRecordedIndiaParts(recordedAt, createdAt);
   if (!parts) return <span className="text-[13px] text-muted-foreground">—</span>;
@@ -168,6 +184,12 @@ function RecordedCell({ recordedAt, createdAt }: { recordedAt: string | null; cr
  * internals. (Duration lives only in the Recording cell's
  * compact readout and inside the audio player — never as its
  * own column.)
+ *
+ * Rows are the combined chronological view: audio recordings
+ * plus missed-call events (`row_kind: 'missed'`). Missed rows
+ * show the red Missed treatment and "No recording" — never a
+ * player, never audio. Recording rows keep the compact Play
+ * button + duration with the floating player popover.
  *
  * The Recording column stays compact: one small Play button plus
  * the duration. The full audio player lives in a floating
@@ -190,7 +212,7 @@ export function RecordingsTable({
   onPageSize,
   onFindLead,
 }: {
-  recordings: CallRecording[];
+  recordings: RecordingTableRow[];
   loading: boolean;
   page: number;
   total: number;
@@ -259,7 +281,8 @@ export function RecordingsTable({
             ) : (
               recordings.map((r, i) => {
                 const linked = !!r.contact_id;
-                const playerOpen = r.id === openId;
+                const missed = isMissedCallRow(r);
+                const playerOpen = !missed && r.id === openId;
                 return (
                   // Rows are not clickable: the player opens ONLY
                   // from the Recording cell's Play button below.
@@ -309,7 +332,11 @@ export function RecordingsTable({
                       )}
                     </TableCell>
                     <TableCell className="border-r border-border px-4 last:border-r-0">
-                      <CallLabel callType={r.call_type} direction={r.direction} />
+                      {missed ? (
+                        <MissedCallLabel />
+                      ) : (
+                        <CallLabel callType={r.call_type} direction={r.direction} />
+                      )}
                     </TableCell>
                     <TableCell className="max-w-[140px] truncate border-r border-border px-4 text-[13px] last:border-r-0">
                       {r.uploader_name ?? 'Unknown'}
@@ -320,7 +347,15 @@ export function RecordingsTable({
                         floating popover (portaled — never in the row),
                         so this column stays narrow and row height
                         never changes. */}
+                    {/* Missed events have no audio: "No recording",
+                        never a player. Recording rows keep the
+                        compact Play button + floating popover. */}
                     <TableCell className="border-r border-border px-4 last:border-r-0">
+                      {missed ? (
+                        <span className="text-[13px] text-muted-foreground">
+                          No recording
+                        </span>
+                      ) : (
                       <Popover
                         open={playerOpen}
                         onOpenChange={(next) => {
@@ -399,7 +434,7 @@ export function RecordingsTable({
                             recordingId={r.id}
                             autoplay={autoplay}
                           />
-                          {!linked && onFindLead ? (
+                          {!isMissedCallRow(r) && !linked && onFindLead ? (
                             <Button
                               variant="outline"
                               size="sm"
@@ -414,6 +449,7 @@ export function RecordingsTable({
                           ) : null}
                         </PopoverContent>
                       </Popover>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

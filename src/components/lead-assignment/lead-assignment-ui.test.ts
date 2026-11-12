@@ -15,12 +15,12 @@ const root = process.cwd();
 const src = (p: string) => readFileSync(`${root}/src/${p}`, "utf8");
 
 describe("sidebar + route", () => {
-  it("adds a Lead Assignment entry after Chat Assignment, admin-gated", () => {
+  it("removes the Lead Assignment sidebar entry but keeps the route", () => {
     const sidebar = src("components/layout/sidebar.tsx");
-    expect(sidebar).toContain('{ href: "/lead-assignment", label: "Lead Assignment"');
-    const navIdx = sidebar.indexOf('"/lead-assignment"');
-    expect(navIdx).toBeGreaterThan(sidebar.indexOf('"/chat-assignment"'));
-    expect(sidebar).toContain('if (item.href === "/lead-assignment") return canEditSettings;');
+    // Sidebar-only visibility change: the page, route, APIs, and
+    // configuration are untouched.
+    expect(sidebar).not.toContain('"/lead-assignment"');
+    expect(sidebar).not.toContain("Lead Assignment");
     expect(existsSync(`${root}/src/app/(dashboard)/lead-assignment/page.tsx`)).toBe(true);
   });
 

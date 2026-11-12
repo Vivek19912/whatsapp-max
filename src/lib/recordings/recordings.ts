@@ -108,6 +108,74 @@ export interface CallRecording {
   call_type?: string | null;
 }
 
+/**
+ * A missed call event as served inside the Recordings list.
+ * `call_events` rows have NO audio (migration 110) and NO
+ * recording link (no safe join key exists), so a missed row
+ * carries no storage/file fields and must never initialize a
+ * player. `recorded_at` mirrors `occurred_at` so shared
+ * effective-time display/sort helpers work unchanged.
+ */
+export interface MissedCallRow {
+  row_kind: 'missed';
+  id: string;
+  account_id: string;
+  contact_id: string | null;
+  uploaded_by: string | null;
+  uploader_name?: string | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  workspace_table_name?: string | null;
+  direction: string | null;
+  phone_number?: string | null;
+  call_type?: string | null;
+  duration_seconds: null;
+  recorded_at: string | null;
+  created_at: string;
+}
+
+/** One row of the combined Recordings table: audio or missed. */
+export type RecordingTableRow = CallRecording | MissedCallRow;
+
+/** Narrow a table row to a missed-call event (no audio, no player). */
+export function isMissedCallRow(row: RecordingTableRow): row is MissedCallRow {
+  return (row as MissedCallRow).row_kind === 'missed';
+}
+
+/** Effective call time: recordings use recorded_at ?? created_at. */
+export function rowTimeMs(row: RecordingTableRow): number {
+  const raw = row.recorded_at ?? row.created_at;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : Number.NaN;
+}
+
+export function toMissedCallRow(
+  event: Record<string, unknown>,
+  uploaderName?: string | null,
+  contactName?: string | null,
+  contactPhone?: string | null,
+  workspaceTableName?: string | null,
+): MissedCallRow {
+  const occurredAt = event.occurred_at as string;
+  return {
+    row_kind: 'missed',
+    id: event.id as string,
+    account_id: event.account_id as string,
+    contact_id: (event.contact_id as string | null) ?? null,
+    uploaded_by: (event.user_id as string | null) ?? null,
+    uploader_name: uploaderName ?? null,
+    contact_name: contactName ?? null,
+    contact_phone: contactPhone ?? null,
+    workspace_table_name: workspaceTableName ?? null,
+    direction: (event.direction as string | null) ?? null,
+    phone_number: (event.phone_number as string | null) ?? null,
+    call_type: (event.call_type as string | null) ?? 'phone',
+    duration_seconds: null,
+    recorded_at: occurredAt ?? null,
+    created_at: (event.created_at as string) ?? occurredAt,
+  };
+}
+
 export function toCallRecording(
   row: Record<string, unknown>,
   uploaderName?: string | null,

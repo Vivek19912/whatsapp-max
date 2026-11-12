@@ -17,7 +17,6 @@ import { NotificationsPanel } from '@/components/settings/notifications-panel';
 import { WhatsAppConfig } from '@/components/settings/whatsapp-config';
 import { ReminderNumberSettings } from
 '@/components/settings/reminder-number-panel';
-import { CallRecordingPanel } from '@/components/settings/call-recording-panel';
 import { BusinessProfileSettings } from '@/components/settings/business-profile';
 import { TravelCrmSettings } from '@/components/settings/travel-crm-settings';
 import { MetaIntegrationSettings } from '@/components/settings/meta-integration-settings';
@@ -105,7 +104,6 @@ export default function SettingsPage() {
     notifications: <NotificationsPanel />,
     whatsapp: <WhatsAppConfig />,
     'reminder-number': <ReminderNumberSettings />,
-    'call-recording': <CallRecordingPanel />,
     'business-profile': <BusinessProfileSettings />,
     'travel-crm': <TravelCrmSettings />,
     'meta-lead-ads': <MetaIntegrationSettings />,

@@ -28,7 +28,6 @@ import {
   Settings,
   Sheet,
   Table2,
-  UserCheck,
   UsersRound,
   Workflow,
   X,
@@ -55,7 +54,7 @@ interface NavItem {
 export const navItems: NavItem[] = [
   { href: "/meta-lead-ads/dashboard", label: "Dashboard", icon: Megaphone },
   { href: "/inbox", label: "Inbox", icon: MessageSquare },
-  { href: "/calls", label: "Calls", icon: Phone },
+  { href: "/calls", label: "Call Analytics", icon: Phone },
   { href: "/recordings", label: "Recordings", icon: Mic },
   { href: "/flows", label: "Flows", icon: Workflow, beta: false },
   { href: "/followups", label: "Reminders", icon: CalendarClock },
@@ -68,9 +67,6 @@ export const navItems: NavItem[] = [
   { href: "/data-export", label: "Flow Sheets", icon: Sheet },
   { href: "/all-sheets", label: "All Sheets", icon: Sheet },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
-  // Lead Assignment is a separate feature from Chat Assignment
-  // (own rules, own engine, own page) — never merged.
-  { href: "/lead-assignment", label: "Lead Assignment", icon: UserCheck },
 ];
 
 const bottomNavItems = [
@@ -156,10 +152,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   const isOwner = accountRole === "owner";
   const isAgent = accountRole === "agent";
   const visibleNavItems = navItems.filter((item) => {
-    // Lead Assignment config is admin+ work: teammates without
-    // settings access never see the entry (the page enforces the
-    // same bar server-side).
-    if (item.href === "/lead-assignment") return canEditSettings;
     // Chat Assignment is hidden from the sidebar UI. The page,
     // route, APIs, and configuration are untouched.
     if (item.href === "/chat-assignment") return false;

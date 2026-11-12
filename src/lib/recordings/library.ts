@@ -5,7 +5,7 @@
 // browser, so the full catalog never downloads.
 // ============================================================
 
-import type { CallRecording } from './recordings';
+import type { RecordingTableRow } from './recordings';
 
 export interface RecordingsFilters {
   q: string;
@@ -56,8 +56,12 @@ export interface RecordingsSummary {
 }
 
 export interface RecordingsList {
-  recordings: CallRecording[];
+  /** Combined rows: audio recordings + missed-call events, newest first. */
+  recordings: RecordingTableRow[];
+  /** Combined count across both populations (summary KPIs stay recordings-only). */
   total: number;
+  /** Missed-event rows in this response (additive; absent on older responses). */
+  missedTotal?: number;
 }
 
 export interface MemberOption {

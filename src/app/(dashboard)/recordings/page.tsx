@@ -8,7 +8,10 @@ import { LinkCallDrawer, type UnlinkedRecording } from '@/components/calls/link-
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { getCallsRange } from '@/lib/calls/ranges';
-import type { CallRecording } from '@/lib/recordings/recordings';
+import type {
+  CallRecording,
+  RecordingTableRow,
+} from '@/lib/recordings/recordings';
 import {
   loadMemberOptions,
   loadRecordingsList,
@@ -57,7 +60,7 @@ export default function RecordingsPage() {
   const [filters, setFilters] = useState<RecordingsFilters>(DEFAULT_FILTERS);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<WorkspacePageSize>(DEFAULT_WORKSPACE_PAGE_SIZE);
-  const [recordings, setRecordings] = useState<CallRecording[]>([]);
+  const [recordings, setRecordings] = useState<RecordingTableRow[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [summary, setSummary] = useState<RecordingsSummary | null>(null);
   const [members, setMembers] = useState<MemberOption[]>([]);

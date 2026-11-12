@@ -5,7 +5,12 @@ import {
   toErrorResponse,
 } from '@/lib/auth/account';
 import { normalizePhone } from '@/lib/whatsapp/phone-utils';
-import { resolveUploaderName, toCallRecording } from '@/lib/recordings/recordings';
+import {
+  resolveUploaderName,
+  rowTimeMs,
+  toCallRecording,
+  toMissedCallRow,
+} from '@/lib/recordings/recordings';
 import { uploaderNamesByUserId } from '@/lib/recordings/uploaders';
 import {
   flowContactIds,
@@ -59,6 +64,24 @@ function parseBound(value: string | null): number | null {
  *     { total, totalDurationSecs, phone, whatsapp (merged),
  *       unlinked }. The stored whatsapp/whatsapp_business split
  *     is folded server-side; there is no separate business KPI.
+ *     The summary is ALWAYS recordings-only: missed events never
+ *     inflate recording aggregates.
+ *
+ * List rows are the COMBINED chronological view: actual audio
+ * recordings plus genuine missed-call events
+ * (`call_events.outcome = 'missed'`), merged newest-first with
+ * stable ids (`row_kind: 'missed'` marks event rows). Missed
+ * events have no audio and no recording link (migration 110
+ * establishes there is no safe join key), so they are shown
+ * as-is — never matched, merged, or suppressed against
+ * recordings, and never counted in the summary.
+ *
+ * Missed events are phone-only (migration 110 CHECK) and carry
+ * a non-null in/out direction, so a whatsapp call-type filter
+ * or an out/unknown direction filter matches no events. The
+ * `contact_id` lead view stays recordings-only (that page owns
+ * its own audio table); every other filter applies to both
+ * populations with Recordings semantics.
  */
 export async function GET(request: Request) {
   try {
@@ -167,7 +190,7 @@ export async function GET(request: Request) {
         return NextResponse.json(
           wantSummary
             ? { summary: emptySummary() }
-            : { recordings: [], total: 0, limit, offset, contact: contactHeader }
+            : { recordings: [], total: 0, missedTotal: 0, limit, offset, contact: contactHeader }
         );
       }
     }
@@ -184,7 +207,7 @@ export async function GET(request: Request) {
         return NextResponse.json(
           wantSummary
             ? { summary: emptySummary() }
-            : { recordings: [], total: 0, limit, offset, contact: contactHeader }
+            : { recordings: [], total: 0, missedTotal: 0, limit, offset, contact: contactHeader }
         );
       }
     }
@@ -207,7 +230,7 @@ export async function GET(request: Request) {
       return NextResponse.json(
         wantSummary
           ? { summary: emptySummary() }
-          : { recordings: [], total: 0, limit, offset, contact: contactHeader }
+          : { recordings: [], total: 0, missedTotal: 0, limit, offset, contact: contactHeader }
       );
     }
 
@@ -287,16 +310,82 @@ export async function GET(request: Request) {
     if (error) throw error;
 
     const rows = (data ?? []) as Record<string, unknown>[];
+
+    // Missed-call events for the same filtered set. Events are
+    // phone-only with non-null direction, so non-phone or
+    // out/unknown filters match nothing (mirrors the documented
+    // outgoing-direction behavior of yielding zero). The lead
+    // view stays recordings-only.
+    const includeMissed =
+      !contactId &&
+      (!callType || callType === 'phone') &&
+      (!direction || direction === 'in');
+    let missedEvents: Record<string, unknown>[] = [];
+    let missedTotal = 0;
+    if (includeMissed) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let eventsQuery: any = supabase
+        .from('call_events')
+        .select(
+          'id, account_id, contact_id, user_id, direction, call_type, phone_number, occurred_at, created_at',
+          { count: 'exact' }
+        )
+        .eq('account_id', accountId)
+        .eq('outcome', 'missed');
+      if (direction === 'in') eventsQuery = eventsQuery.eq('direction', 'in');
+      if (uploadedBy) eventsQuery = eventsQuery.eq('user_id', uploadedBy);
+      if (status === 'linked') eventsQuery = eventsQuery.not('contact_id', 'is', null);
+      if (status === 'unlinked') eventsQuery = eventsQuery.is('contact_id', null);
+      if (tableContactIds && tableContactIds.length > 0) {
+        eventsQuery = eventsQuery.in('contact_id', tableContactIds);
+      }
+      if (from !== null && to !== null) {
+        const fromISO = new Date(from).toISOString();
+        const toISO = new Date(to).toISOString();
+        eventsQuery = eventsQuery.gte('occurred_at', fromISO).lt('occurred_at', toISO);
+      }
+      if (q) {
+        const parts: string[] = [];
+        if (searchContactIds && searchContactIds.length > 0) {
+          parts.push(`contact_id.in.(${searchContactIds.join(',')})`);
+        }
+        if (effectiveDigits) {
+          parts.push(`phone_number.ilike.%${effectiveDigits}%`);
+        }
+        if (parts.length > 0) eventsQuery = eventsQuery.or(parts.join(','));
+      }
+      const {
+        data: eventsData,
+        error: eventsError,
+        count: eventsCount,
+      } = await eventsQuery
+        .order('occurred_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (eventsError) throw eventsError;
+      missedEvents = (eventsData ?? []) as Record<string, unknown>[];
+      missedTotal = eventsCount ?? 0;
+    }
+
     const names = await uploaderNamesByUserId(
       supabase,
-      rows.map((r) => r.uploaded_by as string | null).filter(Boolean) as string[]
+      [
+        ...rows.map((r) => r.uploaded_by as string | null),
+        ...missedEvents.map((e) => e.user_id as string | null),
+      ].filter(Boolean) as string[]
     );
     // Lead display for the table: one batched account-scoped lookup,
     // never N+1. Deleted contacts (SET NULL keeps the recording, or a
     // contact removed after linking) resolve to null → "Unlinked".
-    const contactIds = [...new Set(
-      rows.map((r) => r.contact_id as string | null).filter(Boolean)
-    )] as string[];
+    // Missed events share the same maps (same contacts table).
+    const contactIds = [
+      ...new Set(
+        [
+          ...rows.map((r) => r.contact_id as string | null),
+          ...missedEvents.map((e) => e.contact_id as string | null),
+        ].filter(Boolean)
+      ),
+    ] as string[];
     const contactInfo = new Map<string, { name: string | null; phone: string | null }>();
     if (contactIds.length > 0) {
       const { data: contacts, error: contactsError } = await supabase
@@ -324,23 +413,47 @@ export async function GET(request: Request) {
     );
 
     return NextResponse.json({
-      recordings: rows.map((r) => {
-        const info = r.contact_id
-          ? (contactInfo.get(r.contact_id as string) ?? null)
-          : null;
-        return toCallRecording(
-          r,
-          r.uploaded_by
-            ? (names[r.uploaded_by as string] ?? resolveUploaderName(null))
-            : null,
-          info?.name ?? null,
-          info?.phone ?? null,
-          r.contact_id
-            ? (workspaceTables[r.contact_id as string] ?? null)
-            : null
-        );
+      recordings: [
+        ...rows.map((r) => {
+          const info = r.contact_id
+            ? (contactInfo.get(r.contact_id as string) ?? null)
+            : null;
+          return toCallRecording(
+            r,
+            r.uploaded_by
+              ? (names[r.uploaded_by as string] ?? resolveUploaderName(null))
+              : null,
+            info?.name ?? null,
+            info?.phone ?? null,
+            r.contact_id
+              ? (workspaceTables[r.contact_id as string] ?? null)
+              : null
+          );
+        }),
+        ...missedEvents.map((e) => {
+          const info = e.contact_id
+            ? (contactInfo.get(e.contact_id as string) ?? null)
+            : null;
+          return toMissedCallRow(
+            e,
+            e.user_id ? (names[e.user_id as string] ?? resolveUploaderName(null)) : null,
+            info?.name ?? null,
+            info?.phone ?? null,
+            e.contact_id ? (workspaceTables[e.contact_id as string] ?? null) : null
+          );
+        }),
+      ].sort((a, b) => {
+        // Newest call first across both populations; stable ids
+        // break ties deterministically. Unparseable times sink.
+        const tb = rowTimeMs(b);
+        const ta = rowTimeMs(a);
+        if (Number.isFinite(tb) && Number.isFinite(ta) && tb !== ta) return tb - ta;
+        if (Number.isFinite(tb) && !Number.isFinite(ta)) return -1;
+        if (!Number.isFinite(tb) && Number.isFinite(ta)) return 1;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       }),
-      total: count ?? 0,
+      total: (count ?? 0) + missedTotal,
+      missedTotal,
       limit,
       offset,
       // Present only for ?contact_id= — the lead page header.
