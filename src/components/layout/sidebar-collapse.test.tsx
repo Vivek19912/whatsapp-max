@@ -192,27 +192,21 @@ describe("8/9. tooltips, keyboard, toggle control", () => {
   });
 });
 
-describe("10. Google Sheets navigation unchanged", () => {
-  it("keeps routes, order, and single instances in both states", () => {
-    // Default group state is collapsed: expanded hides both sheets
-    // children on a non-sheets route (existing behavior); the
-    // collapsed rail forces the icons visible instead.
-    const expanded = render(false);
-    expect(expanded).not.toContain('href="/chat-assignment"');
-    expect(expanded).not.toContain('href="/data-export"');
-    expect(expanded).not.toContain('href="/all-sheets"');
-    const collapsed = render(true);
-    expect(collapsed).toContain('href="/data-export"');
-    expect(collapsed).toContain('href="/all-sheets"');
-    expect(collapsed).not.toContain('href="/chat-assignment"');
+describe("10. Google Sheets removed from the sidebar", () => {
+  it("renders no sheets group, header, or links in either state", () => {
+    for (const collapsed of [false, true]) {
+      const html = render(collapsed);
+      expect(html).not.toContain('href="/data-export"');
+      expect(html).not.toContain('href="/all-sheets"');
+      expect(html).not.toContain("Google Sheets");
+      expect(html).not.toContain("Flow Sheets");
+      expect(html).not.toContain("All Sheets");
+    }
     // Lead Assignment is gone from the sidebar entirely (the
-    // page, route, and APIs are untouched).
-    expect(expanded).not.toContain('href="/lead-assignment"');
-    expect(collapsed).not.toContain('href="/lead-assignment"');
-    // No duplicates even with the group header inline.
-    expect(collapsed.split("Flow Sheets").length - 1).toBe(1);
-    expect(collapsed.split("All Sheets").length - 1).toBe(1);
-    expect(sidebarSrc).toContain("GOOGLE SHEETS");
+    // page, route, and APIs are untouched) — same treatment.
+    expect(render(false)).not.toContain('href="/lead-assignment"');
+    expect(render(true)).not.toContain('href="/lead-assignment"');
+    expect(sidebarSrc).not.toContain("GOOGLE SHEETS");
   });
 });
 

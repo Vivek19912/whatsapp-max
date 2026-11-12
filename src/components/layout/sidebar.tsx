@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, Fragment, type ComponentType, type ReactElement } from "react";
+import { useEffect, type ComponentType, type ReactElement } from "react";
 import { cn } from "@/lib/utils";
 import { getTravelCrmUrl } from "@/lib/travel-crm";
 import { useAuth } from "@/hooks/use-auth";
@@ -20,13 +20,10 @@ import {
   Megaphone,
   Mic,
   Phone,
-  ChevronDown,
-  ChevronUp,
   ExternalLink,
   Radio,
   Route,
   Settings,
-  Sheet,
   Table2,
   UsersRound,
   Workflow,
@@ -64,33 +61,12 @@ export const navItems: NavItem[] = [
   { href: "/automations", label: "Automations", icon: Zap },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/templates", label: "Templates", icon: FileText },
-  { href: "/data-export", label: "Flow Sheets", icon: Sheet },
-  { href: "/all-sheets", label: "All Sheets", icon: Sheet },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
 ];
 
 const bottomNavItems = [
   { href: "/settings", label: "Settings", icon: Settings },
 ];
-
-/** Google Sheets starts collapsed on every sidebar mount (no persistence). */
-export const DEFAULT_SHEETS_COLLAPSED = true;
-
-/**
- * Whether the Google Sheets group shows its children. An
- * explicitly expanded group is always open; a collapsed group
- * still opens when the user is on a sheets child route so the
- * active row is never hidden.
- */
-export function resolveSheetsOpen(
-  sheetsCollapsed: boolean,
-  pathname: string
-): boolean {
-  if (!sheetsCollapsed) return true;
-  return (
-    pathname.startsWith("/data-export") || pathname.startsWith("/all-sheets")
-  );
-}
 
 interface SidebarProps {
   /** Controlled on mobile by the Header's hamburger button. Ignored on lg+. */
@@ -133,15 +109,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   const { profileLoading, account, accountRole, canEditSettings } = useAuth();
   // Team Members is a standalone page at /team-members.
   const isTeamMembersActive = pathname.startsWith("/team-members");
-  // Collapsible GOOGLE SHEETS group (Flow Sheets + All Sheets).
-  // Default COLLAPSED on every sidebar mount — no persistence, so a
-  // refresh/reload always starts closed. Forced open while a sheets
-  // child route is active so the highlighted row is never hidden
-  // inside a closed group.
-  const [sheetsCollapsed, setSheetsCollapsed] = useState(
-    DEFAULT_SHEETS_COLLAPSED
-  );
-  const sheetsOpen = resolveSheetsOpen(sheetsCollapsed, pathname);
   // UI-only gating: Flows and Settings are shown to the owner
   // only. Non-owners simply don't see these nav entries. This is purely a
   // visibility change — the backend/routes are untouched, so it can be
@@ -158,7 +125,7 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     if (
       !isOwner &&
-      (item.href === "/flows" || item.href === "/data-export" || item.href === "/all-sheets" || item.href === "/chat-assignment")
+      (item.href === "/flows" || item.href === "/chat-assignment")
     ) {
       return false;
     }
@@ -299,31 +266,7 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
                 item.href === "/notifications" && unreadNotifications > 0;
 
               return (
-                <Fragment key={item.href}>
-                  {/* Collapsible group header for the two sheets
-                      entries — a button, never a navigation link.
-                      Rendered inline at the first sheets item so
-                      owner-gating and ordering stay untouched.
-                      Hidden on the collapsed rail (icons remain). */}
-                  {item.href === "/data-export" && (
-                    <li className={cn(collapsed && "lg:hidden")}>
-                      <button
-                        type="button"
-                        onClick={() => setSheetsCollapsed((v) => !v)}
-                        aria-expanded={sheetsOpen}
-                        className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        Google Sheets
-                        {sheetsOpen ? (
-                          <ChevronUp className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    </li>
-                  )}
-                  {((item.href === "/data-export" || item.href === "/all-sheets") && !sheetsOpen && !collapsed) ? null : (
-                  <li>
+                <li key={item.href}>
                   <NavTip label={item.label} collapsed={collapsed}>
                   <Link
                     href={item.href}
@@ -375,8 +318,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
                   </Link>
                   </NavTip>
                 </li>
-                  )}
-                </Fragment>
               );
             })}
           </ul>

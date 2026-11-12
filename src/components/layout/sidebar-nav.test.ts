@@ -1,11 +1,9 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
   navItems,
-  DEFAULT_SHEETS_COLLAPSED,
-  resolveSheetsOpen,
 } from './sidebar';
 
 const root = process.cwd();
@@ -42,8 +40,6 @@ describe('Features removal — sidebar', () => {
       '/automations',
       '/notifications',
       '/templates',
-      '/data-export',
-      '/all-sheets',
       '/chat-assignment',
     ]);
   });
@@ -77,14 +73,9 @@ describe('Features removal — sidebar', () => {
     expect(navItems[6].beta ?? false).toBe(false);
   });
 
-  it('places Chat Assignment after the Google Sheets children', () => {
+  it('places Chat Assignment last', () => {
     const hrefs = navItems.map((i) => i.href);
-    expect(hrefs.indexOf('/chat-assignment')).toBeGreaterThan(
-      hrefs.indexOf('/all-sheets')
-    );
-    expect(hrefs.indexOf('/all-sheets')).toBe(
-      hrefs.indexOf('/data-export') + 1
-    );
+    expect(hrefs[hrefs.length - 1]).toBe('/chat-assignment');
   });
 
   it('contains no Lead Assignment entry (sidebar-only visibility change)', () => {
@@ -119,41 +110,38 @@ describe('Contacts removal — sidebar and route are gone', () => {
   });
 });
 
-describe('Google Sheets accordion visibility', () => {
-  it('is collapsed by default', () => {
-    expect(DEFAULT_SHEETS_COLLAPSED).toBe(true);
+describe('Google Sheets moved to Settings (main sidebar clean)', () => {
+  it('has no Google Sheets accordion helpers or markup anymore', () => {
+    const sidebarSrc = readFileSync(join(root, 'src/components/layout/sidebar.tsx'), 'utf8');
+    expect(sidebarSrc).not.toContain('GOOGLE SHEETS');
+    expect(sidebarSrc).not.toContain('resolveSheetsOpen');
+    expect(sidebarSrc).not.toContain('DEFAULT_SHEETS_COLLAPSED');
+    expect(sidebarSrc).not.toContain('sheetsCollapsed');
   });
 
-  it('stays collapsed on normal routes (fresh load, refresh, reload)', () => {
-    for (const pathname of ['/dashboard', '/inbox', '/workspace', '/flows']) {
-      expect(resolveSheetsOpen(true, pathname)).toBe(false);
-    }
+  it('shows no sheets group, header, or children', () => {
+    const hrefs = navItems.map((i) => i.href);
+    expect(hrefs).not.toContain('/data-export');
+    expect(hrefs).not.toContain('/all-sheets');
+    expect(
+      navItems.some((i) => i.label.toLowerCase().includes('sheet'))
+    ).toBe(false);
   });
 
-  it('an explicitly expanded group stays open', () => {
-    expect(resolveSheetsOpen(false, '/dashboard')).toBe(true);
-  });
-
-  it('toggling twice returns to collapsed (expand then collapse)', () => {
-    let collapsed = DEFAULT_SHEETS_COLLAPSED;
-    collapsed = !collapsed;
-    expect(resolveSheetsOpen(collapsed, '/dashboard')).toBe(true);
-    collapsed = !collapsed;
-    expect(resolveSheetsOpen(collapsed, '/dashboard')).toBe(false);
-  });
-
-  it('a direct child-route visit reveals the section and active item', () => {
-    expect(resolveSheetsOpen(true, '/data-export')).toBe(true);
-    expect(resolveSheetsOpen(true, '/all-sheets')).toBe(true);
-    expect(resolveSheetsOpen(true, '/data-export/123')).toBe(true);
+  it('keeps the Flow Sheets and All Sheets pages (navigation-only move)', () => {
+    // The pages, routes, APIs, and configuration are untouched —
+    // only their sidebar entries are gone (they now live under
+    // Settings → Workspace → Google Sheets).
+    expect(existsSync(join(root, 'src/app/(dashboard)/data-export/page.tsx'))).toBe(true);
+    expect(existsSync(join(root, 'src/app/(dashboard)/all-sheets/page.tsx'))).toBe(true);
   });
 });
 
 describe('Features removal — protected areas intact', () => {
-  it('Google Sheets navigation still present', () => {
+  it('Google Sheets navigation moved out (pages untouched)', () => {
     const hrefs = navItems.map((i) => i.href);
-    expect(hrefs).toContain('/data-export');
-    expect(hrefs).toContain('/all-sheets');
+    expect(hrefs).not.toContain('/data-export');
+    expect(hrefs).not.toContain('/all-sheets');
   });
 
   it('Workspace navigation still present', () => {

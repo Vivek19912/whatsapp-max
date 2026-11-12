@@ -135,7 +135,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[236px_minmax(0,1fr)] lg:items-start">
-        <SettingsRail active={section} onSelect={go} hints={hints} visibleSections={visibleSections} />
+        <SettingsRail active={section} onSelect={go} hints={hints} visibleSections={visibleSections} showSheetsLinks={isOwner} />
         <div className="min-w-0">{panel[section]}</div>
       </div>
     </div>
