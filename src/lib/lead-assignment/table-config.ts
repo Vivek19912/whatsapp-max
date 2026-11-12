@@ -135,7 +135,11 @@ function toAssigneeRow(raw: Record<string, unknown>): TableAssigneeRow {
     pause_reason: (raw.pause_reason as string | null) ?? null,
     pause_scope:
       raw.pause_scope === "account" ? "account" : "table",
-    notify_email: raw.notify_email !== false,
+    // Notification channels are strictly opt-in: a missing or
+    // undefined preference defaults to OFF (never auto-enabled by a
+    // roster email). Only an explicitly saved `true` turns a channel
+    // on, and that saved `true` is preserved on every read.
+    notify_email: raw.notify_email === true,
     notify_whatsapp: raw.notify_whatsapp === true,
   };
 }

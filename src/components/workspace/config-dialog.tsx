@@ -9,7 +9,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -73,7 +72,16 @@ export function ConfigDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={cn(
-          "flex max-h-[92vh] flex-col gap-0 overflow-hidden p-0 sm:rounded-xl",
+          // Fixed flex column bounded by the *dynamic* viewport:
+          // dvh tracks visible browser chrome (mobile URL bar,
+          // desktop bookmark bars, zoom) so the dialog never grows
+          // past the visible area. Header/footer are non-shrinking;
+          // the body is the only flex-1 child (min-h-0) so it alone
+          // scrolls while navigation buttons stay put.
+          // `[max-height:…]` is an arbitrary-property fallback kept
+          // alongside `max-h-[…dvh]` (separate merge groups): engines
+          // without dvh drop that declaration and keep the vh bound.
+          "flex [max-height:92vh] max-h-[92dvh] flex-col gap-0 overflow-hidden p-0 sm:rounded-xl",
           WS_DIALOG_WIDTH[width],
           contentClassName,
         )}
@@ -107,12 +115,22 @@ export function ConfigDialog({
         </div>
 
         {(error || footer) && (
-          <DialogFooter className="shrink-0 flex-col items-stretch gap-2 border-t border-border bg-muted/40 px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          // Plain footer element (not the shared ui/dialog footer):
+          // the base footer carries negative margins that push the
+          // last 16px of the buttons outside this overflow-hidden
+          // container and clip them. shrink-0 keeps it out of the
+          // scroll flow; the bottom padding absorbs the
+          // home-indicator safe area. Buttons are never resized to
+          // fit — the footer always keeps its natural height.
+          <div
+            data-slot="dialog-footer"
+            className="flex shrink-0 flex-col items-stretch gap-2 border-t border-border bg-muted/40 px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between sm:px-6"
+          >
             <p role={error ? "alert" : undefined} className="min-h-5 text-xs text-destructive">
               {error ?? ""}
             </p>
             <div className="flex items-center justify-end gap-2">{footer}</div>
-          </DialogFooter>
+          </div>
         )}
       </DialogContent>
     </Dialog>

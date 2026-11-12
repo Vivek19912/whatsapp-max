@@ -56,9 +56,18 @@ describe("config dialog shell contract (source pins; Base UI portals need a DOM)
       `${process.cwd()}/src/components/workspace/config-dialog.tsx`,
       "utf8"
     );
-    expect(src).toContain("max-h-[92vh]");
+    // dvh bound (vh arbitrary-property fallback) so browser chrome
+    // and zoom never push the footer past the visible area.
+    expect(src).toContain("max-h-[92dvh]");
+    expect(src).toContain("[max-height:92vh]");
     expect(src).toContain("overflow-y-auto");
-    expect(src).toContain("DialogFooter");
+    // Plain footer element: the base DialogFooter's -mx-4/-mb-4
+    // negative margins clipped the bottom of the buttons inside
+    // this overflow-hidden container.
+    expect(src).not.toContain("DialogFooter");
+    expect(src).toContain('data-slot="dialog-footer"');
+    expect(src).toContain("shrink-0");
+    expect(src).toContain("safe-area-inset-bottom");
     expect(src).toContain("saveLabel");
     expect(src).toContain("sticky");
     expect(src).toContain("ConfigSection");

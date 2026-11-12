@@ -17,7 +17,12 @@ import { SearchableSelect } from "./searchable-select";
 import {
   encodeTemplateKey,
   formatTemplateCategory,
+  type TemplateDetail,
 } from "./assignment-template-utils";
+import {
+  TemplatePreviewEye,
+  TemplatePreviewPopover,
+} from "./template-preview";
 
 export interface SequenceTemplateSlot {
   key: string;
@@ -97,6 +102,7 @@ export function AssigneeSequenceEditor({
   readOnly,
   onDelayChange,
   onItemsChange,
+  templateDetails,
 }: {
   templates: readonly SequenceTemplateOption[];
   fields: readonly SequenceFieldDef[];
@@ -106,6 +112,12 @@ export function AssigneeSequenceEditor({
   readOnly: boolean;
   onDelayChange: (delay: string) => void;
   onItemsChange: (items: SequenceItem[]) => void;
+  /**
+   * Full template content for hover previews, keyed by
+   * `encodeTemplateKey({ name, language })`. Optional: when absent
+   * (or a template has no entry), rows render exactly as before.
+   */
+  templateDetails?: ReadonlyMap<string, TemplateDetail>;
 }) {
   const [pick, setPick] = useState("");
 
@@ -219,6 +231,11 @@ export function AssigneeSequenceEditor({
               item.variable_mappings,
               sample,
             );
+            const detailKey = encodeTemplateKey({
+              name: item.template_name,
+              language: item.template_language,
+            });
+            const detail = templateDetails?.get(detailKey) ?? null;
             return (
               <li
                 key={`${item.template_name}\u0000${item.template_language}`}
@@ -232,8 +249,16 @@ export function AssigneeSequenceEditor({
                     {index + 1}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">
-                      {item.template_name}
+                    <p className="flex min-w-0 items-center gap-1 truncate text-sm font-medium text-foreground">
+                      <span className="truncate">{item.template_name}</span>
+                      {detail ? (
+                        <TemplatePreviewPopover
+                          detail={detail}
+                          label={`Preview template ${item.template_name}`}
+                        >
+                          <TemplatePreviewEye label={`Preview template ${item.template_name}`} />
+                        </TemplatePreviewPopover>
+                      ) : null}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {tpl
@@ -340,6 +365,31 @@ export function AssigneeSequenceEditor({
                   : "All approved templates are already in the sequence."
               }
               ariaLabel="Add a customer template"
+              renderOptionPreview={(o) => {
+                const found = available.find(
+                  (t) =>
+                    encodeTemplateKey({
+                      name: t.template_name,
+                      language: t.template_language,
+                    }) === o.value,
+                );
+                const key = found
+                  ? encodeTemplateKey({
+                      name: found.template_name,
+                      language: found.template_language,
+                    })
+                  : o.value;
+                const preview = templateDetails?.get(key) ?? null;
+                if (!preview) return null;
+                return (
+                  <TemplatePreviewPopover
+                    detail={preview}
+                    label={`Preview template ${preview.name}`}
+                  >
+                    <TemplatePreviewEye label={`Preview template ${preview.name}`} />
+                  </TemplatePreviewPopover>
+                );
+              }}
             />
           </div>
           <Button

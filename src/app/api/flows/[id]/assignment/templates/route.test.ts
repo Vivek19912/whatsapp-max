@@ -169,4 +169,47 @@ describe("GET /flows/[id]/assignment/templates", () => {
     const json = (await res.json()) as { templates: unknown[] };
     expect(json.templates).toEqual([]);
   });
+
+  it("includes full renderable details for hover previews", async () => {
+    h.templates = [
+      {
+        account_id: "acct-1",
+        name: "new_lead_assigned",
+        language: "en_US",
+        status: "APPROVED",
+        category: "Utility",
+        header_type: "text",
+        header_content: "Hi {{1}}",
+        header_media_url: null,
+        body_text: "Hello {{1}}",
+        footer_text: "Thanks",
+        buttons: [{ type: "QUICK_REPLY", text: "Yes" }],
+        sample_values: { body: ["Asha"] },
+      },
+      {
+        account_id: "acct-2",
+        name: "other_acct_tpl",
+        language: "en_US",
+        status: "APPROVED",
+        category: "Utility",
+        body_text: "Foreign",
+      },
+    ];
+    const res = await route.GET(new Request("https://x/"), params("flow-meta"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      details: Array<Record<string, unknown>>;
+    };
+    // Only this account's rows, with full content for rendering.
+    expect(json.details).toHaveLength(1);
+    expect(json.details[0]).toMatchObject({
+      name: "new_lead_assigned",
+      language: "en_US",
+      header_type: "text",
+      header_content: "Hi {{1}}",
+      body_text: "Hello {{1}}",
+      footer_text: "Thanks",
+    });
+    expect(json.details[0].buttons).toEqual([{ type: "QUICK_REPLY", text: "Yes" }]);
+  });
 });

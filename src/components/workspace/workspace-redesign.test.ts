@@ -22,9 +22,12 @@ describe("workspace redesign — shared tokens and shell", () => {
     expect(tokens).toContain('md: "sm:max-w-lg"');
     expect(tokens).toContain('lg: "sm:max-w-2xl"');
     expect(tokens).toContain('xl: "sm:max-w-3xl lg:max-w-4xl"');
-    // TheASSIGNMENT dialog uses the widest preset...
+    expect(tokens).toContain('assignment:');
+    expect(tokens).toContain("85vw");
+    expect(tokens).toContain("70vw");
+    // The assignment dialog uses the dedicated large preset...
     expect(src("src/components/workspace/table-assignment-dialog.tsx")).toContain(
-      'width="xl"'
+      'width="assignment"'
     );
     // ...sheets use the large preset, Travel CRM medium.
     expect(src("src/components/workspace/meta-table-sheets-dialog.tsx")).toContain(
@@ -37,10 +40,21 @@ describe("workspace redesign — shared tokens and shell", () => {
 
   it("config shell keeps header/footer visible with a scrolling body", () => {
     const shell = src("src/components/workspace/config-dialog.tsx");
-    expect(shell).toContain("max-h-[92vh]");
+    // dvh bound (vh arbitrary-property fallback) + non-shrinking
+    // footer + independently scrolling body (min-h-0 flex-1): the
+    // footer never clips or scrolls away on any step, height, or
+    // zoom level.
+    expect(shell).toContain("max-h-[92dvh]");
+    expect(shell).toContain("[max-height:92vh]");
     expect(shell).toContain("overflow-y-auto");
+    expect(shell).toContain("min-h-0 flex-1");
     expect(shell).toContain("sticky");
-    expect(shell).toContain("DialogFooter");
+    expect(shell).not.toContain("DialogFooter");
+    expect(shell).toContain('data-slot="dialog-footer"');
+    expect(shell).toContain("shrink-0");
+    expect(shell).toContain("safe-area-inset-bottom");
+    expect(shell).not.toContain("-mb-4");
+    expect(shell).not.toContain("-mx-4");
     expect(shell).toContain("saveLabel");
     expect(shell).toContain("Cancel");
   });

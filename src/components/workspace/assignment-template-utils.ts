@@ -16,6 +16,81 @@ export interface AssignmentTemplateOption {
   category: string | null;
 }
 
+/** Full template content for the rich hover preview. Pure data. */
+export interface TemplateDetail {
+  name: string;
+  language: string;
+  status: string;
+  category: string | null;
+  headerType: string | null;
+  headerContent: string | null;
+  headerMediaUrl: string | null;
+  bodyText: string;
+  footerText: string | null;
+  buttons: Array<{ type: string; text: string }>;
+  sampleValues: Record<string, string[]>;
+}
+
+/** Key (name + language) shared by the picker value encoding. */
+export function templateDetailKey(template: { name: string; language: string }): string {
+  return encodeTemplateKey({ name: template.name, language: template.language });
+}
+
+/**
+ * Index full template rows by (name, language) for preview lookup.
+ * First row wins on duplicates; rows without a name are skipped.
+ * Never throws on malformed rows — they are filtered, not guessed.
+ */
+export function toTemplateDetails(
+  rows: ReadonlyArray<Record<string, unknown>>,
+): Map<string, TemplateDetail> {
+  const out = new Map<string, TemplateDetail>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const name = typeof row.name === "string" ? row.name : "";
+    const language = typeof row.language === "string" ? row.language : "";
+    if (name === "" || language === "") continue;
+    const key = encodeTemplateKey({ name, language });
+    if (out.has(key)) continue;
+    const buttonsRaw = Array.isArray(row.buttons) ? row.buttons : [];
+    const buttons = buttonsRaw
+      .filter(
+        (b): b is { type: unknown; text: unknown } =>
+          !!b && typeof b === "object" && !Array.isArray(b),
+      )
+      .map((b) => ({
+        type: typeof b.type === "string" ? b.type : "",
+        text: typeof b.text === "string" ? b.text : "",
+      }))
+      .filter((b) => b.text !== "");
+    const sampleRaw =
+      row.sample_values && typeof row.sample_values === "object" && !Array.isArray(row.sample_values)
+        ? (row.sample_values as Record<string, unknown>)
+        : {};
+    const sampleValues: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(sampleRaw)) {
+      if (Array.isArray(v)) {
+        const vals = v.filter((x): x is string => typeof x === "string");
+        if (vals.length > 0) sampleValues[k] = vals;
+      }
+    }
+    out.set(key, {
+      name,
+      language,
+      status: typeof row.status === "string" ? row.status : "",
+      category: typeof row.category === "string" ? row.category : null,
+      headerType: typeof row.header_type === "string" ? row.header_type : null,
+      headerContent: typeof row.header_content === "string" ? row.header_content : null,
+      headerMediaUrl: typeof row.header_media_url === "string" ? row.header_media_url : null,
+      bodyText: typeof row.body_text === "string" ? row.body_text : "",
+      footerText: typeof row.footer_text === "string" ? row.footer_text : null,
+      buttons,
+      sampleValues,
+    });
+  }
+  return out;
+}
+
 /**
  * Display category for a template option: the actual stored
  * category uppercased to Meta's style (`UTILITY`, `MARKETING`,

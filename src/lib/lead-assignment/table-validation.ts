@@ -317,13 +317,14 @@ export function validateTableAssignee(
   // An internal member link without any contact channel is fine
   // (ownership + roster email still work); an external-only
   // recipient needs at least one channel (enforced above).
-  // An enabled email alert with no possible recipient can never
-  // deliver: external recipients have no roster fallback, so
-  // require a typed address up front instead of persisting a
-  // misconfiguration that would only fail silently later.
-  // (Internal members fall back to the linked roster email.)
-  const notifyEmail =
-    entry.notify_email === undefined ? true : entry.notify_email === true;
+  // Notification channels are strictly opt-in: a missing preference
+  // defaults to OFF. An enabled email alert with no possible
+  // recipient can never deliver: external recipients have no roster
+  // fallback, so require a typed address up front instead of
+  // persisting a misconfiguration that would only fail silently
+  // later. (Internal members fall back to the linked roster email.)
+  // An explicitly saved `true` is preserved as-is.
+  const notifyEmail = entry.notify_email === true;
   if (notifyEmail && !email && !rawUserId) {
     throw new AssignmentValidationError(
       `${where} needs an email address because Email alerts are on for this assignee.`,

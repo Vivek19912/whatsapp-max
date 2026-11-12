@@ -55,6 +55,15 @@ export const WS_DIALOG_WIDTH = {
   lg: "sm:max-w-2xl",
   /** Wide editors (assignment). Full width on mobile. */
   xl: "sm:max-w-3xl lg:max-w-4xl",
+  /** Large assignment wizard: ~85vw/85vh desktop (min 70vw/70vh,
+   * max 90vh), near-fullscreen on small screens. Same dialog hosts
+   * both Create and Edit Assignment, so both share these bounds.
+   * Dynamic viewport units (dvh) with vh arbitrary-property
+   * fallbacks: dvh tracks visible browser chrome and zoom so the
+   * footer is never pushed past the visible area; engines without
+   * dvh keep the vh bounds. */
+  assignment:
+    "w-[96vw] max-w-[96vw] sm:w-[85vw] sm:max-w-[85vw] sm:min-w-[70vw] [height:92vh] h-[92dvh] [max-height:92vh] max-h-[92dvh] sm:[height:85vh] sm:h-[85dvh] sm:[min-height:70vh] sm:min-h-[70dvh] sm:[max-height:90vh] sm:max-h-[90dvh]",
 } as const;
 
 export type WsDialogWidth = keyof typeof WS_DIALOG_WIDTH;

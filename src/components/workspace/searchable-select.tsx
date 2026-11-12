@@ -73,6 +73,7 @@ export function SearchableSelect({
   contentClassName,
   ariaLabel,
   disabled = false,
+  renderOptionPreview,
 }: {
   value: string;
   options: SearchableOption[];
@@ -85,6 +86,13 @@ export function SearchableSelect({
   ariaLabel?: string;
   /** Read-only display: the trigger shows the selection but never opens. */
   disabled?: boolean;
+  /**
+   * Optional per-option preview (e.g. a template hover preview).
+   * Rendered beside — never inside — the option button so preview
+   * interaction can never select the option. Return null for no
+   * preview (default behavior is unchanged).
+   */
+  renderOptionPreview?: (option: SearchableOption) => React.ReactNode | null;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -222,36 +230,84 @@ export function SearchableSelect({
             ) : (
               filtered.map((o, index) => {
                 const active = o.value === value;
+                const preview = renderOptionPreview?.(o) ?? null;
+                if (!preview) {
+                  return (
+                    <button
+                      key={o.value}
+                      id={`${listboxId}-option-${index}`}
+                      data-index={index}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      aria-disabled={o.disabled || undefined}
+                      disabled={o.disabled}
+                      onClick={() => {
+                        onChange(o.value);
+                        setOpen(false);
+                      }}
+                      onMouseEnter={() => setHighlight(index)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                        "hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
+                        "disabled:pointer-events-none disabled:opacity-50",
+                        (active || highlight === index) && "bg-muted"
+                      )}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        <span className="block truncate text-foreground">{o.label}</span>
+                        {o.hint ? (
+                          <span className="block truncate text-xs text-muted-foreground">{o.hint}</span>
+                        ) : null}
+                      </span>
+                      {active ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                    </button>
+                  );
+                }
                 return (
-                  <button
+                  <div
                     key={o.value}
-                    id={`${listboxId}-option-${index}`}
-                    data-index={index}
-                    type="button"
-                    role="option"
-                    aria-selected={active}
-                    aria-disabled={o.disabled || undefined}
-                    disabled={o.disabled}
-                    onClick={() => {
-                      onChange(o.value);
-                      setOpen(false);
-                    }}
-                    onMouseEnter={() => setHighlight(index)}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-                      "hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
-                      "disabled:pointer-events-none disabled:opacity-50",
+                      "flex w-full items-center gap-1 rounded-md pr-1 transition-colors",
+                      "hover:bg-muted focus-within:bg-muted",
                       (active || highlight === index) && "bg-muted"
                     )}
                   >
-                    <span className="min-w-0 flex-1 truncate text-left">
-                      <span className="block truncate text-foreground">{o.label}</span>
-                      {o.hint ? (
-                        <span className="block truncate text-xs text-muted-foreground">{o.hint}</span>
-                      ) : null}
+                    <button
+                      id={`${listboxId}-option-${index}`}
+                      data-index={index}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      aria-disabled={o.disabled || undefined}
+                      disabled={o.disabled}
+                      onClick={() => {
+                        onChange(o.value);
+                        setOpen(false);
+                      }}
+                      onMouseEnter={() => setHighlight(index)}
+                      onFocus={() => setHighlight(index)}
+                      className={cn(
+                        "flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                        "hover:bg-transparent focus-visible:bg-muted focus-visible:outline-none",
+                        "disabled:pointer-events-none disabled:opacity-50"
+                      )}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        <span className="block truncate text-foreground">{o.label}</span>
+                        {o.hint ? (
+                          <span className="block truncate text-xs text-muted-foreground">{o.hint}</span>
+                        ) : null}
+                      </span>
+                      {active ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                    </button>
+                    <span
+                      className="shrink-0"
+                      onMouseEnter={() => setHighlight(index)}
+                    >
+                      {preview}
                     </span>
-                    {active ? <Check className="size-4 shrink-0 text-primary" /> : null}
-                  </button>
+                  </div>
                 );
               })
             )}

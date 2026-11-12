@@ -37,11 +37,21 @@ describe("multi-WhatsApp migration contract (150)", () => {
 });
 
 describe("WhatsApp number draft helpers", () => {
-  it("normalizes E.164 numbers and rejects the rest", () => {
+  it("normalizes India E.164 numbers and rejects the rest", () => {
     expect(normalizeWhatsappNumberInput("+91 98765 43210")).toBe("+919876543210");
     expect(normalizeWhatsappNumberInput("+91-9876543210")).toBe("+919876543210");
     expect(normalizeWhatsappNumberInput("9876543210")).toBeNull();
     expect(normalizeWhatsappNumberInput("123")).toBeNull();
+  });
+
+  it("requires the +91 country code and exactly 10 digits", () => {
+    // Non-Indian numbers are rejected even when valid E.164.
+    expect(normalizeWhatsappNumberInput("+14155550123")).toBeNull();
+    expect(normalizeWhatsappNumberInput("+911234567890")).toBe("+911234567890");
+    // Short, long, and prefix-less inputs are rejected.
+    expect(normalizeWhatsappNumberInput("+91123456789")).toBeNull();
+    expect(normalizeWhatsappNumberInput("+9112345678901")).toBeNull();
+    expect(normalizeWhatsappNumberInput("+919876543210")).toBe("+919876543210");
   });
 
   it("supports at least five numbers per assignee", () => {
@@ -74,28 +84,38 @@ describe("WhatsApp number draft helpers", () => {
 });
 
 describe("WhatsApp numbers editor contract", () => {
-  const src = readFileSync(
+  const dialogSrc = readFileSync(
     join(process.cwd(), "src", "components", "workspace", "table-assignment-dialog.tsx"),
     "utf8"
   );
+  const editorSrc = readFileSync(
+    join(process.cwd(), "src", "components", "workspace", "assignment-field-controls.tsx"),
+    "utf8"
+  );
 
-  it("renders a per-number template picker with add/remove actions", () => {
-    expect(src).toContain("Extra WhatsApp numbers");
-    expect(src).toContain("Add WhatsApp number");
-    expect(src).toContain("Remove extra WhatsApp number");
-    expect(src).toContain("Template for extra WhatsApp number");
+  it("renders a per-number template picker with add/remove actions in Step 2", () => {
+    // The multi-number editor lives in the Step 2 salesperson card
+    // (WhatsappNumbersEditor), not in a buried advanced section.
+    expect(editorSrc).toContain("WhatsApp numbers");
+    expect(editorSrc).toContain("Add WhatsApp Number");
+    expect(editorSrc).toContain("Remove extra WhatsApp number");
+    expect(editorSrc).toContain("Template for extra WhatsApp number");
     // Each row reuses the approved-templates picker — never a free-text field.
-    expect(src).toContain("Table default template");
+    expect(editorSrc).toContain("Table default template");
+    expect(dialogSrc).toContain("WhatsappNumbersEditor");
   });
 
   it("keeps email configuration single and separate", () => {
-    // One email input per assignee; no email list anywhere.
-    expect(src).toContain("Email for notifications (optional)");
-    expect(src).not.toMatch(/Extra Email|extra_emails|email_numbers/i);
+    // One email input per assignee on their Step 2 card; no email
+    // list anywhere, and no duplicate email control in the dialog.
+    expect(dialogSrc).toContain("Email address");
+    expect(dialogSrc).not.toMatch(/Extra Email|extra-emails|email_numbers/i);
+    expect(editorSrc).not.toMatch(/Extra Email|extra-emails|email_numbers/i);
   });
 
   it("persists numbers with per-number templates on save", () => {
-    expect(src).toContain("whatsapp_numbers: d.whatsapp_numbers.map");
-    expect(src).toContain("template_name: n.template_name.trim() || null");
+    expect(dialogSrc).toContain("whatsapp_numbers: d.whatsapp_numbers.map");
+    expect(dialogSrc).toContain("template_name: n.template_name.trim() || null");
+    expect(editorSrc).toContain("onChange(numbers");
   });
 });

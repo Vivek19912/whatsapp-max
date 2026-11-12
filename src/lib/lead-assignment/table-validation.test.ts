@@ -308,8 +308,7 @@ describe("validateTableConfig", () => {
     ).toThrow(/Assignee 2 has an invalid phone number/);
   });
 
-  it("requires an email address for external assignees with email alerts on", () => {
-    // A phone-only external contact can never receive an email —
+  it("requires an email address for external assignees with email alerts on", () => {    // A phone-only external contact can never receive an email —
     // block the misconfiguration at save time instead of failing
     // silently later. Internal members may rely on the roster email.
     expect(() =>
@@ -328,6 +327,24 @@ describe("validateTableConfig", () => {
       ],
     });
     expect(ok.assignees).toHaveLength(2);
+  });
+
+  it("defaults a missing email-notification preference to OFF, preserving an explicit ON", () => {
+    // New salespeople and external contacts are strictly opt-in: an
+    // omitted flag must not auto-enable email (a roster address is
+    // not consent). An explicitly saved `true` survives as-is.
+    const valid = validateTableConfig({
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        { user_id: "u1", display_name: "A" },
+        { display_name: "Walk-in", phone: "+15551234567" },
+        { user_id: "u2", display_name: "B", notify_email: true },
+      ],
+    });
+    expect(valid.assignees[0].notify_email).toBe(false);
+    expect(valid.assignees[1].notify_email).toBe(false);
+    expect(valid.assignees[2].notify_email).toBe(true);
   });
 
   it("marks every config rejection as a 400 client error", () => {

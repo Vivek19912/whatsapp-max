@@ -33,6 +33,11 @@ import {
 } from "./config-dialog";
 import { SearchableSelect } from "./searchable-select";
 import { AssigneeSequenceEditor, type SequenceFieldDef, type SequenceItem, type SequenceTemplateOption } from "./assignee-sequence-editor";
+import {
+  IndiaPhoneInput,
+  ShareSelect,
+  WhatsappNumbersEditor,
+} from "./assignment-field-controls";
 import { ASSIGNMENT_TIMEZONE } from "@/lib/lead-assignment/table-validation";
 import { salespersonKeyFor } from "@/lib/meta-lead-whatsapp/assignee-sequences";
 
@@ -117,14 +122,18 @@ export function AssignmentDeliveryDetailCell({
 export const MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE = 10;
 
 /**
- * Normalize a phone input the same way the server does (strip
- * spaces/dashes/parens; require leading + with 7–15 digits).
+ * Normalize a phone input the India-only way required across the
+ * Assignment wizard: strip spaces/dashes/parens/dots, then accept
+ * only `+91` followed by exactly 10 digits. Users never type the
+ * country code (the UI pins it); a bare 10-digit entry without the
+ * prefix is rejected so a missing +91 can never slip through.
  * Returns the E.164 number or null. Pure.
  */
 export function normalizeWhatsappNumberInput(raw: string): string | null {
   const stripped = raw.replace(/[\s\-().]/g, "");
-  if (/^\+\d{7,15}$/.test(stripped)) return stripped;
-  return null;
+  const match = /^\+91(\d{10})$/.exec(stripped);
+  if (!match) return null;
+  return `+91${match[1]}`;
 }
 
 /**
@@ -173,16 +182,24 @@ export function payloadAssignees(
  *
  * New configurations (no persisted config yet) with at least one
  * active assignee and no weight error activate automatically — the
- * user never needs a separate toggle. Invalid or empty drafts stay
- * paused. Existing configurations always preserve their persisted
- * state so ordinary settings edits never flip activation. Pure.
+ * user never needs a separate toggle. Invalid drafts stay paused.
+ * Existing configurations always preserve their persisted state so
+ * ordinary settings edits never flip activation — except an
+ * explicitly saved EMPTY roster, which stays enabled so the table
+ * engine (not the legacy global rule) owns new leads as
+ * unassigned. Without this, disabling the table would hand leads
+ * back to the legacy fallback and reassign members that were just
+ * removed. Pure.
  */
 export function resolveEnabledOnSave(args: {
   isNew: boolean;
   persistedEnabled: boolean;
   hasActiveAssignee: boolean;
   weightInvalid: boolean;
+  /** True when the user explicitly saved with zero assignees. */
+  explicitEmpty?: boolean;
 }): boolean {
+  if (args.explicitEmpty) return true;
   if (!args.isNew) return args.persistedEnabled;
   if (!args.hasActiveAssignee) return false;
   if (args.weightInvalid) return false;
@@ -196,8 +213,15 @@ import {
   decodeTemplateKey,
   encodeTemplateKey,
   isTemplateSelectionValid,
+  toTemplateDetails,
   toTemplateOptions,
+  type TemplateDetail,
 } from "./assignment-template-utils";
+import {
+  TemplatePreviewCard,
+  TemplatePreviewEye,
+  TemplatePreviewPopover,
+} from "./template-preview";
 export {
   decodeTemplateKey,
   encodeTemplateKey,
@@ -365,7 +389,9 @@ const emptyDraft = (): Draft => ({
   whatsapp_numbers: [],
   weight: "0",
   is_active: true,
-  notify_email: true,
+  // Email notifications default OFF — the user opts in per
+  // salesperson in Step 2. A roster email never auto-enables them.
+  notify_email: false,
   notify_whatsapp: false,
   sequence: null,
   sequenceDirty: false,
@@ -438,36 +464,39 @@ export function mergeOpenFormEdit<T extends { key: string }>(
 }
 
 /**
- * The wizard's three logical stages. A single authoritative assignment
+ * The wizard's four logical stages. A single authoritative assignment
  * draft (drafts + mode + notify + template + sequences) flows through
- * all three — steps never keep parallel copies of any field.
+ * all four — steps never keep parallel copies of any field.
  */
-export type AssignmentStep = "assign" | "notifications" | "review";
+export type AssignmentStep = "assign" | "notify" | "sequences" | "review";
 
 export const ASSIGNMENT_STEPS: ReadonlyArray<{ key: AssignmentStep; label: string }> = [
-  { key: "assign", label: "Assign leads" },
-  { key: "notifications", label: "Notifications" },
-  { key: "review", label: "Review" },
+  { key: "assign", label: "Team Members & Allocation" },
+  { key: "notify", label: "Salesperson Notifications" },
+  { key: "sequences", label: "WhatsApp Template to Lead" },
+  { key: "review", label: "Review & Save" },
 ];
 
 /** Minimal shape validateAssignStep needs (Draft-compatible). */
 export type AssignStepDraft = Pick<Draft, "key" | "is_active" | "weight">;
 
 /**
- * Validate STEP 1 (assign): at least one member, at least one
- * eligible (active) member, and — for percentage mode — active
- * shares totalling exactly 100%. Returns the user-facing error or
- * null. Pure.
+ * Validate STEP 1 (assign): an empty roster is a valid intentional
+ * configuration (new leads stay Unassigned until members are added),
+ * so zero members passes. With members present: at least one must
+ * be eligible (active), and — for percentage mode — active shares
+ * must total exactly 100%. Returns the user-facing error or null.
+ * Pure.
  */
 export function validateAssignStep(
   drafts: ReadonlyArray<AssignStepDraft>,
   mode: "round_robin" | "percentage",
 ): string | null {
   if (drafts.length === 0) {
-    return "Add at least one team member to continue.";
+    return null;
   }
   if (!drafts.some((d) => d.is_active)) {
-    return "At least one member must receive new leads — turn on “Receives new leads” for a member.";
+    return "At least one included member is required — every included member receives new leads.";
   }
   if (mode === "percentage") {
     const total = drafts
@@ -494,11 +523,72 @@ export type NotifyStepDraft = Pick<
 >;
 
 /**
- * Validate STEP 2 (notifications): team template selected when
+ * Validate the customer-sequence step (sequences): every edited
+ * customer sequence carries a sane delay. Returns the first problem
+ * or null. Pure — the delay bounds mirror validateNotifyStep's
+ * sequence check so both gates stay identical.
+ */
+export function validateSequencesStep(args: {
+  drafts: ReadonlyArray<NotifyStepDraft>;
+  isMetaTable: boolean;
+}): string | null {
+  if (!args.isMetaTable) return null;
+  for (const d of args.drafts) {
+    if (!d.sequenceDirty || !d.sequence || d.sequence.items.length === 0) continue;
+    const delayNum = Number(d.sequence.delay_seconds);
+    if (!Number.isInteger(delayNum) || delayNum < 0 || delayNum > 86400) {
+      return "Delay must be a whole number of seconds between 0 and 86400.";
+    }
+  }
+  return null;
+}
+
+/**
+ * Validate one typed or picked share percentage (Step 1 Add/Edit).
+ * Any whole number from 0 to 100 is accepted — values are not
+ * restricted to multiples of 10, so 15%, 35%, 65% etc. are valid.
+ * Returns the user-facing error or null. Pure. Used both by the
+ * inline commit and by tests covering manual entry.
+ */
+export function validateShareValue(weight: string, displayName: string): string | null {
+  const share = Number.parseInt(weight, 10);
+  if (weight.trim() === "" || !Number.isInteger(share) || share < 0 || share > 100) {
+    return `Enter a share percentage between 0 and 100 for "${displayName.trim() || "Unnamed assignee"}".`;
+  }
+  return null;
+}
+
+/**
+ * Validate the member form for the Step 1 (members) context: only the
+ * team-link uniqueness is enforced here. Display name, email and phone
+ * are collected in Step 2 (notification cards), so Step 1 must not
+ * block on them. Full validation still runs on commit elsewhere and
+ * at save time.
+ */
+export function validateMemberStep1(
+  form: Pick<Draft, "key" | "user_id">,
+  drafts: ReadonlyArray<Pick<Draft, "key" | "user_id">>,
+): string | null {
+  if (form.user_id) {
+    const clash = drafts.some(
+      (d) => d.key !== form.key && d.user_id === form.user_id,
+    );
+    if (clash) {
+      return "That team member is already on this table.";
+    }
+  }
+  return null;
+}
+
+/**
+ * Validate the notification step: team template selected when
  * enabled (and still approved), every email alert has a reachable
- * recipient, every phone number is valid E.164, and edited customer
- * sequences carry a sane delay. Returns the first problem or null.
- * Pure — the same function gates Continue and the final save.
+ * recipient, every phone number is valid E.164, and — when
+ * `checkSequences` is set — edited customer sequences carry a sane
+ * delay. Returns the first problem or null. Pure — the same function
+ * gates Continue and the final save. External contacts (no linked
+ * member) must always carry a display name, since nothing else
+ * identifies them.
  */
 export function validateNotifyStep(args: {
   notifyEnabled: boolean;
@@ -516,6 +606,11 @@ export function validateNotifyStep(args: {
   }
   for (const d of args.drafts) {
     const name = d.display_name.trim() || "Unnamed assignee";
+    // External contacts have no linked member identity — they always
+    // need an entered display name (collected in Step 2).
+    if (!d.user_id && d.display_name.trim() === "") {
+      return "Give each external contact a display name in Step 2.";
+    }
     if (d.notify_email && d.email.trim() === "" && !args.rosterEmailFor(d.user_id)) {
       return `Email alerts are on for "${name}" but there is no email address — enter one or turn Email alerts off.`;
     }
@@ -542,21 +637,99 @@ export function validateNotifyStep(args: {
 }
 
 /**
- * Compact three-step progress indicator for the wizard header:
- * current step (blue), completed steps (green check, clickable to
- * go back), upcoming steps (neutral gray). Pure presentation.
+ * Step progress indicator for the wizard header: current step (blue),
+ * completed steps (green check, clickable to go back), upcoming steps
+ * (neutral gray). Pure presentation.
+ *
+ * `layout="horizontal"` renders the legacy top stepper (kept as the
+ * compact fallback on small screens); `layout="vertical"` renders the
+ * persistent left-sidebar navigation. Both share the same step order,
+ * completion state, and go-back-only interaction.
  */
 export function AssignmentStepper({
   step,
   completedSteps,
   onStepClick,
+  layout = "horizontal",
+  invalidSteps = [],
 }: {
   step: AssignmentStep;
   completedSteps: ReadonlyArray<AssignmentStep>;
   onStepClick?: (target: AssignmentStep) => void;
+  layout?: "horizontal" | "vertical";
+  /** Steps failing validation — shown with an error dot, still navigable back. */
+  invalidSteps?: ReadonlyArray<AssignmentStep>;
 }) {
-  const order: AssignmentStep[] = ["assign", "notifications", "review"];
+  const order: AssignmentStep[] = ["assign", "notify", "sequences", "review"];
   const activeIndex = order.indexOf(step);
+  if (layout === "vertical") {
+    return (
+      <nav aria-label="Assignment progress">
+        <ol className="flex flex-col gap-1">
+          {ASSIGNMENT_STEPS.map((s) => {
+            const index = order.indexOf(s.key);
+            const completed = completedSteps.includes(s.key);
+            const current = s.key === step;
+            const invalid = invalidSteps.includes(s.key);
+            const clickable = !current && index < activeIndex && completed && !!onStepClick;
+            const circleClass = current
+              ? "bg-primary text-primary-foreground"
+              : completed
+                ? "bg-emerald-500 text-white"
+                : "bg-muted text-muted-foreground";
+            const content =
+              current || !completed ? (
+                <span aria-hidden>{index + 1}</span>
+              ) : (
+                <Check aria-hidden className="size-3.5" />
+              );
+            const inner = (
+              <>
+                <span
+                  aria-hidden
+                  className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${circleClass}`}
+                >
+                  {content}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className={`block truncate text-sm font-medium ${current ? "text-foreground" : "text-muted-foreground"}`}>
+                    {s.label}
+                  </span>
+                  <span className="sr-only">{`Step ${index + 1}: ${s.label}${current ? " (current step)" : completed ? " (completed)" : ""}${invalid ? " (needs attention)" : ""}`}</span>
+                  {invalid && !current ? (
+                    <span className="block text-xs font-medium text-destructive">Needs attention</span>
+                  ) : null}
+                </span>
+              </>
+            );
+            return (
+              <li key={s.key} data-step={s.key}>
+                {clickable ? (
+                  <button
+                    type="button"
+                    onClick={() => onStepClick?.(s.key)}
+                    aria-label={`Go back to Step ${index + 1}: ${s.label}`}
+                    aria-current={current ? "step" : undefined}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-muted/60"
+                  >
+                    {inner}
+                  </button>
+                ) : (
+                  <span
+                    aria-current={current ? "step" : undefined}
+                    aria-label={current ? `Step ${index + 1}: ${s.label} (current step)` : undefined}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 ${current ? "bg-primary/10" : ""}`}
+                  >
+                    {inner}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
+    );
+  }
   return (
     <ol aria-label="Assignment progress" className="flex items-center gap-1 sm:gap-2">
       {ASSIGNMENT_STEPS.map((s, i) => {
@@ -622,10 +795,33 @@ export function AssignmentStepper({
 }
 
 /**
- * Read-only STEP 3 summary of the complete draft: distribution,
- * members, team notifications, customer sequences, and the
- * activation state. Pure presentation — values come from the live
- * draft so the review can never drift from what Save submits.
+ * Mask an email for review display (`priya@example.com` →
+ * `p***@example.com`). Falls back to a dash for empty values. Pure.
+ */
+export function maskContactEmail(email: string | null | undefined): string {
+  const trimmed = (email ?? "").trim();
+  if (!trimmed) return "—";
+  const at = trimmed.indexOf("@");
+  if (at <= 0) return "—";
+  return `${trimmed[0]}***${trimmed.slice(at)}`;
+}
+
+/**
+ * Mask a phone number for review display (`+911234567890` →
+ * `+91****7890`). Falls back to a dash for empty values. Pure.
+ */
+export function maskContactPhone(phone: string | null | undefined): string {
+  const trimmed = (phone ?? "").trim();
+  if (trimmed.length < 4) return trimmed === "" ? "—" : "••••";
+  return `${trimmed.slice(0, 3)}****${trimmed.slice(-4)}`;
+}
+
+/**
+ * Read-only review summary of the complete draft: distribution,
+ * members, per-salesperson notification settings, customer
+ * sequences, and the activation state. Pure presentation — values
+ * come from the live draft so the review can never drift from what
+ * Save submits.
  */
 export function AssignmentReviewSummary({
   mode,
@@ -638,7 +834,10 @@ export function AssignmentReviewSummary({
   isNew,
 }: {
   mode: "round_robin" | "percentage";
-  drafts: ReadonlyArray<Pick<Draft, "display_name" | "weight" | "is_active" | "notify_email" | "sequence">>;
+  drafts: ReadonlyArray<
+    Pick<Draft, "display_name" | "weight" | "is_active" | "notify_email" | "sequence"> &
+      Partial<Pick<Draft, "user_id" | "email" | "phone" | "notify_whatsapp" | "whatsapp_numbers">>
+  >;
   activeWeightTotal: number;
   notifyEnabled: boolean;
   templateName: string;
@@ -647,6 +846,7 @@ export function AssignmentReviewSummary({
   isNew: boolean;
 }) {
   const emailOn = drafts.filter((d) => d.notify_email).length;
+  const whatsappOn = drafts.filter((d) => d.notify_whatsapp === true).length;
   return (
     <div className="flex flex-col gap-4">
       <section aria-label="Review assignment">
@@ -676,7 +876,7 @@ export function AssignmentReviewSummary({
         </ul>
       </section>
       <section aria-label="Review notifications">
-        <p className="text-sm font-semibold text-foreground">Notifications</p>
+        <p className="text-sm font-semibold text-foreground">Salesperson Notifications</p>
         <p className="mt-1 text-xs text-muted-foreground">
           Team WhatsApp notifications: {notifyEnabled ? "Enabled" : "Disabled"}
           {notifyEnabled && templateName.trim() !== ""
@@ -685,10 +885,35 @@ export function AssignmentReviewSummary({
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
           Email notifications: {emailOn === 0 ? "Disabled" : `${emailOn} of ${drafts.length} members`}
+          {` · WhatsApp notifications: ${whatsappOn === 0 ? "Disabled" : `${whatsappOn} of ${drafts.length} members`}`}
         </p>
+        <ul className="mt-2 flex flex-col gap-1.5">
+          {drafts.map((d, i) => {
+            const extraNumbers = (d.whatsapp_numbers ?? [])
+              .map((n) => n.phone.trim())
+              .filter(Boolean);
+            return (
+              <li
+                key={`${d.display_name}-${i}`}
+                className="rounded-lg border border-border bg-card px-3 py-2 text-xs"
+              >
+                <p className="truncate text-sm font-medium text-foreground">
+                  {d.display_name || "—"}
+                </p>
+                <p className="mt-0.5 break-words text-muted-foreground" title={d.email?.trim() || undefined}>
+                  Email: {d.notify_email ? `On${d.email?.trim() ? ` (${d.email.trim()})` : d.user_id ? " (roster email)" : ""}` : "Off"}
+                </p>
+                <p className="mt-0.5 break-words text-muted-foreground" title={d.phone?.trim() || undefined}>
+                  WhatsApp: {d.notify_whatsapp === true ? `On${d.phone?.trim() ? ` (${d.phone.trim()})` : ""}` : "Off"}
+                  {extraNumbers.length > 0 ? ` · Also: ${extraNumbers.join(", ")}` : ""}
+                </p>
+              </li>
+            );
+          })}
+        </ul>
       </section>
       <section aria-label="Review customer messages">
-        <p className="text-sm font-semibold text-foreground">Customer messages</p>
+        <p className="text-sm font-semibold text-foreground">WhatsApp Template to Lead</p>
         <ul className="mt-1 flex flex-col gap-1">
           {drafts.map((d, i) => (
             <li key={`${d.display_name}-${i}`} className="text-xs text-muted-foreground">
@@ -696,6 +921,9 @@ export function AssignmentReviewSummary({
               {d.sequence && d.sequence.items.length > 0
                 ? `${d.sequence.items.length} message${d.sequence.items.length === 1 ? "" : "s"} configured`
                 : "No sequence configured"}
+              {d.sequence && d.sequence.items.length > 0
+                ? ` · Templates: ${d.sequence.items.map((t) => t.template_name).join(", ")} · Delay ${d.sequence.delay_seconds}s`
+                : ""}
             </li>
           ))}
         </ul>
@@ -744,17 +972,20 @@ export function TableAssignmentDialog({
   // Send-eligible templates for the picker: null until the first
   // load resolves (unknown), [] when the account has none.
   const [templates, setTemplates] = useState<readonly AssignmentTemplateOption[] | null>(null);
+  const [templateDetails, setTemplateDetails] = useState<ReadonlyMap<string, TemplateDetail>>(new Map());
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [senderConnected, setSenderConnected] = useState<boolean | null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  // Individual salesperson WhatsApp switches are the single source
+  // of truth — there is no master on/off. The shared template below
+  // shows whenever at least one salesperson has WhatsApp alerts on;
+  // a saved template stays in memory when all are off so
+  // re-enabling restores the previous pick (saving while all off
+  // persists a null template, as before).
+  const notifyEnabled = drafts.some((d) => d.notify_whatsapp);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [form, setForm] = useState<Draft>(emptyDraft());
-  // Table-level team notification switch. On load it mirrors whether
-  // a notification template is saved; the template itself is kept in
-  // memory while off so re-enabling restores the previous pick.
-  // Saving while off persists a null template.
-  const [notifyEnabled, setNotifyEnabled] = useState(false);
   // Inline member editor disclosure (everything lives in this one
   // dialog — no Sheet, no drawer, no nested modal). Add opens with
   // only the essential fields visible; Edit reveals the advanced
@@ -819,6 +1050,10 @@ export function TableAssignmentDialog({
   }, []);
 
   const toDraft = useCallback((a: AssigneeView): Draft => {
+    // Included assignees are always eligible to receive leads —
+    // there is no per-member off switch in the wizard. Availability
+    // pauses (table/account windows) remain the way to pause
+    // someone temporarily; new drafts default to active.
     return {
       key: a.id,
       user_id: a.user_id,
@@ -831,9 +1066,12 @@ export function TableAssignmentDialog({
         template_language: n.template_language || "en_US",
       })),
       weight: String(a.weight ?? 0),
-      is_active: a.is_active,
-      notify_email: a.notify_email,
-      notify_whatsapp: a.notify_whatsapp,
+      is_active: true,
+      // Notification channels are strictly opt-in: a missing
+      // preference defaults to OFF (never auto-enabled by a roster
+      // email). An explicitly saved `true` is preserved as-is.
+      notify_email: a.notify_email === true,
+      notify_whatsapp: a.notify_whatsapp === true,
       sequence: null,
       sequenceDirty: false,
       sequenceLoadedKey: null,
@@ -998,7 +1236,6 @@ export function TableAssignmentDialog({
       setEnabled(data.config?.enabled ?? false);
       setMode(data.config?.mode ?? "round_robin");
       setTemplateName(data.config?.whatsapp_template_name ?? "");
-      setNotifyEnabled(!!(data.config?.whatsapp_template_name ?? "").trim());
       // Show a language only when a template is saved; the save
       // path falls back to "en_US" for the empty state.
       setTemplateLanguage(
@@ -1033,6 +1270,7 @@ export function TableAssignmentDialog({
         }),
       )) as {
         templates?: Array<{ name?: unknown; language?: unknown; status?: unknown; category?: unknown }>;
+        details?: Array<Record<string, unknown>>;
         sender_connected?: unknown;
       };
       const rows = Array.isArray(json.templates) ? json.templates : [];
@@ -1057,6 +1295,11 @@ export function TableAssignmentDialog({
           })),
       );
       setSenderConnected(json.sender_connected === true);
+      // Full template content for hover previews (same rows, never
+      // fabricated — missing details render an unavailable state).
+      setTemplateDetails(
+        toTemplateDetails(Array.isArray(json.details) ? json.details : []),
+      );
     } catch (err) {
       setTemplatesError(
         err instanceof Error ? err.message : "Could not load WhatsApp templates.",
@@ -1070,7 +1313,6 @@ export function TableAssignmentDialog({
     if (open) {
       setEditingKey(null);
       setForm(emptyDraft());
-      setNotifyEnabled(false);
       setStep("assign");
       setCompletedSteps([]);
       setEditorSlot("members");
@@ -1238,9 +1480,11 @@ export function TableAssignmentDialog({
   };
 
   /**
-   * Open the inline row editor with the customer-messages group
-   * expanded, from the "Messages to leads" section. Same editor,
-   * same persistence — just a focused entry point.
+   * Open the compact customer-sequence panel for one salesperson,
+   * from the "Messages to leads" section. This is NOT the member
+   * editor: no link, name, share, availability, or notification
+   * fields — only that salesperson's WhatsApp sequence, edited
+   * through the same form state and saved by the same persistence.
    */
   const openMessages = (d: Draft) => {
     if (readOnly) return;
@@ -1248,8 +1492,8 @@ export function TableAssignmentDialog({
     setEditingKey(d.key);
     setEditorSlot("messages");
     setForm({ ...d });
-    setShowAdvanced(true);
-    setOpenGroup("msg");
+    setShowAdvanced(false);
+    setOpenGroup(null);
     setConfirmRemoveKey(null);
   };
 
@@ -1262,22 +1506,74 @@ export function TableAssignmentDialog({
   };
 
   /**
+   * Commit the compact Step 3 sequence panel into the drafts (what
+   * its Done button does). Only the customer-sequence fields merge
+   * back — member identity, share, availability, and notification
+   * preferences are never touched here, so no member validation
+   * runs. Returns the merged drafts. Callers must not run this in
+   * view mode (all entry points are readOnly-guarded).
+   */
+  const commitSequenceEditor = (): Draft[] | null => {
+    if (!editingKey || editingKey === "__new__") return drafts;
+    const next = drafts.map((d) =>
+      d.key === form.key
+        ? {
+            ...d,
+            sequence: form.sequence,
+            sequenceDirty: form.sequenceDirty,
+            sequenceLoadedKey: form.sequenceLoadedKey,
+          }
+        : d,
+    );
+    setDrafts(next);
+    cancelEdit();
+    return next;
+  };
+
+  /**
    * Commit the open inline editor into the drafts (what Done does),
    * synchronously so Save — and opening another editor — can
    * validate + submit the merged list in the same tick instead of
    * validating a stale draft while the panel is open. Returns the
    * merged drafts, or null when validation blocks (the form stays
    * open with the error surfaced). A pristine Add panel is
-   * disregarded, not committed. Callers must not run this in
-   * view mode (all entry points are readOnly-guarded).
+   * disregarded on implicit commits (navigation, Save), but an
+   * explicit Done click always commits — that is how a Step 1
+   * external placeholder (no link yet, named in Step 2) is created.
+   * Callers must not run this in view mode (all entry points are
+   * readOnly-guarded).
    */
-  const commitOpenEditor = (): Draft[] | null => {
+  const commitOpenEditor = (opts?: { explicit?: boolean }): Draft[] | null => {
     if (!editingKey) return drafts;
-    if (editingKey === "__new__" && isPristineNewAssigneeForm(form)) {
+    // The Step 3 sequence panel edits customer templates only — it
+    // merges just the sequence fields and never runs member
+    // validation. Kept separate from the general member editor.
+    if (editorSlot === "messages") return commitSequenceEditor();
+    if (
+      editingKey === "__new__" &&
+      !opts?.explicit &&
+      isPristineNewAssigneeForm(form)
+    ) {
       cancelEdit();
       return drafts;
     }
-    const problem = validateAssigneeForm(form, drafts);
+    // Linked members take their display name from the roster when the
+    // Step 1 form carries no typed name (Step 1 no longer asks for
+    // one). Resolve before validation so the roster name satisfies it.
+    if (form.user_id) {
+      const member = rosterById.get(form.user_id);
+      if (member && !form.display_name.trim()) {
+        form.display_name = member.full_name?.trim() || member.email || form.user_id;
+      }
+    }
+    // Step 1 (members slot) collects only the team link + share —
+    // names and contact details live in Step 2 — so it validates
+    // link uniqueness only. Every other editor runs the full form
+    // validation (name, contact channel, duplicates).
+    const problem =
+      editorSlot === "members"
+        ? validateMemberStep1(form, drafts)
+        : validateAssigneeForm(form, drafts);
     if (problem) {
       setSaveError(problem);
       toast.error(problem);
@@ -1289,9 +1585,8 @@ export function TableAssignmentDialog({
     // rebalance or overwrite other members silently. Round Robin
     // ignores the field entirely.
     if (mode === "percentage") {
-      const share = Number.parseInt(form.weight, 10);
-      if (form.weight.trim() === "" || !Number.isInteger(share) || share < 0 || share > 100) {
-        const shareProblem = `Enter a share percentage between 0 and 100 for "${form.display_name.trim() || "Unnamed assignee"}".`;
+      const shareProblem = validateShareValue(form.weight, form.display_name);
+      if (shareProblem) {
         setSaveError(shareProblem);
         toast.error(shareProblem);
         return null;
@@ -1314,7 +1609,7 @@ export function TableAssignmentDialog({
 
   const confirmEdit = () => {
     if (readOnly) return;
-    commitOpenEditor();
+    commitOpenEditor({ explicit: true });
   };
 
   /**
@@ -1353,16 +1648,31 @@ export function TableAssignmentDialog({
       }
       setSaveError(null);
       markStepComplete("assign");
-      setStep("notifications");
-    } else if (step === "notifications") {
-      const problem = validateNotifyStep(notifyArgsFor(activeDrafts));
+      setStep("notify");
+    } else if (step === "notify") {
+      // Step 2 covers notification channels only — sequence delays
+      // belong to Step 3 (validateSequencesStep).
+      const problem = validateNotifyStep({ ...notifyArgsFor(activeDrafts), checkSequences: false });
       if (problem) {
         setSaveError(problem);
         toast.error(problem);
         return;
       }
       setSaveError(null);
-      markStepComplete("notifications");
+      markStepComplete("notify");
+      setStep("sequences");
+    } else if (step === "sequences") {
+      const problem = validateSequencesStep({
+        drafts: activeDrafts,
+        isMetaTable,
+      });
+      if (problem) {
+        setSaveError(problem);
+        toast.error(problem);
+        return;
+      }
+      setSaveError(null);
+      markStepComplete("sequences");
       setStep("review");
     }
   };
@@ -1372,12 +1682,12 @@ export function TableAssignmentDialog({
     const activeDrafts = commitOpenEditor();
     if (!activeDrafts) return;
     setSaveError(null);
-    setStep(step === "review" ? "notifications" : "assign");
+    setStep(step === "review" ? "sequences" : step === "sequences" ? "notify" : "assign");
   };
 
   const goToStep = (target: AssignmentStep) => {
     if (readOnly || busy !== null || target === step) return;
-    const order: AssignmentStep[] = ["assign", "notifications", "review"];
+    const order: AssignmentStep[] = ["assign", "notify", "sequences", "review"];
     // Only completed earlier steps are reachable via the stepper —
     // never skip uncompleted required steps.
     if (order.indexOf(target) >= order.indexOf(step)) return;
@@ -1501,11 +1811,16 @@ export function TableAssignmentDialog({
     try {
       const isNewConfig = !payload?.config;
       const hasActiveAssignee = activeDrafts.some((d) => d.is_active);
+      // An explicitly saved empty roster stays enabled so the table
+      // engine (not the legacy global rule) owns new leads as
+      // unassigned — disabling here would hand leads back to the
+      // legacy fallback and reassign removed members.
       const enabledToSave = resolveEnabledOnSave({
         isNew: isNewConfig,
         persistedEnabled: enabled,
         hasActiveAssignee,
         weightInvalid: activeWeightError !== null,
+        explicitEmpty: activeDrafts.length === 0,
       });
       const json = (await readJson(
         await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment`, {
@@ -1529,7 +1844,10 @@ export function TableAssignmentDialog({
                 template_language: n.template_language.trim() || "en_US",
               })),
               weight: Number.parseInt(d.weight, 10) || 0,
-              is_active: d.is_active,
+              // Included assignees are always eligible — there is
+              // no per-member off switch. Availability pauses stay
+              // separate and untouched here.
+              is_active: true,
               notify_email: d.notify_email,
               notify_whatsapp: d.notify_whatsapp,
             })),
@@ -1545,8 +1863,10 @@ export function TableAssignmentDialog({
       }
       // Persist customer sequences for the drafts the user actually
       // changed. Each is keyed by that salesperson's own identity,
-      // so saving one never overwrites another's sequence. Failures
-      // are surfaced without undoing the assignment save.
+      // so saving one never overwrites another's sequence. A
+      // sequence failure is surfaced without undoing the assignment
+      // save — but the dialog stays open so the user can retry.
+      let sequencesOk = true;
       if (isMetaTable) {
         const dirty = activeDrafts.filter((d) => d.sequenceDirty && d.sequence);
         for (const d of dirty) {
@@ -1558,10 +1878,19 @@ export function TableAssignmentDialog({
             const message =
               err instanceof Error ? err.message : "Failed to save a customer sequence.";
             toast.error(message);
+            sequencesOk = false;
           }
         }
       }
+      // Refresh the dialog data first so the workspace state is
+      // current, then close. Only a full success (assignment API +
+      // every touched sequence) reaches here: validation failures
+      // return early and API failures throw above, so the dialog
+      // stays open whenever the user must correct something.
       await load();
+      if (sequencesOk) {
+        onOpenChange(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save assignment settings.";
       setSaveError(message);
@@ -1654,15 +1983,16 @@ export function TableAssignmentDialog({
    * Inline member editor shared by the Add form (below the member
    * list) and the per-row Edit form (below that member's row). Only
    * one editor is ever open (single `editingKey`), so this renders in
-   * at most one slot. Basic fields stay visible; Contact,
-   * Notifications, Availability, and Customer messages live behind
-   * collapsed toggles. Uses the same form state, validation, and
+   * at most one slot. Uses the same form state, validation, and
    * persistence as the main Save — no parallel source of truth.
    *
-   * STEP 1 passes `basicOnly` so member selection stays compact:
-   * link, display name, contact essentials, and the "Receives new
-   * leads" switch only. Advanced notification, availability pause,
-   * and customer-message groups live in STEP 2.
+   * Step 1 (members slot) stays compact on purpose: link and share
+   * only. Display names come from the linked roster member
+   * automatically; external contacts are named in Step 2, and contact
+   * details live in Step 2 notification cards. Availability and
+   * Customer messages groups remain available in the full editor
+   * used by the advanced slot. Step 3 never uses this editor — it
+   * renders the dedicated compact sequence panel instead.
    */
   const renderMemberEditor = (isNew: boolean, basicOnly = false) => (
     <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
@@ -1672,111 +2002,71 @@ export function TableAssignmentDialog({
         </p>
         <section aria-label="Member">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <Label>Link team member (optional)</Label>
-              <SearchableSelect
-                value={form.user_id ?? ""}
-                options={[
-                  { value: "", label: "External contact (no login)" },
-                  ...rosterOptions,
-                ]}
-                onChange={(v) => linkMember(v)}
-                placeholder="External contact (no login)"
-                searchPlaceholder="Search team members…"
-                emptyText="No team members match."
-                ariaLabel="Link team member"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>Display name</Label>
-              <Input
-                value={form.display_name}
-                onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                placeholder="Priya Sharma"
-                autoFocus
-              />
-            </div>
+            {isNew ? (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label>Link team member (optional)</Label>
+                <SearchableSelect
+                  value={form.user_id ?? ""}
+                  options={[
+                    { value: "", label: "External contact (no login)" },
+                    ...rosterOptions,
+                  ]}
+                  onChange={(v) => linkMember(v)}
+                  placeholder="External contact (no login)"
+                  searchPlaceholder="Search team members…"
+                  emptyText="No team members match."
+                  ariaLabel="Link team member"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave unlinked to add an external contact — you will name it in Step 2.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label>Team member</Label>
+                <p className="text-sm font-medium text-foreground">
+                  {form.display_name.trim() || "External contact"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {form.user_id ? "Linked team member" : "External contact (no login)"}
+                </p>
+              </div>
+            )}
+            {!basicOnly ? (
+              <div className="flex flex-col gap-1.5">
+                <Label>Display name</Label>
+                <Input
+                  value={form.display_name}
+                  onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
+                  placeholder="Priya Sharma"
+                />
+              </div>
+            ) : null}
             {mode === "percentage" ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="assign-share">Share percentage</Label>
-                <div className="flex items-center gap-1.5">
-                  <Input
-                    id="assign-share"
-                    value={form.weight}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, weight: e.target.value.replace(/[^0-9]/g, "").slice(0, 3) }))
-                    }
-                    placeholder="20"
-                    inputMode="numeric"
-                    aria-label={`Share percentage for ${form.display_name.trim() || "member"}`}
-                    className="text-right"
-                  />
-                  <span className="text-xs text-muted-foreground">%</span>
-                </div>
+                <ShareSelect
+                  id="assign-share"
+                  value={form.weight}
+                  onChange={(v) => setForm((f) => ({ ...f, weight: v }))}
+                  displayName={form.display_name}
+                  autoFocus={isNew}
+                />
               </div>
-            ) : null}
-            {isNew ? (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="assign-email">Email for notifications (optional)</Label>
-                  <Input
-                    id="assign-email"
-                    value={form.email}
-                    onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                    placeholder="priya@example.com"
-                    inputMode="email"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label>Phone (with country code)</Label>
-                  <Input
-                    value={form.phone}
-                    onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                    placeholder="+911234567890"
-                    inputMode="tel"
-                  />
-                </div>
-              </>
             ) : null}
           </div>
         </section>
-        {form.user_id && (
+        {form.user_id ? (
           <p className="-mt-2 text-xs text-muted-foreground">
             Linked members take ownership in the Assigned To column. External
             contacts receive notifications only — the lead stays Unassigned.
           </p>
+        ) : (
+          <p className="-mt-2 text-xs text-muted-foreground">
+            External contact — name and notification details are collected in Step 2.
+          </p>
         )}
-        {basicOnly && !isNew ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <Label>Email for notifications (optional)</Label>
-              <Input
-                value={form.email}
-                onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                placeholder="priya@example.com"
-                inputMode="email"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>Phone (with country code)</Label>
-              <Input
-                value={form.phone}
-                onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                placeholder="+911234567890"
-                inputMode="tel"
-              />
-            </div>
-            <label className="flex items-center gap-2 text-sm sm:col-span-2">
-              <Switch
-                checked={form.is_active}
-                onCheckedChange={(v) => setForm((f) => ({ ...f, is_active: v }))}
-                aria-label="Member receives new leads"
-              />
-              Receives new leads
-            </label>
-          </div>
-        ) : null}
-        {isNew || basicOnly ? null : (
+        {basicOnly ? null : (
           <>
             <div>
               <Button
@@ -1791,192 +2081,6 @@ export function TableAssignmentDialog({
             </div>
             {showAdvanced ? (
               <div className="flex flex-col gap-4">
-                <section aria-label="Contact details">
-                  <div className="mb-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 px-2 text-sm font-semibold"
-                      onClick={() => setOpenGroup(openGroup === "contact" ? null : "contact")}
-                      aria-expanded={openGroup === "contact"}
-                    >
-                      Contact details
-                    </Button>
-                  </div>
-                  {openGroup === "contact" ? (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="flex flex-col gap-1.5">
-                        <Label htmlFor="assign-email">Email for notifications (optional)</Label>
-                        <Input
-                          id="assign-email"
-                          value={form.email}
-                          onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                          placeholder="priya@example.com"
-                          inputMode="email"
-                        />
-                        <p className="text-xs leading-snug text-muted-foreground">
-                          This address receives notifications. If left empty, the linked team
-                          member&apos;s roster email is used.
-                        </p>
-                      </div>
-                      <div className="flex flex-col gap-1.5">
-                        <Label>Phone (with country code)</Label>
-                        <Input
-                          value={form.phone}
-                          onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                          placeholder="+911234567890"
-                          inputMode="tel"
-                        />
-                      </div>
-                      <div className="flex flex-col gap-1.5 sm:col-span-2">
-                        <Label>
-                          Extra WhatsApp numbers
-                          {form.whatsapp_numbers.length > 0
-                            ? ` (${form.whatsapp_numbers.length})`
-                            : ""}
-                        </Label>
-                        <p className="text-xs leading-snug text-muted-foreground">
-                          Each number gets its own template below. Empty template =
-                          this table&apos;s default WhatsApp template. The main phone
-                          above stays the primary number.
-                        </p>
-                        {form.whatsapp_numbers.map((n, i) => {
-                          const numberKey =
-                            n.template_name.trim() === ""
-                              ? ""
-                              : encodeTemplateKey({
-                                  name: n.template_name.trim(),
-                                  language: n.template_language.trim() || "en_US",
-                                });
-                          return (
-                            <div
-                              key={i}
-                              className="flex flex-col gap-2 rounded-lg border border-border p-2 sm:flex-row sm:items-start"
-                            >
-                              <Input
-                                value={n.phone}
-                                onChange={(e) =>
-                                  setForm((f) => ({
-                                    ...f,
-                                    whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
-                                      j === i ? { ...m, phone: e.target.value } : m,
-                                    ),
-                                  }))
-                                }
-                                placeholder="+911234567891"
-                                inputMode="tel"
-                                aria-label={`Extra WhatsApp number ${i + 1}`}
-                                className="sm:max-w-44"
-                              />
-                              <div className="min-w-0 flex-1">
-                                <SearchableSelect
-                                  value={numberKey}
-                                  options={templateOptions}
-                                  onChange={(v) => {
-                                    const parsed = decodeTemplateKey(v);
-                                    setForm((f) => ({
-                                      ...f,
-                                      whatsapp_numbers: f.whatsapp_numbers.map((m, j) =>
-                                        j === i
-                                          ? {
-                                              ...m,
-                                              template_name: parsed ? parsed.name : "",
-                                              template_language: parsed
-                                                ? parsed.language
-                                                : "en_US",
-                                            }
-                                          : m,
-                                      ),
-                                    }));
-                                  }}
-                                  placeholder="Table default template"
-                                  searchPlaceholder="Search templates…"
-                                  emptyText={
-                                    templatesError
-                                      ? "Could not load templates."
-                                      : "No approved templates found."
-                                  }
-                                  ariaLabel={`Template for extra WhatsApp number ${i + 1}`}
-                                  disabled={readOnly}
-                                />
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                aria-label={`Remove extra WhatsApp number ${i + 1}`}
-                                onClick={() =>
-                                  setForm((f) => ({
-                                    ...f,
-                                    whatsapp_numbers: f.whatsapp_numbers.filter((_, j) => j !== i),
-                                  }))
-                                }
-                              >
-                                <Trash2 className="size-4" aria-hidden />
-                              </Button>
-                            </div>
-                          );
-                        })}
-                        {form.whatsapp_numbers.length < MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE ? (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="self-start"
-                            onClick={() =>
-                              setForm((f) => ({
-                                ...f,
-                                whatsapp_numbers: [
-                                  ...f.whatsapp_numbers,
-                                  { phone: "", template_name: "", template_language: "en_US" },
-                                ],
-                              }))
-                            }
-                          >
-                            <Plus className="mr-1.5 size-4" aria-hidden /> Add WhatsApp number
-                          </Button>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">
-                            Maximum {MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE} numbers per assignee.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
-                <section aria-label="Notification preferences">
-                  <div className="mb-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 px-2 text-sm font-semibold"
-                      onClick={() => setOpenGroup(openGroup === "notify" ? null : "notify")}
-                      aria-expanded={openGroup === "notify"}
-                    >
-                      Notifications
-                    </Button>
-                  </div>
-                  {openGroup === "notify" ? (
-                    <div className="flex flex-wrap items-center gap-4">
-                      <label className="flex items-center gap-2 text-sm">
-                        <Switch
-                          checked={form.notify_email}
-                          onCheckedChange={(v) => setForm((f) => ({ ...f, notify_email: v }))}
-                        />
-                        Email alerts
-                      </label>
-                      <label className="flex items-center gap-2 text-sm">
-                        <Switch
-                          checked={form.notify_whatsapp}
-                          onCheckedChange={(v) => setForm((f) => ({ ...f, notify_whatsapp: v }))}
-                        />
-                        WhatsApp alerts
-                      </label>
-                    </div>
-                  ) : null}
-                </section>
                 <section aria-label="Availability">
                   <div className="mb-1">
                     <Button
@@ -1992,20 +2096,8 @@ export function TableAssignmentDialog({
                   </div>
                   {openGroup === "avail" ? (
                     <div className="flex flex-col gap-2">
-                      <label className="flex items-center gap-2 text-sm">
-                        <Switch
-                          checked={form.is_active}
-                          onCheckedChange={(v) => setForm((f) => ({ ...f, is_active: v }))}
-                          aria-label="Member receives new leads"
-                        />
-                        Receives new leads
-                      </label>
                       {editingSaved ? (
-                        !form.is_active ? (
-                          <p className="text-xs text-muted-foreground">
-                            Inactive — this member won&apos;t receive new leads.
-                          </p>
-                        ) : editingSaved.paused_until ? (
+                        editingSaved.paused_until ? (
                           <p className="text-xs text-muted-foreground">
                             Paused until {formatPausedUntilFull(editingSaved.paused_until)}
                             {editingSaved.pause_reason ? ` — ${editingSaved.pause_reason}` : ""}
@@ -2203,6 +2295,7 @@ export function TableAssignmentDialog({
                             delay={form.sequence?.delay_seconds ?? "0"}
                             items={form.sequence?.items ?? []}
                             readOnly={false}
+                            templateDetails={templateDetails}
                             onDelayChange={(v) =>
                               setForm((f) => ({
                                 ...f,
@@ -2245,6 +2338,96 @@ export function TableAssignmentDialog({
     </div>
   );
 
+  /**
+   * Compact Step 3 customer-sequence panel — deliberately separate
+   * from renderMemberEditor. One salesperson's WhatsApp templates
+   * only: no team link, display name, share, availability, or
+   * notification fields. Approved templates with full preview come
+   * from the existing catalog; edits ride the same form state and
+   * per-salesperson persistence, committed sequence-only (no member
+   * validation) via commitSequenceEditor.
+   */
+  const renderSequencePanel = () => (
+    <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium text-foreground">
+          WhatsApp messages to lead
+        </p>
+        <p className="text-xs leading-snug text-muted-foreground">
+          {sequenceStatusText(form)} These templates are sent to a
+          lead on initial assignment only — reassignment does not
+          resend them.
+        </p>
+        {!formKey ? (
+          <p className="text-xs text-muted-foreground">
+            Link a team member or enter an email address or phone number to
+            configure customer templates.
+          </p>
+        ) : sequenceCatalogLoading && sequenceCatalog === null ? (
+          <p className="text-xs text-muted-foreground">
+            Loading customer templates…
+          </p>
+        ) : sequenceCatalog === null ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="alert" className="text-xs text-destructive">
+              Could not load customer templates.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadSequenceCatalog()}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <AssigneeSequenceEditor
+            templates={sequenceCatalog.templates}
+            fields={sequenceCatalog.fields}
+            sample={sequenceCatalog.sample}
+            delay={form.sequence?.delay_seconds ?? "0"}
+            items={form.sequence?.items ?? []}
+            readOnly={false}
+            templateDetails={templateDetails}
+            onDelayChange={(v) =>
+              setForm((f) => ({
+                ...f,
+                sequence: {
+                  delay_seconds: v,
+                  items: f.sequence?.items ?? [],
+                },
+                sequenceDirty: true,
+              }))
+            }
+            onItemsChange={(items) =>
+              setForm((f) => ({
+                ...f,
+                sequence: {
+                  delay_seconds: f.sequence?.delay_seconds ?? "0",
+                  items,
+                },
+                sequenceDirty: true,
+              }))
+            }
+          />
+        )}
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
+            Cancel
+          </Button>
+          <Button type="button" size="sm" onClick={confirmSequenceEdit}>
+            Done
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const confirmSequenceEdit = () => {
+    commitSequenceEditor();
+  };
+
   const kindLabel = tableKind === "meta_lead_ads" ? "Meta Lead Ads table" : "Flow table";
   // View mode renders the same saved state with every mutation
   // path closed: disabled inputs, hidden action buttons, a
@@ -2265,18 +2448,33 @@ export function TableAssignmentDialog({
       ? savedById.get(pauseFor)
       : undefined;
 
-  // STEP 3 validation summary: recomputed from the live drafts so
+  // Review validation summary: recomputed from the live drafts so
   // the review can never drift from what Save submits. Reaching the
   // review step implies committed editors (Continue commits first),
   // so these mirror the save-time checks.
   const reviewAssignProblem = validateAssignStep(drafts, mode);
   const reviewNotifyProblem = validateNotifyStep(notifyArgsFor(drafts));
+  const reviewSequencesProblem = validateSequencesStep({
+    drafts,
+    isMetaTable,
+  });
+
+  // Sidebar "needs attention" markers: surface step problems without
+  // navigating away. Same validators, recomputed from live drafts.
+  const invalidSteps: AssignmentStep[] = (() => {
+    const out: AssignmentStep[] = [];
+    if (validateAssignStep(drafts, mode)) out.push("assign");
+    if (validateNotifyStep({ ...notifyArgsFor(drafts), checkSequences: false }))
+      out.push("notify");
+    if (validateSequencesStep({ drafts, isMetaTable })) out.push("sequences");
+    return out;
+  })();
 
   return (
     <ConfigDialog
       open={open}
       onOpenChange={onOpenChange}
-      width="xl"
+      width="assignment"
       icon={<UserPlus aria-hidden />}
       title="Assignment"
       tableLine={`${flowName ?? "This table"} · ${kindLabel}`}
@@ -2397,7 +2595,7 @@ export function TableAssignmentDialog({
             >
               Cancel
             </Button>
-            {step === "notifications" ? (
+            {step !== "assign" ? (
               <Button
                 type="button"
                 variant="outline"
@@ -2420,11 +2618,31 @@ export function TableAssignmentDialog({
     >
       {!loading && (
         <div className="flex flex-col gap-5">
-          <AssignmentStepper
-            step={readOnly ? "review" : step}
-            completedSteps={readOnly ? ["assign", "notifications"] : completedSteps}
-            onStepClick={readOnly ? undefined : goToStep}
-          />
+          {/* Compact top stepper on small screens; the persistent
+              left sidebar below takes over on md+ screens. */}
+          <div className="md:hidden">
+            <AssignmentStepper
+              step={readOnly ? "review" : step}
+              completedSteps={readOnly ? ["assign", "notify", "sequences"] : completedSteps}
+              onStepClick={readOnly ? undefined : goToStep}
+            />
+          </div>
+          <div className="flex min-h-0 flex-col gap-5 md:flex-row">
+            <aside
+              aria-label="Assignment steps"
+              className="hidden shrink-0 md:block md:w-56"
+            >
+              <div className="md:sticky md:top-0">
+                <AssignmentStepper
+                  layout="vertical"
+                  step={readOnly ? "review" : step}
+                  completedSteps={readOnly ? ["assign", "notify", "sequences"] : completedSteps}
+                  onStepClick={readOnly ? undefined : goToStep}
+                  invalidSteps={invalidSteps}
+                />
+              </div>
+            </aside>
+            <div className="flex min-w-0 flex-1 flex-col gap-5">
           {!readOnly && step === "assign" ? (
           <>
           <section aria-label="How should leads be assigned?">
@@ -2567,12 +2785,12 @@ export function TableAssignmentDialog({
                   ) : null}
                 </div>
               )}
-              {editingKey === "__new__" ? renderMemberEditor(true) : null}
+              {editingKey === "__new__" ? renderMemberEditor(true, true) : null}
               </ConfigSection>
             </section>
           </>
           ) : null}
-          {!readOnly && step === "notifications" ? (
+          {!readOnly && step === "notify" ? (
           <>
           <section aria-label="Notify assigned team member">
             <ConfigSection
@@ -2580,16 +2798,7 @@ export function TableAssignmentDialog({
               hint="Send a WhatsApp notification when a new lead is assigned."
             >
               <div className="flex flex-col gap-3">
-                <label className="flex items-center gap-2 text-sm">
-                  <Switch
-                    checked={notifyEnabled}
-                    onCheckedChange={setNotifyEnabled}
-                    aria-label="Notify assigned team member"
-                    disabled={readOnly}
-                  />
-                  WhatsApp notifications
-                </label>
-                {notifyEnabled ? (
+                {notifyEnabled || drafts.length === 0 ? (
                   <div className="flex flex-col gap-1.5">
                     <Label>WhatsApp template</Label>
                     {templatesLoading && templates === null ? (
@@ -2616,6 +2825,18 @@ export function TableAssignmentDialog({
                             }
                             ariaLabel="WhatsApp template (optional)"
                             disabled={readOnly}
+                            renderOptionPreview={(o) => {
+                              const detail = templateDetails.get(o.value);
+                              if (!detail) return null;
+                              return (
+                                <TemplatePreviewPopover
+                                  detail={detail}
+                                  label={`Preview template ${detail.name}`}
+                                >
+                                  <TemplatePreviewEye label={`Preview template ${detail.name}`} />
+                                </TemplatePreviewPopover>
+                              );
+                            }}
                           />
                         </div>
                         {templateKey !== "" ? (
@@ -2647,15 +2868,25 @@ export function TableAssignmentDialog({
                     )}
                     {templatePreviewOpen && templateKey !== "" ? (() => {
                       const selected = templateOptions.find((o) => o.value === templateKey);
+                      const detail = templateDetails.get(templateKey);
                       return (
-                        <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs">
-                          <p className="font-medium text-foreground">
-                            {selected?.label ?? templateName.trim()}
-                          </p>
-                          <p className="mt-0.5 text-muted-foreground">
-                            {selected?.hint ?? templateLanguage.trim()}
-                          </p>
-                        </div>
+                        <TemplatePreviewCard
+                          detail={
+                            detail ?? {
+                              name: selected?.label ?? templateName.trim(),
+                              language: templateLanguage.trim(),
+                              status: "",
+                              category: null,
+                              headerType: null,
+                              headerContent: null,
+                              headerMediaUrl: null,
+                              bodyText: "",
+                              footerText: null,
+                              buttons: [],
+                              sampleValues: {},
+                            }
+                          }
+                        />
                       );
                     })() : null}
                     {templatesError ? (
@@ -2704,15 +2935,206 @@ export function TableAssignmentDialog({
             </ConfigSection>
           </section>
 
+          <section aria-label="Salesperson notifications">
+            <ConfigSection
+              title="Salesperson notifications"
+              hint="Choose how each salesperson is notified when they receive a new lead. Contact details are only needed for enabled channels."
+            >
+              {drafts.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No team members assigned. Salesperson notifications are not configured.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {drafts.map((d) => {
+                    const rosterEmail = d.user_id ? rosterById.get(d.user_id)?.email?.trim() || "" : "";
+                    return (
+                    <div
+                      key={d.key}
+                      className="rounded-lg border border-border bg-card px-3 py-2.5"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <MemberInitials name={d.display_name} />
+                        <div className="min-w-0 flex-1">
+                          {d.display_name.trim() ? (
+                            <p className="truncate text-sm font-medium text-foreground">
+                              {d.display_name}
+                            </p>
+                          ) : (
+                            <p className="truncate text-sm font-medium text-muted-foreground">
+                              External contact — add a name below
+                            </p>
+                          )}
+                          <p className="truncate text-xs text-muted-foreground">
+                            {d.user_id ? "Team member" : "External contact"}
+                            {mode === "percentage" ? ` · ${d.weight}%` : ""}
+                            {` · ${d.is_active ? "Receives new leads" : "Paused"}`}
+                          </p>
+                        </div>
+                        <label className="flex shrink-0 items-center gap-1.5 text-xs">
+                          <Switch
+                            checked={d.notify_email}
+                            onCheckedChange={(v) => patchDraft(d.key, { notify_email: v })}
+                            aria-label={`Email alerts for ${d.display_name.trim() || "member"}`}
+                            disabled={readOnly}
+                          />
+                          Email
+                        </label>
+                        <label className="flex shrink-0 items-center gap-1.5 text-xs">
+                          <Switch
+                            checked={d.notify_whatsapp}
+                            onCheckedChange={(v) => patchDraft(d.key, { notify_whatsapp: v })}
+                            aria-label={`WhatsApp alerts for ${d.display_name.trim() || "member"}`}
+                            disabled={readOnly}
+                          />
+                          WhatsApp
+                        </label>
+                      </div>
+                      {!d.user_id ? (
+                        <div className="mt-2 flex flex-col gap-1.5">
+                          <Label htmlFor={`notify-name-${d.key}`}>
+                            Display name <span className="text-destructive">*</span>
+                          </Label>
+                          <Input
+                            id={`notify-name-${d.key}`}
+                            value={d.display_name}
+                            onChange={(e) => patchDraft(d.key, { display_name: e.target.value })}
+                            placeholder="Priya Sharma"
+                            disabled={readOnly}
+                          />
+                        </div>
+                      ) : null}
+                      {d.notify_whatsapp ? (
+                        <div className="mt-2 flex flex-col gap-2">
+                          <div className="flex flex-col gap-1.5">
+                            <Label htmlFor={`notify-phone-${d.key}`}>Phone number</Label>
+                            <IndiaPhoneInput
+                              id={`notify-phone-${d.key}`}
+                              value={d.phone}
+                              onChange={(phone) => patchDraft(d.key, { phone })}
+                              ariaLabel={`WhatsApp phone number for ${d.display_name.trim() || "member"}`}
+                              disabled={readOnly}
+                            />
+                          </div>
+                          <WhatsappNumbersEditor
+                            numbers={d.whatsapp_numbers}
+                            onChange={(whatsapp_numbers) => patchDraft(d.key, { whatsapp_numbers })}
+                            templateOptions={templateOptions}
+                            templateDetails={templateDetails}
+                            disabled={readOnly}
+                            assigneeName={d.display_name.trim() || "member"}
+                            maxNumbers={MAX_WHATSAPP_NUMBERS_PER_ASSIGNEE}
+                          />
+                        </div>
+                      ) : null}
+                      {d.notify_email ? (
+                        <div className="mt-2 flex flex-col gap-1.5">
+                          <Label htmlFor={`notify-email-${d.key}`}>Email address</Label>
+                          <Input
+                            id={`notify-email-${d.key}`}
+                            value={d.email}
+                            onChange={(e) => patchDraft(d.key, { email: e.target.value })}
+                            placeholder={rosterEmail || "priya@example.com"}
+                            inputMode="email"
+                            disabled={readOnly}
+                          />
+                          {rosterEmail ? (
+                            <p className="text-xs text-muted-foreground">
+                              Leave empty to use the roster address ({rosterEmail}).
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {!d.notify_email && !d.notify_whatsapp ? (
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          Both channels are off — no contact details needed.
+                        </p>
+                      ) : null}
+                    </div>
+                    );
+                  })}
+                </div>
+              )}
+            </ConfigSection>
+          </section>
+
+          <section aria-label="Advanced member settings">
+            <ConfigSection
+              title="Advanced member settings"
+              hint="Availability pauses and customer messages per member. Notification channels live on each card above."
+            >
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowStepAdvanced((v) => !v)}
+                  aria-expanded={showStepAdvanced}
+                >
+                  {showStepAdvanced ? "Hide advanced member settings" : "Show advanced member settings"}
+                </Button>
+              </div>
+              {showStepAdvanced ? (
+                drafts.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Add members in Step 1 to configure advanced settings.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {drafts.map((d) => (
+                      <Fragment key={d.key}>
+                        <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2">
+                          <MemberInitials name={d.display_name} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-foreground">
+                              {d.display_name || "—"}
+                            </p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {d.user_id ? "Team member" : "External contact"}
+                              {d.whatsapp_numbers.length > 0
+                                ? ` · ${d.whatsapp_numbers.length} extra number${d.whatsapp_numbers.length === 1 ? "" : "s"}`
+                                : ""}
+                            </p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {[
+                                d.notify_email ? "Email on" : "Email off",
+                                d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off",
+                              ].join(" · ")}
+                            </p>
+                          </div>
+                          {readOnly ? null : (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs"
+                              onClick={() => startEdit(d, "advanced")}
+                            >
+                              Edit
+                            </Button>
+                          )}
+                        </div>
+                        {editingKey === d.key && editorSlot === "advanced" ? renderMemberEditor(false) : null}
+                      </Fragment>
+                    ))}
+                  </div>
+                )
+              ) : null}
+            </ConfigSection>
+          </section>
+          </>
+          ) : null}
+          {!readOnly && step === "sequences" ? (
+          <>
           {isMetaTable ? (
             <section aria-label="Messages to leads">
               <ConfigSection
-                title="Messages to leads"
-                hint="Automatically send WhatsApp messages to customers after lead assignment."
+                title="WhatsApp Template to Lead"
+                hint="Automatically send WhatsApp messages to customers after lead assignment. Each salesperson has their own sequence."
               >
                 {drafts.length === 0 ? (
                   <p className="text-xs text-muted-foreground">
-                    Add members above to configure customer messages.
+                    No team members assigned. There are no customer message sequences to configure.
                   </p>
                 ) : (
                   <div className="flex flex-col gap-1.5">
@@ -2744,91 +3166,26 @@ export function TableAssignmentDialog({
                           </Button>
                         )}
                       </div>
-                      {editingKey === d.key && editorSlot === "messages" ? renderMemberEditor(false) : null}
+                      {editingKey === d.key && editorSlot === "messages" ? renderSequencePanel() : null}
                       </Fragment>
                     ))}
                   </div>
                 )}
               </ConfigSection>
             </section>
-          ) : null}
-
-          <section aria-label="Advanced notification settings">
-            <ConfigSection
-              title="Advanced notification settings"
-              hint="Per-member email and WhatsApp preferences, contact details, and extra numbers."
-            >
-              <div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowStepAdvanced((v) => !v)}
-                  aria-expanded={showStepAdvanced}
-                >
-                  {showStepAdvanced ? "Hide advanced notification settings" : "Show advanced notification settings"}
-                </Button>
-              </div>
-              {showStepAdvanced ? (
-                drafts.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">
-                    Add members in Step 1 to configure advanced settings.
-                  </p>
-                ) : (
-                  <div className="flex flex-col gap-1.5">
-                    {drafts.map((d) => (
-                      <Fragment key={d.key}>
-                        <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2">
-                          <MemberInitials name={d.display_name} />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium text-foreground">
-                              {d.display_name || "—"}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {d.user_id ? "Team member" : "External contact"}
-                              {d.whatsapp_numbers.length > 0
-                                ? ` · ${d.whatsapp_numbers.length} extra number${d.whatsapp_numbers.length === 1 ? "" : "s"}`
-                                : ""}
-                            </p>
-                          </div>
-                          <label className="flex items-center gap-1.5 text-xs">
-                            <Switch
-                              checked={d.notify_email}
-                              onCheckedChange={(v) => patchDraft(d.key, { notify_email: v })}
-                              aria-label={`Email alerts for ${d.display_name || "member"}`}
-                              disabled={readOnly}
-                            />
-                            Email
-                          </label>
-                          <label className="flex items-center gap-1.5 text-xs">
-                            <Switch
-                              checked={d.notify_whatsapp}
-                              onCheckedChange={(v) => patchDraft(d.key, { notify_whatsapp: v })}
-                              aria-label={`WhatsApp alerts for ${d.display_name || "member"}`}
-                              disabled={readOnly}
-                            />
-                            WhatsApp
-                          </label>
-                          {readOnly ? null : (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 px-2 text-xs"
-                              onClick={() => startEdit(d, "advanced")}
-                            >
-                              Edit
-                            </Button>
-                          )}
-                        </div>
-                        {editingKey === d.key && editorSlot === "advanced" ? renderMemberEditor(false) : null}
-                      </Fragment>
-                    ))}
-                  </div>
-                )
-              ) : null}
-            </ConfigSection>
-          </section>
+          ) : (
+            <section aria-label="Messages to leads">
+              <ConfigSection
+                title="WhatsApp Template to Lead"
+                hint="Customer messages are configured per salesperson."
+              >
+                <p className="text-xs text-muted-foreground">
+                  Customer WhatsApp sequences are available on Meta Lead Ads tables. Flow
+                  tables keep assignment without customer messaging — continue to review.
+                </p>
+              </ConfigSection>
+            </section>
+          )}
           </>
           ) : null}
           {(readOnly || step === "review") ? (
@@ -2849,16 +3206,26 @@ export function TableAssignmentDialog({
                 notifyEnabled={notifyEnabled}
                 templateName={templateName}
                 templateLanguage={templateLanguage}
-                enabled={enabled}
-                isNew={!payload?.config}
+                enabled={enabled && drafts.length > 0}
+                isNew={!!(!payload?.config && drafts.length > 0)}
               />
-              {reviewAssignProblem || reviewNotifyProblem ? (
+              {drafts.length === 0 && !readOnly ? (
+                <p className="text-xs text-muted-foreground">
+                  No team members assigned — automatic team assignment is
+                  inactive and new leads will stay Unassigned until members
+                  are added. Existing lead ownership is unchanged.
+                </p>
+              ) : null}
+              {reviewAssignProblem || reviewNotifyProblem || reviewSequencesProblem ? (
                 <div className="flex flex-col gap-1.5" role="alert">
                   {reviewAssignProblem ? (
                     <p className="text-xs font-medium text-destructive">{reviewAssignProblem}</p>
                   ) : null}
                   {reviewNotifyProblem ? (
                     <p className="text-xs font-medium text-destructive">{reviewNotifyProblem}</p>
+                  ) : null}
+                  {reviewSequencesProblem ? (
+                    <p className="text-xs font-medium text-destructive">{reviewSequencesProblem}</p>
                   ) : null}
                   {!readOnly ? (
                     <p className="text-xs text-muted-foreground">
@@ -2941,6 +3308,8 @@ export function TableAssignmentDialog({
           </section>
           </>
           ) : null}
+          </div>
+        </div>
         </div>
       )}
     </ConfigDialog>
