@@ -139,7 +139,7 @@ export default function CallsPage() {
   }, [stats, members]);
 
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 p-4 sm:p-6">
+    <div className="flex w-full flex-col gap-4 p-4 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-start gap-3">
           <div className="flex h-11 w-11 items-center justify-center rounded-full bg-blue-600 text-white">
@@ -189,7 +189,7 @@ export default function CallsPage() {
         </p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-4 xl:grid-cols-4 2xl:grid-cols-7">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 xl:grid-cols-7">
             {loading || !stats ? (
               Array.from({ length: 7 }).map((_, i) => (
                 <Skeleton key={i} className="h-[104px] w-full rounded-xl" />
@@ -231,7 +231,7 @@ export default function CallsPage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-            <div className="xl:col-span-5">
+            <div className="xl:col-span-6">
               <TrendChart
                 buckets={stats?.trend.buckets ?? null}
                 loading={loading}
@@ -245,7 +245,7 @@ export default function CallsPage() {
                 loading={loading}
               />
             </div>
-            <div className="xl:col-span-4">
+            <div className="xl:col-span-3">
               <DirectionDonut
                 inbound={stats?.incomingRecordings ?? 0}
                 outbound={stats?.outgoingRecordings ?? 0}
@@ -258,10 +258,10 @@ export default function CallsPage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-            <div className="xl:col-span-6">
+            <div className="xl:col-span-5">
               <SalespersonTable rows={salespersonRows} loading={loading} />
             </div>
-            <div className="xl:col-span-3">
+            <div className="xl:col-span-4">
               <HourlyChart data={stats?.hourly ?? null} loading={loading} />
             </div>
             <div className="xl:col-span-3">
