@@ -1,35 +1,45 @@
 'use client';
 
-import {
-  Clock3,
-  Phone,
-  PhoneIncoming,
-  PhoneMissed,
-  PhoneOff,
-  PhoneOutgoing,
-} from 'lucide-react';
+import { Phone } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/dashboard/skeleton';
-import { CallsChart } from '@/components/calls/dashboard/calls-chart';
-import { DirectionDonut } from '@/components/calls/dashboard/direction-donut';
-import { FilterBar, type MemberOption } from '@/components/calls/dashboard/filter-bar';
 import { KpiCard } from '@/components/calls/dashboard/kpi-card';
-import { DurationBars, TopClients } from '@/components/calls/dashboard/panels';
-import { RecentList } from '@/components/calls/dashboard/recent-list';
-import { loadCallsStats, type CallsStatsResult } from '@/lib/calls/client';
+import { TrendChart } from '@/components/calls/dashboard/trend-chart';
+import { DirectionDonut } from '@/components/calls/dashboard/direction-donut';
+import { OutcomeDonut } from '@/components/calls/dashboard/outcome-donut';
+import { SalespersonTable } from '@/components/calls/dashboard/salesperson-table';
+import {
+  HourlyChart,
+  WeekdayChart,
+} from '@/components/calls/dashboard/activity-charts';
+import { RecentCallsTable } from '@/components/calls/dashboard/recent-calls';
+import { RecordingsToolbar } from '@/components/recordings/recordings-toolbar';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { getCallsRange } from '@/lib/calls/ranges';
 import { formatShortDuration } from '@/lib/calls/formatters';
-import { getCallsRange, type CallsRangeKey } from '@/lib/calls/ranges';
+import { mergeSalespersonRows } from '@/lib/calls/aggregate';
+import {
+  loadMemberOptions,
+  loadWorkspaceTableOptions,
+  resetRecordingsFilters,
+  type MemberOption,
+  type RecordingsFilters,
+  type WorkspaceTableOption,
+} from '@/lib/recordings/library';
+import {
+  loadCallsStats,
+  type CallsStatsResult,
+  type SalespersonRow,
+} from '@/lib/calls/client';
 
-interface MembersResponse {
-  members?: Array<{
-    user_id: string;
-    full_name: string | null;
-    email: string | null;
-  }>;
-}
-
+/**
+ * Calls dashboard: one shared filter state (the Recordings
+ * toolbar) drives every section. Totals/outcomes/salesperson
+ * numbers are exact server-side RPCs; hourly, weekday, trend and
+ * recent rows derive from the same bounded fetch, so every panel
+ * describes the same filtered set.
+ */
 export default function CallsPage() {
   const tz = useMemo(
     () =>
@@ -39,20 +49,27 @@ export default function CallsPage() {
     []
   );
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [rangeKey, setRangeKey] = useState<CallsRangeKey>('last30');
-  const [customFrom, setCustomFrom] = useState('');
-  const [customTo, setCustomTo] = useState('');
-  const [userFilter, setUserFilter] = useState<string | null>(null);
-  const [directionFilter, setDirectionFilter] = useState<string | null>(null);
+  const [filters, setFilters] = useState<RecordingsFilters>(
+    resetRecordingsFilters()
+  );
   const [members, setMembers] = useState<MemberOption[]>([]);
+  const [tables, setTables] = useState<WorkspaceTableOption[]>([]);
   const [stats, setStats] = useState<CallsStatsResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const debouncedQ = useDebouncedValue(filters.q, 300);
   const range = useMemo(
     () =>
-      getCallsRange(rangeKey, nowMs, tz, { fromInput: customFrom, toInput: customTo }),
-    [rangeKey, nowMs, tz, customFrom, customTo]
+      getCallsRange(filters.rangeKey, nowMs, tz, {
+        fromInput: filters.customFrom,
+        toInput: filters.customTo,
+      }),
+    [filters.rangeKey, filters.customFrom, filters.customTo, nowMs, tz]
+  );
+  const effectiveFilters = useMemo(
+    () => ({ ...filters, q: debouncedQ }),
+    [filters, debouncedQ]
   );
 
   const fetchAll = useCallback(async () => {
@@ -60,39 +77,31 @@ export default function CallsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [dashboard, membersRes] = await Promise.all([
-        loadCallsStats({
-          fromISO: range.fromISO,
-          toISO: range.toISO,
-          user: userFilter,
-          direction: directionFilter,
-          timeZone: tz,
-          signal: controller.signal,
-        }),
-        fetch('/api/account/members', { cache: 'no-store', signal: controller.signal }).then(
-          async (res) => {
-            if (!res.ok) return null;
-            return (await res.json()) as MembersResponse;
-          }
-        ),
-      ]);
+      const dashboard = await loadCallsStats({
+        fromISO: range.fromISO,
+        toISO: range.toISO,
+        user: effectiveFilters.uploadedBy,
+        direction: effectiveFilters.direction,
+        timeZone: tz,
+        q: effectiveFilters.q.trim() || undefined,
+        callType: effectiveFilters.callType,
+        workspaceTable: effectiveFilters.workspaceTable,
+        status: effectiveFilters.status,
+        signal: controller.signal,
+      });
       if (controller.signal.aborted) return;
       setStats(dashboard);
-      setMembers(
-        (membersRes?.members ?? []).map((m) => ({
-          user_id: m.user_id,
-          label: m.full_name || m.email || 'Unknown user',
-        }))
-      );
     } catch (err) {
       if (controller.signal.aborted) return;
       setStats(null);
-      setError(err instanceof Error ? err.message : 'Failed to load call analytics');
+      setError(
+        err instanceof Error ? err.message : 'Failed to load call analytics'
+      );
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
     return () => controller.abort();
-  }, [range, userFilter, directionFilter, tz]);
+  }, [range, effectiveFilters, tz]);
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -101,6 +110,17 @@ export default function CallsPage() {
     });
     return () => cleanup?.();
   }, [fetchAll]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadMemberOptions(controller.signal)
+      .then(setMembers)
+      .catch(() => undefined);
+    void loadWorkspaceTableOptions(controller.signal)
+      .then(setTables)
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
 
   // Re-anchor "now" when the tab regains focus so Today stays current.
   useEffect(() => {
@@ -111,6 +131,13 @@ export default function CallsPage() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
+  // Every authorized salesperson appears: assigned rows from the
+  // server plus zero-activity roster members, sorted by volume.
+  const salespersonRows: SalespersonRow[] | null = useMemo(() => {
+    if (!stats) return null;
+    return mergeSalespersonRows(stats.salesperson, members);
+  }, [stats, members]);
+
   return (
     <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 p-4 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -119,143 +146,134 @@ export default function CallsPage() {
             <Phone className="h-5 w-5" />
           </div>
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Calls</h1>
-            <p className="mt-0.5 text-sm text-muted-foreground">
-              Recorded phone calls from your devices. Analyze call activity, durations and team
-              performance.
+            <h1 className="text-foreground text-2xl font-semibold tracking-tight">
+              Calls Dashboard
+            </h1>
+            <p className="text-muted-foreground mt-0.5 text-sm">
+              Complete call insights for your team. Track volume, performance
+              and calling activity.
             </p>
           </div>
         </div>
-        <FilterBar
-          rangeKey={rangeKey}
-          onRangeKey={setRangeKey}
-          customFrom={customFrom}
-          customTo={customTo}
-          onCustom={(f, t) => {
-            setCustomFrom(f);
-            setCustomTo(t);
-          }}
-          nowMs={nowMs}
-          timeZone={tz}
-          members={members}
-          userFilter={userFilter}
-          onUserFilter={setUserFilter}
-          directionFilter={directionFilter}
-          onDirectionFilter={setDirectionFilter}
-        />
       </div>
 
+      <RecordingsToolbar
+        filters={filters}
+        onChange={setFilters}
+        nowMs={nowMs}
+        timeZone={tz}
+        members={members}
+        tables={tables}
+      />
+
       {stats?.truncated && !loading ? (
-        <p className="text-xs text-muted-foreground">
-          Very large result set — charts and lists show the most recent 5,000 recordings; the KPI
-          cards above are exact.
+        <p className="text-muted-foreground text-xs">
+          Very large result set — charts and lists show the most recent 5,000
+          recordings; the KPI cards are exact.
         </p>
       ) : null}
 
       {error ? (
         <p
           role="alert"
-          className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+          className="border-destructive/30 bg-destructive/5 text-destructive rounded-xl border p-4 text-sm"
         >
           {error}{' '}
-          <Button variant="outline" size="sm" className="ml-2" onClick={() => void fetchAll()}>
+          <button
+            type="button"
+            className="ml-2 underline"
+            onClick={() => void fetchAll()}
+          >
             Retry
-          </Button>
+          </button>
         </p>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-2 gap-4 xl:grid-cols-4 2xl:grid-cols-7">
             {loading || !stats ? (
-              Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-[104px] w-full rounded-xl" />)
+              Array.from({ length: 7 }).map((_, i) => (
+                <Skeleton key={i} className="h-[104px] w-full rounded-xl" />
+              ))
             ) : (
               <>
                 <KpiCard
-                  icon={Phone}
                   label="Total Calls"
                   value={stats.recordingCount.toLocaleString('en-US')}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
                 />
                 <KpiCard
-                  icon={Clock3}
-                  label="Call Duration"
+                  label="Total Call Duration"
                   value={formatShortDuration(stats.recordingDurationSecs)}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400"
                 />
                 <KpiCard
-                  icon={PhoneIncoming}
-                  label="Incoming"
-                  value={stats.incomingRecordings.toLocaleString('en-US')}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400"
+                  label="Phone Calls"
+                  value={stats.phoneRecordings.toLocaleString('en-US')}
                 />
                 <KpiCard
-                  icon={PhoneIncoming}
-                  label="Incoming Duration"
-                  value={formatShortDuration(stats.incomingDurationSecs)}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400"
+                  label="WhatsApp Calls"
+                  value={(
+                    stats.whatsappRecordings + stats.whatsappBusinessRecordings
+                  ).toLocaleString('en-US')}
                 />
                 <KpiCard
-                  icon={PhoneOutgoing}
-                  label="Outgoing"
+                  label="Outgoing Calls"
                   value={stats.outgoingRecordings.toLocaleString('en-US')}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-orange-50 text-orange-500 dark:bg-orange-500/10 dark:text-orange-400"
                 />
                 <KpiCard
-                  icon={PhoneOutgoing}
-                  label="Outgoing Duration"
-                  value={formatShortDuration(stats.outgoingDurationSecs)}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-orange-50 text-orange-500 dark:bg-orange-500/10 dark:text-orange-400"
+                  label="Incoming Calls"
+                  value={stats.incomingRecordings.toLocaleString('en-US')}
                 />
                 <KpiCard
-                  icon={PhoneMissed}
-                  label="Missed"
+                  label="Missed Calls"
                   value={stats.missedRecordings.toLocaleString('en-US')}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-rose-50 text-rose-500 dark:bg-rose-500/10 dark:text-rose-400"
-                />
-                <KpiCard
-                  icon={PhoneOff}
-                  label="Rejected"
-                  value={stats.rejectedRecordings.toLocaleString('en-US')}
-                  deltaPct={null}
-                  prevLabel=""
-                  iconClassName="bg-orange-50 text-orange-500 dark:bg-orange-500/10 dark:text-orange-400"
                 />
               </>
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-            <div className="xl:col-span-2">
-              <CallsChart daily={stats?.daily ?? null} loading={loading} />
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+            <div className="xl:col-span-5">
+              <TrendChart
+                buckets={stats?.trend.buckets ?? null}
+                loading={loading}
+              />
             </div>
-            <DirectionDonut
-              inbound={stats?.incomingRecordings ?? 0}
-              outbound={stats?.outgoingRecordings ?? 0}
-              unknown={stats?.unknownDirectionRecordings ?? 0}
-              loading={loading}
-            />
+            <div className="xl:col-span-3">
+              <OutcomeDonut
+                answered={stats?.answeredEvents ?? 0}
+                missed={stats?.missedRecordings ?? 0}
+                unknown={stats?.unknownEvents ?? 0}
+                loading={loading}
+              />
+            </div>
+            <div className="xl:col-span-4">
+              <DirectionDonut
+                inbound={stats?.incomingRecordings ?? 0}
+                outbound={stats?.outgoingRecordings ?? 0}
+                unknown={stats?.unknownDirectionRecordings ?? 0}
+                loading={loading}
+                title="Call Direction"
+                subtitle="Inbound vs outbound calls"
+              />
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <DurationBars buckets={stats?.durationBuckets ?? null} loading={loading} />
-            <TopClients clients={stats?.topClients ?? null} loading={loading} />
-            <div className="md:col-span-2 xl:col-span-1">
-              <RecentList recent={stats?.recent ?? null} loading={loading} />
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+            <div className="xl:col-span-6">
+              <SalespersonTable rows={salespersonRows} loading={loading} />
+            </div>
+            <div className="xl:col-span-3">
+              <HourlyChart data={stats?.hourly ?? null} loading={loading} />
+            </div>
+            <div className="xl:col-span-3">
+              <WeekdayChart data={stats?.weekday ?? null} loading={loading} />
             </div>
           </div>
+
+          <RecentCallsTable
+            recent={stats?.recent ?? null}
+            missed={stats?.recentMissed ?? null}
+            loading={loading}
+          />
         </>
       )}
     </div>
