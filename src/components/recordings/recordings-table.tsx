@@ -33,6 +33,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { WorkspacePagination } from '@/components/workspace/workspace-pagination';
+import { WorkspaceLeadLink } from '@/components/workspace/workspace-lead-link';
 import {
   DEFAULT_WORKSPACE_PAGE_SIZE,
   type WorkspacePageSize,
@@ -301,20 +302,16 @@ export function RecordingsTable({
                     </TableCell>
                     <TableCell className="border-r border-border px-4 last:border-r-0">
                       {linked && r.contact_id ? (
-                        // Deep link: opens the lead's own Workspace
-                        // table in a NEW tab, located by stable
-                        // contacts.id (never name/phone). New-tab
-                        // navigation leaves this page untouched;
-                        // rows are not clickable so the player
-                        // never opens from here.
-                        <a
-                          href={`/workspace?contact=${encodeURIComponent(r.contact_id)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="truncate font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        // Shared Workspace lead deep link (same
+                        // component as Call Analytics Recent Calls):
+                        // the lead's own Workspace table in a NEW
+                        // tab, located by stable contacts.id.
+                        <WorkspaceLeadLink
+                          contactId={r.contact_id}
+                          title={r.contact_name ?? undefined}
                         >
                           {r.contact_name ?? 'Unlinked'}
-                        </a>
+                        </WorkspaceLeadLink>
                       ) : (
                         <span className="truncate text-rose-600 dark:text-rose-400">Unlinked</span>
                       )}

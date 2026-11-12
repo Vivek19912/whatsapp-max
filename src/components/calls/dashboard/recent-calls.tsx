@@ -12,6 +12,15 @@ import { useState } from 'react';
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { Skeleton } from '@/components/dashboard/skeleton';
 import { Button } from '@/components/ui/button';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { WorkspaceLeadLink } from '@/components/workspace/workspace-lead-link';
 import { RecordingPlayerPopover } from '@/components/recordings/recording-player-popover';
 import type { RecentMissedRow, RecentRecordingRow } from '@/lib/calls/client';
 import { formatTalkTime } from '@/lib/calls/formatters';
@@ -22,6 +31,8 @@ export interface RecentCallRow {
   timeLabel: string;
   subLabel: string | null;
   leadName: string;
+  /** Stable contacts.id — null means the row must not link anywhere. */
+  contactId: string | null;
   workspaceTable: string | null;
   direction: 'in' | 'out' | null;
   callType: string | null;
@@ -71,7 +82,7 @@ function DirectionCell({
   }
   if (direction === 'in') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] text-emerald-600 dark:text-emerald-400">
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-emerald-600 dark:text-emerald-400">
         <PhoneIncoming className="h-4 w-4" aria-hidden />
         Incoming
       </span>
@@ -79,7 +90,7 @@ function DirectionCell({
   }
   if (direction === 'out') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] text-blue-600 dark:text-blue-400">
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-blue-600 dark:text-blue-400">
         <PhoneOutgoing className="h-4 w-4" aria-hidden />
         Outgoing
       </span>
@@ -140,6 +151,7 @@ export function RecentCallsTable({
         timeLabel: when.time,
         subLabel: when.date,
         leadName: r.contactName || r.phoneNumber || 'Unknown',
+        contactId: r.contactId,
         workspaceTable: r.workspaceTable,
         direction: asDirection(r.direction),
         callType: r.callType,
@@ -157,6 +169,7 @@ export function RecentCallsTable({
         timeLabel: when.time,
         subLabel: when.date,
         leadName: m.contactName || m.phoneNumber || 'Unknown',
+        contactId: m.contactId,
         workspaceTable: m.workspaceTable,
         direction: 'in' as const,
         callType: 'phone' as const,
@@ -210,29 +223,32 @@ export function RecentCallsTable({
             />
           </div>
         ) : (
-          <table className="w-full min-w-[880px] border-collapse text-sm">
-            <thead>
-              <tr className="border-border text-muted-foreground border-b text-left text-xs">
-                <th className="px-5 py-2.5 font-medium">Time</th>
-                <th className="px-4 py-2.5 font-medium">Lead Name</th>
-                <th className="px-4 py-2.5 font-medium">Workspace Table</th>
-                <th className="px-4 py-2.5 font-medium">Call</th>
-                <th className="px-4 py-2.5 font-medium">Type</th>
-                <th className="px-4 py-2.5 text-right font-medium">Duration</th>
-                <th className="px-4 py-2.5 font-medium">Salesperson</th>
-                <th className="px-4 py-2.5 font-medium">Recording</th>
-              </tr>
-            </thead>
-            <tbody>
+          // Same shadcn primitives and Workspace-style header as the
+          // Recordings table: tinted fill, tall bold headers with
+          // dividers, bordered body cells, row hover.
+          <Table>
+            <TableHeader className="[&_tr]:border-b-0 [&_th]:bg-[#f1f5f9] dark:[&_th]:bg-muted">
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="h-16 px-5 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Time</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Lead Name</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Workspace Table</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Call</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Type</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold text-right border-r border-border border-b last:border-r-0">Duration</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Salesperson</TableHead>
+                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Recording</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {rows.map((r) => {
                 const playerOpen =
                   openId === r.recordingId && r.recordingId !== null;
                 return (
-                  <tr
+                  <TableRow
                     key={r.key}
-                    className="border-border/50 border-b last:border-b-0"
+                    className="hover:bg-muted/50"
                   >
-                    <td className="px-5 py-2.5 whitespace-nowrap">
+                    <TableCell className="border-r border-border px-5 last:border-r-0 whitespace-nowrap">
                       <p className="text-foreground font-medium">
                         {r.timeLabel}
                       </p>
@@ -241,31 +257,62 @@ export function RecentCallsTable({
                           {r.subLabel}
                         </p>
                       ) : null}
-                    </td>
-                    <td className="text-foreground max-w-[180px] truncate px-4 py-2.5 font-medium">
-                      {r.leadName}
-                    </td>
-                    <td className="text-muted-foreground max-w-[180px] truncate px-4 py-2.5">
-                      {r.workspaceTable ?? '—'}
-                    </td>
-                    <td className="px-4 py-2.5 whitespace-nowrap">
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 max-w-[180px]">
+                      {r.contactId ? (
+                        // Shared Workspace lead deep link (same
+                        // component as the Recordings table).
+                        <WorkspaceLeadLink
+                          contactId={r.contactId}
+                          title={r.leadName}
+                        >
+                          {r.leadName}
+                        </WorkspaceLeadLink>
+                      ) : (
+                        <span className="truncate text-muted-foreground">
+                          {r.leadName}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 max-w-[180px]">
+                      {r.workspaceTable ? (
+                        <span
+                          title={r.workspaceTable}
+                          className="block truncate text-[13px] text-foreground"
+                        >
+                          {r.workspaceTable}
+                        </span>
+                      ) : (
+                        <span className="block text-[13px] text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 whitespace-nowrap">
                       <DirectionCell
                         direction={r.direction}
                         missed={r.missed}
                       />
-                    </td>
-                    <td className="text-muted-foreground px-4 py-2.5">
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 text-muted-foreground">
                       {callTypeLabel(r.callType)}
-                    </td>
-                    <td className="text-foreground px-4 py-2.5 text-right whitespace-nowrap tabular-nums">
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 text-right whitespace-nowrap tabular-nums text-foreground">
                       {r.durationSecs === null
                         ? '—'
                         : formatTalkTime(r.durationSecs)}
-                    </td>
-                    <td className="text-muted-foreground max-w-[160px] truncate px-4 py-2.5">
-                      {r.salesperson ?? '—'}
-                    </td>
-                    <td className="px-4 py-2.5">
+                    </TableCell>
+                    <TableCell className="border-r border-border px-4 last:border-r-0 max-w-[160px]">
+                      {r.salesperson ? (
+                        <span
+                          title={r.salesperson}
+                          className="block truncate text-muted-foreground"
+                        >
+                          {r.salesperson}
+                        </span>
+                      ) : (
+                        <span className="block text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="px-4 last:border-r-0">
                       {r.recordingId ? (
                         <RecordingPlayerPopover
                           recordingId={r.recordingId}
@@ -292,12 +339,12 @@ export function RecentCallsTable({
                           No recording
                         </span>
                       )}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </div>
     </section>
