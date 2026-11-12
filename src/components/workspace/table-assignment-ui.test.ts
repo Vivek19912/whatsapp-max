@@ -81,13 +81,15 @@ describe("assignment dialog is a four-step wizard", () => {
       "Notify assigned team member",
       "Salesperson Notifications",
       "Messages to leads",
-      "Advanced notification settings",
       "Add member",
       "Recent alert deliveries",
       "Review & save",
     ]) {
       expect(dialog).toContain(section);
     }
+    // No advanced member/notifications editor remains anywhere.
+    expect(dialog).not.toContain("Advanced notification settings");
+    expect(dialog).not.toContain("Advanced member settings");
     expect(dialog).toContain('"sequences"');
     expect(dialog).toContain("WhatsApp Template to Lead");
     // Member editing is inline within the wizard steps — no side
@@ -150,7 +152,8 @@ describe("assignment dialog is a four-step wizard", () => {
     expect(dialog).toContain("External contact (no login)");
     expect(dialog).toContain("External contact");
     expect(dialog).toContain("contacts receive notifications only — the lead stays Unassigned");
-    // Contact details live in the inline member editor, not the main list.
+    // Contact details live in the Step 2 notification cards, not
+    // the member list or the Step 1 editor.
     expect(dialog).toContain("Contact details");
   });
 
@@ -410,19 +413,21 @@ describe("assignment dialog customer-facing sequence (WhatsApp messages to lead)
     "src/app/api/integrations/meta-lead-ads/whatsapp/tables/[flowId]/config/route.ts",
   );
 
-  it("adds a clearly labelled customer-facing section in the inline member editor", () => {
+  it("adds a clearly labelled customer-facing section in the Step 3 sequence panel", () => {
+    // Customer sequences live ONLY in the Step 3 compact panel —
+    // never in the Step 1 member editor, never in Step 2.
     expect(dialog).toContain("WhatsApp messages to lead");
     expect(dialog).toContain("on initial assignment only");
     expect(dialog).toContain("reassignment does not");
-    expect(dialog).toContain("openGroup");
-    expect(dialog).toContain("Show advanced options");
+    expect(dialog).toContain("renderSequencePanel");
     expect(dialog).toContain("<AssigneeSequenceEditor");
+    expect(dialog).not.toContain('editorSlot === "messages" ? renderMemberEditor');
   });
 
   it("keeps the salesperson notification template separate from the customer sequence", () => {
     // The team notification template stays its own section; the
-    // customer sequence lives in the inline member editor. The
-    // sequence is never the notification template.
+    // customer sequence lives only in the Step 3 compact panel.
+    // The sequence is never the notification template.
     expect(dialog).toContain("Notify assigned team member");
     expect(dialog).toContain("WhatsApp template (optional)");
     expect(dialog).toContain("WhatsApp messages to lead");
@@ -582,7 +587,7 @@ describe("assignment dialog open-editor commit on save (Assignee-2 phone regress
     expect(dialogSrc).toContain("assignees: activeDrafts.map((d) => ({");
     expect(dialogSrc).toContain("phone: d.phone.trim() || null,");
     // Validation itself is untouched: strict E.164 on both tiers.
-    expect(dialogSrc).toContain("validateAssigneeForm(form, drafts)");
+    expect(dialogSrc).toContain("validateMemberStep1(form, drafts)");
     expect(dialogSrc).not.toContain("normalizeAssigneePhone = ");
   });
 });
@@ -603,9 +608,12 @@ describe("assignment dialog four-step sidebar navigation", () => {
     expect(dialog).toContain("if (!completedSteps.includes(target)) return;");
   });
 
-  it("keeps the step 1 member form to link + share only", () => {
-    // No display-name/email/phone inputs in the members-slot editor.
-    expect(dialog).toContain("External contact — name and notification details are collected in Step 2.");
+  it("keeps the step 1 member form to link + display name + share", () => {
+    // Step 1 owns membership: team link, display name (linked and
+    // external alike), and share. Email/phone live in Step 2 cards.
+    expect(dialog).toContain("External contact — notification details are collected in Step 2.");
+    expect(dialog).toContain('aria-label="Display name"');
+    expect(dialog).toContain("ShareSelect");
   });
 
   it("wires hover previews without changing selection", () => {
@@ -618,9 +626,10 @@ describe("assignment dialog four-step sidebar navigation", () => {
 
 describe("assignment dialog member rows stay compact (details live in the inline editor)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
-  it("lists members with avatar, name, share, edit, and remove only", () => {
+  it("lists members with avatar, name, share, availability, edit, pause, and remove", () => {
     // One compact row per member: avatar initials, display name,
-    // linked/external caption, read-only share text, Edit, Remove.
+    // linked/external caption, read-only share text, availability
+    // badge with Pause/Resume, Edit, Remove.
     expect(dialog).toContain("MemberInitials");
     expect(dialog).toContain("Add member");
     expect(dialog).toContain("ShareSelect");
@@ -629,11 +638,17 @@ describe("assignment dialog member rows stay compact (details live in the inline
     // percentage mode); the list row keeps read-only text.
     expect(dialog).toContain("assign-share");
     expect(dialog).not.toContain("patchDraft(d.key, { weight");
-    // No activate/deactivate toggles in the list — availability
-    // moved to the inline member editor.
+    // Availability lives on the row: green Available badge with a
+    // Pause action, amber Paused-until badge with Resume.
+    expect(dialog).toContain("openPause(saved)");
+    expect(dialog).toContain("quickResume(saved)");
+    expect(dialog).toContain("renderPausePanel()");
+    expect(dialog).toContain("Pause Member");
+    expect(dialog).toContain("Paused until");
+    // No activate/deactivate toggles in the list.
     expect(dialog).not.toContain("Deactivate");
     // No contact columns in the list — emails, phones, and extra
-    // numbers live in the inline member editor.
+    // numbers live in the Step 2 notification cards.
     expect(dialog).not.toContain("<TableHead>Name</TableHead>");
     expect(dialog).not.toContain("WhatsApp number{");
   });
@@ -643,16 +658,21 @@ describe("assignment dialog member rows stay compact (details live in the inline
     expect(dialog).toContain("must total exactly 100%");
   });
 
-  it("member editor holds the link, share, availability, and messages", () => {
-    // The inline editor now holds only Step 1 basics (link, share)
-    // plus availability and customer sequences. Contact details,
-    // alert switches, and extra numbers moved to the Step 2
-    // per-salesperson cards.
+  it("keeps the member editor to link, display name, and share only", () => {
+    // The Step 1 editor holds membership fields only. Availability
+    // lives on the member row, customer sequences in the Step 3
+    // panel, notifications in Step 2 cards — none of them open from
+    // this editor and no advanced editor entry point remains.
+    expect(dialog).toContain('aria-label="Display name"');
+    expect(dialog).toContain("ShareSelect");
+    expect(dialog).not.toContain("Show advanced options");
+    expect(dialog).not.toContain('aria-label="Availability"');
+    expect(dialog).not.toContain('aria-label="Customer messages"');
+    expect(dialog).not.toContain("Advanced member settings");
     expect(dialog).not.toContain('aria-label="Contact details"');
     expect(dialog).not.toContain('aria-label="Notification preferences"');
-    expect(dialog).toContain("Availability");
     expect(dialog).not.toContain('aria-label="Member receives new leads"');
-    expect(dialog).toContain("Show advanced options");
+    // Step 2 notification cards keep the alert switches.
     expect(dialog).toContain("Email alerts");
     expect(dialog).toContain("WhatsApp alerts");
   });
@@ -840,7 +860,7 @@ describe("simplified assignment UX (four steps + inline member editor)", () => {
     expect(dialog).toContain("sequenceStatusText");
     expect(dialog).toContain("No sequence configured");
     expect(dialog).toContain("openMessages(");
-    expect(dialog).toContain('openGroup === "msg"');
+    expect(dialog).toContain("renderSequencePanel()");
     expect(dialog).toContain("Configure");
   });
 
@@ -873,8 +893,11 @@ describe("simplified assignment UX (four steps + inline member editor)", () => {
   });
 
   it("exposes pause controls per saved member without rewriting owners", () => {
-    expect(dialog).toContain("Pause temporarily");
-    expect(dialog).toContain("Resume / extend pause");
+    // Availability is a Step 1 row concern (Pause/Resume beside the
+    // member), persisted through the pause endpoint — the PUT never
+    // carries pause fields. Separate from assignment-level Pause.
+    expect(dialog).toContain("Pause Member");
+    expect(dialog).toContain("quickResume");
     expect(dialog).toContain("submitPause");
     expect(dialog).toContain("Saving never rewrites existing lead owners.");
   });
@@ -924,18 +947,20 @@ describe("assignment inline editing contract (one dialog, no panels)", () => {
   });
 
   it("adds members through an inline form below the member list", () => {
-    expect(dialog).toContain("renderMemberEditor(true, true)");
+    expect(dialog).toContain("renderMemberEditor(true)");
     expect(dialog).toContain("Add member");
-    expect(dialog).toContain("Show advanced options");
+    // No advanced entry point: link, display name, and share only.
+    expect(dialog).not.toContain("Show advanced options");
+    expect(dialog).toContain('aria-label="Display name"');
   });
 
   it("edits a member inline directly below that member's row", () => {
-    // STEP 1 edits use the compact editor; STEP 2 message/advanced
-    // rows open the full editor. A single editingKey + editorSlot
-    // keeps at most one editor visible across all steps.
+    // STEP 1 edits use the compact membership editor; STEP 3
+    // sequences use the dedicated sequence panel. A single
+    // editingKey + editorSlot keeps at most one editor visible.
     expect(dialog).toContain("editorSlot");
-    expect(dialog).toContain("renderMemberEditor(false, true)");
     expect(dialog).toContain("renderMemberEditor(false)");
+    expect(dialog).toContain("renderSequencePanel()");
     expect(dialog).toContain("Save member");
   });
 
@@ -947,15 +972,49 @@ describe("assignment inline editing contract (one dialog, no panels)", () => {
     expect(dialog).toContain("isPristineNewAssigneeForm");
   });
 
-  it("collapses advanced groups by default and exposes them on demand", () => {
+  it("keeps Step 2 to notifications only — no member editing, no advanced editor", () => {
     expect(dialog).toContain("useState(false)");
-    expect(dialog).toContain('useState<null | "contact" | "notify" | "avail" | "msg">(null)');
+    expect(dialog).not.toContain("openGroup");
     expect(dialog).not.toContain('aria-label="Contact details"');
     expect(dialog).not.toContain('aria-label="Notification preferences"');
-    expect(dialog).toContain('aria-label="Availability"');
-    expect(dialog).toContain('aria-label="Customer messages"');
-    expect(dialog).toContain("aria-expanded={openGroup");
+    expect(dialog).not.toContain('aria-label="Availability"');
+    expect(dialog).not.toContain('aria-label="Customer messages"');
+    expect(dialog).not.toContain("Show advanced options");
+    expect(dialog).not.toContain("Hide advanced member settings");
+    expect(dialog).not.toContain("Advanced member settings");
     expect(dialog).toContain('aria-label="Salesperson notifications"');
+  });
+
+  it("manages availability from the Step 1 row with today, days, until, and scopes", () => {
+    // Row: Available badge + Pause, or Paused-until badge + Resume.
+    // Panel: duration modes, scopes, reason, Cancel/Pause Member.
+    expect(dialog).toContain("openPause(saved)");
+    expect(dialog).toContain("quickResume(saved)");
+    expect(dialog).toContain("renderPausePanel()");
+    expect(dialog).toContain('aria-label={`Resume ${d.display_name || "member"}`}');
+    expect(dialog).toContain('aria-label={`Pause ${d.display_name || "member"}`}');
+    for (const label of ["Pause for today", "Pause N days", "Pause until…", "Resume now"]) {
+      expect(dialog).toContain(label);
+    }
+    expect(dialog).toContain("This table only");
+    expect(dialog).toContain("Whole account");
+    expect(dialog).toContain("Resume date and time (IST)");
+    expect(dialog).toContain("maxLength={280}");
+    expect(dialog).toContain("Pause Member");
+    // Pause actions target persisted members only and never fire
+    // while another save is in flight.
+    expect(dialog).toContain("pauseFor === saved?.id ? renderPausePanel() : null");
+    expect(dialog).toContain("if (readOnly || busy !== null) return;");
+  });
+
+  it("shows per-member availability in Review, distinct from assignment Pause", () => {
+    // Review lists each salesperson as Available or Paused until X
+    // (with scope + reason), and states that member pauses never
+    // pause the whole table.
+    expect(dialog).toContain('aria-label="Review availability"');
+    expect(dialog).toContain("Paused until");
+    expect(dialog).toContain("Entire account");
+    expect(dialog).toContain("Pausing one member never pauses the table");
   });
 
   it("confirms removal inline without a modal", () => {

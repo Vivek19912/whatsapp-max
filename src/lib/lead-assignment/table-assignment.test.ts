@@ -902,6 +902,207 @@ describe("pauses and availability", () => {
   });
 });
 
+describe("assignment saves preserve per-salesperson pauses", () => {
+  const daysFromNow = (n: number) =>
+    new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString();
+
+  async function seedPausedTable(
+    db: ReturnType<typeof fakeSupabase>,
+    flowId = "flow-meta-1",
+    scope: "table" | "account" = "table",
+  ) {
+    await saveConfig(db, flowId, {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+    const before = await configLib.getTableConfig(db as never, "acct-1", flowId);
+    const ashaId = before!.assignees.find((a) => a.user_id === "u-asha")!.id;
+    await configLib.pauseTableAssignee(db as never, {
+      accountId: "acct-1",
+      flowId,
+      assigneeId: ashaId,
+      input: { mode: "until", until: daysFromNow(30), reason: "On leave", scope },
+    });
+    return ashaId;
+  }
+
+  const pausedRowFor = (flowId: string, userId: string) =>
+    (h.assignees as Array<Record<string, unknown>>).find(
+      (r) =>
+        (h.configs as Array<Record<string, unknown>>).find((c) => c.id === r.config_id)?.flow_id ===
+          flowId && r.user_id === userId,
+    )!;
+
+  it("changing percentages keeps the paused member's window, reason, and scope", async () => {
+    const db = fakeSupabase();
+    const ashaId = await seedPausedTable(db);
+    const before = pausedRowFor("flow-meta-1", "u-asha");
+    expect(before.paused_until).toBeTruthy();
+    // Owner changes an unrelated setting (allocation + a name) in
+    // the same PUT the UI sends — the payload carries no pause
+    // fields at all.
+    const after = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "percentage",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha", weight: 40 }),
+        assignee("u-ravi", { display_name: "Ravi Kumar", weight: 60 }),
+      ],
+    });
+    const asha = after.assignees.find((a) => a.user_id === "u-asha")!;
+    expect(asha.id).toBe(ashaId);
+    expect(asha.paused_until).toBe(before.paused_until);
+    expect(asha.pause_reason).toBe("On leave");
+    expect(asha.pause_scope).toBe("table");
+    expect(after.assignees.find((a) => a.user_id === "u-ravi")!.display_name).toBe("Ravi Kumar");
+  });
+
+  it("saving notification settings keeps the pause", async () => {
+    const db = fakeSupabase();
+    await seedPausedTable(db);
+    const before = pausedRowFor("flow-meta-1", "u-asha");
+    const after = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      whatsapp_template_name: "lead_assigned_v2",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi", phone: "+919876543210", notify_whatsapp: true }),
+      ],
+    });
+    const asha = after.assignees.find((a) => a.user_id === "u-asha")!;
+    expect(asha.paused_until).toBe(before.paused_until);
+    expect(asha.pause_reason).toBe("On leave");
+    expect(asha.pause_scope).toBe("table");
+    expect(after.whatsapp_template_name).toBe("lead_assigned_v2");
+  });
+
+  it("resubmitting the roster never resurrects a cleared pause or clears a live one", async () => {
+    const db = fakeSupabase();
+    const ashaId = await seedPausedTable(db);
+    // Resume first: the save that follows must keep it resumed
+    // (stale client values never restore the old window).
+    await configLib.pauseTableAssignee(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      assigneeId: ashaId,
+      input: { mode: "resume" },
+    });
+    const resumed = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+    expect(resumed.assignees.find((a) => a.user_id === "u-asha")!.paused_until).toBeNull();
+    // Re-pause, then save again: the live window survives.
+    await configLib.pauseTableAssignee(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      assigneeId: ashaId,
+      input: { mode: "days", days: 4, reason: "Camp", scope: "table" },
+    });
+    const repaused = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+    const asha = repaused.assignees.find((a) => a.user_id === "u-asha")!;
+    expect(asha.paused_until).toBeTruthy();
+    expect(asha.pause_reason).toBe("Camp");
+  });
+
+  it("removing a member removes their table pause row", async () => {
+    const db = fakeSupabase();
+    await seedPausedTable(db);
+    expect(pausedRowFor("flow-meta-1", "u-asha").paused_until).toBeTruthy();
+    const after = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-ravi", { display_name: "Ravi" })],
+    });
+    expect(after.assignees).toHaveLength(1);
+    expect(
+      (h.assignees as Array<Record<string, unknown>>).filter(
+        (r) =>
+          (h.configs as Array<Record<string, unknown>>).find((c) => c.id === r.config_id)
+            ?.flow_id === "flow-meta-1" && r.user_id === "u-asha",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("new members start unpaused and other tables keep their pauses", async () => {
+    const db = fakeSupabase();
+    await seedPausedTable(db, "flow-meta-1");
+    await saveConfig(db, "flow-meta-2", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [assignee("u-asha", { display_name: "Asha" })],
+    });
+    const after = await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+        assignee("u-owner", { display_name: "Owner" }),
+      ],
+    });
+    const owner = after.assignees.find((a) => a.user_id === "u-owner")!;
+    expect(owner.paused_until).toBeNull();
+    expect(after.assignees.find((a) => a.user_id === "u-asha")!.paused_until).toBeTruthy();
+    // The other table's rows were never touched.
+    expect(
+      (h.assignees as Array<Record<string, unknown>>).filter(
+        (r) =>
+          (h.configs as Array<Record<string, unknown>>).find((c) => c.id === r.config_id)
+            ?.flow_id === "flow-meta-2",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("paused members stay ineligible under percentage mode too", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "percentage",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha", weight: 50 }),
+        assignee("u-ravi", { display_name: "Ravi", weight: 50 }),
+      ],
+    });
+    const detail = await configLib.getTableConfig(db as never, "acct-1", "flow-meta-1");
+    const asha = detail!.assignees.find((a) => a.user_id === "u-asha")!;
+    await configLib.pauseTableAssignee(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-meta-1",
+      assigneeId: asha.id,
+      input: { mode: "days", days: 3 },
+    });
+    const got: Array<string | null> = [];
+    for (let i = 0; i < 3; i++) {
+      run(`run-pct-${i}`, "flow-meta-1");
+      const r = await engine.assignTableLead(db as never, {
+        accountId: "acct-1",
+        flowId: "flow-meta-1",
+        runId: `run-pct-${i}`,
+        formId: "formdb-1",
+      });
+      got.push(r.userId);
+    }
+    expect(got).toEqual(["u-ravi", "u-ravi", "u-ravi"]);
+  });
+});
+
 describe("reliability", () => {
   it("duplicate deliveries assign once (skip-if-owned)", async () => {
     const db = fakeSupabase();

@@ -15,6 +15,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { salespersonKeyFor } from "@/lib/meta-lead-whatsapp/assignee-sequences";
+
 import {
   ASSIGNMENT_TIMEZONE,
   AssignmentValidationError,
@@ -273,10 +275,17 @@ export async function getTableConfig(
 
 /**
  * Create or replace one table's assignment settings. Assignees are
- * replaced wholesale (positions = array order); algorithm state,
- * historical leads, and events are preserved. Only this table's
- * rows are touched (config upsert is keyed on account+flow, and
- * assignees are deleted/inserted strictly under that config id).
+ * reconciled in place (matched by stable salesperson identity) so
+ * pause windows survive unrelated saves: matched rows are UPDATED
+ * on every column EXCEPT the pause columns, removed members are
+ * deleted (their table pauses go with the row), and new members
+ * start unpaused. The PUT payload carries no pause fields — pauses
+ * live exclusively behind the pause endpoint — so this path never
+ * writes (and can never clear or resurrect) pause data. Only this
+ * table's rows are touched (all statements are scoped to the
+ * config id); algorithm state, historical leads, and events are
+ * preserved. On any write failure the snapshotted roster is
+ * restored best-effort and the original error rethrown.
  */
 export async function saveTableConfig(
   db: SupabaseClient,
@@ -359,36 +368,124 @@ export async function saveTableConfig(
     snapshotOk = false;
   }
 
-  const { error: deleteErr } = await db
-    .from("lead_assignment_table_assignees")
-    .delete()
-    .eq("config_id", configId);
-  if (deleteErr) throw deleteErr;
-  if (valid.assignees.length > 0) {
-    const { error: insertErr } = await db
+  // Without a snapshot there is nothing to match against or
+  // restore: fall back to the historical wholesale replace (pause
+  // windows cannot be preserved, but the save itself proceeds).
+  if (!snapshotOk) {
+    const { error: deleteErr } = await db
       .from("lead_assignment_table_assignees")
-      .insert(
-        valid.assignees.map((a, index) => ({
-          config_id: configId,
-          user_id: a.user_id,
-          display_name: a.display_name,
-          email: a.email,
-          phone: a.phone,
-          whatsapp_numbers: a.whatsapp_numbers,
-          position: index,
-          weight: valid.mode === "percentage" ? a.weight : 0,
-          is_active: a.is_active,
-          notify_email: a.notify_email,
-          notify_whatsapp: a.notify_whatsapp,
+      .delete()
+      .eq("config_id", configId);
+    if (deleteErr) throw deleteErr;
+    if (valid.assignees.length > 0) {
+      const { error: insertErr } = await db
+        .from("lead_assignment_table_assignees")
+        .insert(
+          valid.assignees.map((a, index) => ({
+            config_id: configId,
+            user_id: a.user_id,
+            display_name: a.display_name,
+            email: a.email,
+            phone: a.phone,
+            whatsapp_numbers: a.whatsapp_numbers,
+            position: index,
+            weight: valid.mode === "percentage" ? a.weight : 0,
+            is_active: a.is_active,
+            paused_until: null,
+            pause_reason: null,
+            pause_scope: "table" as const,
+            notify_email: a.notify_email,
+            notify_whatsapp: a.notify_whatsapp,
+          })),
+        );
+      if (insertErr) throw insertErr;
+    }
+  } else {
+  // Match incoming assignees to existing rows by the same stable
+  // salesperson identity the engine uses (linked user_id, else
+  // lowercased email, else phone digits). Each existing row is
+  // consumed at most once; unmatched newcomers insert fresh.
+  const matchedPrevIds = new Set<string>();
+  const matched: Array<{ prevId: string; index: number }> = [];
+  const fresh: number[] = [];
+  valid.assignees.forEach((a, index) => {
+    const key = salespersonKeyFor({
+      user_id: a.user_id,
+      email: a.email,
+      phone: a.phone,
+    });
+    const prev = previousAssignees.find(
+      (p) =>
+        !matchedPrevIds.has(p.id) &&
+        salespersonKeyFor({ user_id: p.user_id, email: p.email, phone: p.phone }) === key,
+    );
+    if (key !== null && prev) {
+      matchedPrevIds.add(prev.id);
+      matched.push({ prevId: prev.id, index });
+    } else {
+      fresh.push(index);
+    }
+  });
+  const removedIds = previousAssignees
+    .map((a) => a.id)
+    .filter((id) => !matchedPrevIds.has(id));
+
+  const nonPauseColumns = (index: number) => {
+    const a = valid.assignees[index]!;
+    return {
+      config_id: configId,
+      user_id: a.user_id,
+      display_name: a.display_name,
+      email: a.email,
+      phone: a.phone,
+      whatsapp_numbers: a.whatsapp_numbers,
+      position: index,
+      weight: valid.mode === "percentage" ? a.weight : 0,
+      is_active: a.is_active,
+      notify_email: a.notify_email,
+      notify_whatsapp: a.notify_whatsapp,
+    };
+  };
+  try {
+    // Matched rows keep their id AND their untouched pause columns
+    // (paused_until / pause_reason / pause_scope are never written
+    // here), so a concurrent pause or resume lands on the same row
+    // and neither operation can clobber the other.
+    for (const m of matched) {
+      const { error } = await db
+        .from("lead_assignment_table_assignees")
+        .update(nonPauseColumns(m.index))
+        .eq("id", m.prevId)
+        .eq("config_id", configId);
+      if (error) throw error;
+    }
+    // Removed members lose their table-specific pause rows with the row.
+    for (const id of removedIds) {
+      const { error } = await db
+        .from("lead_assignment_table_assignees")
+        .delete()
+        .eq("id", id)
+        .eq("config_id", configId);
+      if (error) throw error;
+    }
+    // Newcomers start with no pause window — never inherited.
+    if (fresh.length > 0) {
+      const { error } = await db.from("lead_assignment_table_assignees").insert(
+        fresh.map((index) => ({
+          ...nonPauseColumns(index),
+          paused_until: null,
+          pause_reason: null,
+          pause_scope: "table" as const,
         })),
       );
-    if (insertErr) {
-      // The delete above already ran: restore the previous roster
-      // (best-effort, never masking the original failure) so the
-      // table is not left emptied by a failed save.
-      if (snapshotOk) await restoreAssigneeRows(db, configId, previousAssignees);
-      throw insertErr;
+      if (error) throw error;
     }
+  } catch (err) {
+    // Best-effort restore of the snapshotted roster (pauses
+    // included), never masking the original failure.
+    await restoreAssigneeRows(db, configId, previousAssignees);
+    throw err;
+  }
   }
   // Lazily ensure the algorithm state row exists so the first
   // assignment never pays for a racy init (insert is unique-keyed;

@@ -23,7 +23,10 @@
 //                    'unknown'.
 //   phone_number     optional string (≤64) — matching evidence
 //                    only, resolved via the shared exact matcher.
-//   duration_seconds optional non-negative int.
+//   duration_seconds optional non-negative int; legacy CallVault
+//                    clients send it as a digits-only JSON string,
+//                    which is normalized to a number (see
+//                    parseDurationSeconds).
 //   occurred_at      required ISO 8601 — the CallLog timestamp.
 //
 // Contact linking reuses matchContactByPhone (exact unique match
@@ -85,6 +88,34 @@ function toCallEvent(row: Record<string, unknown>): CallEvent {
 
 function isOutcome(value: unknown): value is Outcome {
   return typeof value === 'string' && (OUTCOMES as readonly string[]).includes(value);
+}
+
+/**
+ * Strict `duration_seconds` parser. Accepts a non-negative safe
+ * integer, or — for CallVault clients that serialize every field as
+ * a JSON string — a digits-only numeric string normalized to a
+ * number. `null`/`undefined` stay `null` (duration omitted).
+ * Everything else (negatives, decimals, blanks, non-numeric
+ * strings, booleans, unsafe integers) is invalid: returns
+ * `undefined`. No loose coercion — `true` must never become `1`.
+ */
+export function parseDurationSeconds(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!/^\d+$/.test(text)) return undefined;
+    // Length-gated before Number(): anything above MAX_SAFE_INTEGER
+    // (16 digits) can never be a safe integer. Equal-length strings
+    // compare lexicographically.
+    const digits = text.replace(/^0+/, '') || '0';
+    if (digits.length > 16) return undefined;
+    if (digits.length === 16 && digits > '9007199254740991') return undefined;
+    return Number(digits);
+  }
+  return undefined;
 }
 
 export async function POST(request: Request) {
@@ -153,14 +184,9 @@ export async function POST(request: Request) {
         400
       );
     }
-    const duration =
-      body.duration_seconds === null || body.duration_seconds === undefined
-        ? null
-        : body.duration_seconds;
-    if (duration !== null) {
-      if (typeof duration !== 'number' || !Number.isInteger(duration) || duration < 0) {
-        return fail('bad_request', "'duration_seconds' must be a non-negative integer.", 400);
-      }
+    const duration = parseDurationSeconds(body.duration_seconds);
+    if (duration === undefined) {
+      return fail('bad_request', "'duration_seconds' must be a non-negative integer.", 400);
     }
     const occurredAt = typeof body.occurred_at === 'string' ? body.occurred_at : null;
     if (!occurredAt || Number.isNaN(Date.parse(occurredAt))) {

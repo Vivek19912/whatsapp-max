@@ -98,7 +98,7 @@ vi.mock("@/lib/auth/device", async (importOriginal) => {
   };
 });
 
-const { POST } = await import("./route");
+const { POST, parseDurationSeconds } = await import("./route");
 
 const DEVICE_TOKEN = "device-session-token";
 const EVENT = {
@@ -183,6 +183,78 @@ describe("POST /api/v1/call-events", () => {
     const json = (await res.json()) as { data: { deduped: boolean; id: string } };
     expect(json.data.deduped).toBe(true);
     expect(json.data.id).toBe("e-9");
+  });
+
+  it("accepts JSON numbers and legacy numeric strings for duration_seconds", async () => {
+    for (const [input, expected] of [
+      [0, 0],
+      [63, 63],
+      ["0", 0],
+      ["63", 63],
+      ["  7  ", 7],
+      [null, null],
+      [undefined, null],
+    ] as Array<[unknown, number | null]>) {
+      h.lastInsert = null;
+      const body = { ...EVENT, client_event_id: `evt-${String(expected)}-${String(input)}` };
+      if (input === undefined) {
+        delete (body as Record<string, unknown>).duration_seconds;
+      } else {
+        (body as Record<string, unknown>).duration_seconds = input;
+      }
+      const res = await POST(postEvent(body));
+      expect(res.status).toBe(201);
+      const inserted = h.lastInsert as Record<string, unknown> | null;
+      expect(inserted?.duration_seconds).toBe(expected);
+      expect(typeof inserted?.duration_seconds).not.toBe("string");
+    }
+    // Omitted duration stays NULL rather than failing.
+    h.lastInsert = null;
+    const omitted = { ...EVENT, client_event_id: "evt-omitted" };
+    delete (omitted as Record<string, unknown>).duration_seconds;
+    expect((await POST(postEvent(omitted))).status).toBe(201);
+    expect((h.lastInsert as Record<string, unknown> | null)?.duration_seconds).toBeNull();
+  });
+
+  it("rejects non-integer, negative, blank, and unsafe durations", async () => {
+    for (const [input, name] of [
+      [-1, "negative number"],
+      ["-1", "negative string"],
+      [1.5, "decimal number"],
+      ["1.5", "decimal string"],
+      ["", "empty string"],
+      ["   ", "whitespace string"],
+      ["abc", "non-numeric string"],
+      ["0x10", "hex string"],
+      ["1e3", "exponent string"],
+      [true, "boolean"],
+      // NaN/Infinity cannot survive JSON transport (they serialize
+      // to null), so they are covered at the parser level below.
+      [Number.MAX_SAFE_INTEGER + 1, "unsafe integer"],
+      ["9007199254740993", "unsafe integer string"],
+    ] as Array<[unknown, string]>) {
+      h.lastInsert = null;
+      const res = await POST(postEvent({ ...EVENT, duration_seconds: input }));
+      expect(res.status, name).toBe(400);
+      expect(h.lastInsert, name).toBeNull();
+    }
+  });
+
+  it("parses durations strictly at the unit level (incl. non-JSON values)", () => {
+    expect(parseDurationSeconds(null)).toBeNull();
+    expect(parseDurationSeconds(undefined)).toBeNull();
+    expect(parseDurationSeconds(0)).toBe(0);
+    expect(parseDurationSeconds(63)).toBe(63);
+    expect(parseDurationSeconds("0")).toBe(0);
+    expect(parseDurationSeconds("63")).toBe(63);
+    for (const bad of [
+      -1, "-1", 1.5, "1.5", "", "   ", "abc", "0x10", "1e3",
+      true, false, Number.NaN, Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1,
+      "9007199254740993", {}, [],
+    ]) {
+      expect(parseDurationSeconds(bad), String(bad)).toBeUndefined();
+    }
   });
 
   it("rejects missing/invalid outcome, type, and timestamps", async () => {

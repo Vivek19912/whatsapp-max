@@ -350,25 +350,34 @@ describe("wizard step validation — sequences", () => {
   });
 });
 
-describe("wizard step validation — step 1 member linking", () => {
+describe("wizard step validation — step 1 member linking and naming", () => {
   it("allows linked members and flags duplicates only", () => {
     expect(
-      validateMemberStep1({ key: "n", user_id: "u-1" }, []),
+      validateMemberStep1({ key: "n", user_id: "u-1", display_name: "N" }, []),
     ).toBeNull();
     expect(
-      validateMemberStep1({ key: "n", user_id: "u-1" }, [
+      validateMemberStep1({ key: "n", user_id: "u-1", display_name: "N" }, [
         { key: "a", user_id: "u-1" },
       ]),
     ).toMatch(/already on this table/i);
     expect(
-      validateMemberStep1({ key: "a", user_id: "u-1" }, [
+      validateMemberStep1({ key: "a", user_id: "u-1", display_name: "A" }, [
         { key: "a", user_id: "u-1" },
       ]),
     ).toBeNull();
   });
 
-  it("does not require names or contact details in step 1", () => {
-    expect(validateMemberStep1({ key: "n", user_id: null }, [])).toBeNull();
+  it("requires a display name for external contacts in step 1", () => {
+    // Step 1 owns display names now that Step 2 no longer edits
+    // them: linked members may inherit the roster name, external
+    // contacts must be named here. Contact details still live in
+    // Step 2, so they are never required here.
+    expect(
+      validateMemberStep1({ key: "n", user_id: null, display_name: "  " }, []),
+    ).toMatch(/display name/i);
+    expect(
+      validateMemberStep1({ key: "n", user_id: null, display_name: "Walk-in" }, []),
+    ).toBeNull();
   });
 });
 
@@ -392,13 +401,13 @@ describe("wizard step validation — step 2 external identity", () => {
     ...over,
   });
 
-  it("requires a display name for external contacts", () => {
+  it("requires a display name for external contacts (named in Step 1)", () => {
     expect(
       validateNotifyStep({
         ...base,
         drafts: [ext({ display_name: "  " })],
       }),
-    ).toMatch(/display name/i);
+    ).toMatch(/Step 1/);
   });
 
   it("accepts named external contacts with channels off and no details", () => {

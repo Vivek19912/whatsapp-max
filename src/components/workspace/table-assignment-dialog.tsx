@@ -559,16 +559,20 @@ export function validateShareValue(weight: string, displayName: string): string 
 }
 
 /**
- * Validate the member form for the Step 1 (members) context: only the
- * team-link uniqueness is enforced here. Display name, email and phone
- * are collected in Step 2 (notification cards), so Step 1 must not
- * block on them. Full validation still runs on commit elsewhere and
- * at save time.
+ * Validate the member form for the Step 1 (members) context: the
+ * team-link uniqueness is enforced, and external contacts (no link)
+ * must be named here — Step 1 owns display names now that Step 2
+ * no longer edits them. Email and phone stay in Step 2
+ * notification cards, so Step 1 never blocks on them. Full
+ * validation still runs on commit elsewhere and at save time.
  */
 export function validateMemberStep1(
-  form: Pick<Draft, "key" | "user_id">,
+  form: Pick<Draft, "key" | "user_id" | "display_name">,
   drafts: ReadonlyArray<Pick<Draft, "key" | "user_id">>,
 ): string | null {
+  if (!form.user_id && form.display_name.trim() === "") {
+    return "Give the external contact a display name.";
+  }
   if (form.user_id) {
     const clash = drafts.some(
       (d) => d.key !== form.key && d.user_id === form.user_id,
@@ -607,9 +611,11 @@ export function validateNotifyStep(args: {
   for (const d of args.drafts) {
     const name = d.display_name.trim() || "Unnamed assignee";
     // External contacts have no linked member identity — they always
-    // need an entered display name (collected in Step 2).
+    // need an entered display name. Names are edited in Step 1, so a
+    // missing one points back there instead of blocking Step 2 with
+    // no way to fix it.
     if (!d.user_id && d.display_name.trim() === "") {
-      return "Give each external contact a display name in Step 2.";
+      return "Give each external contact a display name in Step 1.";
     }
     if (d.notify_email && d.email.trim() === "" && !args.rosterEmailFor(d.user_id)) {
       return `Email alerts are on for "${name}" but there is no email address — enter one or turn Email alerts off.`;
@@ -986,12 +992,10 @@ export function TableAssignmentDialog({
   const notifyEnabled = drafts.some((d) => d.notify_whatsapp);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [form, setForm] = useState<Draft>(emptyDraft());
-  // Inline member editor disclosure (everything lives in this one
-  // dialog — no Sheet, no drawer, no nested modal). Add opens with
-  // only the essential fields visible; Edit reveals the advanced
-  // toggle. Advanced groups stay collapsed until explicitly opened.
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [openGroup, setOpenGroup] = useState<null | "contact" | "notify" | "avail" | "msg">(null);
+  // Inline member editor state (everything lives in this one
+  // dialog — no Sheet, no drawer, no nested modal). The Step 1
+  // editor holds link, display name, and share; availability lives
+  // on the member row and sequences in the Step 3 panel.
   // Two-click inline remove confirmation (no modal): first click arms
   // the row, second click removes the draft. Closing or saving the
   // dialog without saving discards everything anyway.
@@ -1002,12 +1006,10 @@ export function TableAssignmentDialog({
   // the open editor, validates the step, then advances.
   const [step, setStep] = useState<AssignmentStep>("assign");
   const [completedSteps, setCompletedSteps] = useState<AssignmentStep[]>([]);
-  // Which inline-editor slot owns the open editor: the STEP 1 member
-  // list, the STEP 2 message list, or the STEP 2 advanced list. One
-  // editor is ever open, so only that slot renders it.
-  const [editorSlot, setEditorSlot] = useState<"members" | "messages" | "advanced">("members");
-  // Collapsed "Advanced notification settings" disclosure in STEP 2.
-  const [showStepAdvanced, setShowStepAdvanced] = useState(false);
+  // Which inline-editor slot owns the open editor: the STEP 1
+  // member list or the STEP 3 sequence panel. Only one editor is
+  // ever open, so only that slot renders it.
+  const [editorSlot, setEditorSlot] = useState<"members" | "messages">("members");
   // Inline preview of the selected notification template (name,
   // language, category, status — the picker endpoint carries no body
   // text, so details are the honest preview).
@@ -1316,9 +1318,6 @@ export function TableAssignmentDialog({
       setStep("assign");
       setCompletedSteps([]);
       setEditorSlot("members");
-      setShowStepAdvanced(false);
-      setShowAdvanced(false);
-      setOpenGroup(null);
       setConfirmRemoveKey(null);
       setTemplatePreviewOpen(false);
       setPauseFor(null);
@@ -1461,21 +1460,15 @@ export function TableAssignmentDialog({
     setEditingKey("__new__");
     setEditorSlot("members");
     setForm(emptyDraft());
-    // Add opens with only the essential fields visible; advanced
-    // groups stay collapsed until explicitly requested.
-    setShowAdvanced(false);
-    setOpenGroup(null);
     setConfirmRemoveKey(null);
   };
 
-  const startEdit = (d: Draft, slot: "members" | "messages" | "advanced" = "members") => {
+  const startEdit = (d: Draft) => {
     if (readOnly) return;
     if (!commitOpenEditor()) return;
     setEditingKey(d.key);
-    setEditorSlot(slot);
+    setEditorSlot("members");
     setForm({ ...d });
-    setShowAdvanced(false);
-    setOpenGroup(null);
     setConfirmRemoveKey(null);
   };
 
@@ -1492,17 +1485,12 @@ export function TableAssignmentDialog({
     setEditingKey(d.key);
     setEditorSlot("messages");
     setForm({ ...d });
-    setShowAdvanced(false);
-    setOpenGroup(null);
     setConfirmRemoveKey(null);
   };
 
   const cancelEdit = () => {
     setEditingKey(null);
     setForm(emptyDraft());
-    setShowAdvanced(false);
-    setOpenGroup(null);
-    setPauseFor(null);
   };
 
   /**
@@ -1539,9 +1527,9 @@ export function TableAssignmentDialog({
    * open with the error surfaced). A pristine Add panel is
    * disregarded on implicit commits (navigation, Save), but an
    * explicit Done click always commits — that is how a Step 1
-   * external placeholder (no link yet, named in Step 2) is created.
-   * Callers must not run this in view mode (all entry points are
-   * readOnly-guarded).
+   * external contact (no link yet, named right in Step 1) is
+   * created. Callers must not run this in view mode (all entry
+   * points are readOnly-guarded).
    */
   const commitOpenEditor = (opts?: { explicit?: boolean }): Draft[] | null => {
     if (!editingKey) return drafts;
@@ -1558,22 +1546,19 @@ export function TableAssignmentDialog({
       return drafts;
     }
     // Linked members take their display name from the roster when the
-    // Step 1 form carries no typed name (Step 1 no longer asks for
-    // one). Resolve before validation so the roster name satisfies it.
+    // Step 1 form carries no typed name. Resolve before validation
+    // so the roster name satisfies it.
     if (form.user_id) {
       const member = rosterById.get(form.user_id);
       if (member && !form.display_name.trim()) {
         form.display_name = member.full_name?.trim() || member.email || form.user_id;
       }
     }
-    // Step 1 (members slot) collects only the team link + share —
-    // names and contact details live in Step 2 — so it validates
-    // link uniqueness only. Every other editor runs the full form
-    // validation (name, contact channel, duplicates).
-    const problem =
-      editorSlot === "members"
-        ? validateMemberStep1(form, drafts)
-        : validateAssigneeForm(form, drafts);
+    // The Step 1 members editor collects link, display name, and
+    // share — email/phone live in Step 2 — so it validates link
+    // uniqueness plus the external-contact name. The sequence panel
+    // never reaches here (it returns above).
+    const problem = validateMemberStep1(form, drafts);
     if (problem) {
       setSaveError(problem);
       toast.error(problem);
@@ -1900,28 +1885,67 @@ export function TableAssignmentDialog({
     }
   };
 
+  /**
+   * POST one assignee pause/resume to this table's pause endpoint.
+   * Shared by the Step 1 row panel (submitPause) and the immediate
+   * row Resume action (quickResume) so both use the same API and
+   * validation.
+   */
+  const postPause = async (assigneeId: string, body: Record<string, unknown>) => {
+    await readJson(
+      await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment/pause`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assignee_id: assigneeId, ...body }),
+      }),
+    );
+  };
+
   const submitPause = async () => {
     if (readOnly || !pauseFor) return;
     setBusy("pause");
     try {
       const body: Record<string, unknown> = {
-        assignee_id: pauseFor,
         mode: pauseMode,
         scope: pauseScope,
       };
       if (pauseMode === "days") body.days = Number.parseInt(pauseDays, 10);
       if (pauseMode === "until") body.until = pauseUntil;
       if (pauseReason.trim()) body.reason = pauseReason.trim();
-      await readJson(
-        await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment/pause`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-      );
+      await postPause(pauseFor, body);
       toast.success(pauseMode === "resume" ? "Assignee resumed." : "Pause updated.");
       setPauseFor(null);
       setPauseReason("");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update the pause.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Open the compact pause panel for a persisted Step 1 member.
+   * Pause actions stay disabled while any save is in flight.
+   */
+  const openPause = (saved: AssigneeView) => {
+    if (readOnly || busy !== null) return;
+    setPauseFor(saved.id);
+    setPauseMode("today");
+    setConfirmRemoveKey(null);
+  };
+
+  /**
+   * Immediately clear a salesperson's pause from the Step 1 row
+   * (no panel round-trip). Uses the same endpoint as the panel.
+   */
+  const quickResume = async (saved: AssigneeView) => {
+    if (readOnly || busy !== null) return;
+    setBusy("pause");
+    try {
+      await postPause(saved.id, { mode: "resume" });
+      toast.success("Assignee resumed.");
+      setPauseFor((cur) => (cur === saved.id ? null : cur));
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update the pause.");
@@ -1980,21 +2004,21 @@ export function TableAssignmentDialog({
   };
 
   /**
-   * Inline member editor shared by the Add form (below the member
-   * list) and the per-row Edit form (below that member's row). Only
-   * one editor is ever open (single `editingKey`), so this renders in
-   * at most one slot. Uses the same form state, validation, and
-   * persistence as the main Save — no parallel source of truth.
+   * Inline Step 1 member editor shared by the Add form (below the
+   * member list) and the per-row Edit form (below that member's
+   * row). Only one editor is ever open (single `editingKey`), so
+   * this renders in at most one slot. Uses the same form state,
+   * validation, and persistence as the main Save — no parallel
+   * source of truth.
    *
-   * Step 1 (members slot) stays compact on purpose: link and share
-   * only. Display names come from the linked roster member
-   * automatically; external contacts are named in Step 2, and contact
-   * details live in Step 2 notification cards. Availability and
-   * Customer messages groups remain available in the full editor
-   * used by the advanced slot. Step 3 never uses this editor — it
-   * renders the dedicated compact sequence panel instead.
+   * Step 1 owns membership: team link, display name (linked members
+   * and external contacts alike — Step 2 no longer edits names),
+   * and share. Phone/email live in Step 2 notification cards,
+   * availability lives on the Step 1 member row, and customer
+   * sequences live in the Step 3 compact panel — none of them open
+   * from this editor.
    */
-  const renderMemberEditor = (isNew: boolean, basicOnly = false) => (
+  const renderMemberEditor = (isNew: boolean) => (
     <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
       <div className="flex flex-col gap-4">
         <p className="text-sm font-medium text-foreground">
@@ -2018,7 +2042,7 @@ export function TableAssignmentDialog({
                   ariaLabel="Link team member"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Leave unlinked to add an external contact — you will name it in Step 2.
+                  Leave unlinked to add an external contact — name it below.
                 </p>
               </div>
             ) : (
@@ -2032,16 +2056,15 @@ export function TableAssignmentDialog({
                 </p>
               </div>
             )}
-            {!basicOnly ? (
-              <div className="flex flex-col gap-1.5">
-                <Label>Display name</Label>
-                <Input
-                  value={form.display_name}
-                  onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                  placeholder="Priya Sharma"
-                />
-              </div>
-            ) : null}
+            <div className="flex flex-col gap-1.5">
+              <Label>Display name</Label>
+              <Input
+                value={form.display_name}
+                onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
+                placeholder="Priya Sharma"
+                aria-label="Display name"
+              />
+            </div>
             {mode === "percentage" ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="assign-share">Share percentage</Label>
@@ -2063,268 +2086,8 @@ export function TableAssignmentDialog({
           </p>
         ) : (
           <p className="-mt-2 text-xs text-muted-foreground">
-            External contact — name and notification details are collected in Step 2.
+            External contact — notification details are collected in Step 2.
           </p>
-        )}
-        {basicOnly ? null : (
-          <>
-            <div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setShowAdvanced((v) => !v)}
-                aria-expanded={showAdvanced}
-              >
-                {showAdvanced ? "Hide advanced options" : "Show advanced options"}
-              </Button>
-            </div>
-            {showAdvanced ? (
-              <div className="flex flex-col gap-4">
-                <section aria-label="Availability">
-                  <div className="mb-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 px-2 text-sm font-semibold"
-                      onClick={() => setOpenGroup(openGroup === "avail" ? null : "avail")}
-                      aria-expanded={openGroup === "avail"}
-                    >
-                      Availability
-                    </Button>
-                  </div>
-                  {openGroup === "avail" ? (
-                    <div className="flex flex-col gap-2">
-                      {editingSaved ? (
-                        editingSaved.paused_until ? (
-                          <p className="text-xs text-muted-foreground">
-                            Paused until {formatPausedUntilFull(editingSaved.paused_until)}
-                            {editingSaved.pause_reason ? ` — ${editingSaved.pause_reason}` : ""}
-                          </p>
-                        ) : (
-                          <p className="text-xs text-muted-foreground">
-                            {editingSaved.available ? "Available — eligible for new leads." : editingSaved.status_label}
-                          </p>
-                        )
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          Availability applies after the first save.
-                        </p>
-                      )}
-                      {editingSaved ? (
-                        <div>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setPauseFor(pauseFor ? null : editingSaved.id)}
-                          >
-                            {pauseFor
-                              ? "Close pause controls"
-                              : editingSaved.paused_until
-                                ? "Resume / extend pause"
-                                : "Pause temporarily"}
-                          </Button>
-                        </div>
-                      ) : null}
-                      {pausingSaved ? (
-                        <Card className="border-dashed">
-                          <CardContent className="flex flex-col gap-3 pt-4">
-                            <p className="text-sm font-medium">
-                              Pause {pausingSaved.display_name}
-                            </p>
-                                <p className="text-xs text-muted-foreground">
-                                  Pauses take effect immediately for new leads. Existing ownership never changes. All times are in Indian Standard Time (IST).
-                                </p>
-                            {pausingSaved.paused_until ? (
-                              <p className="text-muted-foreground text-xs">
-                                Current: Paused until{" "}
-                                {formatPausedUntilFull(pausingSaved.paused_until)}
-                                {pausingSaved.pause_reason ? ` — ${pausingSaved.pause_reason}` : ""} (
-                                {pausingSaved.pause_scope === "account" ? "whole account" : "this table"})
-                              </p>
-                            ) : null}
-                                <div className="flex flex-wrap gap-2">
-                                  {(
-                                    [
-                                      ["today", "Pause for today"],
-                                      ["days", "Pause N days"],
-                                      ["until", "Pause until…"],
-                                      ["resume", "Resume now"],
-                                    ] as const
-                                  ).map(([value, label]) => (
-                                    <Button
-                                      key={value}
-                                      type="button"
-                                      variant={pauseMode === value ? "default" : "outline"}
-                                      size="sm"
-                                      onClick={() => setPauseMode(value)}
-                                    >
-                                      {label}
-                                    </Button>
-                                  ))}
-                                </div>
-                                {pauseMode === "days" && (
-                                  <div className="flex flex-col gap-1.5">
-                                    <Label>Days (1–365)</Label>
-                                    <Input
-                                      value={pauseDays}
-                                      inputMode="numeric"
-                                      className="w-28"
-                                      onChange={(e) =>
-                                        setPauseDays(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
-                                      }
-                                    />
-                                  </div>
-                                )}
-                                {pauseMode === "until" && (
-                                  <div className="flex flex-col gap-1.5">
-                                    <Label>Resume date and time (IST)</Label>
-                                    <Input
-                                      type="datetime-local"
-                                      value={pauseUntil}
-                                      onChange={(e) => setPauseUntil(e.target.value)}
-                                    />
-                                  </div>
-                                )}
-                                {pauseMode !== "resume" && (
-                                  <>
-                                    <div className="flex flex-col gap-1.5">
-                                      <Label>Reason (optional)</Label>
-                                      <Input
-                                        value={pauseReason}
-                                        onChange={(e) => setPauseReason(e.target.value)}
-                                        placeholder="On leave"
-                                        maxLength={280}
-                                      />
-                                    </div>
-                                    <div className="flex gap-2">
-                                      <Button
-                                        type="button"
-                                        variant={pauseScope === "table" ? "default" : "outline"}
-                                        size="sm"
-                                        onClick={() => setPauseScope("table")}
-                                      >
-                                        This table only
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant={pauseScope === "account" ? "default" : "outline"}
-                                        size="sm"
-                                        onClick={() => setPauseScope("account")}
-                                      >
-                                        Whole account
-                                      </Button>
-                                    </div>
-                                  </>
-                                )}
-                                <div className="flex justify-end gap-2">
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => setPauseFor(null)}
-                                  >
-                                    Cancel
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    disabled={busy === "pause"}
-                                    onClick={submitPause}
-                                  >
-                                    {pauseMode === "resume" ? "Resume" : "Pause"}
-                                  </Button>
-                                </div>
-                              </CardContent>
-                            </Card>
-                          ) : null}
-                      </div>
-                  ) : null}
-                </section>
-                {isMetaTable ? (
-                  <section aria-label="Customer messages">
-                    <div className="mb-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 px-2 text-sm font-semibold"
-                        onClick={() => setOpenGroup(openGroup === "msg" ? null : "msg")}
-                        aria-expanded={openGroup === "msg"}
-                      >
-                        WhatsApp messages to lead
-                      </Button>
-                    </div>
-                    <p className="text-xs leading-snug text-muted-foreground">
-                      {sequenceStatusText(form)} These templates are sent to a
-                      lead on initial assignment only — reassignment does not
-                      resend them.
-                    </p>
-                    {openGroup === "msg" ? (
-                      <div className="mt-2 flex flex-col gap-2">
-                        {!formKey ? (
-                          <p className="text-xs text-muted-foreground">
-                            Link a team member or enter an email address or phone number to
-                            configure customer templates.
-                          </p>
-                        ) : sequenceCatalogLoading && sequenceCatalog === null ? (
-                          <p className="text-xs text-muted-foreground">
-                            Loading customer templates…
-                          </p>
-                        ) : sequenceCatalog === null ? (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <p role="alert" className="text-xs text-destructive">
-                              Could not load customer templates.
-                            </p>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => void loadSequenceCatalog()}
-                            >
-                              Retry
-                            </Button>
-                          </div>
-                        ) : (
-                          <AssigneeSequenceEditor
-                            templates={sequenceCatalog.templates}
-                            fields={sequenceCatalog.fields}
-                            sample={sequenceCatalog.sample}
-                            delay={form.sequence?.delay_seconds ?? "0"}
-                            items={form.sequence?.items ?? []}
-                            readOnly={false}
-                            templateDetails={templateDetails}
-                            onDelayChange={(v) =>
-                              setForm((f) => ({
-                                ...f,
-                                sequence: {
-                                  delay_seconds: v,
-                                  items: f.sequence?.items ?? [],
-                                },
-                                sequenceDirty: true,
-                              }))
-                            }
-                            onItemsChange={(items) =>
-                              setForm((f) => ({
-                                ...f,
-                                sequence: {
-                                  delay_seconds: f.sequence?.delay_seconds ?? "0",
-                                  items,
-                                },
-                                sequenceDirty: true,
-                              }))
-                            }
-                          />
-                        )}
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
-              </div>
-            ) : null}
-          </>
         )}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
@@ -2337,6 +2100,132 @@ export function TableAssignmentDialog({
       </div>
     </div>
   );
+
+  /**
+   * Compact per-salesperson pause panel rendered below a Step 1
+   * member row. Same controls as the assignment pause endpoint
+   * accepts (today / N days / until / resume, table or account
+   * scope, optional 280-char reason) with Cancel + Pause Member.
+   * Pauses apply to persisted members only and take effect for new
+   * leads immediately; historical ownership never changes.
+   */
+  const renderPausePanel = () => {
+    if (!pausingSaved) return null;
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
+        <Card className="border-dashed">
+          <CardContent className="flex flex-col gap-3 pt-4">
+            <p className="text-sm font-medium">
+              Pause {pausingSaved.display_name}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Pauses take effect immediately for new leads. Existing ownership never changes. All times are in Indian Standard Time (IST).
+            </p>
+            {pausingSaved.paused_until ? (
+              <p className="text-muted-foreground text-xs">
+                Current: Paused until{" "}
+                {formatPausedUntilFull(pausingSaved.paused_until)}
+                {pausingSaved.pause_reason ? ` — ${pausingSaved.pause_reason}` : ""} (
+                {pausingSaved.pause_scope === "account" ? "whole account" : "this table"})
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  ["today", "Pause for today"],
+                  ["days", "Pause N days"],
+                  ["until", "Pause until…"],
+                  ["resume", "Resume now"],
+                ] as const
+              ).map(([value, label]) => (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={pauseMode === value ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setPauseMode(value)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            {pauseMode === "days" && (
+              <div className="flex flex-col gap-1.5">
+                <Label>Days (1–365)</Label>
+                <Input
+                  value={pauseDays}
+                  inputMode="numeric"
+                  className="w-28"
+                  onChange={(e) =>
+                    setPauseDays(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
+                  }
+                />
+              </div>
+            )}
+            {pauseMode === "until" && (
+              <div className="flex flex-col gap-1.5">
+                <Label>Resume date and time (IST)</Label>
+                <Input
+                  type="datetime-local"
+                  value={pauseUntil}
+                  onChange={(e) => setPauseUntil(e.target.value)}
+                />
+              </div>
+            )}
+            {pauseMode !== "resume" && (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <Label>Reason (optional)</Label>
+                  <Input
+                    value={pauseReason}
+                    onChange={(e) => setPauseReason(e.target.value)}
+                    placeholder="On leave"
+                    maxLength={280}
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant={pauseScope === "table" ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setPauseScope("table")}
+                  >
+                    This table only
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={pauseScope === "account" ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setPauseScope("account")}
+                  >
+                    Whole account
+                  </Button>
+                </div>
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setPauseFor(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={busy === "pause"}
+                onClick={submitPause}
+              >
+                {pauseMode === "resume" ? "Resume now" : "Pause Member"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  };
 
   /**
    * Compact Step 3 customer-sequence panel — deliberately separate
@@ -2435,18 +2324,11 @@ export function TableAssignmentDialog({
   // path can persist anything either).
   const readOnly = viewMode === true;
 
-  // Saved row for the member open in the editor (availability and
-  // pause controls exist only for persisted assignees).
-  const editingSaved =
-    editingKey && editingKey !== "__new__" ? savedById.get(editingKey) : undefined;
-
-  // Pause target for the inline pause card: only when the editor is
-  // open on the saved member currently being paused. Hoisted out of
-  // the JSX so the card needs no inline IIFE.
-  const pausingSaved =
-    pauseFor && editingSaved && pauseFor === editingSaved.id
-      ? savedById.get(pauseFor)
-      : undefined;
+  // Pause target for the Step 1 pause panel: the persisted member
+  // currently being paused (persisted only — unsaved drafts have no
+  // server row to pause). Hoisted out of the JSX so the panel needs
+  // no inline IIFE.
+  const pausingSaved = pauseFor ? savedById.get(pauseFor) : undefined;
 
   // Review validation summary: recomputed from the live drafts so
   // the review can never drift from what Save submits. Reaching the
@@ -2725,7 +2607,12 @@ export function TableAssignmentDialog({
                 </div>
               ) : (
                 <div className="flex flex-col gap-1.5">
-                  {drafts.map((d) => (
+                  {drafts.map((d) => {
+                    const saved = savedById.get(d.key);
+                    const pausedLive = saved?.paused_until
+                      ? Date.parse(saved.paused_until) > Date.now()
+                      : false;
+                    return (
                     <Fragment key={d.key}>
                     <div
                       className={cn(
@@ -2747,8 +2634,53 @@ export function TableAssignmentDialog({
                           {d.weight}%
                         </span>
                       ) : null}
+                      {saved ? (
+                        pausedLive && saved.paused_until ? (
+                          <span
+                            className="inline-flex max-w-44 shrink-0 items-center gap-1.5 truncate rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-400"
+                            title={saved.pause_reason ? `Paused until ${formatPausedUntilFull(saved.paused_until)} — ${saved.pause_reason}` : `Paused until ${formatPausedUntilFull(saved.paused_until)}`}
+                          >
+                            Paused until {formatPausedUntilFull(saved.paused_until)}
+                          </span>
+                        ) : (
+                          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                            Available
+                          </span>
+                        )
+                      ) : (
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          Available
+                        </span>
+                      )}
                       {readOnly ? null : (
                         <div className="flex shrink-0 items-center gap-1">
+                          {saved ? (
+                            pausedLive ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() => void quickResume(saved)}
+                                disabled={busy !== null}
+                                aria-label={`Resume ${d.display_name || "member"}`}
+                              >
+                                Resume
+                              </Button>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() => openPause(saved)}
+                                disabled={busy !== null}
+                                aria-label={`Pause ${d.display_name || "member"}`}
+                              >
+                                Pause
+                              </Button>
+                            )
+                          ) : null}
                           <Button
                             type="button"
                             variant="ghost"
@@ -2775,9 +2707,11 @@ export function TableAssignmentDialog({
                         </div>
                       )}
                     </div>
-                    {editingKey === d.key && editorSlot === "members" ? renderMemberEditor(false, true) : null}
+                    {editingKey === d.key && editorSlot === "members" ? renderMemberEditor(false) : null}
+                    {pauseFor === saved?.id ? renderPausePanel() : null}
                     </Fragment>
-                  ))}
+                    );
+                  })}
                   {mode === "percentage" ? (
                     <p className="pt-1 text-xs text-muted-foreground">
                       Total allocation: {activeWeightTotal}%
@@ -2785,7 +2719,7 @@ export function TableAssignmentDialog({
                   ) : null}
                 </div>
               )}
-              {editingKey === "__new__" ? renderMemberEditor(true, true) : null}
+              {editingKey === "__new__" ? renderMemberEditor(true) : null}
               </ConfigSection>
             </section>
           </>
@@ -2962,7 +2896,7 @@ export function TableAssignmentDialog({
                             </p>
                           ) : (
                             <p className="truncate text-sm font-medium text-muted-foreground">
-                              External contact — add a name below
+                              External contact — add a name in Step 1
                             </p>
                           )}
                           <p className="truncate text-xs text-muted-foreground">
@@ -2990,20 +2924,6 @@ export function TableAssignmentDialog({
                           WhatsApp
                         </label>
                       </div>
-                      {!d.user_id ? (
-                        <div className="mt-2 flex flex-col gap-1.5">
-                          <Label htmlFor={`notify-name-${d.key}`}>
-                            Display name <span className="text-destructive">*</span>
-                          </Label>
-                          <Input
-                            id={`notify-name-${d.key}`}
-                            value={d.display_name}
-                            onChange={(e) => patchDraft(d.key, { display_name: e.target.value })}
-                            placeholder="Priya Sharma"
-                            disabled={readOnly}
-                          />
-                        </div>
-                      ) : null}
                       {d.notify_whatsapp ? (
                         <div className="mt-2 flex flex-col gap-2">
                           <div className="flex flex-col gap-1.5">
@@ -3055,71 +2975,6 @@ export function TableAssignmentDialog({
                   })}
                 </div>
               )}
-            </ConfigSection>
-          </section>
-
-          <section aria-label="Advanced member settings">
-            <ConfigSection
-              title="Advanced member settings"
-              hint="Availability pauses and customer messages per member. Notification channels live on each card above."
-            >
-              <div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowStepAdvanced((v) => !v)}
-                  aria-expanded={showStepAdvanced}
-                >
-                  {showStepAdvanced ? "Hide advanced member settings" : "Show advanced member settings"}
-                </Button>
-              </div>
-              {showStepAdvanced ? (
-                drafts.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">
-                    Add members in Step 1 to configure advanced settings.
-                  </p>
-                ) : (
-                  <div className="flex flex-col gap-1.5">
-                    {drafts.map((d) => (
-                      <Fragment key={d.key}>
-                        <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2">
-                          <MemberInitials name={d.display_name} />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium text-foreground">
-                              {d.display_name || "—"}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {d.user_id ? "Team member" : "External contact"}
-                              {d.whatsapp_numbers.length > 0
-                                ? ` · ${d.whatsapp_numbers.length} extra number${d.whatsapp_numbers.length === 1 ? "" : "s"}`
-                                : ""}
-                            </p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {[
-                                d.notify_email ? "Email on" : "Email off",
-                                d.notify_whatsapp ? "WhatsApp on" : "WhatsApp off",
-                              ].join(" · ")}
-                            </p>
-                          </div>
-                          {readOnly ? null : (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 px-2 text-xs"
-                              onClick={() => startEdit(d, "advanced")}
-                            >
-                              Edit
-                            </Button>
-                          )}
-                        </div>
-                        {editingKey === d.key && editorSlot === "advanced" ? renderMemberEditor(false) : null}
-                      </Fragment>
-                    ))}
-                  </div>
-                )
-              ) : null}
             </ConfigSection>
           </section>
           </>
@@ -3215,6 +3070,37 @@ export function TableAssignmentDialog({
                   inactive and new leads will stay Unassigned until members
                   are added. Existing lead ownership is unchanged.
                 </p>
+              ) : null}
+              {drafts.length > 0 ? (
+                <div className="mt-2 flex flex-col gap-1" aria-label="Review availability">
+                  <p className="text-sm font-semibold text-foreground">Availability</p>
+                  <ul className="flex flex-col gap-1">
+                    {drafts.map((d) => {
+                      const saved = savedById.get(d.key);
+                      const paused = saved?.paused_until
+                        ? Date.parse(saved.paused_until) > Date.now()
+                        : false;
+                      return (
+                        <li key={d.key} className="text-xs text-muted-foreground">
+                          {d.display_name || "—"} —{" "}
+                          {paused && saved?.paused_until ? (
+                            <>
+                              Paused until {formatPausedUntilFull(saved.paused_until)}
+                              {saved.pause_scope === "account" ? " · Entire account" : " · This table only"}
+                              {saved.pause_reason ? ` · ${saved.pause_reason}` : ""}
+                            </>
+                          ) : (
+                            "Available"
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="text-xs text-muted-foreground">
+                    Pausing one member never pauses the table: the assignment-level
+                    Pause/Resume controls below govern automatic assignment for everyone.
+                  </p>
+                </div>
               ) : null}
               {reviewAssignProblem || reviewNotifyProblem || reviewSequencesProblem ? (
                 <div className="flex flex-col gap-1.5" role="alert">
