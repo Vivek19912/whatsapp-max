@@ -100,6 +100,59 @@ export function displayRecordingNumber(digits: string | null): string {
   return `+${digits}`;
 }
 
+/**
+ * Editable 10-digit portion for the fixed-+91 phone input from a
+ * stored normalized value. `91` + 10 digits (with or without
+ * formatting) yields the 10 subscriber digits; a bare 10-digit
+ * value is used as-is. Anything else yields '' so a legacy
+ * non-conforming value is never mangled into the field — the
+ * owner re-enters it and validation blocks saving until it is
+ * exactly 10 digits.
+ */
+export function recordingMobileDigitsFromStored(value: string | null): string {
+  if (!value) return '';
+  const digits = normalizePhone(value);
+  if (/^91\d{10}$/.test(digits)) return digits.slice(2);
+  if (/^\d{10}$/.test(digits)) return digits;
+  return '';
+}
+
+/**
+ * Sanitize keystrokes/pastes for the fixed-+91 phone input. Digits
+ * only, capped at 10. A pasted (or fully typed) 12-digit Indian
+ * number (`91` + 10 digits, `+` already stripped) is reduced to
+ * its 10 subscriber digits so the fixed prefix is never
+ * duplicated. A genuine 10-digit entry is never stripped.
+ */
+export function sanitizeRecordingMobileInput(value: string): string {
+  const digits = (value ?? '').replace(/\D/g, '');
+  if (/^91\d{10}$/.test(digits)) return digits.slice(2);
+  return digits.slice(0, 10);
+}
+
+/**
+ * Resolve what the recording form saves for the phone field.
+ * Disabled → null (no number). Enabled → exactly 10 digits,
+ * stored as `91` + digits via the shared server-mirroring
+ * normalizer (never a doubled prefix). Anything else is a
+ * user-facing validation error; the caller keeps the dialog open.
+ */
+export function resolveRecordingSaveNumber(
+  phoneEnabled: boolean,
+  digits: string,
+): { number: string | null } | { error: string } {
+  if (!phoneEnabled) return { number: null };
+  const clean = (digits ?? '').trim();
+  if (!/^\d{10}$/.test(clean)) {
+    return { error: 'Enter a valid 10-digit mobile number.' };
+  }
+  const normalized = normalizeRecordingPhoneNumber(`91${clean}`);
+  if (!normalized) {
+    return { error: 'Enter a valid 10-digit mobile number.' };
+  }
+  return { number: normalized };
+}
+
 export function RecordingConfigDialog({
   member,
   onClose,
@@ -149,10 +202,11 @@ export function RecordingConfigForm({
   const [phoneEnabled, setPhoneEnabled] = useState(
     () => member.phone_recording_number != null,
   );
-  const [phoneDraft, setPhoneDraft] = useState(() =>
-    member.phone_recording_number
-      ? displayRecordingNumber(member.phone_recording_number)
-      : '',
+  // Editable subscriber digits only — the +91 prefix is a fixed,
+  // non-editable adornment rendered beside the input, never part
+  // of this value, so it can never be deleted or duplicated.
+  const [phoneDigits, setPhoneDigits] = useState(() =>
+    recordingMobileDigitsFromStored(member.phone_recording_number),
   );
   const [whatsapp, setWhatsapp] = useState(
     () => member.whatsapp_recording_source || 'none',
@@ -162,18 +216,12 @@ export function RecordingConfigForm({
 
   async function save() {
     setError(null);
-    let number: string | null = null;
-    if (phoneEnabled) {
-      if (!isRecordingPhoneNumber(phoneDraft) || !phoneDraft.trim()) {
-        setError('Enter a valid phone number.');
-        return;
-      }
-      number = normalizeRecordingPhoneNumber(phoneDraft);
-      if (!number) {
-        setError('Enter a valid phone number.');
-        return;
-      }
+    const resolved = resolveRecordingSaveNumber(phoneEnabled, phoneDigits);
+    if ('error' in resolved) {
+      setError(resolved.error);
+      return;
     }
+    const number = resolved.number;
     setSaving(true);
     try {
       const res = await fetch(`/api/account/recording-settings/${member.user_id}`, {
@@ -267,21 +315,33 @@ export function RecordingConfigForm({
             <Label htmlFor={`rec-phone-input-${member.user_id}`} className="text-sm text-foreground">
               Phone number
             </Label>
-            <Input
-              id={`rec-phone-input-${member.user_id}`}
-              value={phoneDraft}
-              disabled={!phoneEnabled || saving}
-              onChange={(e) => {
-                setPhoneDraft(e.target.value);
-                setError(null);
-              }}
-              placeholder="+91 __________"
-              inputMode="tel"
-              autoComplete="tel"
-              aria-invalid={error ? true : undefined}
-              aria-describedby={`rec-phone-hint-${member.user_id}`}
-              className="mt-1.5 bg-muted border-border text-foreground"
-            />
+            <div className="relative mt-1.5">
+              <span
+                aria-hidden="true"
+                className={`text-muted-foreground pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm select-none ${!phoneEnabled || saving ? 'opacity-50' : ''}`}
+              >
+                +91
+              </span>
+              <span
+                aria-hidden="true"
+                className={`bg-border pointer-events-none absolute top-2 bottom-2 left-11 w-px ${!phoneEnabled || saving ? 'opacity-50' : ''}`}
+              />
+              <Input
+                id={`rec-phone-input-${member.user_id}`}
+                value={phoneDigits}
+                disabled={!phoneEnabled || saving}
+                onChange={(e) => {
+                  setPhoneDigits(sanitizeRecordingMobileInput(e.target.value));
+                  setError(null);
+                }}
+                placeholder="8604012345"
+                inputMode="numeric"
+                autoComplete="tel"
+                aria-invalid={error ? true : undefined}
+                aria-describedby={`rec-phone-hint-${member.user_id}`}
+                className="bg-muted border-border pl-16 text-foreground"
+              />
+            </div>
             <p id={`rec-phone-hint-${member.user_id}`} className="mt-1.5 text-xs text-muted-foreground">
               Enter the SIM&apos;s phone number assigned to this salesperson. CallVault
               automatically detects which active SIM currently has this number.

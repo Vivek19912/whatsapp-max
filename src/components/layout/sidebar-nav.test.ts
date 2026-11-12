@@ -32,7 +32,6 @@ describe('Features removal — sidebar', () => {
       '/inbox',
       '/calls',
       '/recordings',
-      '/flows',
       '/followups',
       '/workspace',
       '/broadcasts',
@@ -68,9 +67,9 @@ describe('Features removal — sidebar', () => {
     ).toBe('Dashboard');
   });
 
-  it('places Workspace seventh with no Beta badge', () => {
-    expect(navItems[6]).toMatchObject({ href: '/workspace' });
-    expect(navItems[6].beta ?? false).toBe(false);
+  it('places Workspace sixth with no Beta badge', () => {
+    expect(navItems[5]).toMatchObject({ href: '/workspace' });
+    expect(navItems[5].beta ?? false).toBe(false);
   });
 
   it('places Chat Assignment last', () => {
@@ -90,6 +89,20 @@ describe('Features removal — sidebar', () => {
   });
 });
 
+describe('Flows moved to Settings (main sidebar clean)', () => {
+  it('has no Flows entry in the main sidebar', () => {
+    const hrefs = navItems.map((i) => i.href);
+    expect(hrefs).not.toContain('/flows');
+    expect(navItems.some((i) => i.label === 'Flows')).toBe(false);
+  });
+
+  it('keeps the Flows page (navigation-only move)', () => {
+    // The page, routes, APIs, and configuration are untouched —
+    // only the sidebar entry is gone (it now lives under
+    // Settings → Workspace, above Google Sheets).
+    expect(existsSync(join(root, 'src/app/(dashboard)/flows/page.tsx'))).toBe(true);
+  });
+});
 describe('Features removal — route is gone', () => {
   it('has no /features route directory or page', () => {
     expect(existsSync(join(root, 'src/app/(dashboard)/features'))).toBe(false);

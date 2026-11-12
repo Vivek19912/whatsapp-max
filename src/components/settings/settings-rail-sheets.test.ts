@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  SETTINGS_FLOWS_LINK,
   SETTINGS_SHEETS_LINKS,
   resolveSheetsOpen,
 } from './settings-rail';
@@ -44,7 +45,7 @@ describe('Settings → Workspace → Google Sheets group', () => {
     // after the section buttons (Webhooks is the last rail section).
     const workspaceAnchor = railSrc.indexOf("group === 'workspace'");
     expect(workspaceAnchor).toBeGreaterThan(-1);
-    const groupAnchor = railSrc.indexOf('Google Sheets', workspaceAnchor);
+    const groupAnchor = railSrc.indexOf('key="google-sheets"', workspaceAnchor);
     expect(groupAnchor).toBeGreaterThan(workspaceAnchor);
     // No other rail content follows the group.
     expect(
@@ -78,6 +79,39 @@ describe('Settings → Workspace → Google Sheets group', () => {
   });
 });
 
+describe('Settings → Workspace → Flows item', () => {
+  it('links to the existing Flows route', () => {
+    expect(SETTINGS_FLOWS_LINK).toEqual({ href: '/flows', label: 'Flows' });
+  });
+
+  it('renders immediately above Google Sheets, after Webhooks', () => {
+    // Expected Workspace order: WhatsApp … Webhooks, Flows,
+    // Google Sheets. The Flows link is injected inside the workspace
+    // group container, before the Google Sheets group.
+    const workspaceAnchor = railSrc.indexOf("group === 'workspace'");
+    expect(workspaceAnchor).toBeGreaterThan(-1);
+    const flowsAnchor = railSrc.indexOf('SETTINGS_FLOWS_LINK.href', workspaceAnchor);
+    expect(flowsAnchor).toBeGreaterThan(workspaceAnchor);
+    const groupAnchor = railSrc.indexOf('key="google-sheets"', workspaceAnchor);
+    expect(groupAnchor).toBeGreaterThan(flowsAnchor);
+  });
+
+  it('reuses rail styling and highlights while on any /flows route', () => {
+    expect(railSrc).toContain('SETTINGS_FLOWS_LINK.label');
+    expect(railSrc).toContain("pathname.startsWith(SETTINGS_FLOWS_LINK.href)");
+    expect(railSrc).toContain('showFlowsLink');
+    expect(settingsPageSrc).toContain('showFlowsLink={isOwner}');
+  });
+
+  it('does not add a settings tab or change the route', () => {
+    const sectionsSrc = readFileSync(
+      join(root, 'src/components/settings/settings-sections.ts'),
+      'utf8'
+    );
+    expect(sectionsSrc).not.toContain("'/flows'");
+    expect(sectionsSrc).not.toContain('"/flows"');
+  });
+});
 describe('Main sidebar no longer carries Google Sheets', () => {
   it('has no sheets entries, header, or accordion state', () => {
     expect(sidebarSrc).not.toContain('GOOGLE SHEETS');

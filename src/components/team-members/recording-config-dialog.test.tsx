@@ -9,6 +9,9 @@ import {
   displayRecordingNumber,
   isRecordingPhoneNumber,
   normalizeRecordingPhoneNumber,
+  recordingMobileDigitsFromStored,
+  resolveRecordingSaveNumber,
+  sanitizeRecordingMobileInput,
   whatsappSourceLabel,
   type RecordingConfigMember,
 } from "./recording-config-dialog";
@@ -45,11 +48,15 @@ function openHtml(m?: Record<string, unknown>) {
 }
 
 describe("RecordingConfigDialog", () => {
-  it("shows identity, current phone number, and current WhatsApp choice", () => {
+  it("shows identity, fixed +91 prefix, subscriber digits, and current WhatsApp choice", () => {
     const html = openHtml();
     expect(html).toContain("Vikas Sahni");
     expect(html).toContain("vikas@example.com");
-    expect(html).toContain("+91 89530 65369");
+    // +91 is a fixed, non-editable adornment; only the 10 subscriber
+    // digits live in the input value.
+    expect(html).toContain("+91");
+    expect(html).toContain('value="8953065369"');
+    expect(html).not.toContain('value="+91');
     expect(html).toContain("WhatsApp Business");
   });
 
@@ -108,6 +115,18 @@ describe("RecordingConfigDialog", () => {
     });
     expect(html).toContain("No phone calls will be recorded.");
   });
+
+  it("keeps the phone input disabled with an empty value when recording is off", () => {
+    const html = openHtml({ phone_recording_number: null });
+    expect(html).toContain("disabled");
+    expect(html).toContain("+91");
+    expect(html).toContain('value=""');
+  });
+
+  it("prefills plain 10-digit stored values without adding a prefix", () => {
+    const html = openHtml({ phone_recording_number: "8953065369" });
+    expect(html).toContain('value="8953065369"');
+  });
 });
 
 describe("recording dialog helpers", () => {
@@ -123,8 +142,57 @@ describe("recording dialog helpers", () => {
     expect(isRecordingPhoneNumber("xyz")).toBe(false);
   });
 
-  it("labels WhatsApp sources with a safe fallback", () => {
-    expect(whatsappSourceLabel("whatsapp")).toBe("WhatsApp");
+  it("derives the editable digits from stored values without corruption", () => {
+    // Standard stored form: 91 + 10 digits (with or without formatting).
+    expect(recordingMobileDigitsFromStored("918953065369")).toBe("8953065369");
+    expect(recordingMobileDigitsFromStored("+91 89530 65369")).toBe("8953065369");
+    expect(recordingMobileDigitsFromStored("+918953065369")).toBe("8953065369");
+    // Bare 10-digit values pass through untouched.
+    expect(recordingMobileDigitsFromStored("8953065369")).toBe("8953065369");
+    // Empty/missing stays empty.
+    expect(recordingMobileDigitsFromStored(null)).toBe("");
+    expect(recordingMobileDigitsFromStored("")).toBe("");
+    // Non-conforming legacy values are never mangled into the field.
+    expect(recordingMobileDigitsFromStored("abc")).toBe("");
+    expect(recordingMobileDigitsFromStored("123")).toBe("");
+    expect(recordingMobileDigitsFromStored("12025550173")).toBe("");
+  });
+
+  it("sanitizes typed and pasted input to 10 digits, never doubling +91", () => {
+    // Normal entry.
+    expect(sanitizeRecordingMobileInput("8604012345")).toBe("8604012345");
+    // Pasted full Indian numbers collapse to subscriber digits.
+    expect(sanitizeRecordingMobileInput("+918604012345")).toBe("8604012345");
+    expect(sanitizeRecordingMobileInput("918604012345")).toBe("8604012345");
+    expect(sanitizeRecordingMobileInput("+91 86040 12345")).toBe("8604012345");
+    // Typing +91 manually can never stick: "+" is stripped, and a
+    // completed 91+10-digit entry reduces to its 10 digits.
+    expect(sanitizeRecordingMobileInput("+91")).toBe("91");
+    // Letters/symbols are dropped; over-length input is capped.
+    expect(sanitizeRecordingMobileInput("86a040-12345")).toBe("8604012345");
+    expect(sanitizeRecordingMobileInput("86040123456789")).toBe("8604012345");
+    expect(sanitizeRecordingMobileInput("")).toBe("");
+    // A genuine 10-digit number is never stripped, even when it
+    // starts with 91.
+    expect(sanitizeRecordingMobileInput("9198765432")).toBe("9198765432");
+  });
+
+  it("resolves save payloads without ever doubling the country code", () => {
+    expect(resolveRecordingSaveNumber(true, "8604012345")).toEqual({
+      number: "918604012345",
+    });
+    // Incomplete, empty, over-long, and already-prefixed entries are
+    // rejected instead of being saved with a doubled prefix.
+    for (const bad of ["86040123", "", "86040123456", "918604012345", "abcdefghij"]) {
+      const resolved = resolveRecordingSaveNumber(true, bad);
+      expect(resolved).toEqual({ error: "Enter a valid 10-digit mobile number." });
+    }
+    // Disabled recording always clears the number.
+    expect(resolveRecordingSaveNumber(false, "8604012345")).toEqual({ number: null });
+    expect(resolveRecordingSaveNumber(false, "")).toEqual({ number: null });
+  });
+
+  it("labels WhatsApp sources with a safe fallback", () => {    expect(whatsappSourceLabel("whatsapp")).toBe("WhatsApp");
     expect(whatsappSourceLabel("whatsapp_business")).toBe("WhatsApp Business");
     expect(whatsappSourceLabel("none")).toBe("None");
     expect(whatsappSourceLabel("bogus")).toBe("None");

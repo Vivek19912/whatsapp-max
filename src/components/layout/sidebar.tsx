@@ -26,7 +26,6 @@ import {
   Settings,
   Table2,
   UsersRound,
-  Workflow,
   X,
   Zap,
   UserX,
@@ -53,7 +52,6 @@ export const navItems: NavItem[] = [
   { href: "/inbox", label: "Inbox", icon: MessageSquare },
   { href: "/calls", label: "Call Analytics", icon: Phone },
   { href: "/recordings", label: "Recordings", icon: Mic },
-  { href: "/flows", label: "Flows", icon: Workflow, beta: false },
   { href: "/followups", label: "Reminders", icon: CalendarClock },
   { href: "/workspace", label: "Workspace", icon: Table2 },
   { href: "/broadcasts", label: "Bulk Messages", icon: Radio },
@@ -109,7 +107,7 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
   const { profileLoading, account, accountRole, canEditSettings } = useAuth();
   // Team Members is a standalone page at /team-members.
   const isTeamMembersActive = pathname.startsWith("/team-members");
-  // UI-only gating: Flows and Settings are shown to the owner
+  // UI-only gating: Settings is shown to the owner
   // only. Non-owners simply don't see these nav entries. This is purely a
   // visibility change — the backend/routes are untouched, so it can be
   // reverted by removing the `isOwner` checks below.
@@ -123,12 +121,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     // route, APIs, and configuration are untouched.
     if (item.href === "/chat-assignment") return false;
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
-    if (
-      !isOwner &&
-      (item.href === "/flows" || item.href === "/chat-assignment")
-    ) {
-      return false;
-    }
     return true;
   });
   const totalUnread = useTotalUnread();

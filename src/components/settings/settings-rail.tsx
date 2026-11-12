@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronDown, ChevronUp, Sheet } from 'lucide-react';
+import { ChevronDown, ChevronUp, Sheet, Workflow } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import {
@@ -17,6 +17,13 @@ import {
 // no auto-scroll needed). Mirrors the Tailwind `lg:` breakpoint that
 // drives the row→column switch in the markup below — keep the two in sync.
 const RAIL_DESKTOP_MIN_PX = 1024;
+
+/**
+ * Single link of the Settings → Workspace → Flows item.
+ * Same destination as the old main-sidebar entry — the route and
+ * page are untouched, only the navigation entry point moved.
+ */
+export const SETTINGS_FLOWS_LINK = { href: '/flows', label: 'Flows' } as const;
 
 /**
  * Child links of the Settings → Workspace → Google Sheets group.
@@ -56,6 +63,7 @@ export function SettingsRail({
   hints,
   visibleSections,
   showSheetsLinks = false,
+  showFlowsLink = false,
 }: {
   active: SettingsSection;
   onSelect: (section: SettingsSection) => void;
@@ -67,6 +75,12 @@ export function SettingsRail({
    * visibility — the routes themselves are untouched.
    */
   showSheetsLinks?: boolean;
+  /**
+   * Show the Flows link immediately above Google Sheets. Owner-only,
+   * matching the old main-sidebar visibility — the route and page
+   * are untouched.
+   */
+  showFlowsLink?: boolean;
 }) {
   const activeRef = useRef<HTMLButtonElement>(null);
   const pathname = usePathname();
@@ -147,6 +161,30 @@ export function SettingsRail({
                 </button>
               );
             })}
+            {/* Flows sits immediately above Google Sheets: same
+                rail item styling as the section buttons, active
+                while on any /flows route. */}
+            {group === 'workspace' && showFlowsLink ? (
+              <Link
+                key={SETTINGS_FLOWS_LINK.href}
+                href={SETTINGS_FLOWS_LINK.href}
+                aria-current={
+                  pathname != null && pathname.startsWith(SETTINGS_FLOWS_LINK.href)
+                    ? 'page'
+                    : undefined
+                }
+                className={cn(
+                  'flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium whitespace-nowrap transition-colors',
+                  'lg:w-full',
+                  pathname != null && pathname.startsWith(SETTINGS_FLOWS_LINK.href)
+                    ? 'bg-primary-soft text-primary'
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                )}
+              >
+                <Workflow className="size-4 shrink-0" aria-hidden="true" />
+                <span className="flex-1">{SETTINGS_FLOWS_LINK.label}</span>
+              </Link>
+            ) : null}
             {/* Google Sheets is always the final Workspace item,
                 after Webhooks. Collapsible group linking to the
                 existing Flow Sheets / All Sheets routes. */}
