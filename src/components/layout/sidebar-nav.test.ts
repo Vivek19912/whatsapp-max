@@ -16,29 +16,30 @@ describe('Features removal — sidebar', () => {
     );
   });
 
-  it('leads with Dashboard (Meta Lead Ads route), then Inbox', () => {
+  it('leads with Dashboard, then Call Analytics', () => {
     expect(navItems[0]).toMatchObject({ href: '/meta-lead-ads/dashboard', label: 'Dashboard' });
-    expect(navItems[1]).toMatchObject({ href: '/inbox' });
+    expect(navItems[1]).toMatchObject({ href: '/calls', label: 'Call Analytics' });
   });
 
-  it('places Calls after the Meta Lead Ads entry and Inbox', () => {
-    expect(navItems[1]).toMatchObject({ href: '/inbox' });
-    expect(navItems[2]).toMatchObject({ href: '/calls', label: 'Call Analytics' });
+  it('follows the required sidebar order', () => {
+    expect(navItems[2]).toMatchObject({ href: '/workspace' });
+    expect(navItems[3]).toMatchObject({ href: '/recordings' });
+    expect(navItems[4]).toMatchObject({ href: '/inbox' });
   });
 
   it('keeps every other entry in the required order', () => {
     expect(navItems.map((i) => i.href)).toEqual([
       '/meta-lead-ads/dashboard',
-      '/inbox',
       '/calls',
-      '/recordings',
-      '/followups',
       '/workspace',
+      '/recordings',
+      '/inbox',
       '/broadcasts',
       '/quick-replies',
       '/automations',
-      '/notifications',
+      '/followups',
       '/templates',
+      '/notifications',
       '/chat-assignment',
     ]);
   });
@@ -67,9 +68,9 @@ describe('Features removal — sidebar', () => {
     ).toBe('Dashboard');
   });
 
-  it('places Workspace sixth with no Beta badge', () => {
-    expect(navItems[5]).toMatchObject({ href: '/workspace' });
-    expect(navItems[5].beta ?? false).toBe(false);
+  it('places Workspace third with no Beta badge', () => {
+    expect(navItems[2]).toMatchObject({ href: '/workspace' });
+    expect(navItems[2].beta ?? false).toBe(false);
   });
 
   it('places Chat Assignment last', () => {

@@ -49,16 +49,16 @@ interface NavItem {
 
 export const navItems: NavItem[] = [
   { href: "/meta-lead-ads/dashboard", label: "Dashboard", icon: Megaphone },
-  { href: "/inbox", label: "Inbox", icon: MessageSquare },
   { href: "/calls", label: "Call Analytics", icon: Phone },
-  { href: "/recordings", label: "Recordings", icon: Mic },
-  { href: "/followups", label: "Reminders", icon: CalendarClock },
   { href: "/workspace", label: "Workspace", icon: Table2 },
+  { href: "/recordings", label: "Recordings", icon: Mic },
+  { href: "/inbox", label: "Inbox", icon: MessageSquare },
   { href: "/broadcasts", label: "Bulk Messages", icon: Radio },
   { href: "/quick-replies", label: "Quick Replies", icon: MessageSquareText },
   { href: "/automations", label: "Automations", icon: Zap },
-  { href: "/notifications", label: "Notifications", icon: Bell },
+  { href: "/followups", label: "Reminders", icon: CalendarClock },
   { href: "/templates", label: "Templates", icon: FileText },
+  { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
 ];
 
