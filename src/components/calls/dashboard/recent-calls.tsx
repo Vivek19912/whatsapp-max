@@ -1,12 +1,6 @@
 'use client';
 
 import Link from 'next/link';
-import {
-  HelpCircle,
-  PhoneIncoming,
-  PhoneMissed,
-  PhoneOutgoing,
-} from 'lucide-react';
 import { useState } from 'react';
 
 import { EmptyState } from '@/components/dashboard/empty-state';
@@ -22,8 +16,15 @@ import {
 } from '@/components/ui/table';
 import { WorkspaceLeadLink } from '@/components/workspace/workspace-lead-link';
 import { RecordingPlayerPopover } from '@/components/recordings/recording-player-popover';
+// Shared Call-cell treatment with the Recordings table: merged
+// type icon + direction text, WhatsApp icon for both WhatsApp
+// variants, Missed treatment for missed rows.
+import {
+  CallLabel,
+  formatDuration,
+  MissedCallLabel,
+} from '@/components/recordings/recordings-table';
 import type { RecentMissedRow, RecentRecordingRow } from '@/lib/calls/client';
-import { formatTalkTime } from '@/lib/calls/formatters';
 
 export interface RecentCallRow {
   key: string;
@@ -63,52 +64,6 @@ function splitDateTime(iso: string | null): {
     year: 'numeric',
   }).format(d);
   return { time, date };
-}
-
-function DirectionCell({
-  direction,
-  missed,
-}: {
-  direction: 'in' | 'out' | null;
-  missed: boolean;
-}) {
-  if (missed) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-rose-600 dark:text-rose-400">
-        <PhoneMissed className="h-4 w-4" aria-hidden />
-        Missed
-      </span>
-    );
-  }
-  if (direction === 'in') {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-emerald-600 dark:text-emerald-400">
-        <PhoneIncoming className="h-4 w-4" aria-hidden />
-        Incoming
-      </span>
-    );
-  }
-  if (direction === 'out') {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-blue-600 dark:text-blue-400">
-        <PhoneOutgoing className="h-4 w-4" aria-hidden />
-        Outgoing
-      </span>
-    );
-  }
-  return (
-    <span className="text-muted-foreground inline-flex items-center gap-1.5 text-[13px]">
-      <HelpCircle className="h-4 w-4" aria-hidden />
-      Unknown
-    </span>
-  );
-}
-
-function callTypeLabel(callType: string | null): string {
-  if (callType === 'phone') return 'Phone';
-  if (callType === 'whatsapp' || callType === 'whatsapp_business')
-    return 'WhatsApp';
-  return '—';
 }
 
 /**
@@ -233,8 +188,6 @@ export function RecentCallsTable({
                 <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Lead Name</TableHead>
                 <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Workspace Table</TableHead>
                 <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Call</TableHead>
-                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Type</TableHead>
-                <TableHead className="h-16 px-4 align-middle text-[15px] font-bold text-right border-r border-border border-b last:border-r-0">Duration</TableHead>
                 <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Salesperson</TableHead>
                 <TableHead className="h-16 px-4 align-middle text-[15px] font-bold border-r border-border border-b last:border-r-0">Recording</TableHead>
               </TableRow>
@@ -286,19 +239,19 @@ export function RecentCallsTable({
                         <span className="block text-[13px] text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="border-r border-border px-4 last:border-r-0 whitespace-nowrap">
-                      <DirectionCell
-                        direction={r.direction}
-                        missed={r.missed}
-                      />
-                    </TableCell>
-                    <TableCell className="border-r border-border px-4 last:border-r-0 text-muted-foreground">
-                      {callTypeLabel(r.callType)}
-                    </TableCell>
-                    <TableCell className="border-r border-border px-4 last:border-r-0 text-right whitespace-nowrap tabular-nums text-foreground">
-                      {r.durationSecs === null
-                        ? '—'
-                        : formatTalkTime(r.durationSecs)}
+                    {/* Merged Call cell, same as the Recordings table:
+                        call-type icon + direction text (blue Incoming,
+                        green Outgoing, neutral Unknown); missed rows
+                        get the Missed treatment. */}
+                    <TableCell className="border-r border-border px-4 last:border-r-0">
+                      {r.missed ? (
+                        <MissedCallLabel />
+                      ) : (
+                        <CallLabel
+                          callType={r.callType}
+                          direction={r.direction}
+                        />
+                      )}
                     </TableCell>
                     <TableCell className="border-r border-border px-4 last:border-r-0 max-w-[160px]">
                       {r.salesperson ? (
@@ -328,14 +281,10 @@ export function RecentCallsTable({
                           onPlayIntent={() => setAutoplay(true)}
                           onClose={closePlayer}
                           playLabel={`Play recording of ${r.leadName}`}
-                          durationText={
-                            r.durationSecs === null
-                              ? ''
-                              : formatTalkTime(r.durationSecs)
-                          }
+                          durationText={formatDuration(r.durationSecs)}
                         />
                       ) : (
-                        <span className="text-muted-foreground text-xs">
+                        <span className="text-[13px] text-muted-foreground">
                           No recording
                         </span>
                       )}

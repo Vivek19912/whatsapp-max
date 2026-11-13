@@ -202,6 +202,25 @@ describe("highlight-only mode (?contact=<id>&highlight=only)", () => {
   });
 });
 
+describe("collapsed-rail deep link (?contact=<id>&sidebar=collapsed)", () => {
+  it("persists the rail through the existing sidebar preference", () => {
+    expect(pageSrc).toContain("deepLinkParams.get('sidebar') !== 'collapsed'");
+    expect(pageSrc).toContain("saveSidebarCollapsed(accountId, true);");
+  });
+
+  it("drops the one-shot flag from the URL after applying it", () => {
+    expect(pageSrc).toContain("url.searchParams.delete('sidebar');");
+    expect(pageSrc).toContain("router.replace(next, { scroll: false });");
+  });
+
+  it("never forces the rail for ordinary navigation (no flag, no-op)", () => {
+    const idx = pageSrc.indexOf("sidebarCollapseAppliedRef.current = true;");
+    expect(idx).toBeGreaterThan(-1);
+    const guard = pageSrc.slice(Math.max(0, idx - 400), idx);
+    expect(guard).toContain("deepLinkParams.get('sidebar') !== 'collapsed'");
+  });
+});
+
 describe("located lead is scrolled to and temporarily highlighted", () => {
   it("arms the highlight when the deep-linked row is selected", () => {
     const src = effectSrc();

@@ -300,14 +300,19 @@ describe("Call column (merged type + direction)", () => {
     expect(cell).toContain('data-icon="phone-handset"');
   });
 
-  it("merges type and direction: WhatsApp icon beside Outgoing text", () => {
-    const out = html([recording({ call_type: "whatsapp", direction: "out" })]);
-    expect(out).toContain('data-icon="whatsapp-brand"');
-    expect(out).toContain("Outgoing");
-    const idx = out.indexOf("Outgoing");
-    const tdStart = out.lastIndexOf("<td", idx);
-    const cell = out.slice(tdStart, out.indexOf("</td>", tdStart));
-    expect(cell).toContain('data-icon="whatsapp-brand"');
+  it("WhatsApp shows the icon only, never a direction label", () => {
+    for (const direction of ["in", "out", null] as const) {
+      for (const callType of ["whatsapp", "whatsapp_business"] as const) {
+        const out = html([recording({ call_type: callType, direction })]);
+        expect(out).toContain('data-icon="whatsapp-brand"');
+        const idx = out.indexOf('data-icon="whatsapp-brand"');
+        const tdStart = out.lastIndexOf("<td", idx);
+        const cell = out.slice(tdStart, out.indexOf("</td>", tdStart));
+        expect(cell).not.toContain("Incoming");
+        expect(cell).not.toContain("Outgoing");
+        expect(cell).not.toContain("Unknown");
+      }
+    }
   });
 
   it("renders no directional arrow icons anywhere in the table", () => {
@@ -441,7 +446,9 @@ describe("Lead and Recording behavior", () => {
     const out = html();
     const cell = leadCell(out, "Akash");
     // Stable contacts.id — never the name or phone number.
-    expect(cell).toContain('href="/workspace?contact=c-1"');
+    expect(cell).toContain('href="/workspace?contact=c-1');
+    // Recording lead links open Workspace with the rail collapsed.
+    expect(cell).toContain("sidebar=collapsed");
     expect(cell).toContain('target="_blank"');
     expect(cell).toContain('rel="noreferrer"');
     // Blue and clickable affordance, no avatar or initial.

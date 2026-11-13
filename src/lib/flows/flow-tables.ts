@@ -528,13 +528,20 @@ export function toFlowTableRow(
  * With `{ highlightOnly: true }` the page locates, scrolls to,
  * and temporarily highlights the row WITHOUT opening the drawer
  * (Inbox "Open in Workspace" flow).
+ * With `{ sidebarCollapsed: true }` the page additionally opens
+ * with the left navigation rail collapsed to icon-only mode
+ * (`?sidebar=collapsed`, consumed by the dashboard shell's
+ * persisted sidebar preference; Recordings lead links use this).
+ * Both flags compose; absent flags preserve existing behavior.
  */
 export function workspaceContactHref(
   contactId: string,
-  opts?: { highlightOnly?: boolean }
+  opts?: { highlightOnly?: boolean; sidebarCollapsed?: boolean }
 ): string {
   const base = `/workspace?contact=${encodeURIComponent(contactId)}`;
-  return opts?.highlightOnly ? `${base}&highlight=only` : base;
+  const highlight = opts?.highlightOnly ? `&highlight=only` : '';
+  const sidebar = opts?.sidebarCollapsed ? `&sidebar=collapsed` : '';
+  return `${base}${highlight}${sidebar}`;
 }
 
 /**

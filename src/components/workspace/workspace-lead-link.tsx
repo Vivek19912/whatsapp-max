@@ -16,6 +16,10 @@ import { workspaceContactHref } from '@/lib/flows/flow-tables';
  * scrolls it into view, applies the ~4s blue-wash highlight, and
  * opens the same lead drawer a row click opens. `rel="noreferrer"`
  * (implies `noopener`) so the new tab cannot touch this page.
+ * The link also requests the collapsed icon-only rail
+ * (`?sidebar=collapsed`), so the table gets the full width
+ * immediately — the sidebar preference itself is untouched for
+ * normal navigation.
  */
 export function WorkspaceLeadLink({
   contactId,
@@ -31,7 +35,7 @@ export function WorkspaceLeadLink({
 }) {
   return (
     <a
-      href={workspaceContactHref(contactId)}
+      href={workspaceContactHref(contactId, { sidebarCollapsed: true })}
       target="_blank"
       rel="noreferrer"
       title={title}

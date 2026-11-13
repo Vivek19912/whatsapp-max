@@ -64,14 +64,12 @@ function headerCells(markup: string): string[] {
 }
 
 describe('RecentCallsTable columns', () => {
-  it('orders headers Time | Lead Name | Workspace Table | Call | Type | Duration | Salesperson | Recording', () => {
+  it('orders headers Time | Lead Name | Workspace Table | Call | Salesperson | Recording', () => {
     expect(headerCells(html())).toEqual([
       'Time',
       'Lead Name',
       'Workspace Table',
       'Call',
-      'Type',
-      'Duration',
       'Salesperson',
       'Recording',
     ]);
@@ -85,10 +83,15 @@ describe('RecentCallsTable columns', () => {
     expect(out).toContain('hover:bg-transparent');
   });
 
-  it('right-aligns Duration and divides body cells like Workspace rows', () => {
+  it('has no separate Type or Duration columns', () => {
+    const headers = headerCells(html());
+    expect(headers).not.toContain('Type');
+    expect(headers).not.toContain('Duration');
+    expect(html()).not.toContain('text-right');
+  });
+
+  it('divides body cells like Workspace rows', () => {
     const out = html();
-    expect(out).toContain('text-right');
-    expect(out).toContain('tabular-nums');
     expect(out).toContain('border-r border-border');
     expect(out).toContain('hover:bg-muted/50');
   });
@@ -97,7 +100,8 @@ describe('RecentCallsTable columns', () => {
 describe('RecentCallsTable lead navigation (shared deep link)', () => {
   it('links linked lead names to the exact Workspace lead in a new tab', () => {
     const out = html();
-    expect(out).toContain('href="/workspace?contact=c-1"');
+    expect(out).toContain('href="/workspace?contact=c-1');
+    expect(out).toContain('sidebar=collapsed');
     expect(out).toContain('target="_blank"');
     expect(out).toContain('rel="noreferrer"');
     expect(out).toContain('title="Akash"');
@@ -114,7 +118,8 @@ describe('RecentCallsTable lead navigation (shared deep link)', () => {
 
   it('links missed rows only when a real contact association exists', () => {
     const linked = html([], [missed()]);
-    expect(linked).toContain('href="/workspace?contact=c-2"');
+    expect(linked).toContain('href="/workspace?contact=c-2');
+    expect(linked).toContain('sidebar=collapsed');
     expect(linked).toContain('Missed');
 
     const unlinked = html(
@@ -147,12 +152,12 @@ describe('RecentCallsTable lead navigation (shared deep link)', () => {
 });
 
 describe('RecentCallsTable cells', () => {
-  it('labels call direction with consistent treatment', () => {
+  it('merges icon and direction into one Call cell like the Recordings table', () => {
     const out = html(
       [
-        recording({ id: 'r-1', direction: 'out' }),
-        recording({ id: 'r-2', direction: 'in' }),
-        recording({ id: 'r-3', direction: null, contactId: 'c-3' }),
+        recording({ id: 'r-1', direction: 'out', callType: 'phone' }),
+        recording({ id: 'r-2', direction: 'in', callType: 'phone' }),
+        recording({ id: 'r-3', direction: null, callType: null, contactId: 'c-3' }),
       ],
       [missed({ id: 'e-9' })]
     );
@@ -160,29 +165,39 @@ describe('RecentCallsTable cells', () => {
     expect(out).toContain('Incoming');
     expect(out).toContain('Missed');
     expect(out).toContain('Unknown');
-    expect(out).toContain('text-blue-600');
-    expect(out).toContain('text-emerald-600');
+    // One Call cell holds both the type icon and the direction text.
+    const idx = out.indexOf('Outgoing');
+    const tdStart = out.lastIndexOf('<td', idx);
+    const cell = out.slice(tdStart, out.indexOf('</td>', tdStart));
+    expect(cell).toContain('data-icon="phone-handset"');
+    expect(out).toContain('text-blue-700');
+    expect(out).toContain('text-emerald-700');
     expect(out).toContain('text-rose-600');
   });
 
-  it('labels types, em dash for unknown', () => {
-    const out = html(
-      [
-        recording({ id: 'r-1', callType: 'phone' }),
-        recording({ id: 'r-2', callType: 'whatsapp' }),
-        recording({ id: 'r-3', callType: null, contactId: 'c-3' }),
-      ],
-      []
-    );
-    expect(out).toContain('>Phone<');
-    expect(out).toContain('>WhatsApp<');
-    expect(out).toContain('>—<');
+  it('shows only the WhatsApp icon for WhatsApp calls, regardless of direction', () => {
+    for (const callType of ['whatsapp', 'whatsapp_business'] as const) {
+      for (const direction of ['in', 'out', null] as const) {
+        const out = html(
+          [recording({ id: 'r-1', callType, direction })],
+          []
+        );
+        expect(out).toContain('data-icon="whatsapp-brand"');
+        const idx = out.indexOf('data-icon="whatsapp-brand"');
+        const tdStart = out.lastIndexOf('<td', idx);
+        const cell = out.slice(tdStart, out.indexOf('</td>', tdStart));
+        expect(cell).not.toContain('Incoming');
+        expect(cell).not.toContain('Outgoing');
+        expect(cell).not.toContain('Unknown');
+      }
+    }
   });
 
-  it('formats durations, em dash when genuinely unavailable', () => {
+  it('formats durations like the Recordings table, No recording for missed rows', () => {
     const out = html([recording({ durationSecs: 84 })], [missed()]);
-    expect(out).toContain('1m 24s');
-    // Missed rows have no duration: em dash, never a fabricated 0:00.
+    expect(out).toContain('1:24');
+    expect(out).toContain('No recording');
+    // Missed rows have no duration: never a fabricated 0:00.
     expect(out).not.toContain('0:00');
   });
 

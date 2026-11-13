@@ -10,17 +10,27 @@ describe('WorkspaceLeadLink (shared Recordings + Calls deep link)', () => {
         Akash
       </WorkspaceLeadLink>
     );
-    expect(html).toContain('href="/workspace?contact=c-1"');
+    expect(html).toContain('href="/workspace?contact=c-1');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noreferrer"');
     expect(html).toContain('title="Akash"');
     expect(html).toContain('>Akash</a>');
   });
 
+  it('requests the collapsed sidebar rail for the new Workspace tab', () => {
+    const html = renderToStaticMarkup(
+      <WorkspaceLeadLink contactId="c-1" title="Akash">
+        Akash
+      </WorkspaceLeadLink>
+    );
+    expect(html).toContain('sidebar=collapsed');
+  });
+
   it('encodes contact ids instead of guessing by name or phone', () => {
     const html = renderToStaticMarkup(
       <WorkspaceLeadLink contactId="c 1&2">X</WorkspaceLeadLink>
     );
-    expect(html).toContain('href="/workspace?contact=c%201%262"');
+    expect(html).toContain('href="/workspace?contact=c%201%262');
+    expect(html).toContain('sidebar=collapsed');
   });
 });

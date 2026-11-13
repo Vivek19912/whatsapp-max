@@ -13,7 +13,36 @@ import { useSyncExternalStore } from "react";
 //
 // SSR-safe: initial state is always expanded; the stored value
 // syncs in an effect, so server and first-client HTML agree.
+// Exception: an explicit deep-link request (`?sidebar=collapsed`,
+// e.g. from a Recordings lead link) reads collapsed on the very
+// first client snapshot — before first paint — so the new tab opens
+// on the icon rail with no expanded flash or width animation. The
+// Workspace page persists it through the same preference below, so
+// afterwards it behaves exactly like a manually collapsed sidebar
+// (toggle, other tabs, later visits).
 // ============================================================
+
+export const SIDEBAR_COLLAPSED_PARAM = "sidebar";
+export const SIDEBAR_COLLAPSED_VALUE = "collapsed";
+
+/**
+ * Whether the current navigation explicitly requests the collapsed
+ * rail (`?sidebar=collapsed`). Pure function of an optional query
+ * string (defaults to the live URL); SSR-safe — no window access on
+ * the server, where it always answers false.
+ */
+export function hasCollapsedSidebarParam(search?: string): boolean {
+  try {
+    const query =
+      search ?? (typeof window === "undefined" ? "" : window.location.search);
+    return (
+      new URLSearchParams(query).get(SIDEBAR_COLLAPSED_PARAM) ===
+      SIDEBAR_COLLAPSED_VALUE
+    );
+  } catch {
+    return false;
+  }
+}
 
 const STORAGE_PREFIX = "wacrm:sidebar-collapsed:v1";
 
@@ -65,7 +94,11 @@ function subscribeToCollapse(callback: () => void): () => void {
 export function useSidebarCollapsed(accountId: string | null): SidebarCollapsed {
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const getSnapshot = useCallback(
-    () => loadSidebarCollapsed(accountId),
+    // A deep-linked collapse request wins over the stored default so
+    // the new tab paints the rail immediately. It composes with (not
+    // instead of) the preference: once the Workspace page persists it,
+    // storage alone carries the state and the param becomes redundant.
+    () => loadSidebarCollapsed(accountId) || hasCollapsedSidebarParam(),
     [accountId],
   );
   const collapsed = useSyncExternalStore(

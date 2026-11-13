@@ -742,6 +742,15 @@ describe("workspace lead deep link (?contact=)", () => {
     expect(workspaceContactHref("c-1", {})).toBe("/workspace?contact=c-1");
   });
 
+  it("appends the collapsed-sidebar request without changing the default", () => {
+    expect(workspaceContactHref("c-1", { sidebarCollapsed: true })).toBe(
+      "/workspace?contact=c-1&sidebar=collapsed"
+    );
+    expect(
+      workspaceContactHref("c 1&2", { highlightOnly: true, sidebarCollapsed: true })
+    ).toBe("/workspace?contact=c%201%262&highlight=only&sidebar=collapsed");
+  });
+
   it("never points at the per-lead recordings page", () => {
     expect(workspaceContactHref("c-1")).not.toContain("/recordings/contact/");
   });

@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
@@ -59,6 +59,7 @@ import { cn } from '@/lib/utils';
 import { handleExpiredSessionResponse } from '@/lib/auth/expired-session';
 import { useAuth } from '@/hooks/use-auth';
 import { useWorkspaceRealtime } from '@/hooks/use-workspace-realtime';
+import { saveSidebarCollapsed } from '@/hooks/use-sidebar-collapsed';
 import type { WorkspaceField } from '@/lib/flows/workspace-fields';
 import {
   isAssigneeField,
@@ -1142,6 +1143,29 @@ export default function WorkspacePage() {
   const highlightOnly = deepLinkParams.get('highlight') === 'only';
   const appliedContactRef = useRef<string | null | undefined>(undefined);
   const locatedContactRef = useRef<string | null | undefined>(undefined);
+  // Recording deep links (?contact=<id>&sidebar=collapsed, from the
+  // shared lead links on the Recordings and Recent Calls tables) open
+  // with the left navigation rail collapsed. The shell already paints
+  // the rail on first render from the same query flag (see
+  // useSidebarCollapsed); this effect persists it through the
+  // existing per-account preference — so the toggle, other tabs,
+  // and later visits behave exactly like a manually collapsed
+  // sidebar — and then drops the one-shot flag from the URL so it
+  // cannot interfere with later toggles or navigation. Runs once per
+  // mount; ordinary navigation carries no such flag and is untouched.
+  const sidebarCollapseAppliedRef = useRef(false);
+  const router = useRouter();
+  useEffect(() => {
+    if (sidebarCollapseAppliedRef.current) return;
+    if (deepLinkParams.get('sidebar') !== 'collapsed') return;
+    if (accountId == null) return;
+    sidebarCollapseAppliedRef.current = true;
+    saveSidebarCollapsed(accountId, true);
+    const url = new URL(window.location.href);
+    url.searchParams.delete('sidebar');
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    router.replace(next, { scroll: false });
+  }, [deepLinkParams, accountId, router]);
   // Temporary deep-link highlight (contact id whose row gets a
   // ~4s blue wash once located) and the miss notice. Both are
   // purely visual: no record writes, no badge, no label.

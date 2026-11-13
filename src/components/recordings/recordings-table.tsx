@@ -43,7 +43,7 @@ import { RecordingPlayer } from './recording-player';
 
 export const PAGE_SIZE: WorkspacePageSize = DEFAULT_WORKSPACE_PAGE_SIZE;
 
-function formatDuration(totalSeconds: number | null | undefined): string {
+export function formatDuration(totalSeconds: number | null | undefined): string {
   if (totalSeconds === null || totalSeconds === undefined || !Number.isFinite(totalSeconds)) {
     return '—';
   }
@@ -129,13 +129,24 @@ function TypeTip({
  * type. Direction data and classification are untouched — this is
  * display only.
  */
-function CallLabel({
+export function CallLabel({
   callType,
   direction,
 }: {
   callType: string | null | undefined;
   direction: string | null | undefined;
 }) {
+  const isWhatsapp =
+    callType === 'whatsapp' || callType === 'whatsapp_business';
+  // WhatsApp and WhatsApp Business have no reliable direction: icon
+  // only, never Incoming/Outgoing/Unknown text, whatever is stored.
+  if (isWhatsapp) {
+    return (
+      <span className="inline-flex items-center text-[13px]">
+        <CallTypeIcon callType={callType} />
+      </span>
+    );
+  }
   const directionClass =
     direction === 'in'
       ? 'text-blue-700 dark:text-blue-300'
@@ -158,7 +169,7 @@ function CallLabel({
  * carry a playable direction/type story — the outcome is the
  * whole message.
  */
-function MissedCallLabel() {
+export function MissedCallLabel() {
   return (
     <span className="inline-flex items-center gap-1.5 text-[13px] font-medium whitespace-nowrap text-rose-600 dark:text-rose-400">
       <PhoneMissed className="h-3.5 w-3.5 shrink-0" aria-hidden />
