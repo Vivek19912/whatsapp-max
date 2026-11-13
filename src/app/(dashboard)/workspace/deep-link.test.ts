@@ -208,9 +208,13 @@ describe("collapsed-rail deep link (?contact=<id>&sidebar=collapsed)", () => {
     expect(pageSrc).toContain("saveSidebarCollapsed(accountId, true);");
   });
 
-  it("drops the one-shot flag from the URL after applying it", () => {
-    expect(pageSrc).toContain("url.searchParams.delete('sidebar');");
-    expect(pageSrc).toContain("router.replace(next, { scroll: false });");
+  it("drops the one-shot flag from the URL without a Next.js navigation", () => {
+    // A plain history swap (history.replaceState inside
+    // stripCollapsedSidebarParam): no router.replace anywhere in the
+    // deep-link path, so the mount-time locate → select → highlight
+    // sequence runs undisturbed.
+    expect(pageSrc).toContain("stripCollapsedSidebarParam();");
+    expect(pageSrc).not.toContain("router.replace(");
   });
 
   it("never forces the rail for ordinary navigation (no flag, no-op)", () => {

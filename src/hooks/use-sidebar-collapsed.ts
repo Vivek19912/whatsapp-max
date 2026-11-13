@@ -44,6 +44,30 @@ export function hasCollapsedSidebarParam(search?: string): boolean {
   }
 }
 
+/**
+ * Forget a one-time collapsed-rail deep link (`?sidebar=collapsed`)
+ * without a Next.js navigation — a plain history entry swap, so no
+ * re-render, refetch, or remount can disturb an in-flight flow
+ * (notably the contact deep-link locate → select → highlight
+ * sequence that runs on the same mount). Used when expanding from
+ * a state that exists only because of the link: persisting an
+ * expansion there would be wrong (nothing is stored yet), and
+ * leaving the flag would make the rail snap back to collapsed.
+ * No-op server-side, when the flag is absent, or on failure.
+ */
+export function stripCollapsedSidebarParam(): void {
+  try {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(SIDEBAR_COLLAPSED_PARAM) !== SIDEBAR_COLLAPSED_VALUE) return;
+    url.searchParams.delete(SIDEBAR_COLLAPSED_PARAM);
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Best effort: worst case the flag lingers in the URL until the
+    // next navigation, which the snapshot reader tolerates.
+  }
+}
+
 const STORAGE_PREFIX = "wacrm:sidebar-collapsed:v1";
 
 export function sidebarCollapsedStorageKey(accountId: string): string {
@@ -108,7 +132,15 @@ export function useSidebarCollapsed(accountId: string | null): SidebarCollapsed 
   );
   const toggle = useCallback(() => {
     if (accountId === null) return;
-    saveSidebarCollapsed(accountId, !loadSidebarCollapsed(accountId));
+    if (!loadSidebarCollapsed(accountId) && hasCollapsedSidebarParam()) {
+      // Collapsed only by the one-time deep link: expanding means
+      // forgetting the flag, not writing storage. A plain history
+      // swap (no Next.js navigation) keeps the deep-link locate →
+      // select → highlight sequence on this mount untouched.
+      stripCollapsedSidebarParam();
+    } else {
+      saveSidebarCollapsed(accountId, !loadSidebarCollapsed(accountId));
+    }
     bump();
   }, [accountId]);
   return { collapsed, toggle };
