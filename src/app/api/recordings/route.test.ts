@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   accountId: "acct-1",
+  userId: "user-1",
+  role: "owner",
   contact: { id: "c-1", account_id: "acct-1" } as Record<string, unknown> | null,
   recordings: [] as Array<Record<string, unknown>>,
   events: [] as Array<Record<string, unknown>>,
@@ -171,7 +173,8 @@ vi.mock("@/lib/auth/account", () => ({
   getCurrentAccount: async () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
-    userId: "user-1",
+    userId: h.userId,
+    role: h.role,
   }),
   toErrorResponse: (err: unknown) => {
     const status =
@@ -208,6 +211,8 @@ function recording(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   h.accountId = "acct-1";
+  h.userId = "user-1";
+  h.role = "owner";
   h.contact = { id: "c-1", account_id: "acct-1" };
   h.recordings = [];
   h.events = [];
@@ -758,6 +763,100 @@ describe("GET /api/recordings search and filters", () => {
       unlinked: 0,
     });
     expect(h.rpcCalls).toHaveLength(0);
+  });
+});
+
+describe("GET /api/recordings agent scoping", () => {
+  const AGENT = "123e4567-e89b-12d3-a456-426614174010";
+  const OTHER = "123e4567-e89b-12d3-a456-426614174011";
+  const seed = () => {
+    h.contacts = [
+      { id: "c-1", account_id: "acct-1", name: "Akash", phone: "+919876543210", phone_normalized: "919876543210" },
+      { id: "c-2", account_id: "acct-1", name: "Sagar", phone: "+911234567890", phone_normalized: "911234567890" },
+    ];
+    h.profiles = [{ user_id: AGENT, full_name: "Agent", email: "a@x.com" }];
+    h.recordings = [
+      recording({ id: "r-own", contact_id: "c-1", phone_number: "+919876543210", uploaded_by: AGENT }),
+      recording({ id: "r-other", contact_id: "c-2", phone_number: "+911234567890", uploaded_by: OTHER }),
+    ];
+    h.events = [
+      {
+        id: "e-own",
+        account_id: "acct-1",
+        contact_id: "c-1",
+        user_id: AGENT,
+        direction: "in",
+        call_type: "phone",
+        outcome: "missed",
+        phone_number: "+919876543210",
+        occurred_at: "2026-10-06T23:25:00.000Z",
+        created_at: "2026-10-06T23:25:00.000Z",
+      },
+      {
+        id: "e-other",
+        account_id: "acct-1",
+        contact_id: "c-2",
+        user_id: OTHER,
+        direction: "in",
+        call_type: "phone",
+        outcome: "missed",
+        phone_number: "+911234567890",
+        occurred_at: "2026-10-06T23:26:00.000Z",
+        created_at: "2026-10-06T23:26:00.000Z",
+      },
+    ];
+  };
+  const fetchIds = async (qs: string) => {
+    const res = await GET(new Request(`https://app.test/api/recordings?${qs}`));
+    const json = (await res.json()) as { recordings: Array<{ id: string }>; total: number };
+    return { res, ids: json.recordings.map((r) => r.id) };
+  };
+
+  it("agents see only their own recordings, even when requesting another uploader", async () => {
+    seed();
+    h.role = "agent";
+    h.userId = AGENT;
+    // A smuggled uploaded_by for another agent is ignored.
+    const { res, ids } = await fetchIds(`uploaded_by=${OTHER}`);
+    expect(res.status).toBe(200);
+    expect(ids).toEqual(["e-own", "r-own"]);
+  });
+
+  it("agents see only their own missed events", async () => {
+    seed();
+    h.role = "agent";
+    h.userId = AGENT;
+    const { ids } = await fetchIds("");
+    expect(ids).toEqual(["e-own", "r-own"]);
+  });
+
+  it("agents cannot widen scope via search or table filters", async () => {
+    seed();
+    h.role = "agent";
+    h.userId = AGENT;
+    // Search matches the other lead too (both names contain "a"),
+    // but only own rows return.
+    const { ids } = await fetchIds("q=a");
+    expect(ids).toEqual(["e-own", "r-own"]);
+  });
+
+  it("agents get a self-scoped summary", async () => {
+    seed();
+    h.role = "agent";
+    h.userId = AGENT;
+    h.rpcResult = { total: 1, totalDurationSecs: 35, phone: 1, whatsapp: 0, whatsappBusiness: 0, unlinked: 0 };
+    const res = await GET(new Request("https://app.test/api/recordings?summary=1"));
+    expect(res.status).toBe(200);
+    expect(h.rpcCalls).toHaveLength(1);
+    expect(h.rpcCalls[0].args).toMatchObject({ p_uploaded_by: AGENT });
+  });
+
+  it("owners keep the requested uploader scope", async () => {
+    seed();
+    h.role = "owner";
+    const { res, ids } = await fetchIds(`uploaded_by=${OTHER}`);
+    expect(res.status).toBe(200);
+    expect(ids).toEqual(["e-other", "r-other"]);
   });
 });
 

@@ -14,7 +14,9 @@
 //     time (recorded_at ?? created_at for recordings;
 //     occurred_at for events). Max span 366 days.
 //   user — auth user UUID; recordings filter uploaded_by,
-//     events filter user_id.
+//     events filter user_id. Agents are scoped to the session
+//     user server-side: a supplied id is replaced, never trusted.
+//     Owners/admins/viewers keep the requested (or full) scope.
 //   direction — 'in' | 'out'. Missed/answered events are
 //     inherently incoming, so 'out' yields zero outcomes.
 //   call_type — 'phone' | 'whatsapp' (legacy alias
@@ -35,8 +37,10 @@
 //
 // Security: RLS-scoped SSR client (caller's JWT) + explicit
 // account_id filter; account comes from the session, never from
-// query params. Storage bucket/path are never selected —
-// playback goes through /api/recordings/[id]/audio.
+// query params. Agents are scoped to their own calls server-side
+// (a supplied `user` is replaced with the session user).
+// Storage bucket/path are never selected — playback goes
+// through /api/recordings/[id]/audio.
 // ============================================================
 
 import { NextResponse } from 'next/server';
@@ -237,7 +241,7 @@ async function fetchRecentMissed(
 
 export async function GET(request: Request) {
   try {
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
 
     const params = new URL(request.url).searchParams;
     const from = parseBound(params.get('from'));
@@ -257,13 +261,18 @@ export async function GET(request: Request) {
         { status: 400 }
       );
     }
-    const user = params.get('user')?.trim() || null;
+    let user = params.get('user')?.trim() || null;
     if (user && !UUID_RE.test(user)) {
       return NextResponse.json(
         { error: "'user' must be a valid user id." },
         { status: 400 }
       );
     }
+    // Agent data isolation (server-side, never client-trusted): an
+    // agent sees only their own calls, so a supplied user id is
+    // ignored and replaced with the session user. Owners/admins/
+    // viewers keep the requested scope (or all users when omitted).
+    if (role === 'agent') user = userId;
     const direction = params.get('direction')?.trim() || null;
     if (
       direction &&

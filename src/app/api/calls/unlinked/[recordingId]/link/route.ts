@@ -8,6 +8,8 @@
 // - recording must belong to the session account AND still be
 //   unlinked — expressed as ONE conditional update, so two
 //   sessions racing to link the same recording cannot both win.
+// - agents may link only recordings they uploaded (resolved
+//   from the session; anything else 404s).
 // - contact must belong to the session account.
 // - foreign recording/contact 404s exactly like a missing one
 //   (no cross-tenant oracle).
@@ -45,7 +47,7 @@ export async function POST(
       );
     }
 
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
 
     // Contact must be ours — 404 otherwise (no oracle).
     const { data: contact, error: contactError } = await supabase
@@ -57,6 +59,35 @@ export async function POST(
     if (contactError) throw contactError;
     if (!contact) {
       return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    }
+
+    // Agent data isolation: an agent may link only recordings they
+    // uploaded. Anything else (including legacy unattributable
+    // rows) 404s like a missing recording. Ownership is resolved
+    // server-side from the session, never from the request.
+    if (role === 'agent') {
+      const { data: target, error: targetError } = await supabase
+        .from('call_recordings')
+        .select('id, uploaded_by, contact_id')
+        .eq('id', recordingId)
+        .eq('account_id', accountId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      const owned =
+        target &&
+        (target as { uploaded_by: string | null }).uploaded_by === userId;
+      if (!owned) {
+        return NextResponse.json(
+          { error: 'Recording not found' },
+          { status: 404 }
+        );
+      }
+      if ((target as { contact_id: string | null }).contact_id) {
+        return NextResponse.json(
+          { error: 'This call has already been linked to a lead.' },
+          { status: 409 }
+        );
+      }
     }
 
     // Atomic claim: only an unlinked row of OUR account can move.

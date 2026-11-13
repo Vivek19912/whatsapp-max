@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Mic } from 'lucide-react';
 
+import { useAuth } from '@/hooks/use-auth';
 import { LinkCallDrawer, type UnlinkedRecording } from '@/components/calls/link-call-drawer';
 import { EmptyState } from '@/components/dashboard/empty-state';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
@@ -49,6 +50,12 @@ function toUnlinked(r: CallRecording): UnlinkedRecording {
 }
 
 export default function RecordingsPage() {
+  const { isAgent, user } = useAuth();
+  // Agent data isolation (UI mirror of the server-side scoping in
+  // /api/recordings): the salesperson filter is pinned to the
+  // session user and the roster list is trimmed to self, so the
+  // page can only ever describe the agent's own recordings.
+  const agentUserId = isAgent ? (user?.id ?? null) : null;
   const tz = useMemo(
     () =>
       typeof Intl !== 'undefined'
@@ -158,6 +165,17 @@ export default function RecordingsPage() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
+  // Pin the salesperson filter to the session user once auth
+  // resolves. The server enforces this regardless; the UI lock
+  // only keeps the page honest while auth is loading.
+  useEffect(() => {
+    if (!agentUserId) return;
+    setFilters((f) =>
+      f.uploadedBy === agentUserId ? f : { ...f, uploadedBy: agentUserId }
+    );
+    setPage(0);
+  }, [agentUserId]);
+
   // Filters (and search) reset pagination to page 1.
   const updateFilters = useCallback((f: RecordingsFilters) => {
     setFilters(f);
@@ -201,8 +219,13 @@ export default function RecordingsPage() {
         onChange={updateFilters}
         nowMs={nowMs}
         timeZone={tz}
-        members={members}
+        members={
+          agentUserId
+            ? members.filter((m) => m.user_id === agentUserId)
+            : members
+        }
         tables={tables}
+        salespersonLocked={agentUserId !== null}
       />
 
       <SummaryCards summary={summary} loading={summaryLoading} />

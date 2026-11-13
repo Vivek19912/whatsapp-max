@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   accountId: 'acct-1',
+  userId: 'user-1',
+  role: 'owner' as string,
   recordings: [] as Array<Record<string, unknown>>,
   contacts: [] as Array<Record<string, unknown>>,
   flowRuns: [] as Array<Record<string, unknown>>,
@@ -62,7 +64,8 @@ vi.mock('@/lib/auth/account', () => ({
   getCurrentAccount: async () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
-    userId: 'user-1',
+    userId: h.userId,
+    role: h.role,
   }),
   toErrorResponse: (err: unknown) => {
     const status =
@@ -98,6 +101,8 @@ const RANGE = 'from=2026-10-01T00:00:00.000Z&to=2026-10-06T00:00:00.000Z';
 
 beforeEach(() => {
   h.accountId = 'acct-1';
+  h.userId = 'user-1';
+  h.role = 'owner';
   h.recordings = [];
   h.contacts = [];
   h.flowRuns = [];
@@ -636,5 +641,60 @@ describe('GET /api/calls/stats', () => {
     const dumped = JSON.stringify(await res.json());
     expect(dumped).not.toContain('storage_bucket');
     expect(dumped).not.toContain('storage_path');
+  });
+
+  it('agents cannot override the user filter with another agent id', async () => {
+    h.role = 'agent';
+    h.userId = 'agent-1';
+    const other = '123e4567-e89b-12d3-a456-426614174000';
+    const res = await GET(post(`${RANGE}&user=${other}`));
+    expect(res.status).toBe(200);
+    // RPCs see the session user, never the smuggled id.
+    expect(
+      h.rpcCalls.find((c) => c.fn === 'call_kpis_summary')?.args
+    ).toMatchObject({ p_uploaded_by: 'agent-1' });
+    expect(
+      h.rpcCalls.find((c) => c.fn === 'call_event_outcomes_summary')?.args
+    ).toMatchObject({ p_user_id: 'agent-1' });
+    expect(
+      h.rpcCalls.find((c) => c.fn === 'call_salesperson_stats')?.args
+    ).toMatchObject({ p_user_id: 'agent-1' });
+    // Row-level reads are scoped the same way.
+    const recEqs = h.calls.filter(
+      (c) => c.table === 'call_recordings' && c.op === 'eq'
+    );
+    expect(recEqs).toContainEqual({
+      table: 'call_recordings',
+      op: 'eq',
+      args: ['uploaded_by', 'agent-1'],
+    });
+    const eventEqs = h.calls.filter(
+      (c) => c.table === 'call_events' && c.op === 'eq'
+    );
+    expect(eventEqs).toContainEqual({
+      table: 'call_events',
+      op: 'eq',
+      args: ['user_id', 'agent-1'],
+    });
+  });
+
+  it('agents are scoped to themselves even without a user param', async () => {
+    h.role = 'agent';
+    h.userId = 'agent-1';
+    const res = await GET(post(RANGE));
+    expect(res.status).toBe(200);
+    expect(
+      h.rpcCalls.find((c) => c.fn === 'call_kpis_summary')?.args
+    ).toMatchObject({ p_uploaded_by: 'agent-1' });
+  });
+
+  it('owners keep the requested user scope', async () => {
+    h.role = 'owner';
+    const other = '123e4567-e89b-12d3-a456-426614174000';
+    const res = await GET(post(`${RANGE}&user=${other}&direction=in`));
+    expect(res.status).toBe(200);
+    expect(
+      h.rpcCalls.find((c) => c.fn === 'call_kpis_summary')?.args
+    ).toMatchObject({ p_uploaded_by: other, p_direction: 'in' });
   });
 });

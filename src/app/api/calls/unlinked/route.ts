@@ -21,7 +21,7 @@ const MAX_LIMIT = 100;
 
 export async function GET(request: Request) {
   try {
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
 
     const params = new URL(request.url).searchParams;
     const limit = Math.min(
@@ -30,14 +30,19 @@ export async function GET(request: Request) {
     );
     const offset = Math.max(Number(params.get('offset')) || 0, 0);
 
-    const { data, error, count } = await supabase
+    // Agents see only the unlinked queue they uploaded (owner or
+    // session uploader for key uploads). Server-side from the
+    // session — agents cannot widen this to the whole account.
+    let listQuery = supabase
       .from('call_recordings')
       .select(
         'id, file_name, phone_number, direction, duration_seconds, recorded_at, created_at, uploaded_by',
         { count: 'exact' }
       )
       .eq('account_id', accountId)
-      .is('contact_id', null)
+      .is('contact_id', null);
+    if (role === 'agent') listQuery = listQuery.eq('uploaded_by', userId);
+    const { data, error, count } = await listQuery
       .order('recorded_at', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })

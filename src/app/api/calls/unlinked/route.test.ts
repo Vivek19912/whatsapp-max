@@ -2,8 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   accountId: "acct-1",
+  userId: "agent-1",
+  role: "owner",
   recordings: [] as Array<Record<string, unknown>>,
   profiles: [] as Array<Record<string, unknown>>,
+  eqFilters: [] as Array<[string, unknown]>,
 }));
 
 function rec(over: Record<string, unknown> = {}) {
@@ -28,17 +31,30 @@ function rec(over: Record<string, unknown> = {}) {
 function chainable() {
   const api: Record<string, (...args: never[]) => unknown> = {};
   api.select = () => api;
-  api.eq = () => api;
+  api.eq = (col: string, val: unknown) => {
+    h.eqFilters.push([col, val]);
+    return api;
+  };
   api.is = () => api;
   api.order = () => api;
-  api.range = async () => ({
+  api.range = async () => {
     // The mock only holds this account's rows; the route must still
     // filter contact_id IS NULL itself — emulate by returning what
-    // the query would return: unlinked rows only.
-    data: h.recordings.filter((r) => r.contact_id === null),
-    error: null,
-    count: h.recordings.filter((r) => r.contact_id === null).length,
-  });
+    // the query would return: unlinked rows only, honoring the
+    // ownership filter when the route applies one.
+    const data = h.recordings.filter(
+      (r) =>
+        r.contact_id === null &&
+        h.eqFilters.every(([c, v]) =>
+          c === "uploaded_by" ? r.uploaded_by === v : true
+        )
+    );
+    return {
+      data,
+      error: null,
+      count: data.length,
+    };
+  };
   return api;
 }
 
@@ -61,7 +77,8 @@ vi.mock("@/lib/auth/account", () => ({
   getCurrentAccount: async () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
-    userId: "user-1",
+    userId: h.userId,
+    role: h.role,
   }),
   toErrorResponse: (err: unknown) => {
     const status =
@@ -79,8 +96,11 @@ const { GET } = await import("./route");
 
 beforeEach(() => {
   h.accountId = "acct-1";
+  h.userId = "agent-1";
+  h.role = "owner";
   h.recordings = [];
   h.profiles = [{ user_id: "u-9", full_name: "Akash", email: "a@x.com" }];
+  h.eqFilters = [];
 });
 
 describe("GET /api/calls/unlinked", () => {
@@ -107,5 +127,32 @@ describe("GET /api/calls/unlinked", () => {
     const json = (await res.json()) as { recordings: Array<Record<string, unknown>> };
     expect(json.recordings[0]).not.toHaveProperty("storage_path");
     expect(json.recordings[0]).not.toHaveProperty("storage_bucket");
+  });
+
+  it("agents see only their own unlinked queue", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    h.recordings = [
+      rec({ id: "r-mine", uploaded_by: "agent-1" }),
+      rec({ id: "r-theirs", uploaded_by: "u-9" }),
+    ];
+    const res = await GET(new Request("https://app.test/api/calls/unlinked"));
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { recordings: Array<{ id: string }>; total: number };
+    expect(json.recordings.map((r) => r.id)).toEqual(["r-mine"]);
+    expect(json.total).toBe(1);
+    expect(h.eqFilters).toContainEqual(["uploaded_by", "agent-1"]);
+  });
+
+  it("owners keep the full unlinked queue", async () => {
+    h.role = "owner";
+    h.recordings = [
+      rec({ id: "r-1", uploaded_by: "agent-1" }),
+      rec({ id: "r-2", uploaded_by: "u-9" }),
+    ];
+    const res = await GET(new Request("https://app.test/api/calls/unlinked"));
+    const json = (await res.json()) as { recordings: Array<{ id: string }>; total: number };
+    expect(json.total).toBe(2);
+    expect(h.eqFilters.some(([c]) => c === "uploaded_by")).toBe(false);
   });
 });

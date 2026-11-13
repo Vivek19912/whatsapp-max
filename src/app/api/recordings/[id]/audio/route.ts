@@ -39,18 +39,33 @@ export async function GET(
       );
     }
 
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
 
     // Account-scoped lookup — a recording from another workspace
     // 404s exactly like a nonexistent one (no cross-tenant oracle).
+    // uploaded_by is fetched for the agent ownership check below
+    // but never leaves this route.
     const { data: recording, error } = await supabase
       .from('call_recordings')
-      .select('storage_bucket, storage_path, file_name')
+      .select('storage_bucket, storage_path, file_name, uploaded_by')
       .eq('id', id)
       .eq('account_id', accountId)
       .maybeSingle();
     if (error) throw error;
     if (!recording) {
+      return NextResponse.json(
+        { error: 'Recording not found' },
+        { status: 404 }
+      );
+    }
+    // Agent data isolation: an agent may stream only recordings
+    // they uploaded. Anything else (including legacy rows with no
+    // attributable uploader) 404s like a missing recording — no
+    // oracle, no signed URL, no storage path leak.
+    if (
+      role === 'agent' &&
+      (recording as { uploaded_by: string | null }).uploaded_by !== userId
+    ) {
       return NextResponse.json(
         { error: 'Recording not found' },
         { status: 404 }

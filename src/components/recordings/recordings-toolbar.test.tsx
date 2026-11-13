@@ -105,6 +105,33 @@ describe("Filter labels and default values", () => {
   });
 });
 
+describe("Agent-locked salesperson filter", () => {
+  it("renders an inert, self-scoped salesperson control", () => {
+    const out = renderToStaticMarkup(
+      <RecordingsToolbar
+        filters={{ ...resetRecordingsFilters(), uploadedBy: "u-sagar" }}
+        onChange={() => {}}
+        nowMs={new Date(2026, 9, 6, 12, 0).getTime()}
+        timeZone="UTC"
+        members={MEMBERS}
+        tables={TABLES}
+        salespersonLocked
+      />
+    );
+    // Locked to the session agent: shows their name, offers no
+    // way to widen the scope.
+    expect(out).toContain("Sagar");
+    expect(out).toMatch(/aria-label="Salesperson"[^>]*disabled/);
+    expect(out).toContain("Showing only your calls");
+  });
+
+  it("stays interactive by default (owner view unchanged)", () => {
+    const out = html();
+    expect(out).not.toContain("Showing only your calls");
+    expect(out).toContain("All users");
+  });
+});
+
 describe("Labels stay visible after selection", () => {
   it("keeps the label beside a specific selected value", () => {
     const out = html({

@@ -36,8 +36,10 @@ function parseBound(value: string | null): number | null {
 
 /**
  * GET /api/recordings — account-scoped recording list for the
- * Recordings page. Any member may read (mirrors the
- * `call_recordings_select` RLS policy). Newest call first.
+ * Recordings page. Agents see only their own uploads (enforced
+ * server-side from the session — a supplied uploaded_by is
+ * ignored for agents, mirroring `call_recordings_select` plus
+ * per-agent scoping). Newest call first.
  *
  * Filters (all optional, all server-side, all ANDed):
  *   limit, offset — pagination (existing).
@@ -85,7 +87,7 @@ function parseBound(value: string | null): number | null {
  */
 export async function GET(request: Request) {
   try {
-    const { supabase, accountId } = await getCurrentAccount();
+    const { supabase, accountId, userId, role } = await getCurrentAccount();
 
     const params = new URL(request.url).searchParams;
     const limit = Math.min(
@@ -99,7 +101,7 @@ export async function GET(request: Request) {
     const to = parseBound(params.get('to'));
     const callType = params.get('call_type')?.trim() || null;
     const direction = params.get('direction')?.trim() || null;
-    const uploadedBy = params.get('uploaded_by')?.trim() || null;
+    let uploadedBy = params.get('uploaded_by')?.trim() || null;
     const workspaceTable = params.get('workspace_table')?.trim() || null;
     const status = params.get('status')?.trim() || null;
     const wantSummary = params.get('summary') === '1';
@@ -128,6 +130,12 @@ export async function GET(request: Request) {
         { status: 400 }
       );
     }
+    // Agent data isolation (server-side, never client-trusted): an
+    // agent sees only their own recordings, so a supplied uploader
+    // id is ignored and replaced with the session user. This covers
+    // the list, the summary RPC, and the missed-event join below.
+    // Owners/admins/viewers keep the requested (or full) scope.
+    if (role === 'agent') uploadedBy = userId;
     if (workspaceTable && !UUID_RE.test(workspaceTable)) {
       return NextResponse.json(
         { error: "'workspace_table' must be a valid flow id." },

@@ -62,6 +62,7 @@ function FilterSelect({
   formatValue,
   valueClassName,
   wideContent,
+  disabled,
   children,
 }: {
   label: string;
@@ -79,11 +80,22 @@ function FilterSelect({
    * every other filter keeps its compact anchored menu.
    */
   wideContent?: boolean;
+  /**
+   * Locked filter (agent-scoped salesperson): the trigger is
+   * inert and dimmed. Server-side scoping is the real
+   * enforcement — this only communicates it.
+   */
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <Select value={value} onValueChange={onValueChange}>
-      <SelectTrigger aria-label={ariaLabel} className={CARD_CLASS}>
+      <SelectTrigger
+        aria-label={ariaLabel}
+        className={CARD_CLASS}
+        disabled={disabled}
+        title={disabled ? 'Showing only your calls' : undefined}
+      >
         <span className="shrink-0 text-muted-foreground">{icon}</span>
         <span className="flex min-w-0 flex-1 flex-col items-start leading-tight">
           <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
@@ -338,6 +350,7 @@ export function RecordingsToolbar({
   timeZone,
   members,
   tables,
+  salespersonLocked = false,
 }: {
   filters: RecordingsFilters;
   onChange: (f: RecordingsFilters) => void;
@@ -345,6 +358,12 @@ export function RecordingsToolbar({
   timeZone: string;
   members: MemberOption[];
   tables: WorkspaceTableOption[];
+  /**
+   * Agent view: the salesperson filter is pinned to the session
+   * user and inert. Server-side scoping is the enforcement; this
+   * only keeps the UI honest.
+   */
+  salespersonLocked?: boolean;
 }) {
   const todayInput = toDateInputValue(nowMs, timeZone);
 
@@ -400,6 +419,7 @@ export function RecordingsToolbar({
         value={filters.uploadedBy ?? 'all'}
         onValueChange={(v) => set({ uploadedBy: v === 'all' ? null : v })}
         ariaLabel="Salesperson"
+        disabled={salespersonLocked}
         formatValue={(v) =>
           v === 'all' || v == null
             ? 'All users'

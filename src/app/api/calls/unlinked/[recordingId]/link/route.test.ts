@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   accountId: "acct-1",
+  userId: "user-1",
+  role: "owner",
   // The recording row as the "database" sees it.
   recording: null as {
     id: string;
     account_id: string;
     contact_id: string | null;
+    uploaded_by: string | null;
   } | null,
   // Contacts in THIS account.
   contacts: [] as Array<{ id: string }>,
@@ -71,7 +74,8 @@ vi.mock("@/lib/auth/account", () => ({
   getCurrentAccount: async () => ({
     supabase: fakeSupabase(),
     accountId: h.accountId,
-    userId: "user-1",
+    userId: h.userId,
+    role: h.role,
   }),
   toErrorResponse: (err: unknown) => {
     const status =
@@ -99,7 +103,9 @@ function linkReq(recordingId: string, body: unknown) {
 
 beforeEach(() => {
   h.accountId = "acct-1";
-  h.recording = { id: "r-1", account_id: "acct-1", contact_id: null };
+  h.userId = "user-1";
+  h.role = "owner";
+  h.recording = { id: "r-1", account_id: "acct-1", contact_id: null, uploaded_by: "user-1" };
   h.contacts = [{ id: "11111111-1111-1111-1111-111111111111" }];
   h.claimed = null;
 });
@@ -134,14 +140,14 @@ describe("POST /api/calls/unlinked/[id]/link", () => {
   });
 
   it("404s a foreign recording (no cross-tenant oracle)", async () => {
-    h.recording = { id: "r-1", account_id: "acct-OTHER", contact_id: null };
+    h.recording = { id: "r-1", account_id: "acct-OTHER", contact_id: null, uploaded_by: "user-1" };
     const [req, ctx] = linkReq("r-1", { contact_id: C1 });
     const res = await POST(req, ctx);
     expect(res.status).toBe(404);
   });
 
   it("409s an already-linked recording (lost race)", async () => {
-    h.recording = { id: "r-1", account_id: "acct-1", contact_id: C9 };
+    h.recording = { id: "r-1", account_id: "acct-1", contact_id: C9, uploaded_by: "user-1" };
     const [req, ctx] = linkReq("r-1", { contact_id: C1 });
     const res = await POST(req, ctx);
     expect(res.status).toBe(409);
@@ -149,5 +155,35 @@ describe("POST /api/calls/unlinked/[id]/link", () => {
     expect(json.error).toBe("This call has already been linked to a lead.");
     // The earlier link wins — never overwritten.
     expect(h.recording?.contact_id).toBe(C9);
+  });
+
+  it("agents can link their own unlinked recording", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    h.recording = { id: "r-1", account_id: "acct-1", contact_id: null, uploaded_by: "agent-1" };
+    const [req, ctx] = linkReq("r-1", { contact_id: C1 });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(200);
+    expect(h.recording?.contact_id).toBe(C1);
+  });
+
+  it("agents get 404 linking another agent's recording", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    h.recording = { id: "r-1", account_id: "acct-1", contact_id: null, uploaded_by: "agent-2" };
+    const [req, ctx] = linkReq("r-1", { contact_id: C1 });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(404);
+    expect(h.recording?.contact_id).toBeNull();
+  });
+
+  it("agents get 404 linking recordings without attributable ownership", async () => {
+    h.role = "agent";
+    h.userId = "agent-1";
+    h.recording = { id: "r-1", account_id: "acct-1", contact_id: null, uploaded_by: null };
+    const [req, ctx] = linkReq("r-1", { contact_id: C1 });
+    const res = await POST(req, ctx);
+    expect(res.status).toBe(404);
+    expect(h.recording?.contact_id).toBeNull();
   });
 });

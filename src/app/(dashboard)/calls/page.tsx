@@ -4,6 +4,7 @@ import { Phone } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { Skeleton } from '@/components/dashboard/skeleton';
+import { useAuth } from '@/hooks/use-auth';
 import { KpiCard } from '@/components/calls/dashboard/kpi-card';
 import { TrendChart } from '@/components/calls/dashboard/trend-chart';
 import { DirectionDonut } from '@/components/calls/dashboard/direction-donut';
@@ -41,6 +42,12 @@ import {
  * describes the same filtered set.
  */
 export default function CallsPage() {
+  const { isAgent, user } = useAuth();
+  // Agent data isolation (UI mirror of the server-side scoping in
+  // /api/calls/stats): the salesperson filter is pinned to the
+  // session user and the roster list is trimmed to self, so the
+  // dashboard can only ever describe the agent's own calls.
+  const agentUserId = isAgent ? (user?.id ?? null) : null;
   const tz = useMemo(
     () =>
       typeof Intl !== 'undefined'
@@ -53,6 +60,15 @@ export default function CallsPage() {
     resetRecordingsFilters()
   );
   const [members, setMembers] = useState<MemberOption[]>([]);
+  // Pin the salesperson filter to the session user once auth
+  // resolves. The server enforces this regardless; the UI lock
+  // only keeps the dashboard honest while auth is loading.
+  useEffect(() => {
+    if (!agentUserId) return;
+    setFilters((f) =>
+      f.uploadedBy === agentUserId ? f : { ...f, uploadedBy: agentUserId }
+    );
+  }, [agentUserId]);
   const [tables, setTables] = useState<WorkspaceTableOption[]>([]);
   const [stats, setStats] = useState<CallsStatsResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -162,8 +178,13 @@ export default function CallsPage() {
         onChange={setFilters}
         nowMs={nowMs}
         timeZone={tz}
-        members={members}
+        members={
+          agentUserId
+            ? members.filter((m) => m.user_id === agentUserId)
+            : members
+        }
         tables={tables}
+        salespersonLocked={agentUserId !== null}
       />
 
       {stats?.truncated && !loading ? (
