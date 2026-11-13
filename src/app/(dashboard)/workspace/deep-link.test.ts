@@ -203,25 +203,21 @@ describe("highlight-only mode (?contact=<id>&highlight=only)", () => {
 });
 
 describe("collapsed-rail deep link (?contact=<id>&sidebar=collapsed)", () => {
-  it("persists the rail through the existing sidebar preference", () => {
-    expect(pageSrc).toContain("deepLinkParams.get('sidebar') !== 'collapsed'");
-    expect(pageSrc).toContain("saveSidebarCollapsed(accountId, true);");
-  });
-
-  it("drops the one-shot flag from the URL without a Next.js navigation", () => {
-    // A plain history swap (history.replaceState inside
-    // stripCollapsedSidebarParam): no router.replace anywhere in the
-    // deep-link path, so the mount-time locate → select → highlight
-    // sequence runs undisturbed.
-    expect(pageSrc).toContain("stripCollapsedSidebarParam();");
+  it("performs no sidebar writes or navigation on mount", () => {
+    // Tab-scoped collapse lives entirely in the shell's
+    // useSidebarCollapsed snapshot + toggle (one-time URL flag,
+    // never persisted). The page must not persist it, strip it, or
+    // navigate — any mount-time write is what used to disturb the
+    // locate → select → highlight sequence.
+    expect(pageSrc).not.toContain("saveSidebarCollapsed");
+    expect(pageSrc).not.toContain("stripCollapsedSidebarParam");
+    expect(pageSrc).not.toContain("sidebarCollapseAppliedRef");
     expect(pageSrc).not.toContain("router.replace(");
   });
 
-  it("never forces the rail for ordinary navigation (no flag, no-op)", () => {
-    const idx = pageSrc.indexOf("sidebarCollapseAppliedRef.current = true;");
-    expect(idx).toBeGreaterThan(-1);
-    const guard = pageSrc.slice(Math.max(0, idx - 400), idx);
-    expect(guard).toContain("deepLinkParams.get('sidebar') !== 'collapsed'");
+  it("leaves the contact deep-link params fully intact", () => {
+    expect(pageSrc).toContain("deepLinkParams.get('contact')");
+    expect(pageSrc).toContain("locate-contact?contact_id=");
   });
 });
 

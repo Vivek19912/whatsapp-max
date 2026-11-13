@@ -59,7 +59,6 @@ import { cn } from '@/lib/utils';
 import { handleExpiredSessionResponse } from '@/lib/auth/expired-session';
 import { useAuth } from '@/hooks/use-auth';
 import { useWorkspaceRealtime } from '@/hooks/use-workspace-realtime';
-import { saveSidebarCollapsed, stripCollapsedSidebarParam } from '@/hooks/use-sidebar-collapsed';
 import type { WorkspaceField } from '@/lib/flows/workspace-fields';
 import {
   isAssigneeField,
@@ -1143,32 +1142,14 @@ export default function WorkspacePage() {
   const highlightOnly = deepLinkParams.get('highlight') === 'only';
   const appliedContactRef = useRef<string | null | undefined>(undefined);
   const locatedContactRef = useRef<string | null | undefined>(undefined);
-  // Recording deep links (?contact=<id>&sidebar=collapsed, from the
-  // shared lead links on the Recordings and Recent Calls tables) open
-  // with the left navigation rail collapsed. The shell already paints
-  // the rail on first render from the same query flag (see
-  // useSidebarCollapsed); this effect persists it through the
-  // existing per-account preference — so the toggle, other tabs,
-  // and later visits behave exactly like a manually collapsed
-  // sidebar — and then drops the one-shot flag from the URL so it
-  // cannot interfere with later toggles or navigation. Runs once per
-  // mount; ordinary navigation carries no such flag and is untouched.
-  const sidebarCollapseAppliedRef = useRef(false);
-  useEffect(() => {
-    if (sidebarCollapseAppliedRef.current) return;
-    if (deepLinkParams.get('sidebar') !== 'collapsed') return;
-    if (accountId == null) return;
-    sidebarCollapseAppliedRef.current = true;
-    // Persist through the existing per-account preference so the toggle,
-    // other tabs, and later visits behave exactly like a manually
-    // collapsed sidebar — then drop the one-time flag from the URL with
-    // a plain history swap. Deliberately no Next.js navigation here:
-    // a client-side route change on this mount would re-render mid
-    // deep-link and risk the locate → select → highlight sequence
-    // below, which is exactly what this page must not disturb.
-    saveSidebarCollapsed(accountId, true);
-    stripCollapsedSidebarParam();
-  }, [deepLinkParams, accountId]);
+  // Recording / Recent Calls lead links append `?sidebar=collapsed`
+  // alongside `?contact=` (see workspaceContactHref). That flag is a
+  // purely tab-scoped, URL-driven hint consumed by the shell's
+  // useSidebarCollapsed first-paint snapshot — this page performs no
+  // sidebar writes and no navigation for it, so the contact locate →
+  // select → highlight sequence below runs exactly like the Inbox
+  // flow. Expanding the rail forgets the flag via the shell toggle
+  // without storing anything.
   // Temporary deep-link highlight (contact id whose row gets a
   // ~4s blue wash once located) and the miss notice. Both are
   // purely visual: no record writes, no badge, no label.

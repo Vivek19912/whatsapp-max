@@ -17,9 +17,10 @@ import { useSyncExternalStore } from "react";
 // e.g. from a Recordings lead link) reads collapsed on the very
 // first client snapshot — before first paint — so the new tab opens
 // on the icon rail with no expanded flash or width animation. The
-// Workspace page persists it through the same preference below, so
-// afterwards it behaves exactly like a manually collapsed sidebar
-// (toggle, other tabs, later visits).
+// flag is one-time and tab-scoped: it lives only in that tab's URL,
+// is never written to the stored preference, and expanding the rail
+// forgets it (see toggle). Ordinary navigation carries no flag and
+// behaves exactly as before.
 // ============================================================
 
 export const SIDEBAR_COLLAPSED_PARAM = "sidebar";
@@ -119,9 +120,9 @@ export function useSidebarCollapsed(accountId: string | null): SidebarCollapsed 
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const getSnapshot = useCallback(
     // A deep-linked collapse request wins over the stored default so
-    // the new tab paints the rail immediately. It composes with (not
-    // instead of) the preference: once the Workspace page persists it,
-    // storage alone carries the state and the param becomes redundant.
+    // the new tab paints the rail immediately. Tab-scoped only: the
+    // flag is never persisted, and the toggle below forgets it on
+    // expand — so later visits and other tabs are untouched.
     () => loadSidebarCollapsed(accountId) || hasCollapsedSidebarParam(),
     [accountId],
   );
@@ -132,14 +133,17 @@ export function useSidebarCollapsed(accountId: string | null): SidebarCollapsed 
   );
   const toggle = useCallback(() => {
     if (accountId === null) return;
-    if (!loadSidebarCollapsed(accountId) && hasCollapsedSidebarParam()) {
-      // Collapsed only by the one-time deep link: expanding means
-      // forgetting the flag, not writing storage. A plain history
-      // swap (no Next.js navigation) keeps the deep-link locate →
-      // select → highlight sequence on this mount untouched.
-      stripCollapsedSidebarParam();
-    } else {
-      saveSidebarCollapsed(accountId, !loadSidebarCollapsed(accountId));
+    const stored = loadSidebarCollapsed(accountId);
+    const hadParam = hasCollapsedSidebarParam();
+    // A present flag is always one-time: forget it first, with a
+    // plain history swap (no Next.js navigation, so an in-flight
+    // deep-link locate → select → highlight is never disturbed).
+    if (hadParam) stripCollapsedSidebarParam();
+    if (!hadParam || stored) {
+      // Ordinary toggle. A link-only collapse (nothing stored, flag
+      // just forgotten above) already expanded — storing anything
+      // here would wrongly persist a preference the user never set.
+      saveSidebarCollapsed(accountId, !stored);
     }
     bump();
   }, [accountId]);

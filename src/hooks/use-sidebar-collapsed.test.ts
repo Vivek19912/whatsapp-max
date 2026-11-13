@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
 
 import {
@@ -80,5 +82,31 @@ describe("stripCollapsedSidebarParam", () => {
     const getHref = fakeWindow("https://app.example/workspace?contact=c-1");
     stripCollapsedSidebarParam();
     expect(getHref()).toBe("https://app.example/workspace?contact=c-1");
+  });
+});
+
+describe("toggle with a one-time deep-link flag", () => {
+  const hookSrc = readFileSync(join(__dirname, "use-sidebar-collapsed.ts"), "utf8");
+  const toggleSrc = hookSrc.slice(hookSrc.indexOf("const toggle = useCallback("));
+
+  it("forgets a present flag via a plain history swap, never a Next.js navigation", () => {
+    expect(toggleSrc).toContain("stripCollapsedSidebarParam();");
+    expect(toggleSrc).not.toContain("router.replace(");
+  });
+
+  it("never persists a preference when expanding a link-only collapse", () => {
+    // Link-only collapse (nothing stored, flag just forgotten) must
+    // expand without writing storage: persisting there would leak a
+    // per-tab request into the account-wide preference.
+    expect(toggleSrc).toContain("if (!hadParam || stored) {");
+  });
+
+  it("still strips a redundant flag when toggling out of a stored collapse", () => {
+    // Stored collapse + lingering flag: the strip runs first so the
+    // flag cannot snap the rail back after the stored value flips.
+    const stripIdx = toggleSrc.indexOf("stripCollapsedSidebarParam();");
+    const saveIdx = toggleSrc.indexOf("saveSidebarCollapsed(accountId, !stored);");
+    expect(stripIdx).toBeGreaterThan(-1);
+    expect(saveIdx).toBeGreaterThan(stripIdx);
   });
 });
