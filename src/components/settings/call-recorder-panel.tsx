@@ -45,7 +45,7 @@ export function CallRecorderPanel() {
   return (
     <section className="animate-in fade-in-50 duration-200">
       <div className="rounded-xl border border-border bg-card p-5 sm:p-6">
-        <SettingsPanelHead title="Call Recorder" className="mb-4" />
+        <SettingsPanelHead title="Call Recorder App" className="mb-4" />
         <div className="flex flex-col items-center rounded-xl border border-border bg-background px-6 py-10 text-center">
           <div
             style={{
@@ -67,6 +67,16 @@ export function CallRecorderPanel() {
           <p className="mt-4 text-sm font-medium text-foreground">
             Scan to download
           </p>
+          <div
+            aria-hidden="true"
+            className="mt-4 flex w-full max-w-xs items-center gap-3"
+          >
+            <span className="h-px flex-1 bg-border" />
+            <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              OR
+            </span>
+            <span className="h-px flex-1 bg-border" />
+          </div>
           <a
             href={url}
             className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-10 py-3 text-base font-semibold text-white transition-colors hover:bg-blue-700"

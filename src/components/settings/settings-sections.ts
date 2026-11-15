@@ -55,6 +55,11 @@ export const DEFAULT_SECTION: SettingsSection = 'overview';
 export interface SectionMeta {
   id: SettingsSection;
   label: string;
+  /**
+   * Optional sidebar-only override. When set, the settings rail renders
+   * this instead of `label`; every other surface keeps `label`.
+   */
+  railLabel?: string;
   icon: LucideIcon;
   group: 'top' | 'account' | 'integrations' | 'workspace';
   /**
@@ -81,7 +86,14 @@ export const SECTION_META: Record<SettingsSection, SectionMeta> = {
   'meta-lead-ads': { id: 'meta-lead-ads', label: 'Meta', icon: Megaphone, group: 'integrations' },
   'google-sheets-meta': { id: 'google-sheets-meta', label: 'Google Sheets — Meta Lead Ads', icon: Table2, group: 'integrations', hideFromRail: true },
   whatsapp: { id: 'whatsapp', label: 'WhatsApp', icon: PlugZap, group: 'workspace' },
-  'call-recorder': { id: 'call-recorder', label: 'Call Recorder', icon: Download, group: 'workspace' },
+  'call-recorder': {
+    id: 'call-recorder',
+    label: 'Call Recorder',
+    /** Sidebar-only text; the Overview tile and panel keep `label`. */
+    railLabel: 'Download Call Recorder app',
+    icon: Download,
+    group: 'workspace',
+  },
   'reminder-number': { id: 'reminder-number', label: 'Reminder WhatsApp Number', icon: Smartphone, group: 'workspace' },
   'business-profile': { id: 'business-profile', label: 'Business Profile', icon: Store, group: 'account' },
   fields: { id: 'fields', label: 'Fields & tags', icon: Tags, group: 'workspace' },

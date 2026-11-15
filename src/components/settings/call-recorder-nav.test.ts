@@ -24,6 +24,9 @@ describe("Settings → Workspace → Call Recorder entry", () => {
   it("is a Workspace sibling of WhatsApp, not nested inside it", () => {
     expect(SECTION_META["call-recorder"].group).toBe("workspace");
     expect(SECTION_META["call-recorder"].label).toBe("Call Recorder");
+    expect(SECTION_META["call-recorder"].railLabel).toBe(
+      "Download Call Recorder app",
+    );
     expect(SECTION_META["whatsapp"].group).toBe("workspace");
   });
 

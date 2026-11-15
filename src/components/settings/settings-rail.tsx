@@ -147,7 +147,7 @@ export function SettingsRail({
                   )}
                 >
                   <Icon className="size-4 shrink-0" />
-                  <span className="flex-1">{meta.label}</span>
+                  <span className="flex-1">{meta.railLabel ?? meta.label}</span>
                   {hints?.[s] != null ? (
                     <span
                       className={cn(
