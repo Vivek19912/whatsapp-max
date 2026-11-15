@@ -4,6 +4,7 @@ import {
   Link2,
   Minus,
   Pause,
+  Phone,
   PhoneMissed,
   Play,
   X,
@@ -58,6 +59,28 @@ export function formatDuration(totalSeconds: number | null | undefined): string 
 export function leadInitial(name: string | null | undefined): string {
   const first = (name ?? '').trim().slice(0, 1).toUpperCase();
   return first || 'U';
+}
+
+/**
+ * Phone number shown in the Lead Name hover tip. Linked rows use
+ * the authoritative linked contact phone, falling back to the
+ * recording's own stored number; unlinked rows use only the
+ * recording metadata. Returns null when there is nothing to
+ * show — the label then renders with no tooltip at all.
+ */
+export function leadPhoneForRow(row: {
+  contact_id: string | null;
+  contact_phone?: string | null;
+  phone_number?: string | null;
+}): string | null {
+  if (row.contact_id) {
+    return (
+      row.contact_phone?.trim() ||
+      row.phone_number?.trim() ||
+      null
+    );
+  }
+  return row.phone_number?.trim() || null;
 }
 
 function CallTypeIcon({ callType }: { callType: string | null | undefined }) {
@@ -116,6 +139,43 @@ function TypeTip({
         }
       />
       <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Phone-number hover tip for a Lead Name cell: phone icon + number
+ * in the shared dark tooltip (portaled, so the table never shifts).
+ * Renders nothing extra when there is no number to show — the
+ * caller keeps its plain label. The trigger wraps the existing
+ * label and is keyboard-focusable, matching the TypeTip pattern
+ * above; the link inside stays clickable and unchanged.
+ */
+function LeadPhoneTip({
+  phone,
+  children,
+}: {
+  phone: string | null | undefined;
+  children: React.ReactNode;
+}) {
+  const number = (phone ?? '').trim() || null;
+  if (!number) return <>{children}</>;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            tabIndex={0}
+            className="inline-flex min-w-0 max-w-full items-center outline-none"
+          >
+            {children}
+          </span>
+        }
+      />
+      <TooltipContent side="right">
+        <Phone className="size-3.5 shrink-0" aria-hidden />
+        <span className="tabular-nums">{number}</span>
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -317,14 +377,20 @@ export function RecordingsTable({
                         // component as Call Analytics Recent Calls):
                         // the lead's own Workspace table in a NEW
                         // tab, located by stable contacts.id.
-                        <WorkspaceLeadLink
-                          contactId={r.contact_id}
-                          title={r.contact_name ?? undefined}
-                        >
-                          {r.contact_name ?? 'Unlinked'}
-                        </WorkspaceLeadLink>
+                        // Hover (or keyboard focus) reveals the
+                        // linked lead's current phone number.
+                        <LeadPhoneTip phone={leadPhoneForRow(r)}>
+                          <WorkspaceLeadLink
+                            contactId={r.contact_id}
+                            title={r.contact_name ?? undefined}
+                          >
+                            {r.contact_name ?? 'Unlinked'}
+                          </WorkspaceLeadLink>
+                        </LeadPhoneTip>
                       ) : (
-                        <span className="truncate text-rose-600 dark:text-rose-400">Unlinked</span>
+                        <LeadPhoneTip phone={leadPhoneForRow(r)}>
+                          <span className="truncate text-rose-600 dark:text-rose-400">Unlinked</span>
+                        </LeadPhoneTip>
                       )}
                     </TableCell>
                     <TableCell className="max-w-[200px] border-r border-border px-4 last:border-r-0">

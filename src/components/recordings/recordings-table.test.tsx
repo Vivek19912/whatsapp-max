@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   RecordingsTable,
   PAGE_SIZE,
+  leadPhoneForRow,
 } from "./recordings-table";
 import type {
   CallRecording,
@@ -42,6 +43,7 @@ function recording(over: Partial<CallRecording> = {}): CallRecording {
     created_at: at,
     direction: "out",
     phone_number: "+918953065369",
+    contact_phone: "+919876543210",
     call_type: "phone",
     workspace_table_name: "Meta Lead Ads",
     ...over,
@@ -483,6 +485,66 @@ describe("Lead and Recording behavior", () => {
   it("keeps Play buttons with recording labels", () => {
     const out = html();
     expect(out).toContain('aria-label="Play recording of Akash"');
+  });
+});
+
+describe("Lead phone hover tooltip", () => {
+  function leadCell(markup: string, name: string): string {
+    const idx = markup.indexOf(`>${name}<`);
+    const tdStart = markup.lastIndexOf("<td", idx);
+    return markup.slice(tdStart, markup.indexOf("</td>", tdStart));
+  }
+
+  it("resolves the tooltip number from the linked contact first", () => {
+    expect(
+      leadPhoneForRow({ contact_id: "c-1", contact_phone: "+911234567890", phone_number: "+919999999999" })
+    ).toBe("+911234567890");
+  });
+
+  it("falls back to the recording number when the linked contact has none", () => {
+    expect(
+      leadPhoneForRow({ contact_id: "c-1", contact_phone: null, phone_number: "+919999999999" })
+    ).toBe("+919999999999");
+    expect(leadPhoneForRow({ contact_id: "c-1" })).toBeNull();
+  });
+
+  it("uses only recording metadata for unlinked rows, never another contact", () => {
+    expect(leadPhoneForRow({ contact_id: null, phone_number: "+915555555555" })).toBe("+915555555555");
+    expect(leadPhoneForRow({ contact_id: null, phone_number: null })).toBeNull();
+    expect(leadPhoneForRow({ contact_id: null, contact_phone: "+911234567890" })).toBeNull();
+  });
+
+  it("shows the phone tooltip trigger on linked lead names without changing navigation", () => {
+    const out = html();
+    const cell = leadCell(out, "Akash");
+    expect(cell).toContain('href="/workspace?contact=c-1');
+    // Keyboard-focusable hover trigger wrapping the unchanged link.
+    expect(cell).toContain('tabindex="0"');
+    expect(cell).toContain('data-base-ui-tooltip-trigger');
+  });
+
+  it("shows the stored number on Unlinked labels and nothing when absent", () => {
+    const withPhone = html([recording({ contact_id: null, contact_name: null, phone_number: "+915555555555" })]);
+    const cell = leadCell(withPhone, "Unlinked");
+    expect(cell).toContain('tabindex="0"');
+    expect(cell).toContain('data-base-ui-tooltip-trigger');
+    expect(cell).not.toContain("/workspace?contact=");
+    const withoutPhone = html([recording({ contact_id: null, contact_name: null, phone_number: null })]);
+    expect(leadCell(withoutPhone, "Unlinked")).not.toContain("tabindex");
+  });
+
+  it("renders the tooltip through the shared UI tooltip with a phone icon beside the name", () => {
+    const src = readFileSync(
+      `${root}/src/components/recordings/recordings-table.tsx`,
+      "utf8",
+    );
+    expect(src).toContain("LeadPhoneTip");
+    expect(src).toContain('side="right"');
+    // Tooltip body: phone icon + resolved number (portaled, so
+    // asserted in source rather than SSR markup).
+    expect(src).toContain("<Phone");
+    expect(src).toContain("{number}");
+    expect(src).not.toContain("Phone Number");
   });
 });
 

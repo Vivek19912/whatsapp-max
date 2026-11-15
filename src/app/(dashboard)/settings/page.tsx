@@ -15,6 +15,7 @@ import { SecurityPanel } from '@/components/settings/security-panel';
 import { AppearancePanel } from '@/components/settings/appearance-panel';
 import { NotificationsPanel } from '@/components/settings/notifications-panel';
 import { WhatsAppConfig } from '@/components/settings/whatsapp-config';
+import { CallRecorderPanel } from '@/components/settings/call-recorder-panel';
 import { ReminderNumberSettings } from
 '@/components/settings/reminder-number-panel';
 import { BusinessProfileSettings } from '@/components/settings/business-profile';
@@ -103,6 +104,7 @@ export default function SettingsPage() {
     appearance: <AppearancePanel />,
     notifications: <NotificationsPanel />,
     whatsapp: <WhatsAppConfig />,
+    'call-recorder': <CallRecorderPanel />,
     'reminder-number': <ReminderNumberSettings />,
     'business-profile': <BusinessProfileSettings />,
     'travel-crm': <TravelCrmSettings />,
