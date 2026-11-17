@@ -1,10 +1,18 @@
 "use client";
 
-import { useState, type ComponentType } from "react";
-import { MoreHorizontal, Search } from "lucide-react";
+import { useEffect, useState, type ComponentType } from "react";
+import { Eye, EyeOff, MoreHorizontal, Search, Settings2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,6 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { WS_ACTION_BUTTON, WS_CONTROL_HEIGHT } from "./workspace-tokens";
 
@@ -70,6 +79,8 @@ function norm(s: string): string {
   return s.trim().toLowerCase();
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 /**
  * Table selector: searchable menu of Workspace tables. Keeps the
  * existing Select contract (value/onValueChange, placeholder,
@@ -89,6 +100,11 @@ export function WorkspaceTableSelector({
   onSelect,
   wide,
   displayName,
+  allFlows,
+  hiddenIds,
+  canManage,
+  savingHidden,
+  onSaveHidden,
 }: {
   flows: WorkspaceFlowOption[];
   flowId: string | null;
@@ -96,8 +112,32 @@ export function WorkspaceTableSelector({
   /** Meta tables get the wider trigger for long form names. */
   wide?: boolean;
   displayName: (name: string | null | undefined) => string;
+  /**
+   * Full table list (including hidden) for the Manage Options
+   * popup. Defaults to `flows` when omitted.
+   */
+  allFlows?: WorkspaceFlowOption[];
+  /** Flow ids hidden from this dropdown (owner-managed). */
+  hiddenIds?: ReadonlySet<string>;
+  /** Owner-only: shows eye icons + the Manage Options control. */
+  canManage?: boolean;
+  /** Save in flight (disables the popup Save button). */
+  savingHidden?: boolean;
+  /** Persist the new hidden set (owner only). */
+  onSaveHidden?: (hidden: string[]) => void | Promise<void>;
 }) {
   const [query, setQuery] = useState("");
+  const [manageOpen, setManageOpen] = useState(false);
+  const hidden = hiddenIds ?? EMPTY_SET;
+  const manageable = canManage === true && typeof onSaveHidden === "function";
+  // Draft visibility inside the popup: true = shown (ON).
+  const [draftVisible, setDraftVisible] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!manageOpen) return;
+    const draft: Record<string, boolean> = {};
+    for (const f of (allFlows ?? flows)) draft[f.id] = !hidden.has(f.id);
+    setDraftVisible(draft);
+  }, [manageOpen, allFlows, flows, hidden]);
   const filtered =
     norm(query).length === 0
       ? flows
@@ -107,8 +147,10 @@ export function WorkspaceTableSelector({
             norm(f.id).includes(norm(query)),
         );
   const active = flows.find((f) => f.id === flowId) ?? null;
+  const popupFlows = allFlows ?? flows;
 
   return (
+    <>
     <Select
       value={flowId ?? ""}
       onValueChange={(v) => {
@@ -186,8 +228,94 @@ export function WorkspaceTableSelector({
             </SelectItem>
           ))
         )}
+        {manageable ? (
+          <div className="border-t border-border p-1">
+            <button
+              type="button"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => setManageOpen(true)}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] font-medium text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground"
+            >
+              <Settings2 className="size-3.5 shrink-0" aria-hidden />
+              Manage Options
+            </button>
+          </div>
+        ) : null}
       </SelectContent>
     </Select>
+    {manageable ? (
+      <Dialog open={manageOpen} onOpenChange={setManageOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Manage Options</DialogTitle>
+            <DialogDescription>
+              Choose which tables appear in the Workspace selector.
+              Hidden tables keep receiving new leads.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[50vh] space-y-1 overflow-y-auto py-1">
+            {popupFlows.map((f) => {
+              const visible = draftVisible[f.id] ?? !hidden.has(f.id);
+              return (
+                <div
+                  key={f.id}
+                  className="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5"
+                >
+                  <span className="flex min-w-0 items-center gap-2 text-sm">
+                    {visible ? (
+                      <Eye
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    ) : (
+                      <EyeOff
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    )}
+                    <span className="min-w-0 truncate" title={displayName(f.name)}>
+                      {displayName(f.name)}
+                    </span>
+                  </span>
+                  <Switch
+                    checked={visible}
+                    onCheckedChange={(next) =>
+                      setDraftVisible((prev) => ({ ...prev, [f.id]: next }))
+                    }
+                    aria-label={`Show ${displayName(f.name)}`}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setManageOpen(false)}
+            >
+              Close
+            </Button>
+            <Button
+              type="button"
+              disabled={savingHidden === true}
+              onClick={() => {
+                const nextHidden = popupFlows
+                  .filter((f) => (draftVisible[f.id] ?? !hidden.has(f.id)) === false)
+                  .map((f) => f.id);
+                void (async () => {
+                  await onSaveHidden(nextHidden);
+                  setManageOpen(false);
+                })();
+              }}
+            >
+              {savingHidden === true ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    ) : null}
+    </>
   );
 }
 

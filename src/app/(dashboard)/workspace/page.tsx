@@ -171,6 +171,10 @@ import {
   resolveAttachmentUrl,
   type LocateContactResponse,
 } from '@/lib/flows/flow-tables';
+import {
+  cleanHiddenTableIds,
+  visibleWorkspaceTables,
+} from '@/lib/flows/workspace-hidden-tables';
 import { formatPhoneForDisplay } from '@/lib/whatsapp/phone-utils';
 import {
   formatRecordingDuration,
@@ -585,6 +589,14 @@ export default function WorkspacePage() {
   const [flows, setFlows] = useState<FlowOption[] | null>(null);
   const [flowsError, setFlowsError] = useState<string | null>(null);
   const [flowId, setFlowId] = useState<string | null>(null);
+  // Owner-managed hidden tables (account-wide, migration 168).
+  // Visibility-only: hidden tables keep receiving leads; the
+  // selector simply filters them out until restored. Any member
+  // reads the set; only the owner writes it.
+  const [hiddenTableIds, setHiddenTableIds] = useState<ReadonlySet<string>>(
+    new Set()
+  );
+  const [savingHiddenTables, setSavingHiddenTables] = useState(false);
   const [view, setView] = useState<FlowTableView>('completed');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -725,7 +737,9 @@ export default function WorkspacePage() {
         setFlows(list);
         setFlowId(
           resolveInitialFlowId(
-            list.map((f) => f.id),
+            visibleWorkspaceTables(list, hiddenTableIdsRef.current).map(
+              (f) => f.id
+            ),
             loadSelectedFlowId(accountId),
           ),
         );
@@ -739,6 +753,91 @@ export default function WorkspacePage() {
       });
     return () => ctrl.abort();
   }, [accountId, isAgent]);
+
+  // Owner-managed hidden tables (account-wide). Best-effort like
+  // the prefs reads above: a failure leaves the full list visible.
+  // A ref mirrors the state for the flows fetch above (which must
+  // not re-run when the hidden set arrives later — the fallback
+  // effect below handles a selected table that turns out hidden).
+  const hiddenTableIdsRef = useRef<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    hiddenTableIdsRef.current = hiddenTableIds;
+  }, [hiddenTableIds]);
+  useEffect(() => {
+    if (accountId === null) return;
+    const ctrl = new AbortController();
+    fetch('/api/workspace/hidden-tables', {
+      signal: ctrl.signal,
+      cache: 'no-store',
+    })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => null)) as {
+          hidden?: unknown;
+        } | null;
+        if (ctrl.signal.aborted) return;
+        setHiddenTableIds(cleanHiddenTableIds(json?.hidden));
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [accountId]);
+
+  // Tables shown in the normal dropdown (hidden ones stay out).
+  const visibleFlows = useMemo(
+    () => (flows === null ? null : visibleWorkspaceTables(flows, hiddenTableIds)),
+    [flows, hiddenTableIds]
+  );
+
+  // A selected table that becomes hidden (or disappears) falls
+  // back to the first visible table — the Workspace never sits on
+  // a hidden selection. Hidden tables keep receiving leads; only
+  // the selector filters them. When nothing is visible, the
+  // selection clears (the Manage Options popup stays available
+  // for restoring).
+  useEffect(() => {
+    if (visibleFlows === null) return;
+    const ids = visibleFlows.map((f) => f.id);
+    if (flowId !== null && ids.includes(flowId)) return;
+    const next = ids[0] ?? null;
+    setFlowId(next);
+    if (next !== null) saveSelectedFlowId(accountId, next);
+    setPage(0);
+    setSelected(null);
+  }, [visibleFlows, flowId, accountId]);
+
+  // Owner-only save for the Manage Options popup. Optimistic:
+  // paint immediately, revert + toast when the server rejects.
+  const handleSaveHiddenTables = useCallback(
+    async (hidden: string[]) => {
+      const previous = hiddenTableIds;
+      const next = new Set(hidden);
+      setHiddenTableIds(next);
+      setSavingHiddenTables(true);
+      try {
+        const res = await fetch('/api/workspace/hidden-tables', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hidden }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(
+            (body as { error?: string }).error ?? 'Could not save table options.'
+          );
+        }
+        toast.success('Table options saved.');
+      } catch (err) {
+        setHiddenTableIds(previous);
+        toast.error(
+          err instanceof Error ? err.message : 'Could not save table options.'
+        );
+        throw err;
+      } finally {
+        setSavingHiddenTables(false);
+      }
+    },
+    [hiddenTableIds]
+  );
 
   // Assigned-To roster — same endpoint as Settings → Team Members.
   // Best-effort: a failed fetch leaves [] so Clear + Unassigned
@@ -2575,7 +2674,12 @@ export default function WorkspacePage() {
         selector={
           flows !== null && flows.length > 0 ? (
             <WorkspaceTableSelector
-              flows={flows}
+              flows={visibleFlows ?? []}
+              allFlows={flows}
+              hiddenIds={hiddenTableIds}
+              canManage={isOwner}
+              savingHidden={savingHiddenTables}
+              onSaveHidden={isOwner ? handleSaveHiddenTables : undefined}
               flowId={flowId}
               onSelect={selectFlow}
               wide={isMetaTable}

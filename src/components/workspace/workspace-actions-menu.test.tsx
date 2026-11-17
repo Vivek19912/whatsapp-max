@@ -1,7 +1,7 @@
 // Workspace single actions menu — render + source pins.
 //
 // The Workspace toolbar exposes exactly one permanently visible
-// control (a Settings/Actions icon button); every secondary action
+// control (a compact Settings text button); every secondary action
 // lives in its grouped popover. Closed-state SSR proves the single
 // trigger renders with its accessible label while no panel content
 // leaks; source pins cover the grouped items, handlers, and the
@@ -71,13 +71,13 @@ function closedMenu() {
 }
 
 describe('workspace actions menu trigger (single visible control)', () => {
-  it('renders exactly one icon button with an accessible label', () => {
+  it('renders exactly one text button with an accessible label', () => {
     const html = closedMenu();
     expect(html).toContain('aria-label="Workspace actions"');
     expect(html).toContain('title="Workspace actions"');
     expect(html).toContain('Workspace actions');
-    expect(html).toContain('<svg');
-    // The SlidersHorizontal icon is the only trigger affordance.
+    expect(html).toContain('>Settings<');
+    // The Settings text is the only trigger affordance.
     expect(html).not.toContain('Filters');
     expect(html).not.toContain('Columns');
     expect(html).not.toContain('Assignment');
@@ -99,7 +99,8 @@ describe('workspace actions menu trigger (single visible control)', () => {
     // keyboard-focusable button.
     expect(src).toContain('WS_CONTROL_BUTTON');
     expect(src).toContain('type="button"');
-    expect(src).toContain('SlidersHorizontal');
+    expect(src).toContain('>Settings<');
+    expect(src).not.toContain('SlidersHorizontal');
   });
 });
 

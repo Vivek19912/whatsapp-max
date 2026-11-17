@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ComponentType, type ReactNode } from "react";
-import { Eye, Pencil, Plus, Settings2, SlidersHorizontal, UserPlus } from "lucide-react";
+import { Eye, Pencil, Plus, Settings2, UserPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -149,7 +149,7 @@ export function WorkspaceActionsMenu({
         title="Workspace actions"
         className={cn(WS_CONTROL_BUTTON, "shrink-0 px-2.5")}
       >
-        <SlidersHorizontal className="h-4 w-4" aria-hidden />
+        <span aria-hidden>Settings</span>
         <span className="sr-only">Workspace actions</span>
       </PopoverTrigger>
       <PopoverContent

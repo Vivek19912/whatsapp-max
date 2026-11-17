@@ -73,7 +73,7 @@ describe('workspace page — per-table Google Sheets action', () => {
     expect(menuSrc).toContain('Workspace actions');
     expect(menuSrc).toContain('Table tools');
     expect(menuSrc).toContain('Automation');
-    expect(menuSrc).toContain('SlidersHorizontal');
+    expect(menuSrc).toContain('>Settings<');
     expect(menuSrc).toContain('Assignment');
     const src = page();
     // Removed entry points never appear in the page or the menu;
