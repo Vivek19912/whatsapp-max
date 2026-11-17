@@ -245,7 +245,6 @@ export function TeamMembersView() {
     <section className="animate-in fade-in-50 space-y-6 duration-200">
       <SettingsPanelHead
         title="Team Members"
-        description="People with access to this account. Roles control what each teammate can do."
         action={
           <RequireRole min="owner">
             <Button onClick={() => setAddUserOpen(true)}>
@@ -255,17 +254,6 @@ export function TeamMembersView() {
           </RequireRole>
         }
       />
-
-      {/* Owner-managed recording policy. These dropdowns choose which
-          calls each member's CallVault device is allowed to record —
-          recording configuration is controlled by the WhatsApp Max
-          owner, never by the member's own device. */}
-      {isOwner ? (
-        <p className="text-xs text-muted-foreground">
-          Use Configure on a member to choose which calls their
-          CallVault device is allowed to record.
-        </p>
-      ) : null}
 
       {/* Live presence summary across the roster. Updates without a
           full refresh as heartbeats and the local re-derive tick land. */}

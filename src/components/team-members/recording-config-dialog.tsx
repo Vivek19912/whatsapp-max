@@ -173,7 +173,7 @@ export function RecordingConfigDialog({
         <DialogHeader>
           <DialogTitle>Recording Configuration</DialogTitle>
           <DialogDescription>
-            Control which calls this team member&apos;s CallVault device is allowed to record.
+            Control which calls this team member&apos;s Call Recorder App is allowed to record.
           </DialogDescription>
         </DialogHeader>
         {member ? (
@@ -343,7 +343,7 @@ export function RecordingConfigForm({
               />
             </div>
             <p id={`rec-phone-hint-${member.user_id}`} className="mt-1.5 text-xs text-muted-foreground">
-              Enter the SIM&apos;s phone number assigned to this salesperson. CallVault
+              Enter the SIM&apos;s phone number assigned to this salesperson. Call Recorder App
               automatically detects which active SIM currently has this number.
             </p>
             {!phoneEnabled ? (
