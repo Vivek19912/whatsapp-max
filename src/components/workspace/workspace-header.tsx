@@ -82,6 +82,17 @@ function norm(s: string): string {
 const EMPTY_SET: ReadonlySet<string> = new Set();
 
 /**
+ * Collapsed trigger label: the stored Workspace flow name carries
+ * the redundant `Meta Lead Ads · ` source prefix (see
+ * virtualFlowName) — strip it so the trigger shows only the
+ * actual Instant Form name on a single line. The dropdown menu
+ * and Manage Options popup keep the complete stored name.
+ */
+function stripMetaLeadAdsPrefix(name: string): string {
+  return name.replace(/^Meta Lead Ads\s*·\s*/, "");
+}
+
+/**
  * Table selector: searchable menu of Workspace tables. Keeps the
  * existing Select contract (value/onValueChange, placeholder,
  * aria-label) and the established trigger widths; adds a filter
@@ -171,10 +182,10 @@ export function WorkspaceTableSelector({
         <SelectValue placeholder="Select Flow">
           {active ? (
             <span
-              className="block min-w-0 whitespace-normal break-words"
+              className="block min-w-0 truncate"
               title={displayName(active.name)}
             >
-              {displayName(active.name)}
+              {stripMetaLeadAdsPrefix(displayName(active.name))}
             </span>
           ) : (
             "Select Flow"

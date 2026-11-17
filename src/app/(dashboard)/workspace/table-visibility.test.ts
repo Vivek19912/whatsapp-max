@@ -88,17 +88,33 @@ describe("hidden-tables API — owner-only writes, tenant-scoped reads", () => {
     expect(src).toContain("Flow not found.");
   });
 
-  it("never truncates a table name with an ellipsis", () => {
+  it("keeps the collapsed trigger single-line without the source prefix", () => {
     const src = header();
-    // Selected-table trigger and popup rows wrap instead of
-    // truncating; no `truncate` class may remain on the selector
-    // or the Manage Options popup (other toolbar menus are
-    // untouched).
-    const start = src.indexOf("export function WorkspaceTableSelector");
-    const end = src.indexOf("export interface WorkspaceToolbarAction");
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    expect(src.slice(start, end)).not.toContain("truncate");
+    // The collapsed trigger strips the redundant `Meta Lead Ads · `
+    // prefix and stays single-line (truncate); the dropdown menu
+    // and Manage Options popup below it keep complete names.
+    expect(src).toContain("stripMetaLeadAdsPrefix");
+    expect(src).toContain("/^Meta Lead Ads\\s*·\\s*/");
+    const triggerStart = src.indexOf("<SelectTrigger");
+    const menuStart = src.indexOf("<SelectContent");
+    expect(triggerStart).toBeGreaterThan(-1);
+    expect(menuStart).toBeGreaterThan(triggerStart);
+    const trigger = src.slice(triggerStart, menuStart);
+    expect(trigger).toContain("truncate");
+    expect(trigger).not.toContain("whitespace-normal");
+    expect(trigger).not.toContain("break-words");
+  });
+
+  it("never truncates a table name inside the dropdown or popup", () => {
+    const src = header();
+    // Dropdown items and popup rows wrap instead of truncating.
+    // (Scoped to the menu + dialog: the unrelated toolbar
+    // overflow menu below legitimately keeps its own truncate.)
+    const menuStart = src.indexOf("<SelectContent");
+    const dialogEnd = src.indexOf("</Dialog>", menuStart);
+    expect(menuStart).toBeGreaterThan(-1);
+    expect(dialogEnd).toBeGreaterThan(menuStart);
+    expect(src.slice(menuStart, dialogEnd)).not.toContain("truncate");
   });
 });
 
