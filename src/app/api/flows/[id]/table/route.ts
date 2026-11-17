@@ -528,6 +528,98 @@ export async function GET(
     return row
   });
 
+  // Meta-only drawer provenance: one batched meta_lead_submissions
+  // lookup (flow_run_id → stored attribution), never N+1. RLS scopes
+  // the read like every other query here. Additive to the response —
+  // no new table columns, no stored-row writes. Rows without a
+  // submission keep metaDetails null; the drawer then omits the
+  // "Additional Meta Details" section (or its missing rows).
+  // Best-effort with a legacy fallback: deployments predating
+  // migration 167 lack ad_id/is_organic, so a failed full select
+  // retries with the older column set rather than breaking the
+  // table.
+  if (isMetaLeadFlow && rows.length > 0) {
+    try {
+      const runIds = rows.map((r) => r.runId);
+      const flowAccountId = (flow as { account_id: string }).account_id;
+      const varsByRun = new Map(
+        (rpcRows ?? []).map((r) => [r.run_id, (r.vars ?? {}) as Record<string, unknown>]),
+      );
+      type SubmissionRow = {
+        flow_run_id: string | null;
+        meta_lead_id: string | null;
+        form_id: string | null;
+        ad_id?: string | null;
+        ad_name: string | null;
+        campaign_name: string | null;
+        is_organic?: boolean | null;
+        meta_created_time: string | null;
+        answers: Record<string, unknown> | null;
+      };
+      const fullSelect =
+        "flow_run_id, meta_lead_id, form_id, ad_id, ad_name, campaign_name, is_organic, meta_created_time, answers";
+      let subRows: SubmissionRow[] | null = null;
+      const full = await supabase
+        .from("meta_lead_submissions")
+        .select(fullSelect)
+        .eq("account_id", flowAccountId)
+        .in("flow_run_id", runIds);
+      if (full.error) {
+        const legacy = await supabase
+          .from("meta_lead_submissions")
+          .select(
+            "flow_run_id, meta_lead_id, form_id, ad_name, campaign_name, meta_created_time, answers",
+          )
+          .eq("account_id", flowAccountId)
+          .in("flow_run_id", runIds);
+        if (!legacy.error) subRows = (legacy.data ?? []) as SubmissionRow[];
+      } else {
+        subRows = (full.data ?? []) as SubmissionRow[];
+      }
+      if (subRows) {
+        const byRun = new Map<string, SubmissionRow>();
+        for (const s of subRows) {
+          if (s.flow_run_id && !byRun.has(s.flow_run_id)) byRun.set(s.flow_run_id, s);
+        }
+        const textOrNull = (v: unknown): string | null => {
+          if (typeof v === "string") {
+            const t = v.trim();
+            return t !== "" ? t : null;
+          }
+          if (typeof v === "number" || typeof v === "boolean") return String(v);
+          return null;
+        };
+        for (const r of rows) {
+          const sub = byRun.get(r.runId);
+          if (!sub) {
+            r.metaDetails = null;
+            continue;
+          }
+          const subAnswers = (sub.answers ?? {}) as Record<string, unknown>;
+          const vars = varsByRun.get(r.runId) ?? {};
+          const verifiedRaw =
+            textOrNull(subAnswers["phone_number_verified"]) ??
+            textOrNull(vars["phone_number_verified"]);
+          r.metaDetails = {
+            metaLeadId: textOrNull(sub.meta_lead_id),
+            formId: textOrNull(sub.form_id),
+            adId: textOrNull((sub as SubmissionRow).ad_id ?? null),
+            adName: textOrNull(sub.ad_name),
+            campaignName: textOrNull(sub.campaign_name),
+            isOrganic:
+              typeof (sub as SubmissionRow).is_organic === "boolean"
+                ? ((sub as SubmissionRow).is_organic as boolean)
+                : null,
+            metaCreatedTime: textOrNull(sub.meta_created_time),
+            phoneNumberVerified: verifiedRaw,
+          };
+        }
+      }
+    } catch (err) {
+      console.error("workspace meta details read failed", err);
+    }
+  }
+
   // Contact source URLs for this page: one batched contacts lookup
   // (flow_run.contact_id → contacts.source_url), never N+1.
   // RLS scopes the read like every other query on this route.

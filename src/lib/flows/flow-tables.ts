@@ -83,6 +83,36 @@ export interface FlowTableMeta {
   } | null;
 }
 
+/**
+ * Meta Lead Ads only: stored submission provenance for the lead
+ * drawer's "Additional Meta Details" section. Additive, read-only
+ * enrichment (same pattern as sourceUrl/mediaByConversation):
+ * attached per page by the table route from meta_lead_submissions
+ * (batched, never N+1). Absent on every other flow kind and null
+ * when no submission row resolves. Missing (null) attributes are
+ * never displayed — the drawer omits those rows, never invents
+ * values. Historical rows keep nulls for values discarded during
+ * old ingestion; only newly ingested leads carry ad_id /
+ * is_organic / meta_created_time.
+ */
+export interface FlowTableMetaLeadDetails {
+  metaLeadId: string | null;
+  formId: string | null;
+  adId: string | null;
+  adName: string | null;
+  campaignName: string | null;
+  /** Null when Meta omitted it (historical rows included). */
+  isOrganic: boolean | null;
+  /** Meta Lead created_time, null when never preserved. */
+  metaCreatedTime: string | null;
+  /**
+   * Raw Meta-injected verification answer (answers /
+   * vars `phone_number_verified`). Null when the form never sent
+   * it. Displayed as Yes/No; never a Workspace table column.
+   */
+  phoneNumberVerified: string | null;
+}
+
 export interface FlowTableRow {
   runId: string;
   contactId: string | null;
@@ -110,6 +140,8 @@ export interface FlowTableRow {
    * contacts.source_url (batched, never N+1).
    */
   sourceUrl?: string | null;
+  /** Meta-only drawer provenance (see interface above). */
+  metaDetails?: FlowTableMetaLeadDetails | null;
 }
 
 export interface FlowTablePayload {

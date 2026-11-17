@@ -212,6 +212,22 @@ function formatDateTime(iso: string | null): string {
 }
 
 /**
+ * Meta drawer "Additional Meta Details" helpers (Meta tables only).
+ * Missing values stay missing — callers omit those rows, never
+ * render placeholders or invent values. Long ids wrap (break-all)
+ * instead of breaking the layout.
+ */
+function formatMetaYesNo(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const t = String(raw).trim();
+  if (t === '') return null;
+  const lowered = t.toLowerCase();
+  if (['yes', 'true', '1', 'verified', 'y'].includes(lowered)) return 'Yes';
+  if (['no', 'false', '0', 'unverified', 'n'].includes(lowered)) return 'No';
+  return t;
+}
+
+/**
  * Latest-recording header cell: same shared player popover as the
  * Recordings page (one blue Play button + duration; the full
  * player floats in a portaled popover, never a native audio
@@ -3190,6 +3206,62 @@ export default function WorkspacePage() {
                     onWorkspaceSynced={handleTravelCrmSynced}
                   />
                 )}
+                {/* Meta-only provenance footer: stored submission
+                    metadata not already visible elsewhere. Renders
+                    AFTER Call Recordings + Create in Travel CRM, at
+                    the absolute bottom of the drawer. Missing values
+                    produce no rows; a lead with no stored metadata
+                    renders no section at all. No new table columns. */}
+                {isMetaTable && selected.metaDetails
+                  ? (() => {
+                      const d = selected.metaDetails as {
+                        metaLeadId?: string | null;
+                        formId?: string | null;
+                        adId?: string | null;
+                        adName?: string | null;
+                        campaignName?: string | null;
+                        isOrganic?: boolean | null;
+                        metaCreatedTime?: string | null;
+                        phoneNumberVerified?: string | null;
+                      };
+                      const rows: Array<{ label: string; value: string; mono?: boolean }> = [];
+                      const verified = formatMetaYesNo(d.phoneNumberVerified);
+                      if (verified) rows.push({ label: 'Phone Number Verified', value: verified });
+                      if (d.metaLeadId?.trim()) rows.push({ label: 'Meta Lead ID', value: d.metaLeadId.trim(), mono: true });
+                      if (d.formId?.trim()) rows.push({ label: 'Form ID', value: d.formId.trim(), mono: true });
+                      if (d.adId?.trim()) rows.push({ label: 'Ad ID', value: d.adId.trim(), mono: true });
+                      if (d.adName?.trim()) rows.push({ label: 'Ad Name', value: d.adName.trim() });
+                      if (d.campaignName?.trim()) rows.push({ label: 'Campaign Name', value: d.campaignName.trim() });
+                      if (typeof d.isOrganic === 'boolean')
+                        rows.push({ label: 'Organic Lead', value: d.isOrganic ? 'Yes' : 'No' });
+                      if (d.metaCreatedTime?.trim() && !Number.isNaN(Date.parse(d.metaCreatedTime.trim())))
+                        rows.push({ label: 'Meta Lead Created At', value: formatDateTime(d.metaCreatedTime.trim()) });
+                      if (rows.length === 0) return null;
+                      return (
+                        <div className="border-t border-border pt-4">
+                          <h3 className="text-foreground text-sm font-semibold">
+                            Additional Meta Details
+                          </h3>
+                          <dl className="mt-2 space-y-2 text-sm">
+                            {rows.map((r) => (
+                              <div key={r.label} className="flex justify-between gap-4">
+                                <dt className="text-muted-foreground shrink-0">{r.label}</dt>
+                                <dd
+                                  className={
+                                    r.mono
+                                      ? 'text-foreground max-w-[60%] text-right font-mono text-xs break-all'
+                                      : 'text-foreground max-w-[60%] text-right break-words'
+                                  }
+                                >
+                                  {r.value}
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
+                        </div>
+                      );
+                    })()
+                  : null}
               </div>
             </>
           )}

@@ -71,6 +71,26 @@ function isoOrNow(value: string | null | undefined): string {
   return Number.isNaN(ms) ? new Date().toISOString() : new Date(ms).toISOString();
 }
 
+/**
+ * Meta `created_time` → ISO instant, or null when absent/invalid.
+ * Never falls back to "now" — a missing timestamp must surface as
+ * a missing drawer row, never an invented value.
+ */
+export function metaCreatedTimeOrNull(
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+}
+
+/** Normalize an optional Meta id to trimmed text or null. */
+function metaIdOrNull(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed !== "" ? trimmed : null;
+}
+
 /** PII-free, bounded error summary for storage. */
 function safeError(err: unknown): string {
   if (err instanceof MetaLeadAdsError) {
@@ -399,6 +419,13 @@ export async function processSubmissionById(
         form_name: formRow.form_name ?? submission.form_name,
         campaign_name: lead.campaign_name ?? null,
         ad_name: lead.ad_name ?? null,
+        // Preserved for the "Additional Meta Details" drawer (new
+        // leads only — historical rows keep their existing nulls and
+        // are never backfilled or re-imported).
+        ad_id: metaIdOrNull(lead.ad_id),
+        is_organic:
+          typeof lead.is_organic === "boolean" ? lead.is_organic : null,
+        meta_created_time: metaCreatedTimeOrNull(lead.created_time),
         last_error: null,
         next_retry_at: null,
         claimed_at: null,
