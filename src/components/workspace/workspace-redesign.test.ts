@@ -199,12 +199,14 @@ describe("workspace redesign — assignment dialog structure", () => {
     expect(dialog).toContain("Assigned team members");
     expect(dialog).toContain("MemberInitials");
     expect(dialog).toContain("renderMemberEditor");
-    // No advanced editor anymore: Step 1 rows carry availability
-    // (Pause/Resume) inline and the member editor holds only
-    // link, display name, and share.
+    // No availability UI on member rows: no badges, no Pause/Resume
+    // buttons, no per-member pause panel. The member editor holds
+    // only link, display name, and share.
     expect(dialog).not.toContain("Show advanced options");
-    expect(dialog).toContain("renderPausePanel");
-    expect(dialog).toContain("Pause Member");
+    expect(dialog).not.toContain("renderPausePanel");
+    expect(dialog).not.toContain("Pause Member");
+    expect(dialog).not.toContain("quickResume");
+    expect(dialog).not.toContain("openPause");
   });
 
   it("collapses delivery history and keeps the simplified footer visible", () => {

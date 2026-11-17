@@ -137,9 +137,10 @@ describe("assignment dialog is a four-step wizard", () => {
     expect(dialog).toContain("ASSIGNMENT_TIMEZONE");
     expect(dialog).toContain("@/lib/lead-assignment/table-validation");
     expect(dialog).toContain("IST");
-    // Roster linking keeps its own search; pauses stay scoped.
+    // Roster linking keeps its own search; the table-level
+    // assignment status endpoint stays scoped per table.
     expect(dialog).toContain("SearchableSelect");
-    expect(dialog).toContain("/api/flows/${encodeURIComponent(flowId)}/assignment/pause");
+    expect(dialog).toContain("/api/flows/${encodeURIComponent(flowId)}/assignment/status");
   });
 
   it("all reads and writes are table-scoped and surfaced with feedback", () => {
@@ -220,7 +221,7 @@ describe("assignment dialog view mode (read-only inspection)", () => {
 
   it("swaps the footer to Close-only and blocks the mutating submitters", () => {
     expect(dialog).toContain("if (readOnly || busy !== null) return;");
-    expect(dialog).toContain("if (readOnly || !pauseFor) return;");
+    expect(dialog).not.toContain("if (readOnly || !pauseFor) return;");
     expect(dialog).toContain("if (readOnly) return;");
     // Close-only footer in view mode; the Save pair stays for edit.
     expect(dialog).toContain("readOnly ? (");
@@ -626,10 +627,11 @@ describe("assignment dialog four-step sidebar navigation", () => {
 
 describe("assignment dialog member rows stay compact (details live in the inline editor)", () => {  const dialog = src("src/components/workspace/table-assignment-dialog.tsx");
 
-  it("lists members with avatar, name, share, availability, edit, pause, and remove", () => {
+  it("lists members with avatar, name, share, edit, and remove — no availability UI", () => {
     // One compact row per member: avatar initials, display name,
-    // linked/external caption, read-only share text, availability
-    // badge with Pause/Resume, Edit, Remove.
+    // linked/external caption, read-only share text, Edit, Remove.
+    // No availability badge, no Pause/Resume buttons, no member
+    // pause panel.
     expect(dialog).toContain("MemberInitials");
     expect(dialog).toContain("Add member");
     expect(dialog).toContain("ShareSelect");
@@ -638,13 +640,13 @@ describe("assignment dialog member rows stay compact (details live in the inline
     // percentage mode); the list row keeps read-only text.
     expect(dialog).toContain("assign-share");
     expect(dialog).not.toContain("patchDraft(d.key, { weight");
-    // Availability lives on the row: green Available badge with a
-    // Pause action, amber Paused-until badge with Resume.
-    expect(dialog).toContain("openPause(saved)");
-    expect(dialog).toContain("quickResume(saved)");
-    expect(dialog).toContain("renderPausePanel()");
-    expect(dialog).toContain("Pause Member");
-    expect(dialog).toContain("Paused until");
+    expect(dialog).not.toContain("pauseFor");
+    expect(dialog).not.toContain("openPause");
+    expect(dialog).not.toContain("quickResume");
+    expect(dialog).not.toContain("renderPausePanel");
+    expect(dialog).not.toContain("Pause Member");
+    // (The read-only Review availability summary still mentions
+    // "Paused until" text — that display is unchanged.)
     // No activate/deactivate toggles in the list.
     expect(dialog).not.toContain("Deactivate");
     // No contact columns in the list — emails, phones, and extra
@@ -750,7 +752,7 @@ describe("assignment dialog footer activation (no toggle, Pause/Resume row)", ()
     // tail from the Cancel buttons and pause/resume paths elsewhere
     // in the file.
     const start = dialog.indexOf('toast.success("Assignment settings saved for this table.")');
-    const end = dialog.indexOf("const submitPause", start);
+    const end = dialog.indexOf("const submitStatus", start);
     const tail = dialog.slice(start, end);
     expect(tail.length).toBeGreaterThan(0);
     // Refresh-before-close so the workspace shows current state.
@@ -763,10 +765,8 @@ describe("assignment dialog footer activation (no toggle, Pause/Resume row)", ()
     expect(tail).toContain("sequencesOk");
     // Duplicate-submit guard: Save stays disabled while saving.
     expect(dialog).toContain("disabled={loading || busy !== null}");
-    // Pause/Resume never close the dialog.
-    const pauseBody = dialog.slice(dialog.indexOf("const submitPause"), dialog.indexOf("const submitStatus"));
+    // The table-level status toggle never closes the dialog.
     const statusBody = dialog.slice(dialog.indexOf("const submitStatus"), dialog.indexOf("const loadNotifications"));
-    expect(pauseBody).not.toContain("onOpenChange(false)");
     expect(statusBody).not.toContain("onOpenChange(false)");
   });
 });
@@ -892,13 +892,18 @@ describe("simplified assignment UX (four steps + inline member editor)", () => {
     );
   });
 
-  it("exposes pause controls per saved member without rewriting owners", () => {
-    // Availability is a Step 1 row concern (Pause/Resume beside the
-    // member), persisted through the pause endpoint — the PUT never
-    // carries pause fields. Separate from assignment-level Pause.
-    expect(dialog).toContain("Pause Member");
-    expect(dialog).toContain("quickResume");
-    expect(dialog).toContain("submitPause");
+  it("keeps assignment-level Pause/Resume in the footer without per-member controls", () => {
+    // Table-level activation lives in the footer (Pause/Resume
+    // automatic assignment); member rows carry no availability
+    // badge and no Pause/Resume actions. Saving still never
+    // rewrites existing lead owners.
+    expect(dialog).toContain("Pause automatic assignment");
+    expect(dialog).toContain("Resume automatic assignment");
+    expect(dialog).not.toContain("openPause");
+    expect(dialog).not.toContain("quickResume");
+    expect(dialog).not.toContain("submitPause");
+    expect(dialog).not.toContain("renderPausePanel");
+    expect(dialog).not.toContain("Pause Member");
     expect(dialog).toContain("Saving never rewrites existing lead owners.");
   });
 
@@ -985,26 +990,27 @@ describe("assignment inline editing contract (one dialog, no panels)", () => {
     expect(dialog).toContain('aria-label="Salesperson notifications"');
   });
 
-  it("manages availability from the Step 1 row with today, days, until, and scopes", () => {
-    // Row: Available badge + Pause, or Paused-until badge + Resume.
-    // Panel: duration modes, scopes, reason, Cancel/Pause Member.
-    expect(dialog).toContain("openPause(saved)");
-    expect(dialog).toContain("quickResume(saved)");
-    expect(dialog).toContain("renderPausePanel()");
-    expect(dialog).toContain('aria-label={`Resume ${d.display_name || "member"}`}');
-    expect(dialog).toContain('aria-label={`Pause ${d.display_name || "member"}`}');
+  it("shows no member availability controls on the Step 1 row", () => {
+    // No Available badge, no Paused-until badge, no Pause/Resume
+    // buttons, and no per-member pause panel anywhere in the
+    // dialog. Table-level activation in the footer is untouched.
+    expect(dialog).not.toContain("openPause");
+    expect(dialog).not.toContain("quickResume");
+    expect(dialog).not.toContain("renderPausePanel");
+    expect(dialog).not.toContain('aria-label={`Resume ${d.display_name || "member"}`}');
+    expect(dialog).not.toContain('aria-label={`Pause ${d.display_name || "member"}`}');
     for (const label of ["Pause for today", "Pause N days", "Pause until…", "Resume now"]) {
-      expect(dialog).toContain(label);
+      expect(dialog).not.toContain(label);
     }
-    expect(dialog).toContain("This table only");
-    expect(dialog).toContain("Whole account");
-    expect(dialog).toContain("Resume date and time (IST)");
-    expect(dialog).toContain("maxLength={280}");
-    expect(dialog).toContain("Pause Member");
-    // Pause actions target persisted members only and never fire
-    // while another save is in flight.
-    expect(dialog).toContain("pauseFor === saved?.id ? renderPausePanel() : null");
-    expect(dialog).toContain("if (readOnly || busy !== null) return;");
+    // ("This table only" survives only inside the read-only Review
+    // availability summary, which has no badges or actions.)
+    expect(dialog).not.toContain("Whole account");
+    expect(dialog).not.toContain("Resume date and time (IST)");
+    expect(dialog).not.toContain("maxLength={280}");
+    expect(dialog).not.toContain("Pause Member");
+    expect(dialog).not.toContain("pauseFor");
+    expect(dialog).toContain("Edit");
+    expect(dialog).toContain("Add member");
   });
 
   it("shows per-member availability in Review, distinct from assignment Pause", () => {

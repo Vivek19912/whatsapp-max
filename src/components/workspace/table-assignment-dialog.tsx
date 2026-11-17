@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -1014,12 +1013,6 @@ export function TableAssignmentDialog({
   // language, category, status — the picker endpoint carries no body
   // text, so details are the honest preview).
   const [templatePreviewOpen, setTemplatePreviewOpen] = useState(false);
-  const [pauseFor, setPauseFor] = useState<string | null>(null);
-  const [pauseMode, setPauseMode] = useState<"today" | "days" | "until" | "resume">("today");
-  const [pauseDays, setPauseDays] = useState("1");
-  const [pauseUntil, setPauseUntil] = useState("");
-  const [pauseReason, setPauseReason] = useState("");
-  const [pauseScope, setPauseScope] = useState<"table" | "account">("table");
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRow[] | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1320,7 +1313,6 @@ export function TableAssignmentDialog({
       setEditorSlot("members");
       setConfirmRemoveKey(null);
       setTemplatePreviewOpen(false);
-      setPauseFor(null);
       setShowNotifications(false);
       setNotifications(null);
       setSequenceCatalog(null);
@@ -1886,75 +1878,6 @@ export function TableAssignmentDialog({
   };
 
   /**
-   * POST one assignee pause/resume to this table's pause endpoint.
-   * Shared by the Step 1 row panel (submitPause) and the immediate
-   * row Resume action (quickResume) so both use the same API and
-   * validation.
-   */
-  const postPause = async (assigneeId: string, body: Record<string, unknown>) => {
-    await readJson(
-      await fetch(`/api/flows/${encodeURIComponent(flowId)}/assignment/pause`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ assignee_id: assigneeId, ...body }),
-      }),
-    );
-  };
-
-  const submitPause = async () => {
-    if (readOnly || !pauseFor) return;
-    setBusy("pause");
-    try {
-      const body: Record<string, unknown> = {
-        mode: pauseMode,
-        scope: pauseScope,
-      };
-      if (pauseMode === "days") body.days = Number.parseInt(pauseDays, 10);
-      if (pauseMode === "until") body.until = pauseUntil;
-      if (pauseReason.trim()) body.reason = pauseReason.trim();
-      await postPause(pauseFor, body);
-      toast.success(pauseMode === "resume" ? "Assignee resumed." : "Pause updated.");
-      setPauseFor(null);
-      setPauseReason("");
-      await load();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update the pause.");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /**
-   * Open the compact pause panel for a persisted Step 1 member.
-   * Pause actions stay disabled while any save is in flight.
-   */
-  const openPause = (saved: AssigneeView) => {
-    if (readOnly || busy !== null) return;
-    setPauseFor(saved.id);
-    setPauseMode("today");
-    setConfirmRemoveKey(null);
-  };
-
-  /**
-   * Immediately clear a salesperson's pause from the Step 1 row
-   * (no panel round-trip). Uses the same endpoint as the panel.
-   */
-  const quickResume = async (saved: AssigneeView) => {
-    if (readOnly || busy !== null) return;
-    setBusy("pause");
-    try {
-      await postPause(saved.id, { mode: "resume" });
-      toast.success("Assignee resumed.");
-      setPauseFor((cur) => (cur === saved.id ? null : cur));
-      await load();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update the pause.");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /**
    * Pause or resume automatic assignment for this table. Narrowly
    * scoped: only the enabled flag is persisted server-side, so
    * unsaved distribution or assignee edits are never overwritten.
@@ -2102,132 +2025,6 @@ export function TableAssignmentDialog({
   );
 
   /**
-   * Compact per-salesperson pause panel rendered below a Step 1
-   * member row. Same controls as the assignment pause endpoint
-   * accepts (today / N days / until / resume, table or account
-   * scope, optional 280-char reason) with Cancel + Pause Member.
-   * Pauses apply to persisted members only and take effect for new
-   * leads immediately; historical ownership never changes.
-   */
-  const renderPausePanel = () => {
-    if (!pausingSaved) return null;
-    return (
-      <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
-        <Card className="border-dashed">
-          <CardContent className="flex flex-col gap-3 pt-4">
-            <p className="text-sm font-medium">
-              Pause {pausingSaved.display_name}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Pauses take effect immediately for new leads. Existing ownership never changes. All times are in Indian Standard Time (IST).
-            </p>
-            {pausingSaved.paused_until ? (
-              <p className="text-muted-foreground text-xs">
-                Current: Paused until{" "}
-                {formatPausedUntilFull(pausingSaved.paused_until)}
-                {pausingSaved.pause_reason ? ` — ${pausingSaved.pause_reason}` : ""} (
-                {pausingSaved.pause_scope === "account" ? "whole account" : "this table"})
-              </p>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              {(
-                [
-                  ["today", "Pause for today"],
-                  ["days", "Pause N days"],
-                  ["until", "Pause until…"],
-                  ["resume", "Resume now"],
-                ] as const
-              ).map(([value, label]) => (
-                <Button
-                  key={value}
-                  type="button"
-                  variant={pauseMode === value ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setPauseMode(value)}
-                >
-                  {label}
-                </Button>
-              ))}
-            </div>
-            {pauseMode === "days" && (
-              <div className="flex flex-col gap-1.5">
-                <Label>Days (1–365)</Label>
-                <Input
-                  value={pauseDays}
-                  inputMode="numeric"
-                  className="w-28"
-                  onChange={(e) =>
-                    setPauseDays(e.target.value.replace(/[^0-9]/g, "").slice(0, 3))
-                  }
-                />
-              </div>
-            )}
-            {pauseMode === "until" && (
-              <div className="flex flex-col gap-1.5">
-                <Label>Resume date and time (IST)</Label>
-                <Input
-                  type="datetime-local"
-                  value={pauseUntil}
-                  onChange={(e) => setPauseUntil(e.target.value)}
-                />
-              </div>
-            )}
-            {pauseMode !== "resume" && (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label>Reason (optional)</Label>
-                  <Input
-                    value={pauseReason}
-                    onChange={(e) => setPauseReason(e.target.value)}
-                    placeholder="On leave"
-                    maxLength={280}
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant={pauseScope === "table" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setPauseScope("table")}
-                  >
-                    This table only
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={pauseScope === "account" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setPauseScope("account")}
-                  >
-                    Whole account
-                  </Button>
-                </div>
-              </>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setPauseFor(null)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={busy === "pause"}
-                onClick={submitPause}
-              >
-                {pauseMode === "resume" ? "Resume now" : "Pause Member"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  };
-
-  /**
    * Compact Step 3 customer-sequence panel — deliberately separate
    * from renderMemberEditor. One salesperson's WhatsApp templates
    * only: no team link, display name, share, availability, or
@@ -2323,12 +2120,6 @@ export function TableAssignmentDialog({
   // Close-only footer, and guarded submitters (so no keyboard
   // path can persist anything either).
   const readOnly = viewMode === true;
-
-  // Pause target for the Step 1 pause panel: the persisted member
-  // currently being paused (persisted only — unsaved drafts have no
-  // server row to pause). Hoisted out of the JSX so the panel needs
-  // no inline IIFE.
-  const pausingSaved = pauseFor ? savedById.get(pauseFor) : undefined;
 
   // Review validation summary: recomputed from the live drafts so
   // the review can never drift from what Save submits. Reaching the
@@ -2607,12 +2398,7 @@ export function TableAssignmentDialog({
                 </div>
               ) : (
                 <div className="flex flex-col gap-1.5">
-                  {drafts.map((d) => {
-                    const saved = savedById.get(d.key);
-                    const pausedLive = saved?.paused_until
-                      ? Date.parse(saved.paused_until) > Date.now()
-                      : false;
-                    return (
+                  {drafts.map((d) => (
                     <Fragment key={d.key}>
                     <div
                       className={cn(
@@ -2634,53 +2420,8 @@ export function TableAssignmentDialog({
                           {d.weight}%
                         </span>
                       ) : null}
-                      {saved ? (
-                        pausedLive && saved.paused_until ? (
-                          <span
-                            className="inline-flex max-w-44 shrink-0 items-center gap-1.5 truncate rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-400"
-                            title={saved.pause_reason ? `Paused until ${formatPausedUntilFull(saved.paused_until)} — ${saved.pause_reason}` : `Paused until ${formatPausedUntilFull(saved.paused_until)}`}
-                          >
-                            Paused until {formatPausedUntilFull(saved.paused_until)}
-                          </span>
-                        ) : (
-                          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
-                            Available
-                          </span>
-                        )
-                      ) : (
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          Available
-                        </span>
-                      )}
                       {readOnly ? null : (
                         <div className="flex shrink-0 items-center gap-1">
-                          {saved ? (
-                            pausedLive ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() => void quickResume(saved)}
-                                disabled={busy !== null}
-                                aria-label={`Resume ${d.display_name || "member"}`}
-                              >
-                                Resume
-                              </Button>
-                            ) : (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() => openPause(saved)}
-                                disabled={busy !== null}
-                                aria-label={`Pause ${d.display_name || "member"}`}
-                              >
-                                Pause
-                              </Button>
-                            )
-                          ) : null}
                           <Button
                             type="button"
                             variant="ghost"
@@ -2708,10 +2449,8 @@ export function TableAssignmentDialog({
                       )}
                     </div>
                     {editingKey === d.key && editorSlot === "members" ? renderMemberEditor(false) : null}
-                    {pauseFor === saved?.id ? renderPausePanel() : null}
                     </Fragment>
-                    );
-                  })}
+                    ))}
                   {mode === "percentage" ? (
                     <p className="pt-1 text-xs text-muted-foreground">
                       Total allocation: {activeWeightTotal}%
