@@ -87,6 +87,19 @@ describe("hidden-tables API — owner-only writes, tenant-scoped reads", () => {
     expect(src).toContain(".eq(\"account_id\", accountId)");
     expect(src).toContain("Flow not found.");
   });
+
+  it("never truncates a table name with an ellipsis", () => {
+    const src = header();
+    // Selected-table trigger and popup rows wrap instead of
+    // truncating; no `truncate` class may remain on the selector
+    // or the Manage Options popup (other toolbar menus are
+    // untouched).
+    const start = src.indexOf("export function WorkspaceTableSelector");
+    const end = src.indexOf("export interface WorkspaceToolbarAction");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(src.slice(start, end)).not.toContain("truncate");
+  });
 });
 
 describe("hidden-tables migration — visibility never touches leads", () => {

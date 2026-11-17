@@ -170,7 +170,10 @@ export function WorkspaceTableSelector({
       >
         <SelectValue placeholder="Select Flow">
           {active ? (
-            <span className="block min-w-0 truncate" title={displayName(active.name)}>
+            <span
+              className="block min-w-0 whitespace-normal break-words"
+              title={displayName(active.name)}
+            >
               {displayName(active.name)}
             </span>
           ) : (
@@ -245,7 +248,7 @@ export function WorkspaceTableSelector({
     </Select>
     {manageable ? (
       <Dialog open={manageOpen} onOpenChange={setManageOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Manage Options</DialogTitle>
             <DialogDescription>
@@ -273,7 +276,7 @@ export function WorkspaceTableSelector({
                         aria-hidden
                       />
                     )}
-                    <span className="min-w-0 truncate" title={displayName(f.name)}>
+                    <span className="min-w-0 whitespace-normal break-words" title={displayName(f.name)}>
                       {displayName(f.name)}
                     </span>
                   </span>
@@ -283,6 +286,7 @@ export function WorkspaceTableSelector({
                       setDraftVisible((prev) => ({ ...prev, [f.id]: next }))
                     }
                     aria-label={`Show ${displayName(f.name)}`}
+                    className="shrink-0"
                   />
                 </div>
               );
