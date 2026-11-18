@@ -14,10 +14,12 @@
 // functions; see its contract below).
 
 import type {
+  MetaAgentAnalytics,
   MetaLeadDay,
   MetaLeadFormSplit,
   MetaLeadMonth,
   MetaLeadsAnalytics,
+  MetaLeadStageSplit,
 } from './types'
 
 export interface MetaLeadsAnalyticsParams {
@@ -185,5 +187,75 @@ export async function loadMetaLeadsAnalytics(
         ? json.year
         : params.year,
     monthly: normalizeMetaMonthly(json.monthly),
+  }
+}
+
+function isStageSplit(f: unknown): f is { stage: string | null; leads: number } {
+  if (!f || typeof f !== 'object') return false
+  const r = f as Record<string, unknown>
+  return (
+    (typeof r.stage === 'string' || r.stage === null) &&
+    typeof r.leads === 'number'
+  )
+}
+
+function normalizeStages(input: unknown): MetaLeadStageSplit[] {
+  if (!Array.isArray(input)) return []
+  return (input as unknown[])
+    .filter(isStageSplit)
+    .map((f) => ({ stage: f.stage, leads: Math.floor(f.leads) }))
+    .filter((f) => f.leads >= 0)
+}
+
+/**
+ * Personal loader for the agent dashboard. Same params and
+ * normalization as the owner loader, but hits the self-scoped
+ * /api/meta-lead-ads/agent-dashboard (member derived server-side
+ * from auth.uid() — never a client param).
+ */
+export async function loadMetaAgentAnalytics(
+  params: MetaLeadsAnalyticsParams,
+  signal?: AbortSignal,
+): Promise<MetaAgentAnalytics> {
+  const qs = new URLSearchParams({
+    start: params.startISO,
+    end: params.endISO,
+    prevStart: params.prevStartISO,
+    prevEnd: params.prevEndISO,
+    year: String(params.year),
+    tz: params.tz,
+  })
+  const res = await fetch(`/api/meta-lead-ads/agent-dashboard?${qs.toString()}`, {
+    signal,
+    cache: 'no-store',
+  })
+  if (!res.ok) {
+    throw new Error(`Meta Lead Ads agent analytics failed: ${res.status}`)
+  }
+  const json = (await res.json()) as {
+    assignedTotal?: unknown
+    todayLeads?: unknown
+    yesterdayLeads?: unknown
+    last7Leads?: unknown
+    last30Leads?: unknown
+    daily?: unknown
+    monthly?: unknown
+    year?: unknown
+    stages?: unknown
+  }
+
+  return {
+    assignedTotal: toCount(json.assignedTotal),
+    todayLeads: toCount(json.todayLeads),
+    yesterdayLeads: toCount(json.yesterdayLeads),
+    last7Leads: toCount(json.last7Leads),
+    last30Leads: toCount(json.last30Leads),
+    daily: normalizeMetaDaily(json.daily),
+    year:
+      typeof json.year === 'number' && Number.isInteger(json.year)
+        ? json.year
+        : params.year,
+    monthly: normalizeMetaMonthly(json.monthly),
+    stages: normalizeStages(json.stages),
   }
 }

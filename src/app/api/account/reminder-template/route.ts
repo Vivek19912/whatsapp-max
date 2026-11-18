@@ -8,9 +8,8 @@ import {
 import { hasMinRole } from "@/lib/auth/roles";
 
 /**
- * GET/PUT /api/account/reminder-template — fallback template for
- * WhatsApp reminders sent outside the 24-hour customer-service
- * window ({{1}} = reminder message).
+ * GET/PUT /api/account/reminder-template — template for every
+ * WhatsApp reminder send ({{1}} = reminder message).
  *
  *   GET — { template_name, template_language } (nulls when
  *     unconfigured). Any member. Agents resolve their PERSONAL

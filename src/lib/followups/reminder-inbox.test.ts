@@ -32,6 +32,7 @@ vi.mock("./reminder-send", async (importOriginal) => {
       whatsappMessageId: "wamid-tpl-1",
       via: "template" as const,
       templateName: "reminder_fallback",
+      renderedText: `Reminder: ${params.text}`,
       ...params,
     }),
   };
@@ -229,7 +230,7 @@ beforeEach(() => {
 });
 
 describe("reminder Inbox persistence", () => {
-  it("free-text send lands in the recipient thread with wamid + exact text", async () => {
+  it("open-window send still lands as a template with the complete rendered body", async () => {
     inboundEvidence(new Date(Date.now() - 3600_000).toISOString());
     h.followups = [row({})];
     const out = await drainDueFollowups(fakeDb() as never, NOW);
@@ -239,18 +240,18 @@ describe("reminder Inbox persistence", () => {
     expect(agent).toHaveLength(1);
     expect(agent[0]).toMatchObject({
       conversation_id: "conv-1",
-      content_type: "text",
-      content_text: "Your appointment is tomorrow at 10",
-      template_name: null,
-      message_id: "wamid-text-1",
+      content_type: "template",
+      content_text: "Reminder: Your appointment is tomorrow at 10",
+      template_name: "reminder_fallback",
+      message_id: "wamid-tpl-1",
       status: "sent",
     });
     const conv = h.conversations.find((c) => c.id === "conv-1");
-    expect(conv?.last_message_text).toBe("Your appointment is tomorrow at 10");
+    expect(conv?.last_message_text).toBe("Reminder: Your appointment is tomorrow at 10");
   });
 
-  it("closed-window template send stores template metadata + reminder text", async () => {
-    // No inbound evidence → closed window → template path.
+  it("closed-window template send stores template metadata + complete rendered body", async () => {
+    // No inbound evidence → template path with complete rendered body.
     h.followups = [row({})];
     const out = await drainDueFollowups(fakeDb() as never, NOW);
     expect(out).toMatchObject({ sent: 1 });
@@ -260,7 +261,7 @@ describe("reminder Inbox persistence", () => {
     expect(agent[0]).toMatchObject({
       content_type: "template",
       template_name: "reminder_fallback",
-      content_text: "Your appointment is tomorrow at 10",
+      content_text: "Reminder: Your appointment is tomorrow at 10",
       message_id: "wamid-tpl-1",
       status: "sent",
     });
@@ -316,9 +317,9 @@ describe("reminder Inbox persistence", () => {
       accountId: "acct-1",
       recipientPhone: "919876543210",
       auditUserId: "user-1",
-      contentText: "Your appointment is tomorrow at 10",
-      whatsappMessageId: "wamid-text-1",
-      templateName: null,
+      contentText: "Reminder: Your appointment is tomorrow at 10",
+      whatsappMessageId: "wamid-tpl-1",
+      templateName: "reminder_fallback",
     });
     expect(again).not.toBeNull();
     expect(
@@ -334,17 +335,17 @@ describe("reminder Inbox persistence", () => {
     h.followups = [row({})];
     await drainDueFollowups(fakeDb() as never, NOW);
 
-    await mirrorStatus("wamid-text-1", "delivered");
-    await mirrorStatus("wamid-text-1", "read");
+    await mirrorStatus("wamid-tpl-1", "delivered");
+    await mirrorStatus("wamid-tpl-1", "read");
     expect(
-      h.messages.find((m) => m.message_id === "wamid-text-1")?.status,
+      h.messages.find((m) => m.message_id === "wamid-tpl-1")?.status,
     ).toBe("read");
 
     // Late/duplicate delivered (or sent) after read must not regress.
-    await mirrorStatus("wamid-text-1", "delivered");
-    await mirrorStatus("wamid-text-1", "sent");
+    await mirrorStatus("wamid-tpl-1", "delivered");
+    await mirrorStatus("wamid-tpl-1", "sent");
     expect(
-      h.messages.find((m) => m.message_id === "wamid-text-1")?.status,
+      h.messages.find((m) => m.message_id === "wamid-tpl-1")?.status,
     ).toBe("read");
   });
 

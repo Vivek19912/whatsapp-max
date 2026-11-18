@@ -41,3 +41,17 @@ export interface MetaLeadsAnalytics {
   /** Always 12 entries. */
   monthly: MetaLeadMonth[];
 }
+
+export interface MetaLeadStageSplit {
+  /** Raw Stage value; null when the lead has no Stage set. */
+  stage: string | null;
+  /** Assigned leads in this stage. */
+  leads: number;
+}
+
+export interface MetaAgentAnalytics extends MetaLeadsAnalytics {
+  /** Total currently assigned to the caller (all time, countable statuses). */
+  assignedTotal: number;
+  /** Assigned leads grouped by Stage (existing status definitions). */
+  stages: MetaLeadStageSplit[];
+}

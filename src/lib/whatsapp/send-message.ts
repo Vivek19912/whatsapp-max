@@ -632,23 +632,24 @@ export interface ReminderOutboundMessageParams {
   recipientPhone: string;
   /** Reminder creator (`whatsapp_followups.created_by`) for audit columns. */
   auditUserId: string;
-  /** Exact reminder text that was sent (the `{{1}}` value on templates). */
+  /** Complete rendered template body (same values sent to Meta). */
   contentText: string;
   /** Meta `wamid` from the confirmed send — the webhook correlation key. */
   whatsappMessageId: string;
   /**
-   * Fallback template name when the closed-window path delivered
-   * this reminder; null for free-text sends. Stored on the row so
-   * the Inbox renders it with the existing template conventions.
+   * Approved reminder template name (always set — reminders are
+   * template-only). Stored on the row so the Inbox renders it with
+   * the existing template conventions.
    */
   templateName?: string | null;
 }
 
 /**
  * Persist an already-sent self-reminder as a normal outbound
- * `messages` row so the Inbox shows it like any other WhatsApp
- * message from the business number (same columns, same renderer:
- * `sender_type: 'agent'` + `content_type: 'text' | 'template'`).
+ * `messages` row so the Inbox shows the COMPLETE rendered template
+ * body like any other WhatsApp message from the business number
+ * (same columns, same renderer: `sender_type: 'agent'` +
+ * `content_type: 'template'`).
  *
  * Thread resolution reuses the exact webhook/API conventions:
  * find-or-create the contact for the RECIPIENT phone (never the

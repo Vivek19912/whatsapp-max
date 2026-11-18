@@ -11,6 +11,8 @@ import { Skeleton } from '@/components/dashboard/skeleton'
 interface MetaDailyChartProps {
   data: MetaLeadDay[] | null
   loading: boolean
+  /** Heading override for scoped dashboards; defaults to the owner title. */
+  title?: string
 }
 
 function shortLabel(date: string): string {
@@ -39,7 +41,7 @@ function longLabel(date: string): string {
  * recomputed here — so the number above a bar cannot drift from
  * its segments.
  */
-export function MetaDailyChart({ data, loading }: MetaDailyChartProps) {
+export function MetaDailyChart({ data, loading, title = 'Leads — Last 30 Days' }: MetaDailyChartProps) {
   const days = useMemo(() => data ?? [], [data])
   const hasData = days.some((d) => d.total > 0)
 
@@ -79,7 +81,7 @@ export function MetaDailyChart({ data, loading }: MetaDailyChartProps) {
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.04)]" aria-label="Meta Leads Last 30 Days">
       <div className="border-b border-border px-5 py-4">
-        <h2 className="text-[15px] font-semibold text-foreground">Leads — Last 30 Days</h2>
+        <h2 className="text-[15px] font-semibold text-foreground">{title}</h2>
       </div>
       <div className="p-5">
         {!hasData ? (

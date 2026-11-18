@@ -11,9 +11,12 @@
 // meta_lead_submissions ONLY — messages, flow_runs, and the Inbox
 // lead-source filter are never consulted.
 //
-// Security: RLS-scoped SSR client (caller's JWT) and a SECURITY
-// INVOKER RPC that derives the account from auth.uid() — no
-// account_id param, no service role, no cross-workspace reads.
+// Security: owner-only. RLS-scoped SSR client (caller's JWT) and
+// a SECURITY INVOKER RPC that derives the account from auth.uid()
+// — no account_id param, no service role, no cross-workspace reads.
+// Non-owners (admin/agent/viewer) receive 403 via requireRole and
+// must use the self-scoped /api/meta-lead-ads/agent-dashboard,
+// which cannot return another member's data by construction.
 //
 // Query params (all required except tz):
 //   start, end, prevStart, prevEnd — ISO (today / yesterday local
@@ -24,7 +27,7 @@
 
 import { NextResponse } from "next/server";
 
-import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
+import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { rollupTrailingKpis } from "@/lib/meta-leads-dashboard/analytics-client";
 
 export const dynamic = "force-dynamic";
@@ -38,7 +41,7 @@ function parseISO(value: string | null): string | null {
 
 export async function GET(request: Request) {
   try {
-    const ctx = await getCurrentAccount();
+    const ctx = await requireRole("owner");
 
     const url = new URL(request.url);
     const start = parseISO(url.searchParams.get("start"));

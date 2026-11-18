@@ -2,7 +2,6 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import {
   SendMessageError,
-  sendReminderToAgent,
   sendReminderViaTemplate,
 } from '@/lib/followups/reminder-send';
 import { normalizeAgentWhatsappNumber } from '@/lib/followups/types';
@@ -15,12 +14,13 @@ import { persistReminderOutboundMessage } from '@/lib/whatsapp/send-message';
 // Business number. Mirrors the automations-cron claim pattern
 // (status flip = lock, affected-row check = ownership).
 //
-// Send selection per attempt: when the agent's number messaged
-// the business within the last 24 hours, the reminder goes as
-// free text; otherwise it goes through the account's configured
-// APPROVED fallback template (`{{1}}` = reminder text). Either
-// way the destination is ALWAYS the row's `recipient_phone`
-// snapshot — nothing may override it.
+// Template-only policy: EVERY reminder goes through the account's
+// (or creator's personal) configured APPROVED template
+// (`{{1}}` = reminder text), regardless of the 24-hour
+// customer-service window. There is no free-text branch — the
+// window is observed for logging only, never for routing. The
+// destination is ALWAYS the row's `recipient_phone` snapshot —
+// nothing may override it.
 //
 // A reminder is personal, not a customer message, so this path
 // still avoids everything customer-related:
@@ -275,43 +275,38 @@ async function processOne(
     current.recipient_phone = refreshed;
   }
 
-  // Routing decision, hoisted for the failure log: which mode
-  // was attempted and what the window said when it was attempted.
+  // Routing is template-only (no text branch): every reminder
+  // sends through the creator's personal APPROVED template when
+  // set (else the account default) with the reminder as {{1}}.
+  // The 24-hour window is observed below for logging/diagnostics
+  // only — it never changes the send path. Template
+  // misconfiguration fails loudly with the reason stored.
   let windowOpen = false;
-  let sendMode: "text" | "template" = "text";
+  const sendMode: "template" = "template";
 
   try {
-    // Window routing per attempt — decided here, never probed by
-    // sending: open window → free text (cheapest, exact message);
-    // closed window → the creator's personal APPROVED fallback
-    // template when set (else the account default) with
-    // the reminder as {{1}}. A closed window NEVER attempts text
-    // first (Meta would reject it); template misconfiguration fails
-    // loudly with the reason stored.
-    windowOpen = await isReminderWindowOpen(
+    try {
+      windowOpen = await isReminderWindowOpen(
+        db,
+        current.account_id,
+        current.recipient_phone,
+        now,
+      );
+    } catch {
+      windowOpen = false;
+    }
+    const result = await sendReminderViaTemplate(
       db,
       current.account_id,
-      current.recipient_phone,
-      now,
+      {
+        to: current.recipient_phone,
+        text: current.message_text,
+      },
+      // Personal-first template resolution: this reminder sends
+      // through ITS CREATOR's fallback template when set — never
+      // another agent's configuration.
+      current.created_by,
     );
-    sendMode = windowOpen ? "text" : "template";
-    const result = windowOpen
-      ? await sendReminderToAgent(db, current.account_id, {
-          to: current.recipient_phone,
-          text: current.message_text,
-        })
-      : await sendReminderViaTemplate(
-          db,
-          current.account_id,
-          {
-            to: current.recipient_phone,
-            text: current.message_text,
-          },
-          // Personal-first template resolution: this reminder sends
-          // through ITS CREATOR's fallback template when set — never
-          // another agent's configuration.
-          current.created_by,
-        );
     await markFollowup(db, row.id, {
       status: 'sent',
       sent_at: new Date().toISOString(),
@@ -319,17 +314,17 @@ async function processOne(
       failure_reason: null,
     });
     // Inbox persistence (best-effort, never throws): thread the
-    // sent reminder onto the RECIPIENT's own conversation so it
-    // appears in the Inbox. The wamid dedupes retries; a failure
-    // here must not flip the reminder back to failed.
+    // COMPLETE rendered template body onto the RECIPIENT's own
+    // conversation so the Inbox matches the handset. The wamid
+    // dedupes retries; a failure here must not flip the reminder
+    // back to failed.
     await persistReminderOutboundMessage(db, {
       accountId: current.account_id,
       recipientPhone: current.recipient_phone,
       auditUserId: row.created_by as string,
-      contentText: current.message_text,
+      contentText: result.renderedText ?? current.message_text,
       whatsappMessageId: result.whatsappMessageId,
-      templateName:
-        result.via === 'template' ? (result.templateName ?? null) : null,
+      templateName: result.templateName ?? null,
     });
     // Delivery diagnostics only (never tokens, never full numbers):
     // one line per accepted send so a future non-delivery is
@@ -343,7 +338,7 @@ async function processOne(
       send_mode: sendMode,
       phone_number_id: result.phoneNumberId,
       whatsapp_message_id: result.whatsappMessageId,
-      via: result.via ?? 'text',
+      via: result.via ?? 'template',
       ...(result.templateName ? { template_name: result.templateName } : {}),
       ...(result.templateLanguage
         ? { template_language: result.templateLanguage }

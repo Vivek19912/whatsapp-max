@@ -4,20 +4,20 @@ import { decrypt } from "@/lib/whatsapp/encryption";
 import { sendTemplateMessage, sendTextMessage } from "@/lib/whatsapp/meta-api";
 import { buildSendComponents } from "@/lib/whatsapp/template-send-builder";
 import type { MessageTemplate } from "@/types";
-import { SendMessageError } from "@/lib/whatsapp/send-message";
+import { SendMessageError, renderTemplateMessageText } from "@/lib/whatsapp/send-message";
 
 // Re-exported so scheduler callers import the sender and its error
 // type from one module.
 export { SendMessageError };
 
 /**
- * Fail-closed reason stored when the 24-hour window is closed and
- * the account has no usable fallback template. Worded for the
- * Reminders UI/API surface (no silent text downgrade — Meta would
- * reject free-form text outside the window).
+ * Fail-closed reason stored when no usable approved reminder
+ * template is configured for the account/creator. Reminders are
+ * ALWAYS template sends (never silent text downgrade), so a
+ * missing template fails loudly with this reason.
  */
 export const NO_FALLBACK_TEMPLATE_MESSAGE =
-  "24-hour window is closed and no approved fallback template is configured.";
+  "No approved reminder template is configured.";
 
 // ============================================================
 // Self-reminder send: deliver a reminder TO ITS CREATOR's stored
@@ -67,6 +67,14 @@ export interface ReminderSendResult {
   templateName?: string;
   /** Fallback template language when via is `template`. */
   templateLanguage?: string;
+  /**
+   * Complete human-readable rendered template body (static text
+   * with every variable substituted using the same values sent to
+   * Meta). Persisted to `messages.content_text` so the Inbox shows
+   * exactly what the salesperson received. Present only on the
+   * template path.
+   */
+  renderedText?: string;
 }
 
 interface SenderCredentials {
@@ -123,6 +131,10 @@ export async function sendReminderToAgent(
   accountId: string,
   params: ReminderSendParams,
 ): Promise<ReminderSendResult> {
+  // DEPRECATED for reminders: retained only for direct unit tests.
+  // The scheduler ALWAYS uses sendReminderViaTemplate (template-only
+  // policy) — this text path must never be used for follow-up
+  // reminders, even inside the 24-hour window.
   const { to, text } = params;
 
   if (!to) {
@@ -199,18 +211,16 @@ function assertTemplateParamSendable(param: string, templateName: string, langua
   }
 }
 /**
- * Template fallback for closed-window sends: delivers the reminder
- * through the creator's PERSONAL approved template when set
- * (`profiles.*`), else the account's configured APPROVED template,
- * with the reminder text as `{{1}}`. Same recipient, same sender, same
- * bookkeeping contract as the text path — no customer
- * conversation, no contact lookup. (Inbox persistence happens in
- * the scheduler with `templateName` set, so the thread shows the
- * reminder content with template metadata.)
+ * Template send for ALL reminder deliveries (template-only policy):
+ * delivers the reminder through the creator's PERSONAL approved
+ * template when set (`profiles.*`), else the account's configured
+ * APPROVED template, with the reminder text as `{{1}}`. Same
+ * recipient, same sender — no customer conversation, no contact
+ * lookup. Returns the complete rendered body (`renderedText`) so
+ * the scheduler persists exactly what Meta delivered.
  *
- * Fail-closed contract (never silently downgraded to text, which
- * Meta would reject outside the window; never silently swapped to
- * another template — only the exact configured name/language):
+ * Fail-closed contract (never silently downgraded to text — every
+ * reminder requires the exact configured template):
  *   - no configured template → `no_fallback_template`
  *   - template row missing → `template_missing`
  *   - not APPROVED → `template_unapproved`
@@ -372,12 +382,36 @@ export async function sendReminderViaTemplate(
       template: row,
       messageParams: { body: [param] },
     });
+    // Complete rendered body using the SAME values sent to Meta —
+    // persisted to messages.content_text so the Inbox matches the
+    // handset. Includes static header/footer text when the template
+    // defines them (reminder templates are body-single-var; media
+    // headers / button vars already rejected above).
+    const renderedBody = renderTemplateMessageText(
+      row.body_text ?? "",
+      { body: [param] },
+      [],
+    );
+    const headerText =
+      row.header_type === "text" && typeof row.header_content === "string"
+        ? row.header_content.trim()
+        : "";
+    const footerText =
+      typeof row.footer_text === "string" ? row.footer_text.trim() : "";
+    const renderedText = [
+      headerText || null,
+      renderedBody,
+      footerText || null,
+    ]
+      .filter((part) => part !== null && part !== "")
+      .join("\n\n");
     return {
       whatsappMessageId: result.messageId,
       phoneNumberId,
       via: "template",
       templateName,
       templateLanguage: language,
+      renderedText,
     };
   } catch (err) {
     const message =

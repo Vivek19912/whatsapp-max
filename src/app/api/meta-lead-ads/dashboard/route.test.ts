@@ -1,29 +1,40 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The Meta dashboard route resolves the caller via getCurrentAccount
-// and runs get_meta_leads_analytics with caller-local day bounds.
-// We stub the account context and the RPC, then assert validation
-// and the exact RPC argument mapping (no account_id ever sent).
+// The Meta dashboard route is owner-only: it resolves the caller via
+// requireRole("owner") and runs get_meta_leads_analytics with
+// caller-local day bounds. We stub the account context and the RPC,
+// then assert validation, the exact RPC argument mapping (no
+// account_id ever sent), and the 403 for non-owners.
 
 const h = vi.hoisted(() => ({
   rpcArgs: null as Record<string, unknown> | null,
   rpcData: {} as Record<string, unknown>,
   rpcError: null as { message: string } | null,
+  role: "owner" as string,
 }));
 
 vi.mock("@/lib/auth/account", () => ({
-  getCurrentAccount: async () => ({
-    supabase: {
-      rpc: vi.fn(async (_fn: string, args: Record<string, unknown>) => {
-        h.rpcArgs = args;
-        return { data: h.rpcData, error: h.rpcError };
-      }),
-    },
-    userId: "user-1",
-    accountId: "acct-1",
-    role: "owner",
-    account: { id: "acct-1", name: "Acme" },
-  }),
+  requireRole: async (min: string) => {
+    if (min === "owner" && h.role !== "owner") {
+      const err = new Error(`This action requires the '${min}' role or higher`) as Error & {
+        status: number;
+      };
+      err.status = 403;
+      throw err;
+    }
+    return {
+      supabase: {
+        rpc: vi.fn(async (_fn: string, args: Record<string, unknown>) => {
+          h.rpcArgs = args;
+          return { data: h.rpcData, error: h.rpcError };
+        }),
+      },
+      userId: "user-1",
+      accountId: "acct-1",
+      role: h.role,
+      account: { id: "acct-1", name: "Acme" },
+    };
+  },
   toErrorResponse: (err: unknown) => {
     const status =
       err instanceof Error && "status" in err
@@ -45,6 +56,7 @@ beforeEach(() => {
   h.rpcArgs = null;
   h.rpcData = { todayLeads: 3, yesterdayLeads: 1, daily: [], monthly: [] };
   h.rpcError = null;
+  h.role = "owner";
 });
 
 describe("GET /api/meta-lead-ads/dashboard", () => {
@@ -61,6 +73,15 @@ describe("GET /api/meta-lead-ads/dashboard", () => {
     });
     expect(h.rpcArgs).not.toHaveProperty("account_id");
     expect(h.rpcArgs).not.toHaveProperty("p_account_id");
+  });
+
+  it("rejects non-owners with 403 (no account-wide data leak)", async () => {
+    for (const role of ["admin", "agent", "viewer"]) {
+      h.role = role;
+      const res = await GET(new Request(URL));
+      expect(res.status, role).toBe(403);
+      expect(h.rpcArgs).toBeNull();
+    }
   });
 
   it("returns the RPC payload with server-derived rolling KPIs and no-store caching", async () => {

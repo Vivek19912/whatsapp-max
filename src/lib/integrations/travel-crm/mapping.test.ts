@@ -964,10 +964,11 @@ describe("workspace Name column prefill (flowNameColumnKey)", () => {
     expect(r.missing).toContain("customerName");
   });
 
-  it("legacy path preserved: no key still merges-then-flags contact+answer as ambiguous", () => {
+  it("legacy path prioritized: form answer outranks contact (no ambiguity)", () => {
     const r = mapLeadToTravelCrm(withKey(), null);
-    expect(r.fields.customerName.status).toBe("ambiguous");
-    expect(r.draft.customerName).toBeNull();
+    expect(r.fields.customerName.status).toBe("available");
+    expect(r.draft.customerName).toBe(flowAnswer);
+    expect(r.ambiguous.filter((a) => a.field === "customerName")).toEqual([]);
   });
 
   it("genuinely conflicting values for the exact key stay ambiguous", () => {
@@ -995,5 +996,171 @@ describe("workspace Name column prefill (flowNameColumnKey)", () => {
       { flowNameColumnKey: "full_name" },
     );
     expect(r.fields.customerName).toMatchObject({ status: "invalid" });
+  });
+});
+
+describe("customerName source priority (Meta form > Workspace > contact)", () => {
+  it("form Name wins over a different WhatsApp contact name", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Neelesh Mishra", phone: null, email: null },
+        answers: [{ key: "full_name", label: "Name", value: "Rahul Sharma" }],
+      }),
+      null,
+    );
+    expect(r.fields.customerName.status).toBe("available");
+    expect(r.draft.customerName).toBe("Rahul Sharma");
+  });
+
+  it("uppercase form Name wins over lowercase contact (original casing preserved)", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "rahul sharma", phone: null, email: null },
+        answers: [{ key: "full_name", label: "Name", value: "RAHUL SHARMA" }],
+      }),
+      null,
+    );
+    expect(r.draft.customerName).toBe("RAHUL SHARMA");
+    expect(r.fields.customerName.status).toBe("available");
+  });
+
+  it("spelling-variant form Name wins over contact (no fuzzy merge, priority only)", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Neelesh Mishra", phone: null, email: null },
+        answers: [{ key: "full_name", label: "Name", value: "NEELISH MISHRA" }],
+      }),
+      null,
+    );
+    expect(r.draft.customerName).toBe("NEELISH MISHRA");
+    expect(r.fields.customerName.status).toBe("available");
+    expect(r.ambiguous.filter((a) => a.field === "customerName")).toEqual([]);
+  });
+
+  it("regression: screenshot scenario prefills the Meta form Name", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Neelesh Mishra", phone: "+919731975216", email: null },
+        answers: [{ key: "full_name", label: "Name", value: "NEELISH MISHRA" }],
+      }),
+      null,
+    );
+    expect(r.fields.customerName.status).toBe("available");
+    expect(r.draft.customerName).toBe("NEELISH MISHRA");
+  });
+
+  it("missing form falls back to Workspace custom Name over contact", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Contact Person", phone: null, email: null },
+        answers: [],
+        custom: [{ id: "f-1", name: "Customer Name", value: "Workspace Lead" }],
+      }),
+      null,
+    );
+    expect(r.draft.customerName).toBe("Workspace Lead");
+    expect(r.fields.customerName).toMatchObject({
+      status: "available",
+      source: { kind: "custom", key: "f-1" },
+    });
+  });
+
+  it("missing form and Workspace falls back to contact name", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Only Contact", phone: null, email: null },
+        answers: [],
+        custom: [],
+      }),
+      null,
+    );
+    expect(r.draft.customerName).toBe("Only Contact");
+    expect(r.fields.customerName).toMatchObject({
+      status: "available",
+      source: { kind: "contact", key: "contact.name" },
+    });
+  });
+
+  it("all three sources missing stays missing for manual entry", () => {
+    const r = mapLeadToTravelCrm(source(), null);
+    expect(r.fields.customerName.status).toBe("missing");
+    expect(r.draft.customerName).toBeNull();
+    expect(r.missing).toContain("customerName");
+  });
+
+  it("two genuinely different form answers stay ambiguous", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Someone Else", phone: null, email: null },
+        answers: [
+          { key: "full_name", label: "Name", value: "Anna" },
+          { key: "contact_name", label: "Contact Name", value: "Beth" },
+        ],
+      }),
+      null,
+    );
+    expect(r.fields.customerName.status).toBe("ambiguous");
+    expect(r.draft.customerName).toBeNull();
+    expect(r.fields.customerName.candidates).toEqual(
+      expect.arrayContaining(["Anna", "Beth"]),
+    );
+  });
+
+  it("two genuinely different Workspace customs stay ambiguous when form is empty", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Someone Else", phone: null, email: null },
+        answers: [],
+        custom: [
+          { id: "f-1", name: "Customer Name", value: "Anna" },
+          { id: "f-2", name: "Lead Name", value: "Beth" },
+        ],
+      }),
+      null,
+    );
+    expect(r.fields.customerName.status).toBe("ambiguous");
+    expect(r.draft.customerName).toBeNull();
+  });
+
+  it("single valid candidate auto-populates", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: null, phone: null, email: null },
+        answers: [{ key: "full_name", label: "Name", value: "Solo Lead" }],
+      }),
+      null,
+    );
+    expect(r.draft.customerName).toBe("Solo Lead");
+    expect(r.fields.customerName.status).toBe("available");
+  });
+
+  it("exact flow column still wins; empty exact falls back to other answers before contact", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Contact Person", phone: null, email: null },
+        answers: [
+          { key: "full_name", label: "Name", value: "" },
+          { key: "traveller_name", label: "Traveller Name", value: "Form Fallback" },
+        ],
+      }),
+      null,
+      { flowNameColumnKey: "full_name" },
+    );
+    expect(r.draft.customerName).toBe("Form Fallback");
+    expect(r.fields.customerName.status).toBe("available");
+  });
+
+  it("exact flow column empty falls back to Workspace custom before contact", () => {
+    const r = mapLeadToTravelCrm(
+      source({
+        contact: { name: "Contact Person", phone: null, email: null },
+        answers: [{ key: "full_name", label: "Name", value: "" }],
+        custom: [{ id: "f-1", name: "Customer Name", value: "Workspace Fallback" }],
+      }),
+      null,
+      { flowNameColumnKey: "full_name" },
+    );
+    expect(r.draft.customerName).toBe("Workspace Fallback");
+    expect(r.fields.customerName.status).toBe("available");
   });
 });

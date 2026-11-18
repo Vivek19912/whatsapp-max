@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The team-performance route resolves the caller via
-// getCurrentAccount and runs get_meta_leads_team_performance.
+// The team-performance route is owner-only: it resolves the caller
+// via requireRole("owner") and runs get_meta_leads_team_performance.
 // We stub the account context and the RPC, then assert validation
 // and the exact argument mapping (no account id ever sent).
 
@@ -9,21 +9,29 @@ const h = vi.hoisted(() => ({
   rpcArgs: null as Record<string, unknown> | null,
   rpcData: {} as Record<string, unknown>,
   rpcError: null as { message: string } | null,
+  role: "owner" as string,
 }));
 
 vi.mock("@/lib/auth/account", () => ({
-  getCurrentAccount: async () => ({
-    supabase: {
-      rpc: vi.fn(async (_fn: string, args: Record<string, unknown>) => {
-        h.rpcArgs = args;
-        return { data: h.rpcData, error: h.rpcError };
-      }),
-    },
-    userId: "user-1",
-    accountId: "acct-1",
-    role: "owner",
-    account: { id: "acct-1", name: "Acme" },
-  }),
+  requireRole: async (min: string) => {
+    if (min === "owner" && h.role !== "owner") {
+      const err = new Error("Forbidden") as Error & { status: number };
+      err.status = 403;
+      throw err;
+    }
+    return {
+      supabase: {
+        rpc: vi.fn(async (_fn: string, args: Record<string, unknown>) => {
+          h.rpcArgs = args;
+          return { data: h.rpcData, error: h.rpcError };
+        }),
+      },
+      userId: "user-1",
+      accountId: "acct-1",
+      role: h.role,
+      account: { id: "acct-1", name: "Acme" },
+    };
+  },
   toErrorResponse: (err: unknown) => {
     const status =
       err instanceof Error && "status" in err
@@ -45,6 +53,7 @@ beforeEach(() => {
   h.rpcArgs = null;
   h.rpcData = { members: [], summary: { total: 0, assigned: 0, unassigned: 0 } };
   h.rpcError = null;
+  h.role = "owner";
 });
 
 describe("GET /api/meta-lead-ads/team-performance", () => {
@@ -105,5 +114,14 @@ describe("GET /api/meta-lead-ads/team-performance", () => {
     const res = await GET(new Request(URL));
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "Failed to load team lead performance" });
+  });
+
+  it("rejects non-owners with 403 (agents use the self-scoped agent-dashboard)", async () => {
+    for (const role of ["admin", "agent", "viewer"]) {
+      h.role = role;
+      const res = await GET(new Request(URL));
+      expect(res.status, role).toBe(403);
+    }
+    expect(h.rpcArgs).toBeNull();
   });
 });

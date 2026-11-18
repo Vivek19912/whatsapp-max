@@ -597,17 +597,128 @@ function singleText(
 const ok = (): string | null => null;
 
 /**
- * Resolve Travel CRM Name from the exact flow-derived Workspace
- * "Name" column (CASE 1). Reads ONLY the answer stored under that
- * column's key — never synonym matching, never the contact record,
- * never custom fields. A non-empty answer wins outright: the
- * WhatsApp contact name is ignored, so the two intentionally
- * different sources can never surface as an ambiguity. An
- * empty/missing answer falls back to the single WhatsApp
- * contact-name candidate (the CASE 2 source); with nothing usable
- * the field is missing for manual entry. Conflicting values for
- * the exact key itself (only possible from exotic multi-entry
- * inputs) stay ambiguous.
+ * Distinct non-empty values preserving first-seen order plus the
+ * source of each value's first occurrence. Exact trimmed-string
+ * identity — no case-folding, no fuzzy matching. Preserves the
+ * original spelling/capitalization for display.
+ */
+function distinctWithSources(
+  entries: Array<{ source: Candidate["source"]; raw: string | null }>,
+): { distinct: string[]; sourceByValue: Map<string, Candidate["source"]> } {
+  const sourceByValue = new Map<string, Candidate["source"]>();
+  for (const e of entries) {
+    const value = nonEmpty(e.raw);
+    if (value === null || sourceByValue.has(value)) continue;
+    sourceByValue.set(value, e.source);
+  }
+  return { distinct: [...sourceByValue.keys()], sourceByValue };
+}
+
+/**
+ * Tiered Name fallback used after the exact flow column (when set)
+ * is empty: other recognized form answers first, then Workspace
+ * custom fields, then the WhatsApp contact name. Each tier with
+ * >1 distinct value stays ambiguous (manual selection); a single
+ * distinct value wins for its tier and lower tiers are never
+ * consulted, so a contact/custom spelling can never shadow a
+ * customer-entered form answer. Validation failures are terminal
+ * (invalid, never silent fallback).
+ */
+function resolveCustomerNameByPriority(
+  source: WacrmLeadSource,
+  fields: Record<string, TravelCrmFieldMapping>,
+  draft: TravelCrmLeadDraft,
+  validate: (value: string) => string | null,
+  excludeAnswerKey?: string | null,
+): void {
+  const answerEntries: Array<{ source: Candidate["source"]; raw: string | null }> = [];
+  for (const a of source.answers) {
+    if (excludeAnswerKey != null && a.key === excludeAnswerKey) continue;
+    if (
+      SYNONYMS.customerName.has(normalizeFieldToken(a.key)) ||
+      (a.label != null && SYNONYMS.customerName.has(normalizeFieldToken(a.label)))
+    ) {
+      answerEntries.push({ source: { kind: "answer", key: a.key }, raw: a.value });
+    }
+  }
+  const answers = distinctWithSources(answerEntries);
+  if (answers.distinct.length > 1) {
+    fields.customerName = { status: "ambiguous", candidates: answers.distinct };
+    return;
+  }
+  if (answers.distinct.length === 1) {
+    const value = answers.distinct[0];
+    const reason = validate(value);
+    if (reason !== null) {
+      fields.customerName = { status: "invalid", reason };
+      return;
+    }
+    fields.customerName = {
+      status: "available",
+      source: answers.sourceByValue.get(value) ?? { kind: "answer", key: "" },
+    };
+    draft.customerName = value;
+    return;
+  }
+
+  const customEntries: Array<{ source: Candidate["source"]; raw: string | null }> = [];
+  for (const f of source.custom) {
+    if (SYNONYMS.customerName.has(normalizeFieldToken(f.name))) {
+      customEntries.push({ source: { kind: "custom", key: f.id }, raw: f.value });
+    }
+  }
+  const customs = distinctWithSources(customEntries);
+  if (customs.distinct.length > 1) {
+    fields.customerName = { status: "ambiguous", candidates: customs.distinct };
+    return;
+  }
+  if (customs.distinct.length === 1) {
+    const value = customs.distinct[0];
+    const reason = validate(value);
+    if (reason !== null) {
+      fields.customerName = { status: "invalid", reason };
+      return;
+    }
+    fields.customerName = {
+      status: "available",
+      source: customs.sourceByValue.get(value) ?? { kind: "custom", key: "" },
+    };
+    draft.customerName = value;
+    return;
+  }
+
+  const contactValue = nonEmpty(source.contact.name);
+  if (contactValue === null) {
+    fields.customerName = { status: "missing" };
+    return;
+  }
+  const reason = validate(contactValue);
+  if (reason !== null) {
+    fields.customerName = { status: "invalid", reason };
+    return;
+  }
+  fields.customerName = {
+    status: "available",
+    source: { kind: "contact", key: "contact.name" },
+  };
+  draft.customerName = contactValue;
+}
+
+/**
+ * Resolve Travel CRM Name with source priority:
+ *   1. Exact flow-derived Workspace "Name" column answer (when
+ *      `columnKey` is set) — never merged with other sources.
+ *   2. Other recognized form answers (Meta Instant Form and flow
+ *      questions matched by synonym).
+ *   3. Workspace custom Name fields.
+ *   4. WhatsApp contact name fallback.
+ *
+ * A valid higher-priority Name wins even when a lower-priority
+ * source differs in case or spelling — the lower source never
+ * forces ambiguity. Multiple distinct values at the SAME tier
+ * stay ambiguous for manual selection. No fuzzy matching: two
+ * differently spelled values at the same tier are genuinely
+ * ambiguous. Original spelling/capitalization is preserved.
  */
 function resolveWorkspaceName(
   source: WacrmLeadSource,
@@ -638,21 +749,7 @@ function resolveWorkspaceName(
     draft.customerName = distinct[0];
     return;
   }
-  const contactValue = nonEmpty(source.contact.name);
-  if (contactValue === null) {
-    fields.customerName = { status: "missing" };
-    return;
-  }
-  const reason = validate(contactValue);
-  if (reason !== null) {
-    fields.customerName = { status: "invalid", reason };
-    return;
-  }
-  fields.customerName = {
-    status: "available",
-    source: { kind: "contact", key: "contact.name" },
-  };
-  draft.customerName = contactValue;
+  resolveCustomerNameByPriority(source, fields, draft, validate, columnKey);
 }
 
 /**
@@ -663,11 +760,13 @@ function resolveWorkspaceName(
  * `opts.flowNameColumnKey` carries the exact key of the
  * flow-derived Workspace "Name" column (same derivation the table
  * renders, resolved by the caller). When set, customerName comes
- * from THAT column's answer only — the WhatsApp contact name is
- * used solely as the fallback when the answer is empty, and other
- * name-like fields are ignored entirely. The flow answer and the
- * contact name are therefore never treated as competing
- * candidates. When unset, the legacy synonym matching applies.
+ * from THAT column's answer first; when empty, other recognized
+ * form answers, then Workspace custom Name fields, then the
+ * WhatsApp contact name apply in order. A valid higher-priority
+ * Name never competes with a lower-priority spelling — only
+ * multiple distinct values at the SAME tier stay ambiguous.
+ * When unset, form answers still outrank custom fields, which
+ * outrank the contact name.
  */
 export function mapLeadToTravelCrm(
   source: WacrmLeadSource,
@@ -723,7 +822,7 @@ export function mapLeadToTravelCrm(
   if (opts?.flowNameColumnKey) {
     resolveWorkspaceName(source, opts.flowNameColumnKey, fields, draft, validateName);
   } else {
-    text("customerName", SYNONYMS.customerName, (c) => c.name, "contact.name", validateName);
+    resolveCustomerNameByPriority(source, fields, draft, validateName, null);
   }
   {
     // Phone values that differ only in formatting collapse to one

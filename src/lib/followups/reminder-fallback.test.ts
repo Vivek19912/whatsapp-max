@@ -44,6 +44,7 @@ vi.mock("./reminder-send", async (importOriginal) => {
         phoneNumberId: "pn-1",
         via: "template" as const,
         templateName: "reminder_fallback",
+        renderedText: `Reminder: ${params.text}`,
       };
     },
   };
@@ -213,15 +214,15 @@ beforeEach(() => {
   h.writes = [];
 });
 
-describe("reminder 24h window + template fallback", () => {
-  it("open window sends free text with the snapshot recipient", async () => {
+describe("reminder template-only policy (window never changes the path)", () => {
+  it("open window still sends the approved template (no text fallback)", async () => {
     inboundEvidence(iso(NOW.getTime() - 3600_000));
     h.followups = [row({})];
     const out = await drainDueFollowups(fakeDb() as never, NOW);
     expect(out).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(h.textSends).toHaveLength(1);
-    expect(h.templateSends).toHaveLength(0);
-    expect(h.textSends[0]).toMatchObject({
+    expect(h.textSends).toHaveLength(0);
+    expect(h.templateSends).toHaveLength(1);
+    expect(h.templateSends[0]).toMatchObject({
       to: "919876543210",
       text: "Your appointment is tomorrow at 10",
       accountId: "acct-1",
@@ -254,14 +255,15 @@ describe("reminder 24h window + template fallback", () => {
     expect(h.templateSends).toHaveLength(1);
   });
 
-  it("boundary: just-inside-24h is open, just-outside is closed", async () => {
+  it("boundary: just-inside and just-outside 24h both send template", async () => {
     inboundEvidence(iso(NOW.getTime() - (24 * 3600_000 - 60_000)));
     h.followups = [row({})];
     await drainDueFollowups(fakeDb() as never, NOW);
-    expect(h.textSends).toHaveLength(1);
-    expect(h.templateSends).toHaveLength(0);
+    expect(h.textSends).toHaveLength(0);
+    expect(h.templateSends).toHaveLength(1);
 
     h.textSends = [];
+    h.templateSends = [];
     inboundEvidence(iso(NOW.getTime() - (24 * 3600_000 + 60_000)));
     h.followups = [row({})];
     await drainDueFollowups(fakeDb() as never, NOW);

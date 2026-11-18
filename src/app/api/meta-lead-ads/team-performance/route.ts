@@ -13,9 +13,14 @@
 // Type + contacts for lead names/phones). Messages, flow_runs as
 // a lead source, and call tables are never consulted.
 //
-// Security: RLS-scoped SSR client (caller's JWT) and a SECURITY
-// INVOKER RPC that derives the account from auth.uid() — no
-// account_id param, no service role, no cross-workspace reads.
+// Security: owner-only. The payload carries every member's totals
+// plus the account summary — account-wide analytics no other role
+// may retrieve directly. Agents get their personal view from the
+// self-scoped /api/meta-lead-ads/agent-dashboard (member derived
+// server-side from auth.uid()). RLS-scoped SSR client (caller's
+// JWT) and a SECURITY INVOKER RPC that derives the account from
+// auth.uid() — no account_id param, no service role, no
+// cross-workspace reads.
 //
 // Query params (all optional except tz default):
 //   formId  — Meta form_id, or absent for All Forms
@@ -31,7 +36,7 @@
 
 import { NextResponse } from "next/server";
 
-import { getCurrentAccount, toErrorResponse } from "@/lib/auth/account";
+import { requireRole, toErrorResponse } from "@/lib/auth/account";
 
 export const dynamic = "force-dynamic";
 
@@ -58,7 +63,7 @@ function parsePositiveInt(value: string | null, fallback: number): number {
 
 export async function GET(request: Request) {
   try {
-    const ctx = await getCurrentAccount();
+    const ctx = await requireRole("owner");
 
     const url = new URL(request.url);
     const formId = (url.searchParams.get("formId") ?? "").trim() || null;

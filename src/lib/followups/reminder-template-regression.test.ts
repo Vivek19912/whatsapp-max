@@ -242,8 +242,8 @@ beforeEach(() => {
   h.templateBehavior = "ok";
 });
 
-describe("reminder template-fallback regression (A–J)", () => {
-  it("A. window open → free text sent, template never touched", async () => {
+describe("reminder template-only regression (A–J)", () => {
+  it("A. window open → template sent (template-only policy, no text fallback)", async () => {
     seedConfig();
     h.templates = [templateRow()];
     openWindow();
@@ -251,9 +251,9 @@ describe("reminder template-fallback regression (A–J)", () => {
 
     const out = await drainDueFollowups(fakeDb() as never, NOW);
     expect(out).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(h.textCalls).toHaveLength(1);
-    expect(h.textCalls[0]).toMatchObject({ to: RECIPIENT, text: TEXT });
-    expect(h.templateCalls).toHaveLength(0);
+    expect(h.textCalls).toHaveLength(0);
+    expect(h.templateCalls).toHaveLength(1);
+    expect(h.templateCalls[0]).toMatchObject({ to: RECIPIENT });
     expect(h.followups[0].status).toBe("sent");
     expect(h.followups[0].failure_reason).toBeNull();
   });
@@ -354,7 +354,7 @@ describe("reminder template-fallback regression (A–J)", () => {
     });
   });
 
-  it("I. successful template send stores wamid and an Inbox message", async () => {
+  it("I. successful template send stores wamid and the complete rendered Inbox message", async () => {
     seedConfig();
     h.templates = [templateRow()];
     h.followups = [row({})];
@@ -368,7 +368,7 @@ describe("reminder template-fallback regression (A–J)", () => {
     expect(agent[0]).toMatchObject({
       content_type: "template",
       template_name: "reminder_fallback",
-      content_text: TEXT,
+      content_text: `Reminder: ${TEXT}`,
       message_id: "wamid-tpl-1",
       status: "sent",
     });
@@ -393,7 +393,7 @@ describe("reminder template-fallback regression (A–J)", () => {
       accountId: "acct-1",
       recipientPhone: RECIPIENT,
       auditUserId: "user-1",
-      contentText: TEXT,
+      contentText: `Reminder: ${TEXT}`,
       whatsappMessageId: "wamid-tpl-1",
       templateName: "reminder_fallback",
     });
