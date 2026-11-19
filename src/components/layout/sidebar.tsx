@@ -49,6 +49,7 @@ interface NavItem {
 
 export const navItems: NavItem[] = [
   { href: "/meta-lead-ads/dashboard", label: "Dashboard", icon: Megaphone },
+  { href: "/meta-lead-ads/team-performance", label: "Team Performance", icon: UsersRound },
   { href: "/calls", label: "Call Analytics", icon: Phone },
   { href: "/workspace", label: "Workspace", icon: Table2 },
   { href: "/recordings", label: "Recordings", icon: Mic },
@@ -120,6 +121,8 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     // Chat Assignment is hidden from the sidebar UI. The page,
     // route, APIs, and configuration are untouched.
     if (item.href === "/chat-assignment") return false;
+    // Team Performance is owner-only (route + RPC enforce it too).
+    if (item.href === "/meta-lead-ads/team-performance") return isOwner;
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     return true;
   });
