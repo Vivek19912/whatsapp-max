@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import type { Followup, FollowupStatus } from "@/lib/followups/types";
+import { formatAgentNumberForDisplay } from "@/lib/followups/types";
 import { FollowupDialog } from "./followup-dialog";
 
 const TABS: Array<{ id: FollowupStatus; label: string }> = [
@@ -227,6 +228,25 @@ export function FollowupsPage() {
                   </div>
                   <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
                     {f.message_text}
+                  </p>
+                  {/* Creator + actual recipient (the snapshot the
+                      scheduler sends to — never the customer phone).
+                      Rendered for every tab; the card body is shared. */}
+                  <p className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
+                    <span>
+                      Created by:{" "}
+                      <span className="font-medium text-foreground">
+                        {f.creator?.full_name?.trim() || "Unknown"}
+                      </span>
+                    </span>
+                    <span>
+                      Send to:{" "}
+                      <span className="font-medium tabular-nums text-foreground">
+                        {f.recipient_phone
+                          ? formatAgentNumberForDisplay(f.recipient_phone)
+                          : "—"}
+                      </span>
+                    </span>
                   </p>
                   {f.status === "failed" && f.failure_reason && (
                     <p className="mt-1 text-xs text-red-500">{f.failure_reason}</p>
