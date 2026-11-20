@@ -149,8 +149,12 @@ describe("assignment dialog is a four-step wizard", () => {
     expect(dialog).toContain("toast.error");
   });
 
-  it("distinguishes linked members from external contacts without leaking details", () => {
-    expect(dialog).toContain("External contact (no login)");
+  it("keeps the member editor link-only without leaking details", () => {
+    // Add and Edit share one link-only member form: no external
+    // option, no Display name field. Saved external contacts keep
+    // their row caption ("External contact") and the Add-form
+    // ownership note stays for linked selections.
+    expect(dialog).not.toContain("External contact (no login)");
     expect(dialog).toContain("External contact");
     expect(dialog).toContain("contacts receive notifications only — the lead stays Unassigned");
     // Contact details live in the Step 2 notification cards, not
@@ -609,11 +613,14 @@ describe("assignment dialog four-step sidebar navigation", () => {
     expect(dialog).toContain("if (!completedSteps.includes(target)) return;");
   });
 
-  it("keeps the step 1 member form to link + display name + share", () => {
-    // Step 1 owns membership: team link, display name (linked and
-    // external alike), and share. Email/phone live in Step 2 cards.
-    expect(dialog).toContain("External contact — notification details are collected in Step 2.");
-    expect(dialog).toContain('aria-label="Display name"');
+  it("keeps the step 1 member form to link + share", () => {
+    // Step 1 owns membership: the shared Add/Edit form links a
+    // team member and sets the share. No Display name field and no
+    // external-contact option in the member forms — email/phone
+    // live in Step 2 cards.
+    expect(dialog).not.toContain("External contact (no login)");
+    expect(dialog).not.toContain("External contact — notification details are collected in Step 2.");
+    expect(dialog).not.toContain('aria-label="Display name"');
     expect(dialog).toContain("ShareSelect");
   });
 
@@ -660,12 +667,14 @@ describe("assignment dialog member rows stay compact (details live in the inline
     expect(dialog).toContain("must total exactly 100%");
   });
 
-  it("keeps the member editor to link, display name, and share only", () => {
-    // The Step 1 editor holds membership fields only. Availability
-    // lives on the member row, customer sequences in the Step 3
-    // panel, notifications in Step 2 cards — none of them open from
-    // this editor and no advanced editor entry point remains.
-    expect(dialog).toContain('aria-label="Display name"');
+  it("keeps the member editor to link and share only", () => {
+    // The Step 1 editor holds membership fields only: team link
+    // plus share. Availability lives on the member row, customer
+    // sequences in the Step 3 panel, notifications in Step 2
+    // cards — none of them open from this editor and no advanced
+    // editor entry point remains. No Display name field in either
+    // the Add or the Edit member form.
+    expect(dialog).not.toContain('aria-label="Display name"');
     expect(dialog).toContain("ShareSelect");
     expect(dialog).not.toContain("Show advanced options");
     expect(dialog).not.toContain('aria-label="Availability"');
@@ -885,8 +894,13 @@ describe("simplified assignment UX (four steps + inline member editor)", () => {
     expect(dialog).toContain("WhatsApp alerts");
   });
 
-  it("keeps external notification-only recipients supported", () => {
-    expect(dialog).toContain("External contact (no login)");
+  it("keeps saved external notification-only recipients supported", () => {
+    // The member forms are link-only (no external option, no
+    // Display name field), but saved external assignees keep their
+    // row captions and notification plumbing — the backend support
+    // is untouched.
+    expect(dialog).not.toContain("External contact (no login)");
+    expect(dialog).toContain('"External contact"');
     expect(dialog).toContain(
       "Link a team member or enter an email address or phone number.",
     );
@@ -954,9 +968,10 @@ describe("assignment inline editing contract (one dialog, no panels)", () => {
   it("adds members through an inline form below the member list", () => {
     expect(dialog).toContain("renderMemberEditor(true)");
     expect(dialog).toContain("Add member");
-    // No advanced entry point: link, display name, and share only.
+    // No advanced entry point and no Display name field: the
+    // link-only form offers team link plus share.
     expect(dialog).not.toContain("Show advanced options");
-    expect(dialog).toContain('aria-label="Display name"');
+    expect(dialog).not.toContain('aria-label="Display name"');
   });
 
   it("edits a member inline directly below that member's row", () => {

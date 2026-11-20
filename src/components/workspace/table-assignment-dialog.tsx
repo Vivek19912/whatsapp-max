@@ -1934,10 +1934,12 @@ export function TableAssignmentDialog({
    * validation, and persistence as the main Save — no parallel
    * source of truth.
    *
-   * Step 1 owns membership: the Add form links a team member
-   * (link-only, no external contacts) plus share; the Edit form
-   * keeps the display name field so existing external contacts
-   * stay editable. Phone/email live in Step 2 notification cards,
+   * Both forms are link-only with the same layout: team dropdown
+   * (preselected when editing), share, and Cancel/Save. No Display
+   * name field, no external-contact option — existing external
+   * contacts keep their saved values untouched (the form state
+   * still carries display_name, and saving an unlinked draft
+   * preserves it). Phone/email live in Step 2 notification cards,
    * availability lives on the Step 1 member row, and customer
    * sequences live in the Step 3 compact panel — none of them open
    * from this editor.
@@ -1950,44 +1952,23 @@ export function TableAssignmentDialog({
         </p>
         <section aria-label="Member">
           <div className="grid gap-3 sm:grid-cols-2">
-            {isNew ? (
-              <div className="flex flex-col gap-1.5 sm:col-span-2">
-                <Label>Link team member</Label>
-                <SearchableSelect
-                  value={form.user_id ?? ""}
-                  options={rosterOptions}
-                  onChange={(v) => linkMember(v)}
-                  placeholder="Select a team member"
-                  searchPlaceholder="Search team members…"
-                  emptyText="No team members match."
-                  ariaLabel="Link team member"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Select a team member to add to this table.
-                </p>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-1.5 sm:col-span-2">
-                <Label>Team member</Label>
-                <p className="text-sm font-medium text-foreground">
-                  {form.display_name.trim() || "External contact"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {form.user_id ? "Linked team member" : "External contact (no login)"}
-                </p>
-              </div>
-            )}
-            {!isNew && (
-              <div className="flex flex-col gap-1.5">
-                <Label>Display name</Label>
-                <Input
-                  value={form.display_name}
-                  onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                  placeholder="Priya Sharma"
-                  aria-label="Display name"
-                />
-              </div>
-            )}
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <Label>Link team member</Label>
+              <SearchableSelect
+                value={form.user_id ?? ""}
+                options={rosterOptions}
+                onChange={(v) => linkMember(v)}
+                placeholder="Select a team member"
+                searchPlaceholder="Search team members…"
+                emptyText="No team members match."
+                ariaLabel="Link team member"
+              />
+              <p className="text-xs text-muted-foreground">
+                {isNew
+                  ? "Select a team member to add to this table."
+                  : "Select a team member for this table."}
+              </p>
+            </div>
             {mode === "percentage" ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="assign-share">Share percentage</Label>
@@ -2002,20 +1983,17 @@ export function TableAssignmentDialog({
             ) : null}
           </div>
         </section>
-        {form.user_id ? (
+        {isNew && form.user_id ? (
           <p className="-mt-2 text-xs text-muted-foreground">
             Linked members take ownership in the Assigned To column. External
             contacts receive notifications only — the lead stays Unassigned.
           </p>
-        ) : isNew ? (
+        ) : null}
+        {isNew && !form.user_id ? (
           <p className="-mt-2 text-xs text-muted-foreground">
             Select a team member above to add them to this table.
           </p>
-        ) : (
-          <p className="-mt-2 text-xs text-muted-foreground">
-            External contact — notification details are collected in Step 2.
-          </p>
-        )}
+        ) : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={cancelEdit}>
             Cancel
