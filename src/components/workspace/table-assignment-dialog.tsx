@@ -1934,9 +1934,10 @@ export function TableAssignmentDialog({
    * validation, and persistence as the main Save — no parallel
    * source of truth.
    *
-   * Step 1 owns membership: team link, display name (linked members
-   * and external contacts alike — Step 2 no longer edits names),
-   * and share. Phone/email live in Step 2 notification cards,
+   * Step 1 owns membership: the Add form links a team member
+   * (link-only, no external contacts) plus share; the Edit form
+   * keeps the display name field so existing external contacts
+   * stay editable. Phone/email live in Step 2 notification cards,
    * availability lives on the Step 1 member row, and customer
    * sequences live in the Step 3 compact panel — none of them open
    * from this editor.
@@ -1951,21 +1952,18 @@ export function TableAssignmentDialog({
           <div className="grid gap-3 sm:grid-cols-2">
             {isNew ? (
               <div className="flex flex-col gap-1.5 sm:col-span-2">
-                <Label>Link team member (optional)</Label>
+                <Label>Link team member</Label>
                 <SearchableSelect
                   value={form.user_id ?? ""}
-                  options={[
-                    { value: "", label: "External contact (no login)" },
-                    ...rosterOptions,
-                  ]}
+                  options={rosterOptions}
                   onChange={(v) => linkMember(v)}
-                  placeholder="External contact (no login)"
+                  placeholder="Select a team member"
                   searchPlaceholder="Search team members…"
                   emptyText="No team members match."
                   ariaLabel="Link team member"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Leave unlinked to add an external contact — name it below.
+                  Select a team member to add to this table.
                 </p>
               </div>
             ) : (
@@ -1979,15 +1977,17 @@ export function TableAssignmentDialog({
                 </p>
               </div>
             )}
-            <div className="flex flex-col gap-1.5">
-              <Label>Display name</Label>
-              <Input
-                value={form.display_name}
-                onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                placeholder="Priya Sharma"
-                aria-label="Display name"
-              />
-            </div>
+            {!isNew && (
+              <div className="flex flex-col gap-1.5">
+                <Label>Display name</Label>
+                <Input
+                  value={form.display_name}
+                  onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
+                  placeholder="Priya Sharma"
+                  aria-label="Display name"
+                />
+              </div>
+            )}
             {mode === "percentage" ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="assign-share">Share percentage</Label>
@@ -2006,6 +2006,10 @@ export function TableAssignmentDialog({
           <p className="-mt-2 text-xs text-muted-foreground">
             Linked members take ownership in the Assigned To column. External
             contacts receive notifications only — the lead stays Unassigned.
+          </p>
+        ) : isNew ? (
+          <p className="-mt-2 text-xs text-muted-foreground">
+            Select a team member above to add them to this table.
           </p>
         ) : (
           <p className="-mt-2 text-xs text-muted-foreground">
