@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   profileError: false,
   rows: [] as Array<Record<string, unknown>>,
   tablesRead: [] as string[],
+  metaLeadPhone: false,
 }));
 
 function statusError(status: number, message: string) {
@@ -81,7 +82,7 @@ function fakeSupabase() {
     },
     then: (resolve: (v: unknown) => void) => resolve({ data: matched(), error: null }),
   };
-  return { from: (table: string) => { state.table = table; h.tablesRead.push(table); return api; } };
+  return { from: (table: string) => { state.table = table; h.tablesRead.push(table); return api; }, rpc: async () => ({ data: h.metaLeadPhone, error: null }) };
 }
 
 const { GET, POST } = await import("./route");
@@ -104,6 +105,7 @@ beforeEach(() => {
   h.profileError = false;
   h.rows = [];
   h.tablesRead = [];
+  h.metaLeadPhone = false;
 });
 
 describe("GET /api/followups", () => {
@@ -236,5 +238,23 @@ describe("POST /api/followups", () => {
     expect(res.status).toBe(201);
     expect(h.rows[0].contact_id).toBeNull();
     expect(h.tablesRead).not.toContain("contacts");
+  });
+
+  it("rejects a creator number that belongs to a Meta lead (no bypass)", async () => {
+    h.metaLeadPhone = true;
+    const res = await POST(post(valid));
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; code: string };
+    expect(json.code).toBe("meta_lead_phone");
+    expect(json.error).toContain("Meta Lead Ads Workspace");
+    // Nothing created.
+    expect(h.rows).toHaveLength(0);
+  });
+
+  it("allows creation when the number is not a Meta lead number", async () => {
+    h.metaLeadPhone = false;
+    const res = await POST(post(valid));
+    expect(res.status).toBe(201);
+    expect(h.rows).toHaveLength(1);
   });
 });

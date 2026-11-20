@@ -19,7 +19,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { FOLLOWUP_MESSAGE_MAX, normalizeAgentWhatsappNumber } from "@/lib/followups/types";
+import {
+  FOLLOWUP_MESSAGE_MAX,
+  normalizeAgentWhatsappNumber,
+} from "@/lib/followups/types";
+import {
+  META_LEAD_PHONE_CODE,
+  META_LEAD_PHONE_ERROR,
+} from "@/lib/followups/meta-lead-phone-guard";
 import {
   buildWorkspaceFollowupMessage,
   combineFollowupDateTime,
@@ -120,6 +127,10 @@ export function ScheduleFollowupDialog({
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Field-level recipient rejection (Meta-lead number): shown beside
+  // the Send reminder to input with the input highlighted, instead
+  // of the generic alert. The entered number is preserved.
+  const [recipientError, setRecipientError] = useState<string | null>(null);
 
   // (Re)initialize when the modal opens for a (possibly different)
   // lead: prefill from the current cell value, then layer the
@@ -144,6 +155,7 @@ export function ScheduleFollowupDialog({
     setSaving(false);
     setClearing(false);
     setError(null);
+    setRecipientError(null);
     let cancelled = false;
     const supabase = createClient();
     const fetchProfileNumber = (async (): Promise<string | null> => {
@@ -247,7 +259,40 @@ export function ScheduleFollowupDialog({
     }
     setSaving(true);
     setError(null);
+    setRecipientError(null);
     try {
+      // Read-only pre-validation BEFORE any write: a recipient that
+      // belongs to a Meta lead is rejected here, so the follow-up
+      // cell is never partially updated.
+      const preRes = await fetch(`/api/flows/${flowId}/followup-reminder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          flow_run_id: runId,
+          scheduled_for: iso,
+          message: trimmedMessage === "" ? null : message,
+          recipient_phone: normalizedRecipient,
+          lead_name: leadName,
+          lead_phone: leadPhone,
+          validate_only: true,
+        }),
+      });
+      const preJson = (await preRes.json().catch(() => null)) as {
+        error?: string;
+        code?: string;
+      } | null;
+      if (!preRes.ok) {
+        if (preJson?.code === META_LEAD_PHONE_CODE) {
+          setRecipientError(preJson?.error ?? META_LEAD_PHONE_ERROR);
+          return;
+        }
+        throw new Error(
+          preJson?.error ??
+            (preRes.status === 403
+              ? "You can only schedule follow-ups for leads assigned to you."
+              : "Could not save the reminder."),
+        );
+      }
       const cellRes = await fetch(`/api/flows/${flowId}/workspace-values`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -281,8 +326,28 @@ export function ScheduleFollowupDialog({
       });
       const json = (await res.json().catch(() => null)) as {
         error?: string;
+        code?: string;
       } | null;
       if (!res.ok) {
+        if (json?.code === META_LEAD_PHONE_CODE) {
+          // The reminder was rejected: roll the cell back to its
+          // pre-save value so no partial follow-up date remains.
+          try {
+            await fetch(`/api/flows/${flowId}/workspace-values`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                field_id: fieldId,
+                flow_run_id: runId,
+                value: initialValue,
+              }),
+            });
+          } catch {
+            // Best-effort rollback; the rejection below is authoritative.
+          }
+          setRecipientError(json?.error ?? META_LEAD_PHONE_ERROR);
+          return;
+        }
         throw new Error(
           json?.error ??
             (res.status === 403
@@ -390,14 +455,32 @@ export function ScheduleFollowupDialog({
                 setRecipient(e.target.value);
                 recipientDirtyRef.current = true;
                 setRecipientFromSettings(false);
+                setRecipientError(null);
               }}
               maxLength={32}
               placeholder="WhatsApp number"
               autoComplete="tel"
+              aria-invalid={recipientError !== null}
+              aria-describedby={recipientError ? "fu-recipient-error" : undefined}
+              className={
+                recipientError
+                  ? "border-red-500 focus-visible:ring-red-500/30"
+                  : undefined
+              }
             />
-            <p className="text-xs text-muted-foreground">
-              {recipientFromSettings ? "Defaulted from Settings. You can change it for this reminder." : "Enter the WhatsApp number that should receive this reminder."}
-            </p>
+            {recipientError ? (
+              <p
+                id="fu-recipient-error"
+                role="alert"
+                className="text-xs text-red-600 dark:text-red-400"
+              >
+                {recipientError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {recipientFromSettings ? "Defaulted from Settings. You can change it for this reminder." : "Enter the WhatsApp number that should receive this reminder."}
+              </p>
+            )}
           </div>
 
           {/* Matched date/time pair: custom popover pickers with

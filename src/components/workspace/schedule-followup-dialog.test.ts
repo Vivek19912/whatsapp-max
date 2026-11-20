@@ -111,6 +111,33 @@ describe("create vs edit mode", () => {
   });
 });
 
+describe("Meta-lead recipient guard (field-level, no partial saves)", () => {
+  it("pre-validates the recipient before the follow-up cell write", () => {
+    // The dry-run pre-check precedes the workspace-values PUT, so a
+    // rejected Meta-lead number never leaves a partially updated
+    // follow-up date behind.
+    expect(SRC).toContain("validate_only: true");
+    expect(SRC.indexOf("validate_only: true")).toBeLessThan(
+      SRC.indexOf("/api/flows/${flowId}/workspace-values"),
+    );
+    expect(SRC).toContain("setRecipientError");
+    expect(SRC).toContain("META_LEAD_PHONE_CODE");
+  });
+
+  it("highlights the Send reminder to input and preserves the entered number", () => {
+    expect(SRC).toContain("aria-invalid={recipientError !== null}");
+    expect(SRC).toContain('id="fu-recipient-error"');
+    // Typing clears only the error; rejection paths never reset
+    // the recipient input itself.
+    expect(SRC).toContain("setRecipientError(null)");
+    expect(SRC).toContain("setRecipient(e.target.value)");
+  });
+
+  it("rolls the follow-up cell back when the real save rejects the number", () => {
+    expect(SRC).toContain("value: initialValue");
+  });
+});
+
 describe("per-reminder recipient field", () => {
   it("renders an editable recipient input below the lead card", () => {
     expect(SRC).toContain('Label htmlFor="fu-recipient">Send reminder to');

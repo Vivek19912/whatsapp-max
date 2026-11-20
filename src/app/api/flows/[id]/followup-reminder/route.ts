@@ -5,6 +5,11 @@ import { requireRole, toErrorResponse } from "@/lib/auth/account";
 import { hasMinRole, type AccountRole } from "@/lib/auth/roles";
 import { canManageReminder } from "@/lib/followups/ownership";
 import {
+  META_LEAD_PHONE_CODE,
+  META_LEAD_PHONE_ERROR,
+  isMetaLeadPhoneNumber,
+} from "@/lib/followups/meta-lead-phone-guard";
+import {
   normalizeAgentWhatsappNumber,
   validateFollowupInput,
 } from "@/lib/followups/types";
@@ -348,7 +353,10 @@ export async function POST(
 
     // The reminder must match the persisted cell value — never a
     // stale dialog payload. The cell save already normalized the
-    // instant to ISO, so this is an exact comparison.
+    // instant to ISO, so this is an exact comparison. Skipped for
+    // read-only pre-validation (validate_only): the cell is written
+    // only after the dialog's pre-check passes.
+    if (body.validate_only !== true) {
     const { data: storedRow, error: storedErr } = await supabase
       .from("workspace_values")
       .select("value_text")
@@ -364,6 +372,7 @@ export async function POST(
         "The follow-up changed. Refresh the table and select the date and time again.",
         409,
       );
+    }
     }
 
     const rawMessage = body.message;
@@ -414,6 +423,37 @@ export async function POST(
       role,
       userId,
     });
+
+    // Meta-lead guard: a destination being SET must not belong to a
+    // Meta Lead Ads lead of this account (all tables). Updates that
+    // keep the stored recipient are untouched, so editing a message
+    // or rescheduling never trips on an unchanged number; creates
+    // fall back to the profile snapshot (which then IS the new
+    // recipient). Runs before any write, so a rejected number
+    // creates nothing.
+    const recipientChanging =
+      explicitRecipient !== null &&
+      (!existing || explicitRecipient !== existing.recipient_phone);
+    const outgoingRecipient =
+      explicitRecipient ?? (existing ? null : profile_phone);
+    if (
+      (recipientChanging || !existing) &&
+      outgoingRecipient &&
+      (await isMetaLeadPhoneNumber(supabase, outgoingRecipient))
+    ) {
+      return NextResponse.json(
+        { error: META_LEAD_PHONE_ERROR, code: META_LEAD_PHONE_CODE },
+        { status: 400 },
+      );
+    }
+
+    // Read-only pre-validation for the Schedule dialog: every check
+    // above runs, then this returns without creating or updating
+    // anything — so a rejected number never leaves a partially
+    // updated follow-up cell behind.
+    if (body.validate_only === true) {
+      return NextResponse.json({ valid: true });
+    }
     if (existing) {
       if (existing.status === "processing") {
         return bad(

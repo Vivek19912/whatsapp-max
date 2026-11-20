@@ -8,6 +8,11 @@ import {
 } from "@/lib/auth/account";
 import { hasMinRole } from "@/lib/auth/roles";
 import {
+  META_LEAD_PHONE_CODE,
+  META_LEAD_PHONE_ERROR,
+  isMetaLeadPhoneNumber,
+} from "@/lib/followups/meta-lead-phone-guard";
+import {
   isFollowupStatus,
   normalizeAgentWhatsappNumber,
   validateFollowupInput,
@@ -563,6 +568,15 @@ export async function POST(request: Request) {
           error:
             "Add your WhatsApp number in Settings → Reminder WhatsApp Number before creating a reminder.",
         },
+        { status: 400 },
+      );
+    }
+    // Meta-lead guard: the snapshot destination must not belong to
+    // a Meta Lead Ads lead of this account (all tables). Runs
+    // before the insert, so a rejected number creates nothing.
+    if (await isMetaLeadPhoneNumber(supabase, recipient_phone)) {
+      return NextResponse.json(
+        { error: META_LEAD_PHONE_ERROR, code: META_LEAD_PHONE_CODE },
         { status: 400 },
       );
     }
