@@ -39,6 +39,12 @@ export interface TeamStageSplit {
   leads: number
 }
 
+export interface TeamFormSplit {
+  formId: string | null
+  formName: string
+  leads: number
+}
+
 export interface TeamMemberPerf {
   userId: string
   name: string
@@ -47,6 +53,8 @@ export interface TeamMemberPerf {
   total: number
   stages: TeamStageSplit[]
   types: { type: string | null; leads: number }[]
+  /** Per-form lead counts for this member (stacked-chart segments). Sums to total. */
+  forms: TeamFormSplit[]
 }
 
 export interface TeamTablePerf {
@@ -73,7 +81,7 @@ export interface TeamLeadRow {
 
 export interface TeamPerformanceData {
   members: TeamMemberPerf[]
-  unassigned: { total: number; stages: TeamStageSplit[] }
+  unassigned: { total: number; stages: TeamStageSplit[]; forms: TeamFormSplit[] }
   summary: { total: number; assigned: number; unassigned: number }
   forms: { formId: string; formName: string }[]
   tables: TeamTablePerf[]
@@ -119,6 +127,23 @@ function normalizeStages(input: unknown): TeamStageSplit[] {
   return out
 }
 
+function normalizeFormSplits(input: unknown): TeamFormSplit[] {
+  if (!Array.isArray(input)) return []
+  const out: TeamFormSplit[] = []
+  for (const r of input) {
+    if (!r || typeof r !== 'object') continue
+    const rec = r as Record<string, unknown>
+    if (typeof rec.formName !== 'string' || rec.formName === '') continue
+    if (typeof rec.leads !== 'number' || !Number.isFinite(rec.leads) || rec.leads < 0) continue
+    out.push({
+      formId: typeof rec.formId === 'string' ? rec.formId : null,
+      formName: rec.formName,
+      leads: Math.floor(rec.leads),
+    })
+  }
+  return out
+}
+
 function normalizeMembers(input: unknown): TeamMemberPerf[] {
   if (!Array.isArray(input)) return []
   const out: TeamMemberPerf[] = []
@@ -133,6 +158,7 @@ function normalizeMembers(input: unknown): TeamMemberPerf[] {
       avatar: typeof r.avatar === 'string' ? r.avatar : null,
       total: toCount(r.total),
       stages: normalizeStages(r.stages),
+      forms: normalizeFormSplits(r.forms),
       types: Array.isArray(r.types)
         ? (r.types as unknown[]).flatMap((t) => {
             if (!t || typeof t !== 'object') return []
@@ -197,7 +223,11 @@ export function normalizeTeamPerformance(json: unknown): TeamPerformanceData {
   const unRaw = (r.unassigned ?? {}) as Record<string, unknown>
   return {
     members: normalizeMembers(r.members),
-    unassigned: { total: toCount(unRaw.total), stages: normalizeStages(unRaw.stages) },
+    unassigned: {
+      total: toCount(unRaw.total),
+      stages: normalizeStages(unRaw.stages),
+      forms: normalizeFormSplits(unRaw.forms),
+    },
     summary: {
       total: toCount(summaryRaw.total),
       assigned: toCount(summaryRaw.assigned),

@@ -81,4 +81,52 @@ describe("stage pivots reconcile", () => {
     const tTotal = data.tables.reduce((a, t) => a + t.total, 0);
     expect(tTotal).toBe(data.summary.total);
   });
+
+  it("normalizes per-member and unassigned form splits and reconciles with totals", () => {
+    const raw = normalizeTeamPerformance({
+      members: [
+        {
+          userId: "u1",
+          name: "Pooja",
+          email: null,
+          avatar: null,
+          total: 8,
+          stages: [],
+          types: [],
+          forms: [
+            { formId: "f-sg", formName: "Singapore Lead Form", leads: 4 },
+            { formId: "f-kl", formName: "Kerala Instant Form", leads: 3 },
+            { formId: "f-goa", formName: "Goa Instant Form", leads: 1 },
+            { formId: null, formName: "", leads: 5 },
+          ],
+        },
+        { userId: "u2", name: "No Leads", email: null, avatar: null, total: 0, stages: [], types: [] },
+      ],
+      unassigned: {
+        total: 20,
+        stages: [],
+        forms: [
+          { formId: "f-a", formName: "Form A", leads: 12 },
+          { formId: "f-b", formName: "Form B", leads: 8 },
+        ],
+      },
+      summary: { total: 28, assigned: 8, unassigned: 20 },
+      forms: [],
+      tables: [],
+      leads: { total: 0, rows: [] },
+    });
+    // Malformed entries (empty name) are dropped.
+    expect(raw.members[0].forms).toEqual([
+      { formId: "f-sg", formName: "Singapore Lead Form", leads: 4 },
+      { formId: "f-kl", formName: "Kerala Instant Form", leads: 3 },
+      { formId: "f-goa", formName: "Goa Instant Form", leads: 1 },
+    ]);
+    // Missing forms default to [] (old RPC payloads stay readable).
+    expect(raw.members[1].forms).toEqual([]);
+    // Per-member form sums equal the member total; unassigned likewise.
+    const memberSum = raw.members[0].forms.reduce((a, f) => a + f.leads, 0);
+    expect(memberSum).toBe(raw.members[0].total);
+    const unSum = raw.unassigned.forms.reduce((a, f) => a + f.leads, 0);
+    expect(unSum).toBe(raw.unassigned.total);
+  });
 });

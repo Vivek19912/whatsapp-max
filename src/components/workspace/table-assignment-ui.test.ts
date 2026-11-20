@@ -613,11 +613,13 @@ describe("assignment dialog four-step sidebar navigation", () => {
     expect(dialog).toContain("if (!completedSteps.includes(target)) return;");
   });
 
-  it("keeps the step 1 member form to link + share", () => {
-    // Step 1 owns membership: the shared Add/Edit form links a
-    // team member and sets the share. No Display name field and no
-    // external-contact option in the member forms — email/phone
-    // live in Step 2 cards.
+  it("keeps the step 1 member form to link + share (Add) and share only (Edit)", () => {
+    // Add links a team member and sets the share; Edit shows share
+    // only — member identity is fixed to the row being edited. No
+    // Display name field and no external-contact option in either
+    // member form. Email/phone live in Step 2 cards.
+    expect(dialog).toContain("Select a team member to add to this table.");
+    expect(dialog).not.toContain("Select a team member for this table.");
     expect(dialog).not.toContain("External contact (no login)");
     expect(dialog).not.toContain("External contact — notification details are collected in Step 2.");
     expect(dialog).not.toContain('aria-label="Display name"');
@@ -667,7 +669,7 @@ describe("assignment dialog member rows stay compact (details live in the inline
     expect(dialog).toContain("must total exactly 100%");
   });
 
-  it("keeps the member editor to link and share only", () => {
+  it("keeps the member editor to link + share (Add) and share only (Edit)", () => {
     // The Step 1 editor holds membership fields only: team link
     // plus share. Availability lives on the member row, customer
     // sequences in the Step 3 panel, notifications in Step 2

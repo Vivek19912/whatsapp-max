@@ -1934,15 +1934,17 @@ export function TableAssignmentDialog({
    * validation, and persistence as the main Save — no parallel
    * source of truth.
    *
-   * Both forms are link-only with the same layout: team dropdown
-   * (preselected when editing), share, and Cancel/Save. No Display
-   * name field, no external-contact option — existing external
-   * contacts keep their saved values untouched (the form state
-   * still carries display_name, and saving an unlinked draft
-   * preserves it). Phone/email live in Step 2 notification cards,
-   * availability lives on the Step 1 member row, and customer
-   * sequences live in the Step 3 compact panel — none of them open
-   * from this editor.
+   * Both forms share one inline editor shell. The Add form links a
+   * team member (link-only dropdown, no external contacts) plus
+   * share; the Edit form shows share only — member identity is
+   * fixed (taken from the row being edited) and can never change
+   * or duplicate here. No Display name field in either form:
+   * existing external contacts keep their saved values untouched
+   * (the form state still carries display_name, and saving an
+   * unlinked draft preserves it). Phone/email live in Step 2
+   * notification cards, availability lives on the Step 1 member
+   * row, and customer sequences live in the Step 3 compact
+   * panel — none of them open from this editor.
    */
   const renderMemberEditor = (isNew: boolean) => (
     <div className="rounded-lg border border-dashed border-border bg-card/50 p-3">
@@ -1952,23 +1954,23 @@ export function TableAssignmentDialog({
         </p>
         <section aria-label="Member">
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <Label>Link team member</Label>
-              <SearchableSelect
-                value={form.user_id ?? ""}
-                options={rosterOptions}
-                onChange={(v) => linkMember(v)}
-                placeholder="Select a team member"
-                searchPlaceholder="Search team members…"
-                emptyText="No team members match."
-                ariaLabel="Link team member"
-              />
-              <p className="text-xs text-muted-foreground">
-                {isNew
-                  ? "Select a team member to add to this table."
-                  : "Select a team member for this table."}
-              </p>
-            </div>
+            {isNew && (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label>Link team member</Label>
+                <SearchableSelect
+                  value={form.user_id ?? ""}
+                  options={rosterOptions}
+                  onChange={(v) => linkMember(v)}
+                  placeholder="Select a team member"
+                  searchPlaceholder="Search team members…"
+                  emptyText="No team members match."
+                  ariaLabel="Link team member"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Select a team member to add to this table.
+                </p>
+              </div>
+            )}
             {mode === "percentage" ? (
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="assign-share">Share percentage</Label>
