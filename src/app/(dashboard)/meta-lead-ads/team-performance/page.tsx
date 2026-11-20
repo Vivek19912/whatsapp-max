@@ -300,6 +300,10 @@ function MemberBarCard({ data, loading }: { data: TeamPerformanceData | null; lo
     return members
   }, [data])
   const hasData = rows.some((r) => r.total > 0)
+  const needsRotation = useMemo(
+    () => rows.length > 4 || rows.some((r) => r.name.length > 12),
+    [rows],
+  )
 
   if (loading) {
     return (
@@ -332,18 +336,21 @@ function MemberBarCard({ data, loading }: { data: TeamPerformanceData | null; lo
             hint="Leads created in the selected range will appear here grouped by their current assignee."
           />
         ) : (
-          <div style={{ width: '100%', height: Math.max(180, rows.length * 44) }}>
+          <div style={{ width: '100%', height: 300 }}>
             <ResponsiveContainer>
-              <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 40, bottom: 0, left: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
-                <YAxis
-                  type="category"
+              <BarChart data={rows} margin={{ top: 20, right: 8, bottom: needsRotation ? 56 : 8, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis
                   dataKey="name"
                   tick={{ fontSize: 12 }}
-                  width={110}
-                  tickFormatter={(v: string) => (v.length > 14 ? `${v.slice(0, 13)}…` : v)}
+                  interval={0}
+                  angle={needsRotation ? -25 : 0}
+                  dy={needsRotation ? 12 : 0}
+                  height={needsRotation ? 52 : 30}
+                  textAnchor={needsRotation ? 'end' : 'middle'}
+                  tickFormatter={(v: string) => (needsRotation ? v : v.length > 14 ? `${v.slice(0, 13)}…` : v)}
                 />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
                 <Tooltip
                   content={({ active, payload }) => {
                     if (!active || !payload || payload.length === 0) return null
@@ -357,7 +364,7 @@ function MemberBarCard({ data, loading }: { data: TeamPerformanceData | null; lo
                     )
                   }}
                 />
-                <Bar dataKey="total" radius={[0, 4, 4, 0]} label={{ position: 'right', fontSize: 12 }}>
+                <Bar dataKey="total" radius={[4, 4, 0, 0]} label={{ position: 'top', fontSize: 12 }}>
                   {rows.map((r) => (
                     <Cell key={r.name} fill={r.unassigned ? UNASSIGNED_BAR_COLOR : MEMBER_BAR_COLOR} />
                   ))}
