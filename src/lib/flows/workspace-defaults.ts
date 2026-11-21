@@ -121,6 +121,18 @@ export const STAGE_OPTIONS: readonly string[] = [
   "Not connected",
 ];
 
+/** Exact dropdown options for "Lead Quality" (CRM feedback), in order.
+ *  Only these four are user-selectable; the automatic initial state
+ *  "Lead" is the provisioned display default (read-only fallback for
+ *  empty cells) and is intentionally NOT an option, so it can never
+ *  be saved explicitly or generate a duplicate initial event. */
+export const LEAD_QUALITY_OPTIONS: readonly string[] = [
+  "Interested Lead",
+  "Qualified Lead",
+  "Booking Confirmed",
+  "Disqualified Lead",
+];
+
 /** Exact dropdown options for "Lead Received", in order. */
 export const LEAD_RECEIVED_OPTIONS: readonly string[] = [
   "Website",
@@ -197,6 +209,15 @@ export const WORKSPACE_DEFAULT_FIELDS: readonly WorkspaceDefaultSpec[] = [
     field_type: "single_select",
     options: [...LEAD_RECEIVED_OPTIONS],
   },
+  {
+    name: "Lead Quality",
+    field_type: "single_select",
+    options: [...LEAD_QUALITY_OPTIONS],
+    // Automatic initial state for new Meta leads (display-only
+    // fallback for empty cells — never written back). The four
+    // options above are the only explicitly savable values.
+    default_value: "Lead",
+  },
 ];
 
 /**
@@ -234,6 +255,24 @@ export function isLeadReceivedField(field: { name: string }): boolean {
   return (
     field.name.trim().toLowerCase() ===
     LEAD_RECEIVED_FIELD_NAME.trim().toLowerCase()
+  );
+}
+
+/**
+ * Stored name of the "Lead Quality" CRM-feedback column.
+ * Case-insensitive matching follows the isAssigneeField convention.
+ * NOTE: legacy user-kept "Lead Quality" columns (Hot/Warm/Cold/Fake
+ * options, predating this default) also match by name — callers
+ * must map the STORED VALUE to an event (leadQualityToEvent) and
+ * skip unmapped values, never the column name alone.
+ */
+export const LEAD_QUALITY_FIELD_NAME = "Lead Quality";
+
+/** True for the "Lead Quality" Workspace column (case-insensitive). */
+export function isLeadQualityField(field: { name: string }): boolean {
+  return (
+    field.name.trim().toLowerCase() ===
+    LEAD_QUALITY_FIELD_NAME.trim().toLowerCase()
   );
 }
 
@@ -428,6 +467,10 @@ export async function ensureWorkspaceDefaultFields(
   // Rename-in-place first: legacy default rows adopt the successor
   // label + option set (same id, position, values). Skipped when
   // the successor already exists — never duplicated, never merged.
+  // After a successful rename the old name is freed, so a current
+  // spec reusing that name (e.g. CRM "Lead Quality" vs. the legacy
+  // Hot/Warm/Cold/Fake column) is provisioned fresh below instead
+  // of being shadowed by the renamed-away row.
   const renamed: string[] = [];
   for (const { from, legacyOptions, to } of RENAMED_DEFAULT_SPECS) {
     const fromLower = from.trim().toLowerCase();
@@ -445,6 +488,8 @@ export async function ensureWorkspaceDefaultFields(
       throw renameErr;
     }
     if (!renameErr) {
+      seen.delete(fromLower);
+      byLower.delete(fromLower);
       seen.add(toLower);
       byLower.set(toLower, fromRow);
       renamed.push(to.name);

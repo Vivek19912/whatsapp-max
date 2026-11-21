@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
 import { toast } from 'sonner';
-import { Inbox, Table2, GripVertical } from 'lucide-react';
+import { Inbox, Info, Table2, GripVertical } from 'lucide-react';
 import {
   DndContext,
   DragOverlay,
@@ -144,10 +144,12 @@ import {
   type ColumnOrderEntry,
 } from '@/lib/flows/workspace-column-order';
 import {
+  isLeadQualityField,
   isLeadReceivedField,
   orderBusinessColumns,
   receivedDefaultLabel,
 } from '@/lib/flows/workspace-defaults';
+import { LEAD_QUALITY_TOOLTIP } from '@/lib/meta-crm/lead-quality';
 import { adSourcePlatform } from '@/lib/flows/workspace-ad-source';
 import {
   DEFAULT_WORKSPACE_PAGE_SIZE,
@@ -2007,6 +2009,16 @@ export default function WorkspacePage() {
           showInsertionBar={insertionFor(entry.id)}
         >
           {formatColumnLabel(f.name)}
+          {isLeadQualityField(f) && (
+            <span
+              className="ml-1 inline-flex align-middle text-muted-foreground"
+              title={LEAD_QUALITY_TOOLTIP}
+              aria-label={LEAD_QUALITY_TOOLTIP}
+              role="img"
+            >
+              <Info className="size-3.5" aria-hidden />
+            </span>
+          )}
           {canSendMessages && (
             <ColumnResizeHandle
               columnKey={customFieldVisId(f.id)}

@@ -17,8 +17,10 @@ import {
   LEAD_TYPE_OPTIONS,
   STAGE_OPTIONS,
   LEAD_RECEIVED_OPTIONS,
+  LEAD_QUALITY_OPTIONS,
   ensureWorkspaceDefaultFields,
   defaultBusinessValue,
+  isLeadQualityField,
   isLeadReceivedField,
   isLeadTypeField,
   isStageField,
@@ -129,7 +131,7 @@ function readMigration096(): string {
 }
 
 describe("default business column spec", () => {
-  it("defines exactly the 13 required columns in order", () => {
+  it("defines exactly the 14 required columns in order", () => {
     expect(WORKSPACE_DEFAULT_FIELDS.map((f) => f.name)).toEqual([
       "Assigned To",
       "Call Status",
@@ -144,6 +146,7 @@ describe("default business column spec", () => {
       "Reason for Lost Lead",
       "Final Remark",
       "Lead Received",
+      "Lead Quality",
     ]);
   });
 
@@ -166,6 +169,24 @@ describe("default business column spec", () => {
     );
     expect(byName.get("Final Remark")?.field_type).toBe("text");
     expect(byName.get("Lead Received")?.field_type).toBe("single_select");
+    expect(byName.get("Lead Quality")?.field_type).toBe("single_select");
+  });
+
+  it("defines Lead Quality as the four CRM outcomes with a Lead display default", () => {
+    const byName = new Map(WORKSPACE_DEFAULT_FIELDS.map((f) => [f.name, f]));
+    const spec = byName.get("Lead Quality");
+    expect(spec?.options).toEqual([
+      "Interested Lead",
+      "Qualified Lead",
+      "Booking Confirmed",
+      "Disqualified Lead",
+    ]);
+    // Automatic initial state: display-only, never an option.
+    expect(spec?.default_value).toBe("Lead");
+    expect(spec?.options).not.toContain("Lead");
+    expect(isLeadQualityField({ name: "Lead Quality" })).toBe(true);
+    expect(isLeadQualityField({ name: "lead quality" })).toBe(true);
+    expect(isLeadQualityField({ name: "Stage" })).toBe(false);
   });
 
   it("carries the exact business options for select columns", () => {
@@ -382,11 +403,11 @@ describe("default business column spec", () => {
     const store = newStore();
     await ensureWorkspaceDefaultFields(fakeClient(store), "acct-1", "flow-1");
     const rows = store.inserts[0];
-    // Still exactly 13 names — no duplicates added.
+    // Still exactly 14 names — no duplicates added.
     expect(rows.map((r) => r.name)).toEqual(
       WORKSPACE_DEFAULT_FIELDS.map((f) => f.name),
     );
-    expect(new Set(rows.map((r) => r.name)).size).toBe(13);
+    expect(new Set(rows.map((r) => r.name)).size).toBe(14);
     const byName = new Map(rows.map((r) => [r.name, r]));
     expect(byName.get("No. of Calls Tried")).toMatchObject({
       field_type: "single_select",
@@ -449,8 +470,10 @@ describe("default business column spec", () => {
     expect(isWorkspaceDefaultName("Lead Type")).toBe(true);
     expect(isWorkspaceDefaultName("Stage")).toBe(true);
     expect(isWorkspaceDefaultName("Lead Received")).toBe(true);
-    // Renamed-away legacy names are no longer defaults.
-    expect(isWorkspaceDefaultName("Lead Quality")).toBe(false);
+    // "Lead Quality" is a current CRM-feedback default again (the
+    // legacy Hot/Warm/Cold/Fake column with that name was renamed
+    // to Lead Type long ago); only Quotation / Package stays retired.
+    expect(isWorkspaceDefaultName("Lead Quality")).toBe(true);
     expect(isWorkspaceDefaultName("Quotation / Package")).toBe(false);
     expect(isWorkspaceDefaultName("My Custom Column")).toBe(false);
     expect(isWorkspaceDefaultName(null)).toBe(false);
@@ -468,14 +491,14 @@ describe("default business column spec", () => {
   });
 
 describe("ensureWorkspaceDefaultFields", () => {
-  it("1. provisions all 13 defaults for a new flow (positions 0–12)", async () => {
+  it("1. provisions all 14 defaults for a new flow (positions 0–13)", async () => {
     const store = newStore();
     const res = await ensureWorkspaceDefaultFields(
       fakeClient(store),
       "acct-1",
       "flow-1",
     );
-    expect(res.created).toHaveLength(13);
+    expect(res.created).toHaveLength(14);
     expect(res.renamed).toEqual([]);
     expect(store.inserts).toHaveLength(1);
     const rows = store.inserts[0];
@@ -483,7 +506,7 @@ describe("ensureWorkspaceDefaultFields", () => {
       WORKSPACE_DEFAULT_FIELDS.map((f) => f.name),
     );
     expect(rows.map((r) => r.position)).toEqual([
-      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
     ]);
     for (const row of rows) {
       expect(row.account_id).toBe("acct-1");
@@ -495,12 +518,14 @@ describe("ensureWorkspaceDefaultFields", () => {
           ? "Fresh"
           : row.name === "Stage"
             ? "New Lead"
-            : null;
+            : row.name === "Lead Quality"
+              ? "Lead"
+              : null;
       expect(row.default_value).toBe(expected);
       expect(row.currency_code).toBeNull();
     }
     // No duplicate option payloads: single bulk insert.
-    expect(rows).toHaveLength(13);
+    expect(rows).toHaveLength(14);
   });
 
   it("10. is idempotent — a second call creates nothing", async () => {
@@ -528,11 +553,11 @@ describe("ensureWorkspaceDefaultFields", () => {
       "acct-1",
       "flow-1",
     );
-    expect(res.created).toHaveLength(13);
+    expect(res.created).toHaveLength(14);
     const rows = store.inserts[0];
     // Appended after the current max position — existing order kept.
     expect(rows[0].position).toBe(5);
-    expect(rows[12].position).toBe(17);
+    expect(rows[13].position).toBe(18);
   });
 
   it("10. never duplicates a user field sharing a default name", async () => {
@@ -545,12 +570,12 @@ describe("ensureWorkspaceDefaultFields", () => {
       "acct-1",
       "flow-1",
     );
-    // Two suppressed, eleven created — the user's own rows untouched
+    // Two suppressed, twelve created — the user's own rows untouched
     // (provisioning only inserts; it never updates or deletes).
-    expect(res.created).toHaveLength(11);
+    expect(res.created).toHaveLength(12);
     expect(res.created).not.toContain("Call Status");
     expect(res.created).not.toContain("Lead Type");
-    expect(store.inserts[0]).toHaveLength(11);
+    expect(store.inserts[0]).toHaveLength(12);
     expect(store.updates).toHaveLength(0);
   });
 
@@ -572,6 +597,10 @@ describe("ensureWorkspaceDefaultFields", () => {
       patch: { name: "Lead Type", options: [...LEAD_TYPE_OPTIONS] },
     });
     expect(res.created).not.toContain("Lead Type");
+    // The CRM "Lead Quality" column is provisioned fresh alongside
+    // the rename (new options, display default "Lead") — the rename
+    // only ever targets the legacy option set, never the new spec.
+    expect(res.created).toContain("Lead Quality");
     // Stored values live in workspace_values (untouched here) and
     // stay readable — even "Fake", outside the new options.
   });
@@ -633,7 +662,7 @@ describe("ensureWorkspaceDefaultFields", () => {
     );
     // Attempted the insert; the conflict is swallowed, not surfaced.
     expect(store.inserts).toHaveLength(1);
-    expect(res.created).toHaveLength(13);
+    expect(res.created).toHaveLength(14);
   });
 
   it("surfaces real failures so callers can degrade gracefully", async () => {
@@ -663,17 +692,17 @@ describe("ensureWorkspaceDefaultFields", () => {
 });
 
 describe("default fields in the existing visibility mechanism", () => {
-  it("2/3/4. Completed and Incomplete share one config: all 13 visible initially", () => {
+  it("2/3/4. Completed and Incomplete share one config: all 14 visible initially", () => {
     const fields = defaultFields();
     const model = describeVisibilityMenu([], fields);
     // Searchable Columns manager lists every default, none locked.
-    expect(model.custom).toHaveLength(13);
+    expect(model.custom).toHaveLength(14);
     expect(
       model.custom.every((c) => !("locked" in c)),
     ).toBe(true);
     // Default state (no hidden ids — same key for both views).
     const applied = applyVisibility([], fields, []);
-    expect(applied.customFields).toHaveLength(13);
+    expect(applied.customFields).toHaveLength(14);
   });
 
   it("13. no column is locked; system fields are hideable flow entries", () => {
@@ -706,17 +735,17 @@ describe("default fields in the existing visibility mechanism", () => {
     ).toBe(false);
   });
 
-  it("5/7. hides one, several, or all 13 — and restores each in place", () => {
+  it("5/7. hides one, several, or all 14 — and restores each in place", () => {
     const fields = defaultFields();
     const ids = fields.map((f) => customFieldVisId(f.id));
 
     let hidden = toggleHiddenId([], ids[0]);
-    expect(applyVisibility([], fields, hidden).customFields).toHaveLength(12);
+    expect(applyVisibility([], fields, hidden).customFields).toHaveLength(13);
 
     hidden = toggleHiddenId(hidden, ids[1]);
     hidden = toggleHiddenId(hidden, ids[2]);
     let applied = applyVisibility([], fields, hidden);
-    expect(applied.customFields).toHaveLength(10);
+    expect(applied.customFields).toHaveLength(11);
 
     hidden = [...ids];
     applied = applyVisibility([], fields, hidden);
@@ -888,8 +917,8 @@ describe("Type/Stage business defaults (Fresh / New Lead, read-only)", () => {
     const before = store.rows.map((r) => ({ ...r }));
     const res = await ensureWorkspaceDefaultFields(fakeClient(store), "acct-1", "flow-1");
     // The two pre-existing rows suppress their defaults; only the
-    // other 11 are inserted — and no UPDATE touches any row.
-    expect(res.created).toHaveLength(11);
+    // other 12 are inserted — and no UPDATE touches any row.
+    expect(res.created).toHaveLength(12);
     expect(res.created).not.toContain("Lead Type");
     expect(res.created).not.toContain("Stage");
     expect(store.updates).toHaveLength(0);

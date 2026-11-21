@@ -44,10 +44,18 @@ const CHIP_MAP: Readonly<Record<string, Readonly<Record<string, SelectChip>>>> =
     "invalid number": RED_STRONG,
   },
   "lead quality": {
+    // Legacy values (pre-CRM columns, kept readable): unchanged.
     hot: GREEN_DARK,
     warm: { background: "#dcfce7", color: "#166534" },
     cold: { background: "#ffedd5", color: "#7c2d12" },
     fake: RED_STRONG,
+    // CRM feedback states: green = positive, red = disqualified,
+    // neutral = automatic initial Lead.
+    lead: GRAY_NEUTRAL,
+    "interested lead": { background: "#dcfce7", color: "#166534" },
+    "qualified lead": GREEN_DARK,
+    "booking confirmed": { background: "#052e16", color: "#ffffff" },
+    "disqualified lead": RED_STRONG,
   },
   "lead type": {
     fresh: { background: "#e0e7ff", color: "#3730a3" },

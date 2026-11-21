@@ -178,6 +178,32 @@ describe("5. Lead Quality uses the defined colors", () => {
       color: "#ffffff",
     });
   });
+
+  it("maps CRM states: green positives, red disqualified, neutral Lead", () => {
+    // Green family for positive outcomes.
+    expect(getSelectChip("Lead Quality", "Interested Lead")).toEqual({
+      background: "#dcfce7",
+      color: "#166534",
+    });
+    expect(getSelectChip("Lead Quality", "Qualified Lead")).toEqual({
+      background: "#15803d",
+      color: "#ffffff",
+    });
+    expect(getSelectChip("Lead Quality", "Booking Confirmed")).toEqual({
+      background: "#052e16",
+      color: "#ffffff",
+    });
+    // Red for disqualified, neutral gray for the automatic initial.
+    expect(getSelectChip("Lead Quality", "Disqualified Lead")).toEqual({
+      background: "#dc2626",
+      color: "#ffffff",
+    });
+    expect(getSelectChip("Lead Quality", "Lead")).toEqual({
+      background: "#e5e7eb",
+      color: "#1f2937",
+    });
+    expect(getSelectChip("Lead Quality", "Something Else")).toBeNull();
+  });
 });
 
 describe("6. Quotation / Package uses Sent/Not Yet with defined colors", () => {

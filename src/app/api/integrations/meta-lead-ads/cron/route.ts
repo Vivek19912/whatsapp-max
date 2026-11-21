@@ -19,6 +19,7 @@ import { drainTableAssignmentNotifications } from '@/lib/lead-assignment/table-n
 import { purgeExpiredSheetsOAuthStates } from '@/lib/meta-lead-sheets/oauth';
 import { drainSheetsQueue } from '@/lib/meta-lead-sheets/queue';
 import { drainWhatsappQueue } from '@/lib/meta-lead-whatsapp/queue';
+import { drainCrmEventsQueue } from '@/lib/meta-crm/feedback';
 
 export const dynamic = 'force-dynamic';
 
@@ -165,6 +166,25 @@ export async function GET(request: Request) {
       );
     }
 
+    // ADDITIVE Meta CRM feedback drain. Same 5-minute sweep, no
+    // new scheduler; per-row failures never affect polling,
+    // notifications, Sheets, or WhatsApp, and CRM failures never
+    // roll back leads. Meta-only: drains only meta_crm_events rows.
+    let crmFeedback = {
+      attempted: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+    };
+    try {
+      crmFeedback = await drainCrmEventsQueue(db, { limit: 20 });
+    } catch (error) {
+      console.error(
+        '[meta-lead-ads-cron] crm-feedback drain failed:',
+        error instanceof Error ? error.message : error
+      );
+    }
+
     // ADDITIVE OAuth-state retention. Same sweep: consumed/expired
     // one-time states are purged (safe retention — active states
     // are untouched). Failures are isolated and never affect
@@ -185,6 +205,7 @@ export async function GET(request: Request) {
       notifications,
       sheets,
       whatsapp,
+      crmFeedback,
       imports,
       tableAssignmentNotifications,
       oauthStatesPurged,

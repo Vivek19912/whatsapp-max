@@ -103,12 +103,12 @@ beforeEach(() => {
 });
 
 describe("POST /api/flows provisions Workspace defaults", () => {
-  it("creates all 13 default columns on plain flow creation", async () => {
+  it("creates all 14 default columns on plain flow creation", async () => {
     const res = await POST(post({ name: "Pilgrim Flow" }));
     expect(res.status).toBe(201);
     expect(h.fieldInserts).toHaveLength(1);
     const rows = h.fieldInserts[0];
-    expect(rows).toHaveLength(13);
+    expect(rows).toHaveLength(14);
     expect(rows.map((r) => r.name)).toEqual([
       "Assigned To",
       "Call Status",
@@ -123,9 +123,10 @@ describe("POST /api/flows provisions Workspace defaults", () => {
       "Reason for Lost Lead",
       "Final Remark",
       "Lead Received",
+      "Lead Quality",
     ]);
     expect(rows.map((r) => r.position)).toEqual([
-      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
     ]);
     for (const row of rows) {
       expect(row.account_id).toBe("acct-1");
@@ -133,11 +134,11 @@ describe("POST /api/flows provisions Workspace defaults", () => {
     }
   });
 
-  it("creates all 13 default columns on template-clone creation", async () => {
+  it("creates all 14 default columns on template-clone creation", async () => {
     const res = await POST(post({ template_slug: "lead_capture" }));
     expect(res.status).toBe(201);
     expect(h.fieldInserts).toHaveLength(1);
-    expect(h.fieldInserts[0]).toHaveLength(13);
+    expect(h.fieldInserts[0]).toHaveLength(14);
     for (const row of h.fieldInserts[0]) {
       expect(row.account_id).toBe("acct-1");
       expect(row.flow_id).toBe("flow-new-1");
@@ -149,6 +150,6 @@ describe("POST /api/flows provisions Workspace defaults", () => {
     const res = await POST(post({ name: "Another Flow" }));
     expect(res.status).toBe(201);
     expect(h.fieldInserts).toHaveLength(1);
-    expect(h.fieldInserts[0]).toHaveLength(12);
+    expect(h.fieldInserts[0]).toHaveLength(13);
   });
 });

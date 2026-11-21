@@ -12,6 +12,7 @@ import {
   isAssigneeField,
   validateAssigneeValue,
 } from "@/lib/flows/workspace-assignee";
+import { isLeadQualityField } from "@/lib/flows/workspace-defaults";
 import { recordWorkspaceStatusChanged } from "@/lib/meta-capi/triggers";
 
 /**
@@ -283,6 +284,49 @@ export async function PUT(
       console.error("[meta-capi] workspace trigger failed:", err);
     }
 
+    // ADDITIVE Meta CRM feedback — a Lead Quality cell changed.
+    // Records the genuine transition and enqueues the mapped Meta
+    // event (Lead/InterestedLead/QualifiedLead/BookingConfirmed/
+    // DisqualifiedLead). Meta-only in effect: runs without an
+    // original Meta Lead ID (every non-Meta lead) resolve to
+    // `no_meta_lead` and keep their internal status with no event.
+    // Best-effort and isolated so it can never fail the save. Uses
+    // the service-role client for the ledger write (same RLS
+    // rationale as the Sheets sync above): the queue table's RLS
+    // only allows admin inserts, and the (account, run) pair is
+    // already server-side validated above.
+    let crmEvent: { outcome: 'queued' | 'deduplicated' | 'skipped' | 'failed'; reason?: string } | null = null;
+    try {
+      if (isLeadQualityField(field) && storedValue !== previous) {
+        const { enqueueLeadQualityEvent } = await import(
+          "@/lib/meta-crm/feedback"
+        );
+        const { scheduleCrmDrainSoon } = await import(
+          "@/lib/meta-crm/trigger"
+        );
+        const outcome = await enqueueLeadQualityEvent(supabaseAdmin(), {
+          accountId,
+          flowId: id,
+          runId,
+          fromQuality: previous ?? "",
+          toQuality: storedValue ?? "",
+          eventTimeIso: new Date().toISOString(),
+          actorUserId: userId,
+        });
+        if (outcome.enqueued) {
+          crmEvent = outcome.deduplicated
+            ? { outcome: 'deduplicated' }
+            : { outcome: 'queued' };
+          scheduleCrmDrainSoon({ accountId });
+        } else {
+          crmEvent = { outcome: 'skipped', reason: outcome.reason };
+        }
+      }
+    } catch (err) {
+      console.error("[meta-crm] lead-quality enqueue failed:", err);
+      crmEvent = { outcome: 'failed' };
+    }
+
     // ADDITIVE Meta Sheets sync — a Workspace cell changed on a Meta
     // table; queue an in-place sheet row update. Meta-only (kind
     // gate); Flow Tables skip this entirely. Best-effort: never
@@ -344,7 +388,7 @@ export async function PUT(
       }
     }
 
-    return NextResponse.json({ value: storedValue, sheetsSync });
+    return NextResponse.json({ value: storedValue, sheetsSync, crmEvent });
   } catch (err) {
     return toErrorResponse(err);
   }

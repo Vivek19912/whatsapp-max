@@ -400,7 +400,7 @@ describe("GET /api/flows/[id]/table", () => {
       );
       expect(res.status).toBe(200);
     }
-    // Both views share ONE flow-scoped definition — the same 12
+    // Both views share ONE flow-scoped definition — the same 13
     // names scoped to the same (account, flow), never per-view
     // records. (Cross-request dedupe is covered by the idempotency
     // unit tests; the route mock does not persist between calls.)
@@ -420,6 +420,7 @@ describe("GET /api/flows/[id]/table", () => {
         "Reason for Lost Lead",
         "Final Remark",
         "Lead Received",
+        "Lead Quality",
       ]);
       for (const row of rows) {
         expect(row.account_id).toBe("acct-1");
@@ -439,9 +440,9 @@ describe("GET /api/flows/[id]/table", () => {
       { params: Promise.resolve({ id: "flow-1" }) },
     );
     expect(res.status).toBe(200);
-    // Only the 12 missing columns are filled — the existing one kept.
+    // Only the 13 missing columns are filled — the existing one kept.
     expect(h.adminInserts).toHaveLength(1);
-    expect(h.adminInserts[0]).toHaveLength(12);
+    expect(h.adminInserts[0]).toHaveLength(13);
     expect(
       (h.adminInserts[0] as Array<Record<string, unknown>>).map((r) => r.name),
     ).not.toContain("Assigned To");
