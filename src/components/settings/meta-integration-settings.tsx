@@ -1,14 +1,18 @@
 "use client";
 
+import { useState } from "react";
+
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
+import { MetaCrmDatasetSettings } from "./meta-crm-dataset-settings";
 import { MetaLeadAdsSettings } from "./meta-lead-ads-settings";
 import { SettingsPanelHead } from "./settings-panel-head";
 
 /**
- * One "Meta" section with two independently-configured capabilities:
+ * One "Meta" section with independently-configured capabilities:
  *   * Lead capture  — Direct Meta Lead Ads (Pages → Instant Forms → Workspace)
- *   * Conversions API — send conversion events to the customer's dataset
+ *   * CRM Integration — Create a Meta CRM dataset for future Instant Form
+ *     optimization (Feature 1 only; no event sending).
  *
  * They share the platform Meta app but nothing else; either can be set
  * up, changed, or disconnected without touching the other.
@@ -21,23 +25,25 @@ import { SettingsPanelHead } from "./settings-panel-head";
  * backend functions, tables, and tests are all preserved).
  */
 export function MetaIntegrationSettings() {
+  // Lead Capture stays the default subtab. The retired Conversions API
+  // tab is never offered here (see DEAD FEATURE note above).
+  const [tab, setTab] = useState("lead-capture");
   return (
     <section className="space-y-5">
       <SettingsPanelHead
         title="Meta"
-        description="Connect Meta to WhatsApp Max. Capture leads from Facebook & Instagram Instant Forms."
+        description="Connect Meta to WhatsApp Max. Capture leads from Facebook & Instagram Instant Forms, and create CRM datasets for future optimization."
       />
-      {/* Lead capture is the only visible tab. The Conversions API tab and
-          its content panel were removed here (see DEAD FEATURE note above).
-          Tabs stays controlled to "lead-capture" so the page always defaults
-          to Lead capture and any legacy "conversions-api" value normalizes
-          to it instead of rendering an empty panel. */}
-      <Tabs value="lead-capture">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList variant="line">
           <TabsTrigger value="lead-capture">Lead capture</TabsTrigger>
+          <TabsTrigger value="crm-integration">CRM Integration</TabsTrigger>
         </TabsList>
         <TabsContent value="lead-capture" className="pt-4">
           <MetaLeadAdsSettings embedded />
+        </TabsContent>
+        <TabsContent value="crm-integration" className="pt-4">
+          <MetaCrmDatasetSettings />
         </TabsContent>
       </Tabs>
     </section>
