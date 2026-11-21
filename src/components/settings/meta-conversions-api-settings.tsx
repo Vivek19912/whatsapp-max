@@ -1,5 +1,10 @@
 "use client";
 
+// DEAD FEATURE — Meta Conversions API UI.
+// Retired and intentionally hidden from the WhatsApp Max Settings interface.
+// Do not expose or re-enable this UI without explicit product approval.
+// Existing implementation is retained for reference.
+
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {

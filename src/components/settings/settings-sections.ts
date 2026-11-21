@@ -124,6 +124,10 @@ function isSection(value: string | null): value is SettingsSection {
  */
 export function resolveSection(raw: string | null): SettingsSection {
   if (raw === 'tags' || raw === 'custom-fields') return 'fields';
+  // DEAD FEATURE — Meta Conversions API UI. The "conversions-api" tab was
+  // retired from Settings → Meta; old URLs pointing at it normalize to the
+  // Meta (Lead capture) section so they safely open Lead capture.
+  if (raw === 'conversions-api') return 'meta-lead-ads';
   if (isSection(raw)) return raw;
   return DEFAULT_SECTION;
 }
