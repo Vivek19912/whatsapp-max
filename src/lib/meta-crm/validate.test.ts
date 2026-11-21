@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { validateCrmDatasetInput } from "./validate";
+import { validateCrmDatasetInput, validateRegisterExistingInput } from "./validate";
 
 describe("validateCrmDatasetInput", () => {
   it("accepts a valid input and trims whitespace", () => {
@@ -65,6 +65,38 @@ describe("validateCrmDatasetInput", () => {
       accessToken: "valid-token-1234567890",
     });
     expect(result.values?.businessPortfolioId).toBe("1171141236081090");
+    expect(typeof result.values?.businessPortfolioId).toBe("string");
+  });
+});
+
+describe("validateRegisterExistingInput", () => {
+  it("accepts a valid registration input", () => {
+    const result = validateRegisterExistingInput({
+      datasetId: "1830596054845292",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "valid-token-1234567890",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.values?.datasetId).toBe("1830596054845292");
+  });
+
+  it("rejects non-numeric dataset ids", () => {
+    const result = validateRegisterExistingInput({
+      datasetId: "abc",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "valid-token-1234567890",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.fieldErrors.datasetId).toBeTruthy();
+  });
+
+  it("keeps ids as strings", () => {
+    const result = validateRegisterExistingInput({
+      datasetId: "1830596054845292",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "valid-token-1234567890",
+    });
+    expect(typeof result.values?.datasetId).toBe("string");
     expect(typeof result.values?.businessPortfolioId).toBe("string");
   });
 });

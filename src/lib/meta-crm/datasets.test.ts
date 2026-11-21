@@ -128,3 +128,75 @@ describe("createCrmDataset", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("verifyExistingCrmDataset", () => {
+  function verifyFetch(
+    handlers: Record<string, (url: string) => Response>,
+  ): typeof fetch {
+    return (async (url: string) => {
+      for (const [prefix, handler] of Object.entries(handlers)) {
+        if (url.includes(prefix)) return handler(url);
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as unknown as typeof fetch;
+  }
+
+  it("verifies identity without creating anything (no POST)", async () => {
+    const calls: string[] = [];
+    const fetchImpl = verifyFetch({
+      "/1830596054845292?": () => jsonResponse({ id: "1830596054845292", name: "IM 22 Nov" }),
+      "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+      "/ads_datasets": () => jsonResponse({ data: [{ id: "1830596054845292" }] }),
+    });
+    const wrapped = (async (url: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      return fetchImpl(url);
+    }) as unknown as typeof fetch;
+
+    const { verifyExistingCrmDataset } = await import("./datasets");
+    const out = await verifyExistingCrmDataset({
+      datasetId: "1830596054845292",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "USER_TOKEN",
+      fetchImpl: wrapped,
+    });
+    expect(out.id).toBe("1830596054845292");
+    expect(out.name).toBe("IM 22 Nov");
+    expect(out.ownershipVerified).toBe(true);
+    expect(calls.some((c) => c.startsWith("POST"))).toBe(false);
+  });
+
+  it("rejects name mismatches and never leaks the token", async () => {
+    const fetchImpl = verifyFetch({
+      "/1830596054845292?": () => jsonResponse({ id: "1830596054845292", name: "Real Name" }),
+      "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+      "/ads_datasets": () => jsonResponse({ data: [] }),
+    });
+    const { verifyExistingCrmDataset } = await import("./datasets");
+    const err = await verifyExistingCrmDataset({
+      datasetId: "1830596054845292",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "SECRET_TOKEN_ABC",
+      expectedName: "Wrong Name",
+      fetchImpl,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect((err as MetaCrmError).status).toBe(400);
+    expect((err as Error).message).not.toContain("SECRET_TOKEN_ABC");
+  });
+
+  it("maps dataset access denial to 403 with codes", async () => {
+    const fetchImpl = verifyFetch({
+      "/1830596054845292?": () =>
+        jsonResponse({ error: { message: "Unsupported get request.", code: 100 } }, 400),
+    });
+    const { verifyExistingCrmDataset } = await import("./datasets");
+    const err = await verifyExistingCrmDataset({
+      datasetId: "1830596054845292",
+      businessPortfolioId: "1171141236081090",
+      accessToken: "TOK",
+      fetchImpl,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+  });
+});

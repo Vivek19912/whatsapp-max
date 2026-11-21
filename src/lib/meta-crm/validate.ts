@@ -87,3 +87,78 @@ export function validateCrmDatasetInput(input: CrmDatasetFormInput): {
     fieldErrors: {},
   };
 }
+
+export interface RegisterExistingInput {
+  datasetId: string | null | undefined;
+  businessPortfolioId: string | null | undefined;
+  accessToken: string | null | undefined;
+  datasetName?: string | null | undefined;
+}
+
+export interface ValidatedRegisterInput {
+  datasetId: string;
+  businessPortfolioId: string;
+  accessToken: string;
+  datasetName: string | null;
+}
+
+export interface RegisterFieldErrors {
+  datasetId?: string;
+  businessPortfolioId?: string;
+  accessToken?: string;
+  datasetName?: string;
+}
+
+/**
+ * Validate an "Add Existing" registration form. The token proves
+ * authorized access; the dataset name (when supplied) must match
+ * what Meta returns — the backend re-verifies against Meta and uses
+ * Meta's canonical name when none is supplied.
+ */
+export function validateRegisterExistingInput(input: RegisterExistingInput): {
+  ok: boolean;
+  values: ValidatedRegisterInput | null;
+  fieldErrors: RegisterFieldErrors;
+} {
+  const fieldErrors: RegisterFieldErrors = {};
+
+  const datasetId = (input.datasetId ?? "").trim();
+  if (datasetId === "") {
+    fieldErrors.datasetId = "Enter the existing Meta Dataset ID.";
+  } else if (!BUSINESS_PORTFOLIO_ID_PATTERN.test(datasetId)) {
+    fieldErrors.datasetId = "Dataset ID must be a numeric ID (5–32 digits).";
+  }
+
+  const businessPortfolioId = (input.businessPortfolioId ?? "").trim();
+  if (businessPortfolioId === "") {
+    fieldErrors.businessPortfolioId = "Enter the numeric Business Portfolio ID.";
+  } else if (!BUSINESS_PORTFOLIO_ID_PATTERN.test(businessPortfolioId)) {
+    fieldErrors.businessPortfolioId =
+      "Business Portfolio ID must be a numeric ID (5–32 digits).";
+  }
+
+  const accessToken = (input.accessToken ?? "").trim();
+  if (accessToken === "") {
+    fieldErrors.accessToken = "Paste your authorized Meta access token.";
+  } else if (accessToken.length < ACCESS_TOKEN_MIN_LENGTH) {
+    fieldErrors.accessToken = "That token looks too short. Paste the full access token.";
+  } else if (/\s/.test(accessToken)) {
+    fieldErrors.accessToken = "The access token must not contain spaces.";
+  }
+
+  const rawName = (input.datasetName ?? "") as string;
+  const datasetName = rawName.trim() === "" ? null : rawName.trim();
+  if (datasetName !== null && datasetName.length > CRM_DATASET_NAME_MAX_LENGTH) {
+    fieldErrors.datasetName = `Dataset name must be ${CRM_DATASET_NAME_MAX_LENGTH} characters or fewer.`;
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { ok: false, values: null, fieldErrors };
+  }
+
+  return {
+    ok: true,
+    values: { datasetId, businessPortfolioId, accessToken, datasetName },
+    fieldErrors: {},
+  };
+}
