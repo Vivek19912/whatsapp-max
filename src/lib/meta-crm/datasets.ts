@@ -425,6 +425,12 @@ export async function isDatasetUnderBusiness(
  * List a Business Portfolio's CRM dataset ids. Throws a precise
  * MetaCrmError (never null) so callers can distinguish an expired
  * token, missing permissions, a bad business id, and Meta outages.
+ *
+ * Uses the DOCUMENTED read edge (Meta "Business Ads Dataset"
+ * reference: "To read datasets under a business, make a GET request
+ * to the {business-id}/ads_dataset endpoint"). The plural form
+ * (/{business-id}/ads_datasets) does NOT exist — Meta answers it
+ * with "Unknown path components: /ads_datasets".
  */
 export async function fetchBusinessDatasets(
   businessPortfolioId: string,
@@ -447,9 +453,11 @@ export async function fetchBusinessDatasets(
       status: 400,
     });
   }
+  // NOTE: singular `ads_dataset` — the documented read edge (see
+  // function docblock). The plural form does not exist.
   const url =
     `https://graph.facebook.com/${META_CRM_GRAPH_VERSION}/${businessId}` +
-    `/ads_datasets?fields=id&limit=100`;
+    `/ads_dataset?fields=id&limit=100`;
   let res: Response;
   try {
     res = await fetchImpl(url, {
@@ -483,6 +491,29 @@ export async function fetchBusinessDatasets(
       metaError ? { error: metaError } : null,
       res.status,
     );
+    if (metaCode === 1349004) {
+      throw new MetaCrmError({
+        code: "forbidden",
+        message:
+          `Meta refused: this app/token cannot read datasets for Business Portfolio ${businessId} ` +
+          `(code 1349004). The app needs the business_management permission plus Datasets API ` +
+          `allowlisting, and the token needs dataset access. ${message}`.slice(0, 300),
+        status: 403,
+        metaCode,
+        metaSubcode,
+      });
+    }
+    if (metaCode === 2282001) {
+      throw new MetaCrmError({
+        code: "invalid_input",
+        message:
+          `Invalid Business Portfolio ID ${businessId} (code 2282001). ` +
+          `Check the ID in Meta Business Settings.`,
+        status: 400,
+        metaCode,
+        metaSubcode,
+      });
+    }
     if (metaCode === 200) {
       throw new MetaCrmError({
         code: "forbidden",

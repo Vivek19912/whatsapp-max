@@ -66,7 +66,7 @@ describe("leadQualityToEvent", () => {
 });
 
 describe("buildCrmEventPayload", () => {
-  it("builds a CRM payload with system_generated + lead_id + event_id", () => {
+  it("builds a CRM payload with system_generated + lead_id + event_id + required custom_data", () => {
     const payload = buildCrmEventPayload({
       eventName: "QualifiedLead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
@@ -78,6 +78,7 @@ describe("buildCrmEventPayload", () => {
       event_time: Math.floor(Date.parse("2026-11-22T10:00:00.000Z") / 1000),
       action_source: "system_generated",
       user_data: { lead_id: "123456789012345" },
+      custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
       event_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     });
   });

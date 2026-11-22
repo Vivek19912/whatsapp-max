@@ -146,7 +146,7 @@ describe("verifyExistingCrmDataset", () => {
     const fetchImpl = verifyFetch({
       "/1830596054845292?": () => jsonResponse({ id: "1830596054845292", name: "IM 22 Nov" }),
       "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
-      "/ads_datasets": () => jsonResponse({ data: [{ id: "1830596054845292" }] }),
+      "/ads_dataset": () => jsonResponse({ data: [{ id: "1830596054845292" }] }),
     });
     const wrapped = (async (url: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${url}`);
@@ -170,7 +170,7 @@ describe("verifyExistingCrmDataset", () => {
     const fetchImpl = verifyFetch({
       "/1830596054845292?": () => jsonResponse({ id: "1830596054845292", name: "Real Name" }),
       "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
-      "/ads_datasets": () => jsonResponse({ data: [] }),
+      "/ads_dataset": () => jsonResponse({ data: [] }),
     });
     const { verifyExistingCrmDataset } = await import("./datasets");
     const err = await verifyExistingCrmDataset({
@@ -227,7 +227,7 @@ describe("verifyDatasetOwnership", () => {
         "/1169732842278579?": () =>
           jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
         "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
-        "/ads_datasets": () => jsonResponse({ data: [{ id: "1169732842278579" }] }),
+        "/ads_dataset": () => jsonResponse({ data: [{ id: "1169732842278579" }] }),
       }),
     });
     expect(out).toEqual({ verified: true });
@@ -241,7 +241,7 @@ describe("verifyDatasetOwnership", () => {
         "/1169732842278579?": () =>
           jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
         "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
-        "/ads_datasets": () => jsonResponse({ data: [{ id: "999" }] }),
+        "/ads_dataset": () => jsonResponse({ data: [{ id: "999" }] }),
       }),
     });
     expect(out.verified).toBe(false);
@@ -317,7 +317,7 @@ describe("verifyDatasetOwnership", () => {
         "/1169732842278579?": () =>
           jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
         "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
-        "/ads_datasets": () =>
+        "/ads_dataset": () =>
           jsonResponse(
             { error: { message: "Unknown path components.", code: 2500 } },
             404,
@@ -356,5 +356,72 @@ describe("verifyDatasetOwnership", () => {
     expect(err).toBeInstanceOf(MetaCrmError);
     expect(err.code).toBe("invalid_input");
     expect(calls).toHaveLength(0);
+  });
+
+  it("reads the documented singular ads_dataset edge (never the plural)", async () => {
+    const calls: string[] = [];
+    const { verifyDatasetOwnership } = await import("./datasets");
+    await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: (async (url: string) => {
+        calls.push(url);
+        if (url.includes("/ads_dataset?")) {
+          return jsonResponse({ data: [{ id: "1169732842278579" }] });
+        }
+        if (url.includes("/1169732842278579?")) {
+          return jsonResponse({ id: "1169732842278579", name: "IM CRM" });
+        }
+        return jsonResponse({ id: "1171141236081090", name: "Biz" });
+      }) as unknown as typeof fetch,
+    });
+    const listing = calls.find((u) => u.includes("/ads_dataset"));
+    expect(listing).toBeDefined();
+    expect(calls.some((u) => u.includes("/ads_datasets"))).toBe(false);
+    expect(listing).toContain("/1171141236081090/ads_dataset?fields=id");
+  });
+
+  it("maps 1349004 to forbidden with an allowlist/permission message", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+        "/ads_dataset": () =>
+          jsonResponse(
+            { error: { message: "No permission.", code: 1349004 } },
+            403,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("forbidden");
+    expect(err.status).toBe(403);
+    expect(err.metaCode).toBe(1349004);
+    expect(String(err.message)).toContain("business_management");
+  });
+
+  it("maps 2282001 to invalid input naming the business id", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      businessPortfolioId: "0000000000000000",
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/0000000000000000?": () => jsonResponse({ id: "0000000000000000", name: "Biz" }),
+        "/ads_dataset": () =>
+          jsonResponse(
+            { error: { message: "Invalid Business ID.", code: 2282001 } },
+            400,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("invalid_input");
+    expect(err.status).toBe(400);
+    expect(err.metaCode).toBe(2282001);
+    expect(String(err.message)).toContain("0000000000000000");
   });
 });

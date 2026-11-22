@@ -88,11 +88,22 @@ export function leadQualityToEvent(value: string | null | undefined): CrmEventNa
 /** CAPI action_source for CRM-originated events. */
 export const CRM_ACTION_SOURCE = "system_generated";
 
+/**
+ * CRM tool name reported in custom_data.lead_event_source (REQUIRED
+ * by the Conversion Leads payload spec: "the name of the tool where
+ * the leads are coming from").
+ */
+export const CRM_LEAD_EVENT_SOURCE = "WhatsApp Max";
+
+/** custom_data.event_source value REQUIRED for Conversion Leads events. */
+export const CRM_EVENT_SOURCE = "crm";
+
 /** Graph version for CRM event sends (same pin as dataset creation). */
 export { META_CRM_GRAPH_VERSION } from "./datasets";
 
 export function buildCrmEventsUrl(datasetId: string): string {
   // NOTE: dataset ids are numeric strings; keep as text (no Number()).
+  // Documented send path: POST graph.facebook.com/{VERSION}/{DATASET_ID}/events
   return `https://graph.facebook.com/v27.0/${datasetId.trim()}/events`;
 }
 
@@ -102,6 +113,12 @@ export interface CrmEventPayload {
   event_time: number;
   action_source: typeof CRM_ACTION_SOURCE;
   user_data: { lead_id: string };
+  /**
+   * REQUIRED by the Conversion Leads payload spec: the CRM tool
+   * name plus event_source "crm". Without these, Meta cannot
+   * attribute the event to Conversion Leads optimization.
+   */
+  custom_data: { lead_event_source: string; event_source: "crm" };
   /** Stable dedup id (our event row UUID). */
   event_id: string;
 }
@@ -133,6 +150,7 @@ export function buildCrmEventPayload(args: {
     event_time: Math.floor(ms / 1000),
     action_source: CRM_ACTION_SOURCE,
     user_data: { lead_id: leadId },
+    custom_data: { lead_event_source: CRM_LEAD_EVENT_SOURCE, event_source: CRM_EVENT_SOURCE },
     event_id: args.eventUuid,
   };
 }
