@@ -157,38 +157,36 @@ describe("listCrmDatasets", () => {
 });
 
 describe("normalizePublicDatasets", () => {
-  const created = {
-    id: "row-created",
+  // Exact shape of GET /api/integrations/meta-crm/datasets rows
+  // (toPublicCrmDataset): camelCase keys. This is the reported
+  // IM CRM case — it must survive normalization.
+  const createdApi = {
+    id: "internal-uuid-1",
     account_id: "acct-1",
-    business_portfolio_id: "1171141236081090",
-    dataset_id: "1830596054845292",
-    dataset_name: "IM 22 Nov",
-    dataset_type: "CRM",
-    creation_status: "Created",
-    created_by: "u1",
-    created_at: "2026-11-22T00:00:00.000Z",
-    updated_at: "2026-11-22T00:00:00.000Z",
+    businessPortfolioId: "1171141236081090",
+    datasetId: "1830596054845292",
+    datasetName: "IM 22 Nov",
+    datasetType: "CRM",
+    creationStatus: "Created",
+    createdAt: "2026-11-22T00:00:00.000Z",
   };
-  const registered = {
-    id: "row-registered",
-    account_id: "acct-1",
-    business_portfolio_id: "1171141236081090",
-    dataset_id: "1169732842278579",
-    dataset_name: "IM CRM",
-    dataset_type: "CRM",
-    creation_status: "Registered",
-    created_by: "u1",
-    created_at: "2026-11-22T00:00:00.000Z",
-    updated_at: "2026-11-22T00:00:00.000Z",
+  const registeredApi = {
+    id: "row-im-crm",
+    businessPortfolioId: "1171141236081090",
+    datasetId: "1169732842278579",
+    datasetName: "IM CRM",
+    datasetType: "CRM",
+    creationStatus: "Registered",
+    createdAt: "2026-11-22T00:00:00.000Z",
   };
 
-  it("keeps both Created and Registered datasets with all fields", () => {
-    const out = normalizePublicDatasets([created, registered]);
+  it("keeps both Created and Registered API rows with all fields", () => {
+    const out = normalizePublicDatasets([createdApi, registeredApi]);
     expect(out).toHaveLength(2);
     expect(out.map((d) => d.datasetId)).toEqual(["1830596054845292", "1169732842278579"]);
     const imCrm = out.find((d) => d.datasetId === "1169732842278579")!;
     expect(imCrm).toMatchObject({
-      id: "row-registered",
+      id: "row-im-crm",
       datasetName: "IM CRM",
       businessPortfolioId: "1171141236081090",
       datasetType: "CRM",
@@ -196,17 +194,39 @@ describe("normalizePublicDatasets", () => {
     });
   });
 
+  it("tolerates raw DB-shaped rows too", () => {
+    const out = normalizePublicDatasets([
+      {
+        id: "row-db",
+        account_id: "acct-1",
+        business_portfolio_id: "1171141236081090",
+        dataset_id: "1830596054845292",
+        dataset_name: "IM 22 Nov",
+        dataset_type: "CRM",
+        creation_status: "Registered",
+        created_at: "2026-11-22T00:00:00.000Z",
+        updated_at: "2026-11-22T00:00:00.000Z",
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      id: "row-db",
+      datasetId: "1830596054845292",
+      datasetName: "IM 22 Nov",
+    });
+  });
+
   it("drops malformed rows without blanking valid ones", () => {
     const out = normalizePublicDatasets([
-      registered,
+      registeredApi,
       null,
       undefined,
       "nope",
       42,
-      { id: "", dataset_id: "1169732842278579" },
+      { id: "", datasetId: "1169732842278579" },
       { id: "row-x" },
-      { id: 7, dataset_id: "1169732842278579" },
-      { id: "row-y", dataset_id: "   " },
+      { id: 7, datasetId: "1169732842278579" },
+      { id: "row-y", datasetId: "   " },
     ]);
     expect(out.map((d) => d.datasetId)).toEqual(["1169732842278579"]);
   });

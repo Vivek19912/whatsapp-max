@@ -50,21 +50,43 @@ export function toPublicCrmDataset(row: CrmDatasetRow): PublicCrmDataset {
 /**
  * Normalize a raw datasets payload into dropdown-ready rows.
  *
- * Keeps every row with a usable internal `id` and Meta `datasetId`,
- * regardless of creation status — both `Created` (made in WhatsApp
- * Max) and `Registered` (added via Add Existing) datasets are
- * eligible for CRM Feedback. Malformed rows are skipped
- * individually so one bad record can never blank the whole list.
+ * Accepts the public API shape (`toPublicCrmDataset`: camelCase
+ * `datasetId`, …) and tolerates raw DB rows (snake_case
+ * `dataset_id`, …) for robustness. Keeps every row with a usable
+ * internal `id` and Meta `datasetId`, regardless of creation
+ * status — both `Created` (made in WhatsApp Max) and `Registered`
+ * (added via Add Existing) datasets are eligible for CRM
+ * Feedback. Malformed rows are skipped individually so one bad
+ * record can never blank the whole list.
  */
 export function normalizePublicDatasets(rows: unknown): PublicCrmDataset[] {
   if (!Array.isArray(rows)) return [];
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
   const out: PublicCrmDataset[] = [];
   for (const entry of rows) {
     if (!entry || typeof entry !== "object") continue;
     const row = entry as Record<string, unknown>;
-    if (typeof row.id !== "string" || row.id.trim() === "") continue;
-    if (typeof row.dataset_id !== "string" || row.dataset_id.trim() === "") continue;
-    out.push(toPublicCrmDataset(row as unknown as CrmDatasetRow));
+    const id = text(row.id);
+    // Public API shape first, DB shape as fallback.
+    const datasetId = text(row.datasetId) || text(row.dataset_id);
+    if (id === "" || datasetId === "") continue;
+    const datasetName = text(row.datasetName) || text(row.dataset_name);
+    const businessPortfolioId =
+      text(row.businessPortfolioId) || text(row.business_portfolio_id);
+    const datasetType =
+      text(row.datasetType) || text(row.dataset_type) || "CRM";
+    const creationStatus =
+      text(row.creationStatus) || text(row.creation_status) || "Created";
+    const createdAt = text(row.createdAt) || text(row.created_at);
+    out.push({
+      id,
+      datasetId,
+      datasetName,
+      businessPortfolioId,
+      datasetType,
+      creationStatus,
+      createdAt,
+    });
   }
   return out;
 }
