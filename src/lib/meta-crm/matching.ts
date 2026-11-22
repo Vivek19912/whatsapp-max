@@ -97,13 +97,22 @@ export async function resolveLeadMatchHashes(
   if (runErr) throw runErr;
   const contactId = (run as { contact_id: string | null } | null)?.contact_id ?? null;
   if (contactId) {
-    const { data: contact, error: contactErr } = await db
-      .from("contacts")
-      .select("email, phone")
-      .eq("id", contactId)
-      .eq("account_id", args.accountId)
-      .maybeSingle();
-    if (contactErr) throw contactErr;
+    // Best-effort enrichment (same posture as the event-history
+    // route, which ignores this read's errors): a denied or failed
+    // contacts read falls through to the submission answers below
+    // instead of failing the whole preview with a 500.
+    let contact: unknown = null;
+    try {
+      const { data, error } = await db
+        .from("contacts")
+        .select("email, phone")
+        .eq("id", contactId)
+        .eq("account_id", args.accountId)
+        .maybeSingle();
+      if (!error) contact = data;
+    } catch {
+      contact = null;
+    }
     if (contact) {
       const c = contact as { email: string | null; phone: string | null };
       if (c.email || c.phone) return hashFound(c.email, c.phone);

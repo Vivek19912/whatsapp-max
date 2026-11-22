@@ -113,11 +113,13 @@ export async function assembleLeadQualityPreview(
   const nowIso = args.nowIso ?? new Date().toISOString();
 
   // Run must belong to this account + flow (tenant isolation, same
-  // rule as the workspace-values save path). created_at is the
-  // fallback occurrence for leads with no stored status.
+  // rule as the workspace-values save path). NOTE: flow_runs has NO
+  // created_at column — only started_at/last_advanced_at/ended_at.
+  // Selecting a non-existent column makes PostgREST fail the whole
+  // preview with a 500, so started_at is the run-level fallback.
   const { data: run, error: runErr } = await db
     .from("flow_runs")
-    .select("id, created_at")
+    .select("id, started_at")
     .eq("id", args.runId)
     .eq("account_id", args.accountId)
     .eq("flow_id", args.flowId)
@@ -177,9 +179,12 @@ export async function assembleLeadQualityPreview(
     created_at: string;
   } | null;
   const metaLeadId = submission?.meta_lead_id?.trim() ?? "";
-  const runCreatedAt = (run as { created_at?: string }).created_at ?? null;
+  // Fallback chain for the initial-stage occurrence: the TRUE Meta
+  // creation instant, then ingestion time, then the run start.
+  // (flow_runs.created_at does NOT exist — see the run query above.)
+  const runStartedAt = (run as { started_at?: string }).started_at ?? null;
   const leadCreationIso =
-    submission?.meta_created_time ?? submission?.created_at ?? runCreatedAt ?? nowIso;
+    submission?.meta_created_time ?? submission?.created_at ?? runStartedAt ?? nowIso;
 
   const unmapped = (
     message: string,
