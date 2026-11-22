@@ -30,6 +30,16 @@ export async function GET() {
       config: toPublicCrmFeedbackConfig(config),
     });
   } catch (err) {
+    // meta_crm_config table missing (migration 175 not applied yet)
+    // → honest unconfigured state, not a lie. The dataset registry
+    // (migration 174) keeps working independently.
+    if ((err as { code?: string })?.code === "42P01") {
+      return NextResponse.json({
+        ok: true,
+        config: toPublicCrmFeedbackConfig(null),
+        migrationMissing: true,
+      });
+    }
     return toErrorResponse(err);
   }
 }

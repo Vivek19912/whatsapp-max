@@ -31,6 +31,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { normalizePublicDatasets } from "@/lib/meta-crm/store";
 import {
   Select,
   SelectContent,
@@ -110,7 +111,11 @@ export function MetaCrmFeedbackSettings() {
   const { canEditSettings, profileLoading } = useAuth();
   const [config, setConfig] = useState<FeedbackConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configMigrationMissing, setConfigMigrationMissing] = useState(false);
   const [datasets, setDatasets] = useState<SavedDataset[]>([]);
+  const [datasetsLoading, setDatasetsLoading] = useState(true);
+  const [datasetsError, setDatasetsError] = useState<string | null>(null);
   const [selectedDataset, setSelectedDataset] = useState("");
   const [enableChecked, setEnableChecked] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -125,30 +130,67 @@ export function MetaCrmFeedbackSettings() {
 
   const disabled = !canEditSettings || profileLoading;
 
-  const loadConfig = useCallback(async () => {
-    setConfigLoading(true);
+  // Dataset registry loads INDEPENDENTLY of the feedback config.
+  // A config failure (e.g. missing table, transient error) must
+  // never blank the dropdown: every registered dataset — Created
+  // and Registered alike — stays selectable.
+  const loadDatasets = useCallback(async () => {
+    setDatasetsLoading(true);
+    setDatasetsError(null);
     try {
-      const [cfgRes, dsRes] = await Promise.all([
-        fetch("/api/integrations/meta-crm/config", { cache: "no-store" }),
-        fetch("/api/integrations/meta-crm/datasets", { cache: "no-store" }),
-      ]);
-      const cfg = (await cfgRes.json().catch(() => ({}))) as { ok?: boolean; config?: FeedbackConfig; error?: string };
+      const dsRes = await fetch("/api/integrations/meta-crm/datasets", { cache: "no-store" });
+      const ds = (await dsRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        datasets?: unknown;
+        error?: string;
+      };
+      if (!dsRes.ok || !ds.ok) {
+        throw new Error(typeof ds.error === "string" && ds.error ? ds.error : `Could not load datasets (${dsRes.status}).`);
+      }
+      setDatasets(normalizePublicDatasets(ds.datasets));
+    } catch (err) {
+      setDatasetsError(err instanceof Error ? err.message : "Could not load CRM datasets.");
+    } finally {
+      setDatasetsLoading(false);
+    }
+  }, []);
+
+  const loadConfigState = useCallback(async () => {
+    setConfigLoading(true);
+    setConfigError(null);
+    try {
+      const cfgRes = await fetch("/api/integrations/meta-crm/config", { cache: "no-store" });
+      const cfg = (await cfgRes.json().catch(() => ({}))) as {
+        ok?: boolean;
+        config?: FeedbackConfig;
+        migrationMissing?: boolean;
+        error?: string;
+      };
       if (!cfgRes.ok || !cfg.ok || !cfg.config) {
         throw new Error(typeof cfg.error === "string" && cfg.error ? cfg.error : `Could not load feedback config (${cfgRes.status}).`);
       }
       setConfig(cfg.config);
       setEnableChecked(cfg.config.enabled);
-      const ds = (await dsRes.json().catch(() => ({}))) as { ok?: boolean; datasets?: SavedDataset[] };
-      const list = Array.isArray(ds.datasets) ? ds.datasets : [];
-      setDatasets(list);
-      const current = list.find((d) => d.datasetId === cfg.config?.datasetId);
-      setSelectedDataset(current ? current.id : "");
+      setConfigMigrationMissing(cfg.migrationMissing === true);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not load CRM feedback.");
+      setConfigError(err instanceof Error ? err.message : "Could not load CRM feedback.");
     } finally {
       setConfigLoading(false);
     }
   }, []);
+
+  // Pre-select the saved dataset once both payloads arrive. Only
+  // fills an untouched select — never overrides the user's choice.
+  useEffect(() => {
+    if (selectedDataset !== "" || !config?.datasetId || datasets.length === 0) return;
+    const current = datasets.find((d) => d.datasetId === config.datasetId);
+    if (current) setSelectedDataset(current.id);
+  }, [config, datasets, selectedDataset]);
+
+  useEffect(() => {
+    void loadDatasets();
+    void loadConfigState();
+  }, [loadDatasets, loadConfigState]);
 
   const loadEvents = useCallback(async () => {
     setEventsLoading(true);
@@ -176,10 +218,6 @@ export function MetaCrmFeedbackSettings() {
       setEventsLoading(false);
     }
   }, [statusFilter]);
-
-  useEffect(() => {
-    void loadConfig();
-  }, [loadConfig]);
 
   useEffect(() => {
     void loadEvents();
@@ -222,7 +260,7 @@ export function MetaCrmFeedbackSettings() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save CRM feedback.");
       // Refresh server truth (e.g. failed verification disables).
-      void loadConfig();
+      void loadConfigState();
     } finally {
       setSaving(false);
     }
@@ -264,6 +302,15 @@ export function MetaCrmFeedbackSettings() {
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" /> Loading feedback configuration…
             </p>
+          ) : configError && !config ? (
+            <div className="space-y-2">
+              <p className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                <AlertCircle className="mt-0.5 size-4 shrink-0" /> {configError}
+              </p>
+              <Button variant="outline" size="sm" onClick={() => void loadConfigState()}>
+                <RefreshCw className="size-4" /> Retry
+              </Button>
+            </div>
           ) : (
             <>
               <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
@@ -276,33 +323,73 @@ export function MetaCrmFeedbackSettings() {
                 <Switch
                   checked={enableChecked}
                   onCheckedChange={setEnableChecked}
-                  disabled={disabled || saving}
+                  disabled={disabled || saving || configMigrationMissing}
                   aria-label="Enable CRM feedback"
                 />
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="meta-crm-feedback-dataset">Selected CRM dataset</Label>
-                <Select
-                  value={selectedDataset}
-                  onValueChange={(v) => setSelectedDataset(v ?? "")}
-                  disabled={disabled || saving || datasets.length === 0}
-                >
-                  <SelectTrigger id="meta-crm-feedback-dataset">
-                    <SelectValue placeholder={datasets.length === 0 ? "No datasets registered yet" : "Select a dataset"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {datasets.map((d) => (
-                      <SelectItem key={d.id} value={d.id}>
-                        {d.datasetName} · {d.datasetId}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {datasetsLoading ? (
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" /> Loading datasets…
+                  </p>
+                ) : (
+                  <Select
+                    value={selectedDataset}
+                    onValueChange={(v) => setSelectedDataset(v ?? "")}
+                    disabled={disabled || saving || datasets.length === 0}
+                  >
+                    <SelectTrigger id="meta-crm-feedback-dataset">
+                      <SelectValue placeholder={datasets.length === 0 ? "No datasets registered yet" : "Select a dataset"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {datasets.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          {d.datasetName} · {d.datasetId}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                {datasetsError ? (
+                  <p className="text-sm text-destructive">
+                    {datasetsError}{" "}
+                    <button
+                      type="button"
+                      className="underline"
+                      onClick={() => void loadDatasets()}
+                    >
+                      Retry
+                    </button>
+                  </p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
-                  One dataset per workspace. Register datasets in “Created CRM Datasets” above.
+                  One dataset per workspace. Both created and registered datasets are
+                  listed here — register datasets in “Created CRM Datasets” above.
                 </p>
               </div>
+
+              {configMigrationMissing ? (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                  CRM feedback settings are not available yet — apply migration{" "}
+                  <code>175_meta_crm_feedback</code> to enable configuration and event
+                  tracking. Dataset registration above is unaffected.
+                </p>
+              ) : null}
+
+              {configError ? (
+                <p className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="mt-0.5 size-4 shrink-0" /> {configError}{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => void loadConfigState()}
+                  >
+                    Retry
+                  </button>
+                </p>
+              ) : null}
 
               {config?.lastError ? (
                 <p className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
@@ -331,7 +418,7 @@ export function MetaCrmFeedbackSettings() {
                 </div>
               </div>
 
-              <Button onClick={handleSave} disabled={disabled || saving}>
+              <Button onClick={handleSave} disabled={disabled || saving || configMigrationMissing}>
                 {saving ? (
                   <>
                     <Loader2 className="size-4 animate-spin" /> Saving…

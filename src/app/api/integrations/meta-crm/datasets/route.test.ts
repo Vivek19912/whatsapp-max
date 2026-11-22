@@ -98,6 +98,18 @@ vi.mock("@/lib/meta-crm/store", async (importOriginal) => {
           created_at: "2026-11-22T00:00:00.000Z",
           updated_at: "2026-11-22T00:00:00.000Z",
         },
+        {
+          id: "internal-uuid-2",
+          account_id: accountId,
+          business_portfolio_id: "1171141236081090",
+          dataset_id: "1169732842278579",
+          dataset_name: "IM CRM",
+          dataset_type: "CRM",
+          creation_status: "Registered",
+          created_by: "u1",
+          created_at: "2026-11-22T00:00:00.000Z",
+          updated_at: "2026-11-22T00:00:00.000Z",
+        },
       ];
     },
   };
@@ -227,14 +239,39 @@ describe("GET /api/integrations/meta-crm/datasets", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as {
       ok: boolean;
-      datasets: Array<{ datasetId: string; datasetName: string }>;
+      datasets: Array<{ id: string; datasetId: string; datasetName: string }>;
     };
     expect(json.ok).toBe(true);
     expect(h.listedAccountId).toBe("acct-1");
-    expect(json.datasets).toHaveLength(1);
+    expect(json.datasets).toHaveLength(2);
     expect(json.datasets[0].datasetId).toBe("1830596054845292");
     expect(json.datasets[0].datasetName).toBe("IM 22 Nov");
     expect(JSON.stringify(json).toLowerCase()).not.toContain("token");
+  });
+
+  it("includes Registered (Add Existing) datasets alongside Created ones", async () => {
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      ok: boolean;
+      datasets: Array<{
+        id: string;
+        datasetId: string;
+        datasetName: string;
+        businessPortfolioId: string;
+        creationStatus: string;
+      }>;
+    };
+    const byMetaId = new Map(json.datasets.map((d) => [d.datasetId, d]));
+    // The reported IM CRM case: Registered row for the same business.
+    expect(byMetaId.get("1169732842278579")).toMatchObject({
+      id: "internal-uuid-2",
+      datasetName: "IM CRM",
+      businessPortfolioId: "1171141236081090",
+      creationStatus: "Registered",
+    });
+    // And the Created one is still there — no status filtering.
+    expect(byMetaId.get("1830596054845292")?.creationStatus).toBe("Created");
   });
 
   it("isolates tenants by resolved account", async () => {

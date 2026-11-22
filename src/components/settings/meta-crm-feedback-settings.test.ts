@@ -50,4 +50,31 @@ describe("MetaCrmFeedbackSettings", () => {
     expect(integration).toContain("MetaCrmFeedbackSettings");
     expect(integration).toContain("<MetaCrmDatasetSettings />");
   });
+
+  it("loads the dataset dropdown independently of the config fetch", () => {
+    // Regression: the dropdown used to stay empty ("No datasets
+    // registered yet") whenever GET config failed, even with
+    // datasets present. The registry has its own loader + error
+    // state now, so a config failure can never blank it.
+    expect(src).toContain("const loadDatasets = useCallback");
+    expect(src).toContain("const loadConfigState = useCallback");
+    expect(src).toContain("setDatasets(normalizePublicDatasets(ds.datasets))");
+    expect(src).toContain("setDatasetsError");
+    expect(src).toContain("setConfigError");
+    // No early return that would skip setDatasets on config failure.
+    expect(src).not.toContain("Promise.all([");
+  });
+
+  it("lists Created and Registered datasets without status filtering", () => {
+    expect(src).toContain("normalizePublicDatasets");
+    // The options render every loaded row; nothing gates on status.
+    expect(src).toContain("{datasets.map((d) => (");
+    expect(src).not.toMatch(/creationStatus\s*===?\s*["']Created["']/);
+    expect(src).not.toMatch(/status\s*===?\s*["']Registered["']/);
+  });
+
+  it("surfaces a missing config table instead of an empty dropdown", () => {
+    expect(src).toContain("migrationMissing");
+    expect(src).toContain("175_meta_crm_feedback");
+  });
 });

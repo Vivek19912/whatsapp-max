@@ -47,6 +47,28 @@ export function toPublicCrmDataset(row: CrmDatasetRow): PublicCrmDataset {
   };
 }
 
+/**
+ * Normalize a raw datasets payload into dropdown-ready rows.
+ *
+ * Keeps every row with a usable internal `id` and Meta `datasetId`,
+ * regardless of creation status — both `Created` (made in WhatsApp
+ * Max) and `Registered` (added via Add Existing) datasets are
+ * eligible for CRM Feedback. Malformed rows are skipped
+ * individually so one bad record can never blank the whole list.
+ */
+export function normalizePublicDatasets(rows: unknown): PublicCrmDataset[] {
+  if (!Array.isArray(rows)) return [];
+  const out: PublicCrmDataset[] = [];
+  for (const entry of rows) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.id !== "string" || row.id.trim() === "") continue;
+    if (typeof row.dataset_id !== "string" || row.dataset_id.trim() === "") continue;
+    out.push(toPublicCrmDataset(row as unknown as CrmDatasetRow));
+  }
+  return out;
+}
+
 export interface SaveCrmDatasetInput {
   accountId: string;
   businessPortfolioId: string;

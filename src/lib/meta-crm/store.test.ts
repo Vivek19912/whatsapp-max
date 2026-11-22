@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { listCrmDatasets, saveCrmDataset } from "./store";
+import { listCrmDatasets, normalizePublicDatasets, saveCrmDataset } from "./store";
 
 function makeDb(initial: Array<Record<string, unknown>> = []) {
   const rows = [...initial];
@@ -153,5 +153,67 @@ describe("listCrmDatasets", () => {
     const rows = await listCrmDatasets(db, "acct-1");
     expect(rows).toHaveLength(1);
     expect(calls.some((c) => c.accountId === "acct-1")).toBe(true);
+  });
+});
+
+describe("normalizePublicDatasets", () => {
+  const created = {
+    id: "row-created",
+    account_id: "acct-1",
+    business_portfolio_id: "1171141236081090",
+    dataset_id: "1830596054845292",
+    dataset_name: "IM 22 Nov",
+    dataset_type: "CRM",
+    creation_status: "Created",
+    created_by: "u1",
+    created_at: "2026-11-22T00:00:00.000Z",
+    updated_at: "2026-11-22T00:00:00.000Z",
+  };
+  const registered = {
+    id: "row-registered",
+    account_id: "acct-1",
+    business_portfolio_id: "1171141236081090",
+    dataset_id: "1169732842278579",
+    dataset_name: "IM CRM",
+    dataset_type: "CRM",
+    creation_status: "Registered",
+    created_by: "u1",
+    created_at: "2026-11-22T00:00:00.000Z",
+    updated_at: "2026-11-22T00:00:00.000Z",
+  };
+
+  it("keeps both Created and Registered datasets with all fields", () => {
+    const out = normalizePublicDatasets([created, registered]);
+    expect(out).toHaveLength(2);
+    expect(out.map((d) => d.datasetId)).toEqual(["1830596054845292", "1169732842278579"]);
+    const imCrm = out.find((d) => d.datasetId === "1169732842278579")!;
+    expect(imCrm).toMatchObject({
+      id: "row-registered",
+      datasetName: "IM CRM",
+      businessPortfolioId: "1171141236081090",
+      datasetType: "CRM",
+      creationStatus: "Registered",
+    });
+  });
+
+  it("drops malformed rows without blanking valid ones", () => {
+    const out = normalizePublicDatasets([
+      registered,
+      null,
+      undefined,
+      "nope",
+      42,
+      { id: "", dataset_id: "1169732842278579" },
+      { id: "row-x" },
+      { id: 7, dataset_id: "1169732842278579" },
+      { id: "row-y", dataset_id: "   " },
+    ]);
+    expect(out.map((d) => d.datasetId)).toEqual(["1169732842278579"]);
+  });
+
+  it("returns [] for non-array payloads", () => {
+    expect(normalizePublicDatasets(null)).toEqual([]);
+    expect(normalizePublicDatasets(undefined)).toEqual([]);
+    expect(normalizePublicDatasets({})).toEqual([]);
   });
 });

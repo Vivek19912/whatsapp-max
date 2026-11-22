@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
   tables: {} as Record<string, Array<Record<string, unknown>>>,
   linkage: true as boolean,
   token: "STORED_TOKEN",
+  configDbError: null as { code: string; message: string } | null,
 }));
 
 vi.mock("@/lib/auth/account", () => ({
@@ -60,6 +61,7 @@ function fakeDb() {
       order: () => chain(table, filters),
       limit: (n: number) => chain(table, [...filters, ["__limit", n]] as never),
       maybeSingle: async () => {
+        if (table === "meta_crm_config" && h.configDbError) throw h.configDbError;
         const rows = (tables[table] ?? []).filter((r) =>
           filters.every(([c, v]) => (c === "__limit" ? true : r[c] === v)),
         );
@@ -142,6 +144,7 @@ beforeEach(() => {
   h.role = "admin";
   h.linkage = true;
   h.token = "STORED_TOKEN";
+  h.configDbError = null;
   h.tables = {
     meta_crm_datasets: [
       {
@@ -210,6 +213,21 @@ describe("GET /api/integrations/meta-crm/config", () => {
     const json = (await res.json()) as { ok: boolean; config: { enabled: boolean } };
     expect(json.ok).toBe(true);
     expect(json.config.enabled).toBe(false);
+  });
+
+  it("returns an honest unconfigured state when the config table is missing", async () => {
+    h.configDbError = { code: "42P01", message: 'relation "meta_crm_config" does not exist' };
+    const res = await configGet();
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      ok: boolean;
+      migrationMissing: boolean;
+      config: { enabled: boolean; datasetId: null };
+    };
+    expect(json.ok).toBe(true);
+    expect(json.migrationMissing).toBe(true);
+    expect(json.config.enabled).toBe(false);
+    expect(json.config.datasetId).toBeNull();
   });
 });
 
