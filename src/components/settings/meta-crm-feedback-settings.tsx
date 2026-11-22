@@ -340,10 +340,13 @@ export function MetaCrmFeedbackSettings() {
                     onValueChange={(v) => setSelectedDataset(v ?? "")}
                     disabled={disabled || saving || datasets.length === 0}
                   >
-                    <SelectTrigger id="meta-crm-feedback-dataset">
+                    <SelectTrigger
+                      id="meta-crm-feedback-dataset"
+                      className="h-auto min-h-9 w-full py-2 *:data-[slot=select-value]:line-clamp-none"
+                    >
                       <SelectValue placeholder={datasets.length === 0 ? "No datasets registered yet" : "Select a dataset"} />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className="w-max min-w-(--anchor-width) max-w-[calc(100vw-2rem)] [&_[data-slot=select-item-text]]:whitespace-normal [&_[data-slot=select-item-text]]:break-words">
                       {datasets.map((d) => (
                         <SelectItem key={d.id} value={d.id}>
                           {d.datasetName} · {d.datasetId}

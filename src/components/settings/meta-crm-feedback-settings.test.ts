@@ -77,4 +77,18 @@ describe("MetaCrmFeedbackSettings", () => {
     expect(src).toContain("migrationMissing");
     expect(src).toContain("175_meta_crm_feedback");
   });
+
+  it("sizes the dataset dropdown to its content without clipping text", () => {
+    // Root causes: the shared trigger pairs a fixed h-8 with py-2
+    // (16px content box vs 20px text) and clamps the value with
+    // line-clamp-1 (overflow hidden); the popup is locked to the
+    // anchor width so long "name · id" options clip. The usage
+    // below overrides all three via tailwind-merge (later classes
+    // win the conflict groups) without touching the shared file.
+    expect(src).toContain("h-auto min-h-9 w-full");
+    expect(src).toContain("*:data-[slot=select-value]:line-clamp-none");
+    expect(src).toContain("w-max min-w-(--anchor-width) max-w-[calc(100vw-2rem)]");
+    // Long option labels may wrap instead of clipping on narrow screens.
+    expect(src).toContain("[&_[data-slot=select-item-text]]:whitespace-normal");
+  });
 });
