@@ -313,7 +313,7 @@ describe("drainCrmEventsQueue", () => {
       flow_id: "flow-1",
       flow_run_id: "run-1",
       submission_id: "sub-1",
-      meta_lead_id: "LEAD1",
+      meta_lead_id: "1176464514919762",
       event_name: "QualifiedLead",
       from_quality: "",
       to_quality: "Qualified Lead",
@@ -345,7 +345,8 @@ describe("drainCrmEventsQueue", () => {
         expect(body.data[0]).toMatchObject({
           event_name: "QualifiedLead",
           action_source: "system_generated",
-          user_data: { lead_id: "LEAD1" },
+          // Documented integer form: exact digits, zero precision loss.
+          user_data: { lead_id: 1176464514919762 },
           event_id: "uuid-evt-1",
         });
         return jsonResponse({ events_received: 1 });
@@ -388,6 +389,68 @@ describe("drainCrmEventsQueue", () => {
     expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
     expect(tables.meta_crm_events[0].status).toBe("skipped");
     expect(tables.meta_crm_events[0].attempts).toBe(3);
+  });
+
+  it("delivers the stored occurrence time verbatim on retry (never the send moment)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const { db } = makeDb({
+      meta_crm_events: [seedEvent({ event_time: "2026-11-20T14:00:00.000Z" })],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      // No contacts/submissions seeded: matching resolves to empty,
+      // the historical occurrence must still be exact.
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)).data[0] as Record<string, unknown>);
+        return jsonResponse({ events_received: 1 });
+      }) as unknown as typeof fetch,
+    });
+    expect(out.sent).toBe(1);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].event_time).toBe(Math.floor(Date.parse("2026-11-20T14:00:00.000Z") / 1000));
+  });
+
+  it("includes hashed email/phone from the lead contact when available", async () => {
+    const { sha256Hex } = await import("./matching");
+    const bodies: Array<{ user_data: Record<string, unknown> }> = [];
+    const { db } = makeDb({
+      meta_crm_events: [seedEvent()],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      flow_runs: [{ id: "run-1", account_id: "acct-1", contact_id: "c-1" }],
+      contacts: [
+        { id: "c-1", account_id: "acct-1", email: "John_Smith@gmail.com", phone: "(650) 555-1212" },
+      ],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)).data[0]);
+        return jsonResponse({ events_received: 1 });
+      }) as unknown as typeof fetch,
+    });
+    expect(out.sent).toBe(1);
+    expect(bodies).toHaveLength(1);
+    const userData = bodies[0].user_data;
+    // Exact lead id preserved verbatim; identifiers hashed, never raw.
+    expect(userData.lead_id).toBe(1176464514919762);
+    expect(userData.em).toEqual([sha256Hex("john_smith@gmail.com")]);
+    expect(userData.ph).toEqual([sha256Hex("6505551212")]);
+    expect(JSON.stringify(userData)).not.toContain("John_Smith");
+    expect(JSON.stringify(userData)).not.toContain("650");
+  });
+
+  it("parks rows with invalid Meta Lead IDs as skipped (never retried, never sent)", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_events: [seedEvent({ meta_lead_id: "FORM-99" })],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        throw new Error("must not call Meta");
+      }) as unknown as typeof fetch,
+    });
+    expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
+    expect(tables.meta_crm_events[0].status).toBe("skipped");
+    expect(String(tables.meta_crm_events[0].last_error)).toContain("Meta Lead ID");
   });
 });
 

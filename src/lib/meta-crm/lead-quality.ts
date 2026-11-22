@@ -106,12 +106,28 @@ export function buildCrmEventsUrl(datasetId: string): string {
   return `https://graph.facebook.com/v27.0/${datasetId.trim()}/events`;
 }
 
+export interface CrmUserData {
+  /**
+   * Exact Meta Lead ID digits (un-hashed — Meta matches CRM events
+   * on it verbatim). Kept as the exact digit string in memory so
+   * no precision is ever lost; the JSON serializer emits it as a
+   * JSON number (Meta's documented integer type) whenever the
+   * digits convert to a JS number with zero precision loss, and
+   * preserves the exact digit string otherwise.
+   */
+  lead_id: string;
+  /** SHA-256 hex of the Meta-normalized email (server-hashed). */
+  em?: string[];
+  /** SHA-256 hex of the Meta-normalized phone (server-hashed). */
+  ph?: string[];
+}
+
 export interface CrmEventPayload {
   event_name: CrmEventName;
-  /** Unix seconds — actual business-event time, never fabricated. */
+  /** Unix seconds — the actual business-event (stage-change) time, never fabricated. */
   event_time: number;
   action_source: typeof CRM_ACTION_SOURCE;
-  user_data: { lead_id: string };
+  user_data: CrmUserData;
   /**
    * REQUIRED by the Conversion Leads payload spec: the CRM tool
    * name plus event_source "crm". Without these, Meta cannot
@@ -122,11 +138,91 @@ export interface CrmEventPayload {
   event_id: string;
 }
 
+/**
+ * Outgoing Conversions API request body for CRM events: Meta's
+ * documented structure wraps event objects inside a top-level
+ * `data` array, posted to `/{DATASET_ID}/events`.
+ */
+export interface CrmRequestBody {
+  data: [CrmEventPayload];
+}
+
+/** Build the exact outgoing request body (single shared constructor). */
+export function buildCrmRequestBody(event: CrmEventPayload): CrmRequestBody {
+  return { data: [event] };
+}
+
+/** Upper bound for Meta Lead ID digits (docs: 15–17 digits; 20 caps abuse without blocking valid ids). */
+export const MAX_META_LEAD_ID_LENGTH = 20;
+
+/**
+ * Validate a Meta Lead ID: digits only, non-empty, bounded length.
+ * Returns the exact digit string. Throws (never coerces, never
+ * hashes, never substitutes another id) on anything else.
+ */
+export function validateMetaLeadId(raw: unknown): string {
+  const digits = typeof raw === "string" ? raw.trim() : "";
+  if (!/^\d+$/.test(digits) || digits.length > MAX_META_LEAD_ID_LENGTH) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message:
+        "Refusing to send a CRM event without a valid numeric Meta Lead ID (digits only).",
+      status: 400,
+    });
+  }
+  return digits;
+}
+
+/**
+ * True when the digit string converts to a JS number with zero
+ * precision loss. Larger identifiers stay exact strings — never
+ * imprecise numbers.
+ */
+export function isSafeJsonInteger(digits: string): boolean {
+  if (!/^\d+$/.test(digits)) return false;
+  try {
+    return BigInt(digits) <= BigInt(Number.MAX_SAFE_INTEGER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Serialize the outgoing request body. `lead_id` is emitted as a
+ * JSON number (Meta's documented integer type) exactly when the
+ * digits are exactly representable; otherwise the exact digit
+ * string is preserved rather than corrupted by float precision.
+ */
+export function serializeCrmRequestBody(body: CrmRequestBody): string {
+  return JSON.stringify(body, (key, value: unknown) =>
+    key === "lead_id" &&
+    typeof value === "string" &&
+    /^\d+$/.test(value) &&
+    isSafeJsonInteger(value)
+      ? Number(value)
+      : value,
+  );
+}
+
+/** Parse one validated request body back (tests/diagnostics only). */
+export function parseCrmRequestBody(text: string): CrmRequestBody {
+  return JSON.parse(text) as CrmRequestBody;
+}
+
+/** Clock skew tolerated when rejecting future event times. */
+const EVENT_TIME_FUTURE_TOLERANCE_MS = 5 * 60_000;
+
 export function buildCrmEventPayload(args: {
   eventName: CrmEventName;
   eventTimeIso: string;
   metaLeadId: string;
   eventUuid: string;
+  /**
+   * Optional pre-hashed matching identifiers (server-side SHA-256
+   * of Meta-normalized values). Raw contact data must never reach
+   * this builder — hashing happens in server-only code.
+   */
+  match?: { em?: string[]; ph?: string[] };
 }): CrmEventPayload {
   const ms = Date.parse(args.eventTimeIso);
   if (Number.isNaN(ms)) {
@@ -136,19 +232,28 @@ export function buildCrmEventPayload(args: {
       status: 400,
     });
   }
-  const leadId = args.metaLeadId.trim();
-  if (leadId === "") {
+  // The timestamp must be the actual occurrence (stage-change)
+  // time — never the future. Retries reuse the stored occurrence,
+  // so a historical payload is never "refreshed".
+  if (ms > Date.now() + EVENT_TIME_FUTURE_TOLERANCE_MS) {
     throw new MetaCrmError({
       code: "invalid_input",
-      message: "Refusing to send a CRM event without the original Meta Lead ID.",
+      message: "Refusing to send a CRM event with a future event time.",
       status: 400,
     });
   }
+  const leadId = validateMetaLeadId(args.metaLeadId);
+  const em = (args.match?.em ?? []).filter((s) => typeof s === "string" && s !== "");
+  const ph = (args.match?.ph ?? []).filter((s) => typeof s === "string" && s !== "");
   return {
     event_name: args.eventName,
     event_time: Math.floor(ms / 1000),
     action_source: CRM_ACTION_SOURCE,
-    user_data: { lead_id: leadId },
+    user_data: {
+      lead_id: leadId,
+      ...(em.length > 0 ? { em } : {}),
+      ...(ph.length > 0 ? { ph } : {}),
+    },
     custom_data: { lead_event_source: CRM_LEAD_EVENT_SOURCE, event_source: CRM_EVENT_SOURCE },
     event_id: args.eventUuid,
   };
@@ -162,16 +267,25 @@ export interface LeadQualityPreviewFingerprint {
   toQuality: string;
   datasetId: string;
   metaLeadId: string;
+  /**
+   * Stage-change (occurrence) time: the send must deliver the event
+   * with this exact timestamp, so a re-save (new occurrence) or a
+   * contact-data change invalidates the preview.
+   */
+  occurrenceTimeIso: string;
+  /** SHA-256 match hashes included in the payload (never raw data). */
+  matchEm: readonly string[];
+  matchPh: readonly string[];
 }
 
 /**
  * Server-generated preview id: a stable fingerprint of everything a
  * manual send depends on. The send endpoint recomputes it from live
  * DB state and rejects mismatches (HTTP 409 + fresh preview), so a
- * preview can never be replayed after the lead, dataset, or event
- * mapping changed underneath it. Volatile fields (event_time,
- * event_id) are deliberately excluded — they are regenerated at
- * send time from the same builder.
+ * preview can never be replayed after the lead, dataset, event
+ * mapping, occurrence time, or match data changed underneath it.
+ * The ledger-generated event_id is deliberately excluded — it is
+ * created at send time; everything else must match exactly.
  */
 export function buildLeadQualityPreviewId(
   fingerprint: LeadQualityPreviewFingerprint,
@@ -186,7 +300,10 @@ export function buildLeadQualityPreviewId(
     datasetId: fingerprint.datasetId,
     eventName: fingerprint.eventName,
     flowId: fingerprint.flowId,
+    matchEm: [...fingerprint.matchEm],
+    matchPh: [...fingerprint.matchPh],
     metaLeadId: fingerprint.metaLeadId,
+    occurrenceTimeIso: fingerprint.occurrenceTimeIso,
     runId: fingerprint.runId,
     toQuality: fingerprint.toQuality,
   });
@@ -263,7 +380,10 @@ export async function sendCrmEvent(args: SendCrmEventArgs): Promise<SentCrmEvent
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ data: [args.payload] }),
+      // The exact outgoing body: event objects wrapped in the
+      // documented top-level `data` array, lead_id numerically
+      // serialized only when exactly representable.
+      body: serializeCrmRequestBody(buildCrmRequestBody(args.payload)),
     });
   } catch {
     throw new MetaCrmError({

@@ -14,7 +14,7 @@ interface CrmPreviewPayload {
   event_name: string;
   event_time: number;
   action_source: string;
-  user_data: { lead_id: string };
+  user_data: { lead_id: string; em?: string[]; ph?: string[] };
   custom_data: { lead_event_source: string; event_source: string };
   event_id: string;
 }
@@ -28,16 +28,33 @@ interface CrmPreview {
   eventName: string | null;
   datasetId: string | null;
   metaLeadId: string | null;
+  occurrenceTimeIso: string | null;
   previewId: string | null;
   payload: CrmPreviewPayload | null;
+  requestBody: { data: [CrmPreviewPayload] } | null;
+  warnings: string[];
+  matchInfo: { hasEmail: boolean; hasPhone: boolean };
   lastEvent: {
     id: string;
     eventName: string;
+    eventTime: number | null;
     status: string;
     lastError: string | null;
     sentAt: string | null;
     createdAt: string;
   } | null;
+}
+
+function formatInstant(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "—";
+  return new Date(ms).toLocaleString();
+}
+
+function formatEpoch(sec: number | null): string {
+  if (sec === null || sec === undefined) return "—";
+  return `${new Date(sec * 1000).toLocaleString()} (${sec})`;
 }
 
 /**
@@ -66,6 +83,7 @@ export function MetaCrmSendSection({
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,6 +151,23 @@ export function MetaCrmSendSection({
     }
   }
 
+  async function copyPayload() {
+    if (!preview?.requestBody) return;
+    const text = JSON.stringify(preview.requestBody, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
   const last = preview?.lastEvent ?? null;
   const delivery: "sending" | "not_sent" | "queued" | "sent" | "failed" | "skipped" =
     sending ? "sending" : !last ? "not_sent" : last.status === "pending" ? "queued"
@@ -189,9 +224,28 @@ export function MetaCrmSendSection({
             </dd>
           </div>
           <div className="flex justify-between gap-4">
-            <dt className="text-muted-foreground shrink-0">Timestamp</dt>
-            <dd className="text-muted-foreground max-w-[60%] text-right text-xs">
-              Set at send time
+            <dt className="text-muted-foreground shrink-0">Event time</dt>
+            <dd className="text-foreground max-w-[60%] text-right text-xs">
+              {preview.payload ? formatEpoch(preview.payload.event_time) : "—"}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-muted-foreground shrink-0">Sent at</dt>
+            <dd className="text-foreground max-w-[60%] text-right text-xs">
+              {last?.sentAt ? formatInstant(last.sentAt) : "—"}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-muted-foreground shrink-0">Matching</dt>
+            <dd className="text-foreground max-w-[60%] text-right text-xs">
+              {preview.matchInfo.hasEmail || preview.matchInfo.hasPhone
+                ? [
+                    preview.matchInfo.hasEmail ? "hashed email" : null,
+                    preview.matchInfo.hasPhone ? "hashed phone" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" + ")
+                : "lead ID only"}
             </dd>
           </div>
           {last ? (
@@ -199,7 +253,6 @@ export function MetaCrmSendSection({
               <dt className="text-muted-foreground shrink-0">Last delivery</dt>
               <dd className="text-foreground text-right text-xs">
                 {last.eventName} · {last.status}
-                {last.sentAt ? ` · ${last.sentAt}` : ""}
                 {last.lastError ? ` · ${last.lastError}` : ""}
               </dd>
             </div>
@@ -207,10 +260,43 @@ export function MetaCrmSendSection({
         </dl>
       )}
 
-      {preview?.payload ? (
-        <pre className="bg-muted mt-2 max-h-48 overflow-auto rounded-md p-2 font-mono text-[11px] break-all whitespace-pre-wrap">
-          {JSON.stringify(preview.payload, null, 2)}
-        </pre>
+      {preview?.warnings && preview.warnings.length > 0 ? (
+        <ul className="mt-2 space-y-1">
+          {preview.warnings.map((w) => (
+            <li key={w} className="text-xs text-amber-600 dark:text-amber-400">
+              {w}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {preview?.requestBody ? (
+        <>
+          <pre className="bg-muted mt-2 max-h-64 overflow-auto rounded-md p-2 font-mono text-[11px] break-all whitespace-pre-wrap">
+            {JSON.stringify(preview.requestBody, null, 2)}
+          </pre>
+          <div className="mt-2 flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              onClick={copyPayload}
+            >
+              {copied ? "Copied" : "Copy Payload"}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              disabled={loading}
+              onClick={load}
+            >
+              Refresh Status
+            </Button>
+          </div>
+        </>
       ) : null}
       {preview ? (
         <p className="text-muted-foreground mt-1 text-xs">

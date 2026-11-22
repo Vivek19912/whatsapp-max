@@ -115,18 +115,21 @@ export async function POST(request: Request) {
 
     // Chain from_quality off the lead's latest sent row so repeat
     // sends of an unchanged status collapse to "unchanged" instead
-    // of fabricating new transitions.
+    // of fabricating new transitions. The delivered event_time is
+    // the preview's occurrence (stage-change) instant — never the
+    // send-click moment, never refreshed on retry.
     const fromQuality = await resolveManualFromQuality(supabase, {
       accountId,
       runId,
     });
+    const occurrenceIso = preview.occurrenceTimeIso ?? new Date().toISOString();
     const outcome = await enqueueLeadQualityEvent(supabaseAdmin(), {
       accountId,
       flowId,
       runId,
       fromQuality,
       toQuality: preview.status,
-      eventTimeIso: new Date().toISOString(),
+      eventTimeIso: occurrenceIso,
       actorUserId: userId,
     });
 

@@ -38,6 +38,7 @@ import {
   sendCrmEvent,
   type CrmEventName,
 } from "./lead-quality";
+import { resolveLeadMatchHashes } from "./matching";
 
 // ---------- config ---------------------------------------------
 
@@ -442,14 +443,21 @@ export async function drainCrmEventsQueue(
         out.failed += 1;
         continue;
       }
-      const payload = buildCrmEventPayload({
-        eventName: row.event_name as CrmEventName,
-        eventTimeIso: row.event_time,
-        metaLeadId: row.meta_lead_id,
-        eventUuid: row.event_uuid,
-      });
       let response: unknown = null;
       try {
+        // Built inside the guarded section: a builder rejection
+        // (bad id, bad time) lands in the invalid_input branch
+        // below (skipped), never in the retry loop.
+        const payload = buildCrmEventPayload({
+          eventName: row.event_name as CrmEventName,
+          eventTimeIso: row.event_time,
+          metaLeadId: row.meta_lead_id,
+          eventUuid: row.event_uuid,
+          // Matching identifiers are resolved from the lead at send
+          // time (same resolver the preview uses) — the ledger row
+          // keeps the occurrence + identity, never raw PII.
+          match: await resolveRowMatchHashes(db, row),
+        });
         ({ response } = await sendCrmEvent({
           datasetId: config.dataset_id,
           accessToken: token,
@@ -458,6 +466,23 @@ export async function drainCrmEventsQueue(
         }));
       } catch (err) {
         if (err instanceof MetaCrmError) {
+          // Invalid input (bad id, bad time) can never succeed on
+          // retry — park the row as skipped with the reason instead
+          // of burning all attempts. Auth/permission failures still
+          // retry until attempts are spent (the token may be
+          // refreshed or re-granted).
+          if (err.code === "invalid_input") {
+            await db
+              .from("meta_crm_events")
+              .update({
+                status: "skipped",
+                last_error: err.message,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", row.id);
+            out.skipped += 1;
+            continue;
+          }
           // Auth/permission failures still retry until attempts are
           // spent (the token may be refreshed or re-granted); the
           // diagnostic is preserved on the row either way.
@@ -498,6 +523,27 @@ export async function drainCrmEventsQueue(
     }
   }
   return out;
+}
+
+/**
+ * Match hashes for one ledger row at drain time. Best-effort: a
+ * resolver failure must never lose the valid lead_id match, so it
+ * resolves to no extra identifiers (the payload still carries the
+ * exact Meta Lead ID) rather than failing the row.
+ */
+async function resolveRowMatchHashes(
+  db: SupabaseClient,
+  row: CrmEventRow,
+): Promise<{ em: string[]; ph: string[] }> {
+  try {
+    const match = await resolveLeadMatchHashes(db, {
+      accountId: row.account_id ?? "",
+      runId: row.flow_run_id ?? "",
+    });
+    return { em: match.em, ph: match.ph };
+  } catch {
+    return { em: [], ph: [] };
+  }
 }
 
 async function failRow(

@@ -13,8 +13,13 @@ import {
   LEAD_QUALITY_TOOLTIP,
   buildCrmEventPayload,
   buildCrmEventsUrl,
+  buildCrmRequestBody,
+  isSafeJsonInteger,
   leadQualityToEvent,
+  parseCrmRequestBody,
   sendCrmEvent,
+  serializeCrmRequestBody,
+  validateMetaLeadId,
 } from "./lead-quality";
 import { MetaCrmError } from "./datasets";
 
@@ -104,10 +109,122 @@ describe("buildCrmEventPayload", () => {
     ).toThrow(MetaCrmError);
   });
 
+  it("rejects non-numeric, substituted, or over-long lead ids (never coerced)", () => {
+    for (const bad of ["LEAD1", "FORM-99", "12ab34", "", "1".repeat(21)]) {
+      expect(() => validateMetaLeadId(bad)).toThrow(MetaCrmError);
+      expect(() =>
+        buildCrmEventPayload({
+          eventName: "Lead",
+          eventTimeIso: "2026-11-22T10:00:00.000Z",
+          metaLeadId: bad,
+          eventUuid: "u",
+        }),
+      ).toThrow(MetaCrmError);
+    }
+    expect(validateMetaLeadId("  1176464514919762  ")).toBe("1176464514919762");
+  });
+
+  it("rejects future event times (occurrence only, never the future)", () => {
+    expect(() =>
+      buildCrmEventPayload({
+        eventName: "QualifiedLead",
+        eventTimeIso: new Date(Date.now() + 60 * 60_000).toISOString(),
+        metaLeadId: "1176464514919762",
+        eventUuid: "u",
+      }),
+    ).toThrow(MetaCrmError);
+  });
+
+  it("includes pre-hashed match data when provided, omits it otherwise", () => {
+    const withMatch = buildCrmEventPayload({
+      eventName: "QualifiedLead",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      metaLeadId: "1176464514919762",
+      eventUuid: "u",
+      match: { em: ["aaa"], ph: ["bbb"] },
+    });
+    expect(withMatch.user_data).toEqual({
+      lead_id: "1176464514919762",
+      em: ["aaa"],
+      ph: ["bbb"],
+    });
+    const without = buildCrmEventPayload({
+      eventName: "Lead",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      metaLeadId: "1176464514919762",
+      eventUuid: "u",
+    });
+    expect(without.user_data).toEqual({ lead_id: "1176464514919762" });
+  });
+
   it("pins the v27.0 events endpoint with the dataset id as text", () => {
     expect(buildCrmEventsUrl("1830596054845292")).toBe(
       "https://graph.facebook.com/v27.0/1830596054845292/events",
     );
+  });
+});
+
+describe("CRM request body (documented `data` wrapper)", () => {
+  it("wraps the event in a top-level data array with all CRM parameters", () => {
+    const payload = buildCrmEventPayload({
+      eventName: "InterestedLead",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      metaLeadId: "1176464514919762",
+      eventUuid: "fc4bb2a7482cc029",
+    });
+    const body = buildCrmRequestBody(payload);
+    expect(body).toEqual({
+      data: [
+        {
+          event_name: "InterestedLead",
+          event_time: Math.floor(Date.parse("2026-11-22T10:00:00.000Z") / 1000),
+          action_source: "system_generated",
+          user_data: { lead_id: "1176464514919762" },
+          custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
+          event_id: "fc4bb2a7482cc029",
+        },
+      ],
+    });
+    // The serializer emits exactly-representable ids as JSON numbers
+    // (Meta's documented integer type); parsing them back yields the
+    // numeric form of the same event.
+    const reparsed = parseCrmRequestBody(serializeCrmRequestBody(body));
+    expect(reparsed.data[0]).toEqual({
+      ...body.data[0],
+      user_data: { lead_id: 1176464514919762 },
+    });
+  });
+
+  it("serializes safe ids as JSON numbers (documented integer type)", () => {
+    const payload = buildCrmEventPayload({
+      eventName: "Lead",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      metaLeadId: "1176464514919762",
+      eventUuid: "u",
+    });
+    expect(isSafeJsonInteger("1176464514919762")).toBe(true);
+    const parsed = JSON.parse(serializeCrmRequestBody(buildCrmRequestBody(payload)));
+    expect(parsed.data[0].user_data.lead_id).toBe(1176464514919762);
+  });
+
+  it("preserves over-range ids as exact strings (never imprecise numbers)", () => {
+    const huge = "99999999999999999999";
+    expect(isSafeJsonInteger(huge)).toBe(false);
+    const parsed = JSON.parse(
+      serializeCrmRequestBody(
+        buildCrmRequestBody(
+          buildCrmEventPayload({
+            eventName: "Lead",
+            eventTimeIso: "2026-11-22T10:00:00.000Z",
+            metaLeadId: huge.slice(0, 20),
+            eventUuid: "u",
+          }),
+        ),
+      ),
+    );
+    // Exact digits survive; a float conversion would corrupt them.
+    expect(parsed.data[0].user_data.lead_id).toBe(huge.slice(0, 20));
+    expect(typeof parsed.data[0].user_data.lead_id).toBe("string");
   });
 });
 
@@ -137,6 +254,8 @@ describe("sendCrmEvent", () => {
     const body = JSON.parse(String(calls[0].init.body));
     expect(body.data).toHaveLength(1);
     expect(body.data[0].event_id).toBe("uuid-1");
+    // Documented integer form on the wire for exactly-representable ids.
+    expect(body.data[0].user_data.lead_id).toBe(123);
     expect(response).toEqual({ events_received: 1 });
   });
 

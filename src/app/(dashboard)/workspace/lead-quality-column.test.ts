@@ -15,6 +15,7 @@ const read = (rel: string) => readFileSync(`${root}/${rel}`, "utf8");
 const defaults = read("src/lib/flows/workspace-defaults.ts");
 const chips = read("src/lib/flows/workspace-select-chips.ts");
 const leadQuality = read("src/lib/meta-crm/lead-quality.ts");
+const matching = read("src/lib/meta-crm/matching.ts");
 const preview = read("src/lib/meta-crm/preview.ts");
 const feedback = read("src/lib/meta-crm/feedback.ts");
 const valuesRoute = read("src/app/api/flows/[id]/workspace-values/route.ts");
@@ -75,7 +76,9 @@ describe("Lead Quality column wiring", () => {
   it("the preview comes from the shared builder, never invented data", () => {
     expect(preview).toContain("assembleLeadQualityPreview");
     expect(preview).toContain("buildCrmEventPayload");
+    expect(preview).toContain("buildCrmRequestBody");
     expect(preview).toContain("buildLeadQualityPreviewId");
+    expect(preview).toContain("resolveLeadMatchHashes");
     expect(previewRoute).toContain("assembleLeadQualityPreview");
   });
 
@@ -84,6 +87,37 @@ describe("Lead Quality column wiring", () => {
     expect(sendRoute).toContain("scheduleCrmDrainSoon");
     expect(sendRoute).toContain("stale_preview");
     expect(sendRoute).toContain('requireRole("agent")');
+    // The delivered timestamp is the occurrence, never the click time.
+    expect(sendRoute).toContain("occurrenceTimeIso");
+  });
+
+  it("the payload honors the documented CRM wire format", () => {
+    // `data` wrapper, numeric-when-safe lead_id, hashed matching,
+    // system_generated + crm event_source, stable event_id.
+    expect(leadQuality).toContain("buildCrmRequestBody");
+    expect(leadQuality).toContain("serializeCrmRequestBody");
+    expect(leadQuality).toContain("validateMetaLeadId");
+    expect(leadQuality).toContain("isSafeJsonInteger");
+    expect(leadQuality).toContain("CrmRequestBody");
+    expect(leadQuality).toContain("data: [event]");
+    expect(leadQuality).not.toContain("JSON.stringify({ data: [args.payload] })");
+    // Raw contact data never reaches the builder — hashes only.
+    expect(matching).toContain("sha256Hex");
+    expect(matching).toContain("normalizeEmailForMeta");
+    expect(matching).toContain("normalizePhoneForMeta");
+    // Invalid identifiers are rejected, never coerced or substituted.
+    expect(leadQuality).toContain("invalid_input");
+    expect(feedback).toContain("invalid_input");
+  });
+
+  it("occurrence timestamps come from stored history, never the send moment", () => {
+    expect(preview).toContain("occurrenceTimeIso");
+    expect(preview).toContain("updated_at");
+    expect(preview).toContain("meta_created_time");
+    expect(preview).toContain("invalid_timestamp");
+    // Retries reuse the stored occurrence — the drain never refreshes it.
+    expect(feedback).toContain("eventTimeIso: row.event_time");
+    expect(feedback).toContain("invalid_input");
   });
 
   it("the drawer shows the preview with an explicit Send button", () => {
@@ -91,6 +125,14 @@ describe("Lead Quality column wiring", () => {
     expect(component).toContain("Send to Meta");
     expect(component).toContain("/api/integrations/meta-crm/preview");
     expect(component).toContain("/api/integrations/meta-crm/manual-send");
+    // Full outgoing body, occurrence + send times, warnings, copy.
+    expect(component).toContain("requestBody");
+    expect(component).toContain("Event time");
+    expect(component).toContain("Sent at");
+    expect(component).toContain("Copy Payload");
+    expect(component).toContain("Refresh Status");
+    // Queued is never shown as Sent.
+    expect(component).toContain('"queued"');
     // Saving a status opens the drawer on the edited lead.
     expect(page).toContain("setCrmPreviewBump");
   });

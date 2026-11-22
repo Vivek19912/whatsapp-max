@@ -156,14 +156,40 @@ const RUN = "run-1";
 
 function seed(o: {
   stored?: string | null;
+  /** Status-change instant for the stored value (occurrence). */
+  storedAt?: string;
+  /** Meta lead creation instant (initial-stage occurrence). */
+  leadCreatedAt?: string;
   submission?: boolean;
+  metaLeadId?: string;
+  contact?: { email?: string | null; phone?: string | null } | null;
+  submissionAnswers?: Record<string, string> | null;
   enabled?: boolean;
   datasetId?: string | null;
   legacy?: boolean;
 } = {}) {
-  const { stored = "Qualified Lead", submission = true, enabled = true, datasetId = "DS1", legacy = false } = o;
+  const {
+    stored = "Qualified Lead",
+    // Relative instants: the stored status changed 2h ago; the Meta
+    // lead was created 4h ago. Fixed dates would rot into the
+    // future-gate as wall-clock time moves on.
+    storedAt = new Date(Date.now() - 2 * 3600_000).toISOString(),
+    leadCreatedAt = new Date(Date.now() - 4 * 3600_000).toISOString(),
+    submission = true,
+    metaLeadId = "1176464514919762",
+    contact = null,
+    submissionAnswers = null,
+    enabled = true,
+    datasetId = "DS1",
+    legacy = false,
+  } = o;
   h.tables = {
-    flow_runs: [{ id: RUN, account_id: "acct-1", flow_id: FLOW }],
+    flow_runs: [
+      { id: RUN, account_id: "acct-1", flow_id: FLOW, contact_id: contact ? "c-1" : null, created_at: "2026-11-22T10:05:00.000Z" },
+    ],
+    contacts: contact
+      ? [{ id: "c-1", account_id: "acct-1", email: contact.email ?? null, phone: contact.phone ?? null }]
+      : [],
     workspace_fields: [
       {
         id: "f-q",
@@ -176,9 +202,22 @@ function seed(o: {
       },
     ],
     workspace_values:
-      stored === null ? [] : [{ account_id: "acct-1", field_id: "f-q", flow_run_id: RUN, value_text: stored }],
+      stored === null
+        ? []
+        : [{ account_id: "acct-1", field_id: "f-q", flow_run_id: RUN, value_text: stored, updated_at: storedAt }],
     meta_lead_submissions: submission
-      ? [{ id: "sub-1", account_id: "acct-1", flow_run_id: RUN, meta_lead_id: "LEAD123" }]
+      ? [
+          {
+            id: "sub-1",
+            account_id: "acct-1",
+            flow_run_id: RUN,
+            meta_lead_id: metaLeadId,
+            meta_created_time: leadCreatedAt,
+            created_at: "2026-11-22T10:05:00.000Z",
+            answers: submissionAnswers ?? {},
+            field_data: [],
+          },
+        ]
       : [],
     meta_crm_config: [
       {
@@ -226,8 +265,11 @@ describe("GET preview", () => {
       eventName: string;
       datasetId: string;
       metaLeadId: string;
+      occurrenceTimeIso: string;
       previewId: string;
       payload: Record<string, unknown>;
+      requestBody: { data: Array<Record<string, unknown>> };
+      warnings: string[];
       lastEvent: null;
     };
     expect(p.sendable).toBe(true);
@@ -235,27 +277,37 @@ describe("GET preview", () => {
     expect(p.stored).toBe("Qualified Lead");
     expect(p.eventName).toBe("QualifiedLead");
     expect(p.datasetId).toBe("DS1");
-    expect(p.metaLeadId).toBe("LEAD123");
+    expect(p.metaLeadId).toBe("1176464514919762");
+    // Occurrence = the stored status-change moment, not the send moment.
+    expect(Date.parse(p.occurrenceTimeIso)).toBeLessThanOrEqual(Date.now());
+    expect(p.payload.event_time).toBe(Math.floor(Date.parse(p.occurrenceTimeIso) / 1000));
     expect(typeof p.previewId).toBe("string");
     // Same builder fields as the send path: official shape, real ids.
     expect(p.payload).toMatchObject({
       event_name: "QualifiedLead",
       action_source: "system_generated",
-      user_data: { lead_id: "LEAD123" },
+      user_data: { lead_id: "1176464514919762" },
       custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
     });
     expect(p.payload.event_id).toBe(p.previewId);
+    // The complete outgoing body wraps the event in `data`.
+    expect(p.requestBody.data).toHaveLength(1);
+    expect(p.requestBody.data[0]).toEqual(p.payload);
     expect(JSON.stringify(json)).not.toContain("STORED");
   });
 
   it("falls back to the Lead display default when nothing is stored", async () => {
-    seed({ stored: null });
+    seed({ stored: null, leadCreatedAt: "2026-11-20T09:00:00.000Z" });
     const res = await previewGet(new Request(previewUrl));
-    const json = (await res.json()) as { preview: { sendable: boolean; status: string; stored: null; eventName: string } };
+    const json = (await res.json()) as {
+      preview: { sendable: boolean; status: string; stored: null; eventName: string; occurrenceTimeIso: string };
+    };
     expect(json.preview.sendable).toBe(true);
     expect(json.preview.status).toBe("Lead");
     expect(json.preview.stored).toBeNull();
     expect(json.preview.eventName).toBe("Lead");
+    // Initial stage occurrence = the Meta lead creation instant.
+    expect(json.preview.occurrenceTimeIso).toBe("2026-11-20T09:00:00.000Z");
   });
 
   it("gates unmapped legacy values without a payload", async () => {
@@ -265,6 +317,47 @@ describe("GET preview", () => {
     expect(json.preview.sendable).toBe(false);
     expect(json.preview.reason).toBe("unmapped");
     expect(json.preview.payload).toBeNull();
+  });
+
+  it("blocks invalid Meta Lead IDs and future timestamps", async () => {
+    seed({ metaLeadId: "FORM-99" });
+    const badId = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: string; payload: null };
+    };
+    expect(badId.preview.sendable).toBe(false);
+    expect(badId.preview.reason).toBe("invalid_lead_id");
+    expect(badId.preview.payload).toBeNull();
+
+    seed({ storedAt: new Date(Date.now() + 60 * 60_000).toISOString() });
+    const future = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: string };
+    };
+    expect(future.preview.sendable).toBe(false);
+    expect(future.preview.reason).toBe("invalid_timestamp");
+  });
+
+  it("includes hashed match data and warnings without raw contact values", async () => {
+    seed({ contact: { email: "Buyer@Example.com", phone: "9876543210" } });
+    const json = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; matchInfo: { hasEmail: boolean; hasPhone: boolean }; payload: { user_data: Record<string, unknown> }; warnings: string[] };
+    };
+    expect(json.preview.sendable).toBe(true);
+    expect(json.preview.matchInfo).toEqual({ hasEmail: true, hasPhone: true });
+    const userData = json.preview.payload.user_data;
+    expect(userData.lead_id).toBe("1176464514919762");
+    expect(userData.em).toHaveLength(1);
+    expect(userData.ph).toHaveLength(1);
+    expect(JSON.stringify(userData)).not.toContain("Buyer");
+    expect(JSON.stringify(userData)).not.toContain("9876543210");
+  });
+
+  it("warns on stale occurrences but stays sendable", async () => {
+    seed({ storedAt: "2026-11-10T10:00:00.000Z" });
+    const json = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; warnings: string[] };
+    };
+    expect(json.preview.sendable).toBe(true);
+    expect(json.preview.warnings.some((w) => w.includes("7 days"))).toBe(true);
   });
 
   it("gates leads without a Meta Lead ID and disabled workspaces", async () => {
@@ -343,8 +436,10 @@ describe("POST manual-send", () => {
       from_quality: "",
       to_quality: "Qualified Lead",
       dataset_id: "DS1",
-      meta_lead_id: "LEAD123",
+      meta_lead_id: "1176464514919762",
     });
+    // The stored occurrence (stage-change time) is delivered — never the click time.
+    expect(Date.parse(h.tables.meta_crm_events[0].event_time as string)).toBeLessThanOrEqual(Date.now());
   });
 
   it("rejects stale previews with a fresh one (409)", async () => {
@@ -361,6 +456,28 @@ describe("POST manual-send", () => {
     const json = (await res.json()) as { reason: string; preview: { eventName: string; previewId: string } };
     expect(json.reason).toBe("stale_preview");
     expect(json.preview.eventName).toBe("BookingConfirmed");
+    expect(h.tables.meta_crm_events).toHaveLength(0);
+  });
+
+  it("invalidates previews when the same status is re-saved (new occurrence)", async () => {
+    seed();
+    const preview = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { previewId: string };
+    };
+    // Same status, new save moment → new occurrence → old preview stale.
+    h.tables.workspace_values = [
+      {
+        account_id: "acct-1",
+        field_id: "f-q",
+        flow_run_id: RUN,
+        value_text: "Qualified Lead",
+        updated_at: new Date().toISOString(),
+      },
+    ];
+    const res = await sendPost(post({ flow_id: FLOW, run_id: RUN, preview_id: preview.preview.previewId }));
+    expect(res.status).toBe(409);
+    const json = (await res.json()) as { reason: string };
+    expect(json.reason).toBe("stale_preview");
     expect(h.tables.meta_crm_events).toHaveLength(0);
   });
 
