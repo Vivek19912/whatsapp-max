@@ -27,8 +27,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { supabaseAdmin } from "@/lib/flows/admin-client";
-import { getUserToken } from "@/lib/meta-lead-ads/store";
+import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
 
 import { isUniqueViolation } from "./store";
 import { MetaCrmError, verifyDatasetOwnership } from "./datasets";
@@ -48,6 +47,12 @@ export interface CrmFeedbackConfig {
   dataset_id: string | null;
   business_portfolio_id: string | null;
   dataset_name: string | null;
+  /**
+   * Dedicated Meta CRM access token, application-encrypted
+   * (AES-256-GCM). NEVER the Meta Lead Ads connection token, never
+   * plaintext, never returned by any API.
+   */
+  access_token: string | null;
   enabled: boolean;
   verified_at: string | null;
   last_error: string | null;
@@ -65,6 +70,8 @@ export interface PublicCrmFeedbackConfig {
   verifiedAt: string | null;
   lastError: string | null;
   lastEventAt: string | null;
+  /** Whether a CRM token is stored — the value itself never leaves the server. */
+  hasToken: boolean;
 }
 
 export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): PublicCrmFeedbackConfig {
@@ -76,6 +83,7 @@ export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): Public
     verifiedAt: row?.verified_at ?? null,
     lastError: row?.last_error ?? null,
     lastEventAt: row?.last_event_at ?? null,
+    hasToken: !!row?.access_token,
   };
 }
 
@@ -94,9 +102,20 @@ export async function getCrmFeedbackConfig(
 
 /**
  * Save the per-account feedback config. Enabling requires a
- * dataset that belongs to this account AND passes Meta
- * verification with the account's stored token (fail closed).
- * Disabling (or clearing the dataset) never needs verification.
+ * dataset that belongs to this account AND a dedicated Meta CRM
+ * access token that passes Meta verification (fail closed).
+ * Disabling (or clearing the dataset) never needs verification and
+ * never erases the stored token.
+ *
+ * Token semantics (`accessToken` arg):
+ *   * `undefined` → keep the currently stored token (including on
+ *     disable — temporarily switching feedback off never erases it).
+ *   * `""`        → securely remove the stored token.
+ *   * non-empty   → validate + verify the replacement against the
+ *     chosen dataset, then store it encrypted.
+ *
+ * The Meta Lead Ads connection token is NEVER consulted here — not
+ * for verification, not for sending, not as a fallback.
  */
 export async function saveCrmFeedbackConfig(
   db: SupabaseClient,
@@ -105,6 +124,7 @@ export async function saveCrmFeedbackConfig(
     enabled: boolean;
     datasetRowId: string | null;
     actorUserId: string;
+    accessToken?: string;
     fetchImpl?: typeof fetch;
   },
 ): Promise<{ config: CrmFeedbackConfig; ownershipVerified: boolean }> {
@@ -121,6 +141,14 @@ export async function saveCrmFeedbackConfig(
   }>;
 
   if (!args.enabled) {
+    // Disabling clears the dataset selection but NEVER the stored
+    // CRM token (explicit removal only) and never needs Meta.
+    const tokenPatch: Record<string, unknown> =
+      args.accessToken === undefined
+        ? {}
+        : args.accessToken.trim() === ""
+          ? { access_token: null }
+          : { access_token: encrypt(args.accessToken.trim()) };
     const { data, error } = await db
       .from("meta_crm_config")
       .upsert(
@@ -135,6 +163,7 @@ export async function saveCrmFeedbackConfig(
           last_error: null,
           updated_by: args.actorUserId,
           updated_at: new Date().toISOString(),
+          ...tokenPatch,
         },
         { onConflict: "account_id" },
       )
@@ -153,22 +182,46 @@ export async function saveCrmFeedbackConfig(
     });
   }
 
-  // Verify with the account's stored credential (never a pasted
-  // token here): the dataset must be readable, the business must
-  // be accessible, and the listing must show the dataset under
-  // that business. Every uncertainty surfaces its own precise
-  // error (expired token, missing permission, bad portfolio id,
-  // outage) — never the generic ownership message.
-  let token: string;
-  try {
-    token = await getUserToken(db, args.accountId);
-  } catch {
+  // Resolve the dedicated CRM token: an explicit replacement wins,
+  // explicit removal while enabling is rejected, otherwise the
+  // stored token applies. The Meta Lead Ads connection token is
+  // never consulted — not here, not at send time, never.
+  const tokenOp =
+    args.accessToken === undefined
+      ? "keep"
+      : args.accessToken.trim() === ""
+        ? "remove"
+        : "replace";
+  if (tokenOp === "remove") {
     throw new MetaCrmError({
-      code: "auth_failed",
-      message: "No authorized Meta connection for this workspace. Connect Meta Lead Ads first.",
-      status: 409,
+      code: "invalid_input",
+      message: "Cannot enable CRM feedback while removing its access token. Save a replacement token first.",
+      status: 400,
     });
   }
+  const candidateToken = tokenOp === "replace" ? (args.accessToken as string).trim() : null;
+  let effectiveToken: string | null = candidateToken;
+  if (!effectiveToken) {
+    try {
+      effectiveToken = await getCrmAccessToken(db, args.accountId);
+    } catch {
+      effectiveToken = null;
+    }
+  }
+  if (!effectiveToken) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Add a Meta CRM access token below before enabling feedback. The token is verified against the selected dataset.",
+      status: 400,
+    });
+  }
+
+  // Verify with the dedicated CRM credential only. Every uncertainty
+  // surfaces its own precise error (expired token, missing
+  // permission, bad portfolio id, outage) — never the generic
+  // ownership message. A saved-then-stored token is re-verified on
+  // every enable; saving alone never marks anything verified.
+  const token: string = effectiveToken;
   let ownership: { verified: true } | { verified: false; reason: string };
   try {
     ownership = await verifyDatasetOwnership({
@@ -245,6 +298,10 @@ export async function saveCrmFeedbackConfig(
         last_error: null,
         updated_by: args.actorUserId,
         updated_at: now,
+        // Store the replacement only after it verified above.
+        // Untouched (`keep`) omits the key so the stored token
+        // survives the upsert byte-for-byte.
+        ...(tokenOp === "replace" ? { access_token: encrypt(candidateToken as string) } : {}),
       },
       { onConflict: "account_id" },
     )
@@ -252,6 +309,44 @@ export async function saveCrmFeedbackConfig(
     .single();
   if (error || !data) throw error ?? new Error("Failed to save CRM feedback config.");
   return { config: data as CrmFeedbackConfig, ownershipVerified: true };
+}
+
+/**
+ * Retrieve the workspace's dedicated Meta CRM access token,
+ * decrypted in server memory only. Throws `invalid_input` when no
+ * token is stored (callers park the work instead of retrying) and
+ * never logs or returns the value. The Meta Lead Ads connection
+ * token is never consulted.
+ */
+export async function getCrmAccessToken(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<string> {
+  const { data, error } = await db
+    .from("meta_crm_config")
+    .select("access_token")
+    .eq("account_id", accountId)
+    .maybeSingle();
+  if (error) throw error;
+  const encrypted = (data as { access_token: string | null } | null)?.access_token;
+  if (!encrypted) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message:
+        "No Meta CRM access token is configured for this workspace. Add one in Settings → Meta → CRM Integration before sending.",
+      status: 400,
+    });
+  }
+  try {
+    return decrypt(encrypted);
+  } catch {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message:
+        "The stored Meta CRM access token cannot be read. Save a new token in Settings → Meta → CRM Integration.",
+      status: 400,
+    });
+  }
 }
 
 // ---------- events ----------------------------------------------
@@ -435,13 +530,29 @@ export async function drainCrmEventsQueue(
         out.skipped += 1;
         continue;
       }
+      // Authentication: the workspace's dedicated Meta CRM access
+      // token ONLY. The Meta Lead Ads connection token is never
+      // consulted here — no fallback, no mixing across workspaces
+      // (every query is account-scoped). A missing token parks the
+      // row as skipped with a meaningful message (it can never
+      // succeed on retry until a token is configured).
       let token: string;
       try {
-        token = await getUserToken(db, row.account_id);
-      } catch {
-        await failRow(db, row, "No authorized Meta connection for this workspace.", false);
-        out.failed += 1;
-        continue;
+        token = await getCrmAccessToken(db, row.account_id);
+      } catch (err) {
+        if (err instanceof MetaCrmError && err.code === "invalid_input") {
+          await db
+            .from("meta_crm_events")
+            .update({
+              status: "skipped",
+              last_error: err.message.slice(0, 500),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", row.id);
+          out.skipped += 1;
+          continue;
+        }
+        throw err;
       }
       let response: unknown = null;
       try {

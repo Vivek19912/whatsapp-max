@@ -15,6 +15,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { encrypt } from "@/lib/whatsapp/encryption";
+
 import { assembleLeadQualityPreview } from "./preview";
 import { buildCrmRequestBody, serializeCrmRequestBody } from "./lead-quality";
 
@@ -49,8 +51,8 @@ const COLUMNS: Record<string, Set<string>> = {
   ]),
   meta_crm_config: new Set([
     "account_id", "dataset_ref", "dataset_id", "business_portfolio_id",
-    "dataset_name", "enabled", "verified_at", "last_error", "last_event_at",
-    "updated_by", "created_at", "updated_at",
+    "dataset_name", "access_token", "enabled", "verified_at", "last_error",
+    "last_event_at", "updated_by", "created_at", "updated_at",
   ]),
   meta_crm_events: new Set([
     "id", "account_id", "flow_id", "flow_run_id", "submission_id",
@@ -154,7 +156,7 @@ function seedTables() {
       },
     ],
     meta_crm_config: [
-      { account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" },
+      { account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt("CRM_TOKEN_strict") },
     ],
     meta_crm_events: [],
   };

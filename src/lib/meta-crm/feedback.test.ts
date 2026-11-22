@@ -44,9 +44,16 @@ vi.mock("./datasets", async (importOriginal) => {
 import {
   drainCrmEventsQueue,
   enqueueLeadQualityEvent,
+  getCrmAccessToken,
   getCrmFeedbackConfig,
   saveCrmFeedbackConfig,
 } from "./feedback";
+import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
+
+// Distinct credentials prove separation: the drain must send with
+// the dedicated CRM token and never touch the Lead Ads one.
+const CRM_TOKEN = "CRM_TOKEN_dedicated_abc";
+const LEAD_ADS_TOKEN = "LEAD_ADS_TOKEN_xyz";
 
 type Row = Record<string, unknown>;
 
@@ -194,7 +201,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   h.ownership = "ok";
-  h.token = "STORED_TOKEN";
+  h.token = LEAD_ADS_TOKEN;
   h.tokenCalls = 0;
 });
 
@@ -334,7 +341,7 @@ describe("drainCrmEventsQueue", () => {
     const seen: string[] = [];
     const { db, tables } = makeDb({
       meta_crm_events: [seedEvent()],
-      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt(CRM_TOKEN) }],
     });
     const out = await drainCrmEventsQueue(db, {
       limit: 20,
@@ -353,16 +360,46 @@ describe("drainCrmEventsQueue", () => {
       }) as unknown as typeof fetch,
     });
     expect(out).toEqual({ attempted: 1, sent: 1, failed: 0, skipped: 0 });
-    expect(seen).toEqual(["Bearer STORED_TOKEN"]);
+    // The dedicated CRM token — never the Lead Ads connection token.
+    expect(seen).toEqual([`Bearer ${CRM_TOKEN}`]);
+    expect(h.tokenCalls).toBe(0);
     expect(tables.meta_crm_events[0].status).toBe("sent");
     expect(tables.meta_crm_events[0].attempts).toBe(1);
-    expect(JSON.stringify(tables).includes("STORED_TOKEN")).toBe(false);
+    expect(JSON.stringify(tables).includes(LEAD_ADS_TOKEN)).toBe(false);
+    expect(JSON.stringify(tables).includes(CRM_TOKEN)).toBe(false);
+  });
+
+  it("skips rows when no dedicated CRM token is configured (never sends, never retries)", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_events: [seedEvent()],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        throw new Error("must not call Meta");
+      }) as unknown as typeof fetch,
+    });
+    expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
+    expect(tables.meta_crm_events[0].status).toBe("skipped");
+    expect(String(tables.meta_crm_events[0].last_error)).toContain("access token");
+    expect(h.tokenCalls).toBe(0);
+  });
+
+  it("getCrmAccessToken decrypts the stored token and rejects absence without leaking it", async () => {
+    const { db } = makeDb({
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "DS", access_token: encrypt(CRM_TOKEN) }],
+    });
+    await expect(getCrmAccessToken(db, "acct-1")).resolves.toBe(CRM_TOKEN);
+    const { db: empty } = makeDb({ meta_crm_config: [] });
+    const err = await getCrmAccessToken(empty, "acct-1").catch((e) => e);
+    expect(String(err.message)).toContain("access token");
+    expect(String(err.message)).not.toContain(CRM_TOKEN);
   });
 
   it("marks auth failures failed with backoff and preserves identity", async () => {
     const { db, tables } = makeDb({
       meta_crm_events: [seedEvent()],
-      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt(CRM_TOKEN) }],
     });
     const out = await drainCrmEventsQueue(db, {
       fetchImpl: (async () =>
@@ -395,7 +432,7 @@ describe("drainCrmEventsQueue", () => {
     const bodies: Array<Record<string, unknown>> = [];
     const { db } = makeDb({
       meta_crm_events: [seedEvent({ event_time: "2026-11-20T14:00:00.000Z" })],
-      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt(CRM_TOKEN) }],
       // No contacts/submissions seeded: matching resolves to empty,
       // the historical occurrence must still be exact.
     });
@@ -415,7 +452,7 @@ describe("drainCrmEventsQueue", () => {
     const bodies: Array<{ user_data: Record<string, unknown> }> = [];
     const { db } = makeDb({
       meta_crm_events: [seedEvent()],
-      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt(CRM_TOKEN) }],
       flow_runs: [{ id: "run-1", account_id: "acct-1", contact_id: "c-1" }],
       contacts: [
         { id: "c-1", account_id: "acct-1", email: "John_Smith@gmail.com", phone: "(650) 555-1212" },
@@ -441,7 +478,7 @@ describe("drainCrmEventsQueue", () => {
   it("parks rows with invalid Meta Lead IDs as skipped (never retried, never sent)", async () => {
     const { db, tables } = makeDb({
       meta_crm_events: [seedEvent({ meta_lead_id: "FORM-99" })],
-      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292" }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt(CRM_TOKEN) }],
     });
     const out = await drainCrmEventsQueue(db, {
       fetchImpl: (async () => {
@@ -455,7 +492,7 @@ describe("drainCrmEventsQueue", () => {
 });
 
 describe("saveCrmFeedbackConfig", () => {
-  it("enables only after ownership verification with the stored token", async () => {
+  it("enables only after verifying the dedicated CRM token (never the Lead Ads token)", async () => {
     const { db, tables } = makeDb({
       meta_crm_datasets: [
         {
@@ -473,13 +510,41 @@ describe("saveCrmFeedbackConfig", () => {
       enabled: true,
       datasetRowId: "row-ds",
       actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
     });
     expect(ownershipVerified).toBe(true);
     expect(config.enabled).toBe(true);
     expect(config.dataset_id).toBe("1830596054845292");
     expect(config.verified_at).not.toBeNull();
-    expect(h.tokenCalls).toBeGreaterThan(0);
+    // The Lead Ads connection token is never consulted.
+    expect(h.tokenCalls).toBe(0);
     expect(tables.meta_crm_config).toHaveLength(1);
+    expect(decrypt(tables.meta_crm_config[0]?.access_token as string)).toBe(CRM_TOKEN);
+  });
+
+  it("refuses to enable without a CRM token (no silent fallback)", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        {
+          id: "row-ds",
+          account_id: "acct-1",
+          dataset_id: "1830596054845292",
+          business_portfolio_id: "BIZ1",
+          dataset_name: "IM CRM",
+        },
+      ],
+      meta_crm_config: [],
+    });
+    await expect(
+      saveCrmFeedbackConfig(db, {
+        accountId: "acct-1",
+        enabled: true,
+        datasetRowId: "row-ds",
+        actorUserId: "admin-1",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(tables.meta_crm_config).toHaveLength(0);
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("refuses to enable when the dataset is absent from the business listing", async () => {
@@ -502,11 +567,13 @@ describe("saveCrmFeedbackConfig", () => {
         enabled: true,
         datasetRowId: "row-ds",
         actorUserId: "admin-1",
+        accessToken: CRM_TOKEN,
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
     expect(tables.meta_crm_config[0]?.enabled).toBe(false);
     expect(String(tables.meta_crm_config[0]?.last_error)).toContain("1830596054845292");
     expect(String(tables.meta_crm_config[0]?.last_error)).toContain("BIZ1");
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("surfaces an expired token precisely instead of blaming ownership", async () => {
@@ -537,6 +604,7 @@ describe("saveCrmFeedbackConfig", () => {
       enabled: true,
       datasetRowId: "row-ds",
       actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
     }).catch((e) => e);
     expect(err).toBeInstanceOf(MetaCrmError);
     expect(err.code).toBe("auth_failed");
@@ -545,6 +613,7 @@ describe("saveCrmFeedbackConfig", () => {
     // Fail closed, but the stored diagnostic names the real cause.
     expect(tables.meta_crm_config[0]?.enabled).toBe(false);
     expect(String(tables.meta_crm_config[0]?.last_error)).toContain("expired or invalid");
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("surfaces missing dataset permissions precisely, with Meta codes", async () => {
@@ -575,6 +644,7 @@ describe("saveCrmFeedbackConfig", () => {
       enabled: true,
       datasetRowId: "row-ds",
       actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
     }).catch((e) => e);
     expect(err).toBeInstanceOf(MetaCrmError);
     expect(err.code).toBe("forbidden");
@@ -582,6 +652,7 @@ describe("saveCrmFeedbackConfig", () => {
     expect(err.metaSubcode).toBe(7);
     expect(String(err.message)).toContain("code 200");
     expect(tables.meta_crm_config[0]?.enabled).toBe(false);
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("surfaces listing outages as backend failures, not ownership verdicts", async () => {
@@ -612,12 +683,14 @@ describe("saveCrmFeedbackConfig", () => {
       enabled: true,
       datasetRowId: "row-ds",
       actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
     }).catch((e) => e);
     expect(err).toBeInstanceOf(MetaCrmError);
     expect(err.code).toBe("meta_error");
     expect(err.status).toBe(502);
     expect(String(err.message)).not.toMatch(/ownership could not be verified/i);
     expect(tables.meta_crm_config[0]?.enabled).toBe(false);
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("disables without verification and never touches Meta", async () => {

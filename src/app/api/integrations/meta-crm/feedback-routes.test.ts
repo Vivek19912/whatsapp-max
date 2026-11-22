@@ -13,6 +13,8 @@ const h = vi.hoisted(() => ({
   ownership: "ok" as "ok" | "not-owned" | { throw: unknown },
   token: "STORED_TOKEN",
   configDbError: null as { code: string; message: string } | null,
+  tokensSeen: [] as unknown[],
+  getUserTokenCalls: 0,
 }));
 
 vi.mock("@/lib/auth/account", () => ({
@@ -37,7 +39,13 @@ vi.mock("@/lib/meta-lead-ads/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/meta-lead-ads/store")>();
   return {
     ...actual,
-    getUserToken: async () => h.token,
+    // Lead Ads connection token — CRM Feedback must NEVER use it.
+    // Any call here is a separation violation; tests assert the
+    // count stays zero on every CRM path.
+    getUserToken: async () => {
+      h.getUserTokenCalls += 1;
+      return h.token;
+    },
   };
 });
 
@@ -45,7 +53,8 @@ vi.mock("@/lib/meta-crm/datasets", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/meta-crm/datasets")>();
   return {
     ...actual,
-    verifyDatasetOwnership: async () => {
+    verifyDatasetOwnership: async (args: { accessToken?: unknown }) => {
+      h.tokensSeen.push(args?.accessToken);
       if (h.ownership === "ok") return { verified: true };
       if (h.ownership === "not-owned") {
         return {
@@ -155,6 +164,8 @@ beforeEach(() => {
   h.ownership = "ok";
   h.token = "STORED_TOKEN";
   h.configDbError = null;
+  h.tokensSeen = [];
+  h.getUserTokenCalls = 0;
   h.tables = {
     meta_crm_datasets: [
       {
@@ -181,26 +192,95 @@ describe("PUT /api/integrations/meta-crm/config", () => {
       body: JSON.stringify(body),
     });
 
-  it("enables after verification and stores no token", async () => {
-    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+  it("enables after verification, encrypts the dedicated token, and never returns it", async () => {
+    const { decrypt } = await import("@/lib/whatsapp/encryption");
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds", accessToken: "CRM_TOKEN_new" }));
     expect(res.status).toBe(200);
     const json = (await res.json()) as { ok: boolean; ownershipVerified: boolean; config: Record<string, unknown> };
     expect(json.ok).toBe(true);
     expect(json.ownershipVerified).toBe(true);
     expect(json.config.enabled).toBe(true);
     expect(json.config.datasetId).toBe("1830596054845292");
-    expect(JSON.stringify(json).includes("STORED_TOKEN")).toBe(false);
+    expect(json.config.hasToken).toBe(true);
+    // The response carries a boolean, never the value.
+    expect(JSON.stringify(json)).not.toContain("CRM_TOKEN_new");
+    // Stored encrypted at rest — decrypts to the supplied value.
+    const stored = h.tables.meta_crm_config[0]?.access_token as string;
+    expect(typeof stored).toBe("string");
+    expect(stored).not.toContain("CRM_TOKEN_new");
+    expect(decrypt(stored)).toBe("CRM_TOKEN_new");
+    // Verification used the dedicated token — never the Lead Ads one.
+    expect(h.tokensSeen).toEqual(["CRM_TOKEN_new"]);
+    expect(h.getUserTokenCalls).toBe(0);
+    expect(JSON.stringify(h.tables).includes("STORED_TOKEN")).toBe(false);
+  });
+
+  it("requires a CRM token to enable (no silent fallback)", async () => {
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error?: string };
+    expect(json.error).toContain("access token");
+    expect(h.tables.meta_crm_config[0]?.enabled).not.toBe(true);
+    expect(h.tokensSeen).toHaveLength(0);
+  });
+
+  it("reuses the stored token without re-pasting, then rotates it", async () => {
+    const { decrypt, encrypt } = await import("@/lib/whatsapp/encryption");
+    h.tables.meta_crm_config = [
+      { account_id: "acct-1", enabled: false, dataset_id: null, access_token: encrypt("CRM_TOKEN_old") },
+    ];
+    const reuse = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    expect(reuse.status).toBe(200);
+    expect(h.tokensSeen).toEqual(["CRM_TOKEN_old"]);
+    expect(h.getUserTokenCalls).toBe(0);
+
+    const rotated = await configPut(put({ enabled: true, datasetRowId: "row-ds", accessToken: "CRM_TOKEN_rotated" }));
+    expect(rotated.status).toBe(200);
+    expect(h.tokensSeen).toEqual(["CRM_TOKEN_old", "CRM_TOKEN_rotated"]);
+    expect(decrypt(h.tables.meta_crm_config[0]?.access_token as string)).toBe("CRM_TOKEN_rotated");
+    expect(h.getUserTokenCalls).toBe(0);
+  });
+
+  it("disabling keeps the stored token; removal is explicit", async () => {
+    const { decrypt, encrypt } = await import("@/lib/whatsapp/encryption");
+    h.tables.meta_crm_config = [
+      { account_id: "acct-1", enabled: true, dataset_id: "1830596054845292", access_token: encrypt("CRM_TOKEN_keep") },
+    ];
+    const disabled = await configPut(put({ enabled: false, datasetRowId: null }));
+    expect(disabled.status).toBe(200);
+    const json = (await disabled.json()) as { config: { enabled: boolean; hasToken: boolean } };
+    expect(json.config.enabled).toBe(false);
+    expect(json.config.hasToken).toBe(true);
+    expect(decrypt(h.tables.meta_crm_config[0]?.access_token as string)).toBe("CRM_TOKEN_keep");
+
+    const removed = await configPut(put({ enabled: false, datasetRowId: null, removeAccessToken: true }));
+    expect(removed.status).toBe(200);
+    const removedJson = (await removed.json()) as { config: { hasToken: boolean } };
+    expect(removedJson.config.hasToken).toBe(false);
+    expect(h.tables.meta_crm_config[0]?.access_token).toBeNull();
+
+    // Enabling again without a token is refused.
+    const relapsed = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    expect(relapsed.status).toBe(400);
+  });
+
+  it("rejects enabling while removing the token", async () => {
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds", removeAccessToken: true }));
+    expect(res.status).toBe(400);
   });
 
   it("refuses to enable when the dataset is absent from the business listing", async () => {
     h.ownership = "not-owned";
-    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds", accessToken: "CRM_TOKEN_x" }));
     expect(res.status).toBe(403);
     const json = (await res.json()) as { error?: string; code?: string };
     expect(json.code).toBe("forbidden");
     // Names the actual ids instead of the generic ownership message.
     expect(json.error).toContain("1830596054845292");
     expect(h.tables.meta_crm_config[0]?.enabled).toBe(false);
+    // The failed replacement is never stored.
+    expect(h.tables.meta_crm_config[0]?.access_token).toBeUndefined();
+    expect(h.getUserTokenCalls).toBe(0);
   });
 
   it("surfaces an expired token precisely instead of blaming ownership", async () => {
@@ -214,13 +294,16 @@ describe("PUT /api/integrations/meta-crm/config", () => {
         metaSubcode: null,
       }),
     };
-    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds", accessToken: "CRM_TOKEN_expired" }));
     expect(res.status).toBe(401);
     const json = (await res.json()) as { error?: string; code?: string; metaCode?: number };
     expect(json.code).toBe("auth_failed");
     expect(json.metaCode).toBe(190);
     expect(json.error).toContain("expired or invalid");
     expect(h.tables.meta_crm_config[0]?.enabled).toBe(false);
+    // The rejected token is never stored; the Lead Ads token untouched.
+    expect(h.tables.meta_crm_config[0]?.access_token).toBeUndefined();
+    expect(h.getUserTokenCalls).toBe(0);
   });
 
   it("surfaces missing dataset permissions with Meta codes", async () => {
@@ -234,7 +317,7 @@ describe("PUT /api/integrations/meta-crm/config", () => {
         metaSubcode: 33,
       }),
     };
-    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds", accessToken: "CRM_TOKEN_perms" }));
     expect(res.status).toBe(403);
     const json = (await res.json()) as { error?: string; code?: string; metaCode?: number; metaSubcode?: number };
     expect(json.code).toBe("forbidden");
@@ -264,9 +347,22 @@ describe("GET /api/integrations/meta-crm/config", () => {
   it("returns null config when unconfigured", async () => {
     const res = await configGet();
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; config: { enabled: boolean } };
+    const json = (await res.json()) as { ok: boolean; config: { enabled: boolean; hasToken: boolean } };
     expect(json.ok).toBe(true);
     expect(json.config.enabled).toBe(false);
+    expect(json.config.hasToken).toBe(false);
+  });
+
+  it("reports token presence without ever returning the value", async () => {
+    const { encrypt } = await import("@/lib/whatsapp/encryption");
+    h.tables.meta_crm_config = [
+      { account_id: "acct-1", enabled: true, dataset_id: "DS1", access_token: encrypt("CRM_TOKEN_secret") },
+    ];
+    const res = await configGet();
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { config: { hasToken: boolean } };
+    expect(json.config.hasToken).toBe(true);
+    expect(JSON.stringify(json)).not.toContain("CRM_TOKEN_secret");
   });
 
   it("returns an honest unconfigured state when the config table is missing", async () => {

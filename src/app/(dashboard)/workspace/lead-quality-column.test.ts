@@ -91,6 +91,17 @@ describe("Lead Quality column wiring", () => {
     expect(sendRoute).toContain("occurrenceTimeIso");
   });
 
+  it("CRM Feedback never touches the Meta Lead Ads connection token", () => {
+    // Genuine backend separation: no import, no call, no fallback —
+    // verification, preview gating, and delivery all resolve the
+    // dedicated encrypted CRM credential instead.
+    expect(feedback).not.toContain("getUserToken");
+    expect(feedback).toContain("getCrmAccessToken");
+    expect(feedback).toContain("meta_crm_config");
+    expect(preview).toContain("no_token");
+    expect(preview).toContain("getCrmAccessToken");
+  });
+
   it("the payload honors the documented CRM wire format", () => {
     // `data` wrapper, numeric-when-safe lead_id, hashed matching,
     // system_generated + crm event_source, stable event_id.

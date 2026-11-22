@@ -1,11 +1,13 @@
 // GET /api/integrations/meta-crm/config
 // PUT /api/integrations/meta-crm/config
 //
-// Per-workspace (account) Meta CRM feedback configuration: on/off
-// plus the selected Meta CRM dataset. Enabling requires the
-// dataset to belong to this account AND pass Meta ownership
-// verification with the workspace's stored Meta connection
-// (fail closed — feedback stays disabled otherwise).
+// Per-workspace (account) Meta CRM feedback configuration: on/off,
+// the selected Meta CRM dataset, and the dedicated Meta CRM access
+// token (password input in Settings; stored encrypted, never
+// returned). Enabling requires the dataset to belong to this
+// account AND pass Meta verification with the dedicated CRM token
+// (fail closed — feedback stays disabled otherwise). The Meta Lead
+// Ads connection token is never used here.
 //
 // This is a NEW, independent integration. It does NOT inspect,
 // reuse, or depend on the retired Conversions API (`meta-capi`)
@@ -59,6 +61,13 @@ export async function PUT(request: Request) {
       typeof body.datasetRowId === "string" && body.datasetRowId.trim() !== ""
         ? body.datasetRowId.trim()
         : null;
+    // Dedicated CRM token semantics: absent = keep the stored
+    // token; "" (with removeAccessToken) = remove it; non-empty =
+    // replace it (verified against the dataset before storing).
+    // The raw value is never logged or returned.
+    const accessToken =
+      typeof body.accessToken === "string" ? body.accessToken : undefined;
+    const removeAccessToken = body.removeAccessToken === true;
     if (enabled && !datasetRowId) {
       return NextResponse.json(
         { error: "Select a CRM dataset to enable feedback." },
@@ -74,6 +83,7 @@ export async function PUT(request: Request) {
           enabled,
           datasetRowId,
           actorUserId: ctx.userId,
+          accessToken: removeAccessToken ? "" : accessToken,
         },
       );
       return NextResponse.json({

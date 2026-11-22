@@ -10,6 +10,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { encrypt } from "@/lib/whatsapp/encryption";
+
 const h = vi.hoisted(() => ({
   accountId: "acct-1",
   userId: "agent-1",
@@ -166,6 +168,8 @@ function seed(o: {
   submissionAnswers?: Record<string, string> | null;
   enabled?: boolean;
   datasetId?: string | null;
+  /** Dedicated CRM token: encrypted string stored, null = none configured. */
+  crmToken?: string | null;
   legacy?: boolean;
 } = {}) {
   const {
@@ -181,6 +185,7 @@ function seed(o: {
     submissionAnswers = null,
     enabled = true,
     datasetId = "DS1",
+    crmToken = "CRM_TOKEN_dedicated",
     legacy = false,
   } = o;
   h.tables = {
@@ -227,6 +232,8 @@ function seed(o: {
         dataset_ref: "row-ds",
         business_portfolio_id: "BIZ",
         dataset_name: "IM CRM",
+        // Dedicated token at rest (encrypted) — never the Lead Ads one.
+        access_token: crmToken === null ? null : encrypt(crmToken),
       },
     ],
     flows: [{ id: FLOW, account_id: "acct-1", kind: "meta_lead_ads" }],
@@ -358,6 +365,22 @@ describe("GET preview", () => {
     };
     expect(json.preview.sendable).toBe(true);
     expect(json.preview.warnings.some((w) => w.includes("7 days"))).toBe(true);
+  });
+
+  it("gates a missing dedicated token without sending anything", async () => {
+    seed({ crmToken: null });
+    const json = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: string; payload: null };
+    };
+    expect(json.preview.sendable).toBe(false);
+    expect(json.preview.reason).toBe("no_token");
+    expect(json.preview.payload).toBeNull();
+
+    const preview = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { previewId: string | null };
+    };
+    expect(preview.preview.previewId).toBeNull();
+    expect(h.tables.meta_crm_events).toHaveLength(0);
   });
 
   it("gates leads without a Meta Lead ID and disabled workspaces", async () => {

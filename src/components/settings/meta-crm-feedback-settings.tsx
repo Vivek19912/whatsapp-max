@@ -21,6 +21,8 @@ import { toast } from "sonner";
 import {
   AlertCircle,
   CheckCircle2,
+  Eye,
+  EyeOff,
   Loader2,
   RefreshCw,
   RotateCcw,
@@ -30,6 +32,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { normalizePublicDatasets, formatCrmDatasetLabel } from "@/lib/meta-crm/store";
 import {
@@ -56,6 +59,8 @@ interface FeedbackConfig {
   verifiedAt: string | null;
   lastError: string | null;
   lastEventAt: string | null;
+  /** Whether a CRM token is stored — the value itself never reaches the frontend. */
+  hasToken: boolean;
 }
 
 interface CrmEvent {
@@ -119,6 +124,12 @@ export function MetaCrmFeedbackSettings() {
   const [selectedDataset, setSelectedDataset] = useState("");
   const [enableChecked, setEnableChecked] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Dedicated CRM token input: held only for the save request, then
+  // cleared — the stored value is never readable here (hasToken is
+  // a boolean). Empty = keep the stored token.
+  const [crmToken, setCrmToken] = useState("");
+  const [showCrmToken, setShowCrmToken] = useState(false);
+  const [removingToken, setRemovingToken] = useState(false);
 
   const [events, setEvents] = useState<CrmEvent[] | null>(null);
   const [counts, setCounts] = useState({ pending: 0, sent: 0, failed: 0, skipped: 0 });
@@ -257,6 +268,9 @@ export function MetaCrmFeedbackSettings() {
         body: JSON.stringify({
           enabled: enableChecked,
           datasetRowId: enableChecked ? selectedDataset || null : null,
+          // Only sent when the user typed a replacement — empty
+          // keeps the stored token; removal has its own button.
+          ...(crmToken !== "" ? { accessToken: crmToken } : {}),
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
@@ -271,6 +285,8 @@ export function MetaCrmFeedbackSettings() {
         throw new Error(friendlyError(json, res.status));
       }
       setConfig(json.config);
+      setCrmToken("");
+      setShowCrmToken(false);
       if (json.config.enabled) {
         toast.success(
           json.ownershipVerified
@@ -287,6 +303,42 @@ export function MetaCrmFeedbackSettings() {
       void loadConfigState();
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleRemoveToken() {
+    if (removingToken) return;
+    setRemovingToken(true);
+    try {
+      const res = await fetch("/api/integrations/meta-crm/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: enableChecked,
+          datasetRowId: enableChecked ? selectedDataset || null : null,
+          removeAccessToken: true,
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        config?: FeedbackConfig;
+        error?: string;
+        metaCode?: number;
+        metaSubcode?: number;
+      };
+      if (!res.ok || !json.ok || !json.config) {
+        throw new Error(friendlyError(json, res.status));
+      }
+      setConfig(json.config);
+      setCrmToken("");
+      setShowCrmToken(false);
+      toast.success("CRM access token removed.");
+      void loadEvents();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not remove the CRM token.");
+      void loadConfigState();
+    } finally {
+      setRemovingToken(false);
     }
   }
 
@@ -396,6 +448,52 @@ export function MetaCrmFeedbackSettings() {
                 <p className="text-xs text-muted-foreground">
                   One dataset per workspace. Both created and registered datasets are
                   listed here — register datasets in “Created CRM Datasets” above.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="meta-crm-access-token">Meta CRM Access Token</Label>
+                <div className="relative">
+                  <Input
+                    id="meta-crm-access-token"
+                    type={showCrmToken ? "text" : "password"}
+                    autoComplete="new-password"
+                    placeholder="Paste your Meta CRM access token"
+                    value={crmToken}
+                    onChange={(e) => setCrmToken(e.target.value)}
+                    disabled={disabled || saving || removingToken || configMigrationMissing}
+                    className="pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCrmToken((v) => !v)}
+                    disabled={disabled || saving || removingToken}
+                    aria-label={showCrmToken ? "Hide CRM access token" : "Show CRM access token"}
+                    className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    {showCrmToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                  <span className="text-muted-foreground">
+                    {config?.hasToken ? "Token configured — stored encrypted." : "No token saved yet."}
+                  </span>
+                  {config?.hasToken ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveToken()}
+                      disabled={disabled || saving || removingToken || enableChecked}
+                      className="underline text-muted-foreground hover:text-foreground disabled:no-underline disabled:opacity-50"
+                    >
+                      {removingToken ? "Removing…" : "Remove saved token"}
+                    </button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Dedicated credential for CRM verification and event delivery only — never
+                  shared with the Meta Lead Ads connection. Leave blank to keep the saved
+                  token. Type a replacement to rotate it (verified on save). Disabling
+                  feedback never deletes it; disable first to remove it.
                 </p>
               </div>
 
@@ -518,8 +616,8 @@ export function MetaCrmFeedbackSettings() {
             </div>
           ) : !events || events.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No CRM events yet. New Meta leads queue a Lead event automatically once feedback is
-              enabled; quality changes queue their mapped event.
+              No CRM events yet. Select a Lead Quality status, review the payload
+              preview in the lead drawer, and use Send to Meta to deliver it.
             </p>
           ) : (
             <div className="space-y-2">

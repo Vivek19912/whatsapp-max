@@ -20,7 +20,8 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { getCrmFeedbackConfig } from "./feedback";
+import { getCrmAccessToken, getCrmFeedbackConfig } from "./feedback";
+import { MetaCrmError } from "./datasets";
 import {
   LEAD_QUALITY_DEFAULT_VALUE,
   buildCrmEventPayload,
@@ -41,6 +42,7 @@ export type LeadQualitySendGate =
   | "unmapped"
   | "no_meta_lead"
   | "disabled"
+  | "no_token"
   | "invalid_lead_id"
   | "invalid_timestamp";
 
@@ -324,6 +326,41 @@ export async function assembleLeadQualityPreview(
       sendable: false,
       reason: "disabled",
       message: "Meta CRM feedback is not enabled for this workspace, so sending is disabled.",
+      flowId: args.flowId,
+      runId: args.runId,
+      status,
+      stored,
+      eventName,
+      datasetId: config?.dataset_id ?? null,
+      metaLeadId: leadDigits,
+      occurrenceTimeIso,
+      previewId: null,
+      payload: null,
+      requestBody: null,
+      warnings: [],
+      matchInfo: { hasEmail: false, hasPhone: false },
+      lastEvent: await readLastEvent(db, args.accountId, args.runId),
+    };
+  }
+
+  // The dedicated CRM token must be configured — sending without
+  // it is blocked here (and again at send time), with a message
+  // pointing at Settings. Never falls back to any other credential.
+  let hasCrmToken = true;
+  try {
+    await getCrmAccessToken(db, args.accountId);
+  } catch (err) {
+    if (err instanceof MetaCrmError && err.code === "invalid_input") {
+      hasCrmToken = false;
+    } else {
+      throw err;
+    }
+  }
+  if (!hasCrmToken) {
+    return {
+      sendable: false,
+      reason: "no_token",
+      message: "No Meta CRM access token is configured for this workspace. Add one in Settings → Meta → CRM Integration before sending.",
       flowId: args.flowId,
       runId: args.runId,
       status,
