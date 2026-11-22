@@ -312,11 +312,36 @@ export async function saveCrmFeedbackConfig(
 }
 
 /**
+ * True when a Supabase/PostgREST error means the dedicated-token
+ * column does not exist — i.e. migration
+ * 176_meta_crm_dedicated_token has not been applied in this
+ * environment. The error is a plain object (no `.status`), which
+ * is exactly what toErrorResponse turns into a bare 500, so
+ * callers must map it to an actionable message instead.
+ */
+export function isMissingAccessTokenColumn(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  const message = (err as { message?: unknown }).message;
+  return (
+    code === "42703" &&
+    typeof message === "string" &&
+    message.includes("access_token")
+  );
+}
+
+/** Actionable message when migration 176 is missing (shared by routes). */
+export const TOKEN_STORAGE_MISSING_MESSAGE =
+  "CRM token storage is not ready: database migration 176_meta_crm_dedicated_token has not been applied. Apply it, then save the token again.";
+
+/**
  * Retrieve the workspace's dedicated Meta CRM access token,
  * decrypted in server memory only. Throws `invalid_input` when no
  * token is stored (callers park the work instead of retrying) and
- * never logs or returns the value. The Meta Lead Ads connection
- * token is never consulted.
+ * never logs or returns the value. A missing storage column (42703
+ * when migration 176 is not applied) becomes an actionable 503,
+ * never a bare 500. The Meta Lead Ads connection token is never
+ * consulted.
  */
 export async function getCrmAccessToken(
   db: SupabaseClient,
@@ -327,7 +352,16 @@ export async function getCrmAccessToken(
     .select("access_token")
     .eq("account_id", accountId)
     .maybeSingle();
-  if (error) throw error;
+  if (error) {
+    if (isMissingAccessTokenColumn(error)) {
+      throw new MetaCrmError({
+        code: "invalid_input",
+        message: TOKEN_STORAGE_MISSING_MESSAGE,
+        status: 503,
+      });
+    }
+    throw error;
+  }
   const encrypted = (data as { access_token: string | null } | null)?.access_token;
   if (!encrypted) {
     throw new MetaCrmError({

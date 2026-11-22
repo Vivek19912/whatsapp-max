@@ -18,8 +18,10 @@ import { NextResponse } from "next/server";
 import { getCurrentAccount, requireRole, toErrorResponse } from "@/lib/auth/account";
 import {
   getCrmFeedbackConfig,
+  isMissingAccessTokenColumn,
   saveCrmFeedbackConfig,
   toPublicCrmFeedbackConfig,
+  TOKEN_STORAGE_MISSING_MESSAGE,
 } from "@/lib/meta-crm/feedback";
 import { MetaCrmError } from "@/lib/meta-crm/datasets";
 
@@ -27,9 +29,29 @@ export async function GET() {
   try {
     const ctx = await getCurrentAccount();
     const config = await getCrmFeedbackConfig(ctx.supabase, ctx.accountId);
+    // Proactive storage probe: SELECT * tolerates the missing
+    // column, so an un-migrated database would otherwise look
+    // healthy until the first token save 500s. Flag it so the UI
+    // shows guidance instead of a dead token field.
+    let tokenMigrationMissing = false;
+    try {
+      const probe = await ctx.supabase
+        .from("meta_crm_config")
+        .select("access_token")
+        .eq("account_id", ctx.accountId)
+        .limit(1);
+      if (probe.error) throw probe.error;
+    } catch (err) {
+      if (isMissingAccessTokenColumn(err)) {
+        tokenMigrationMissing = true;
+      } else {
+        throw err;
+      }
+    }
     return NextResponse.json({
       ok: true,
       config: toPublicCrmFeedbackConfig(config),
+      tokenMigrationMissing,
     });
   } catch (err) {
     // meta_crm_config table missing (migration 175 not applied yet)
@@ -103,9 +125,25 @@ export async function PUT(request: Request) {
           { status: err.status },
         );
       }
+      // Un-migrated database (migration 176 missing): the upsert
+      // references access_token and PostgREST rejects it with a
+      // plain 42703 object — map it to an actionable 503 instead
+      // of the bare "Internal server error".
+      if (isMissingAccessTokenColumn(err)) {
+        return NextResponse.json(
+          { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
+          { status: 503 },
+        );
+      }
       throw err;
     }
   } catch (err) {
+    if (isMissingAccessTokenColumn(err)) {
+      return NextResponse.json(
+        { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
+        { status: 503 },
+      );
+    }
     return toErrorResponse(err);
   }
 }

@@ -21,6 +21,7 @@ const feedback = read("src/lib/meta-crm/feedback.ts");
 const valuesRoute = read("src/app/api/flows/[id]/workspace-values/route.ts");
 const previewRoute = read("src/app/api/integrations/meta-crm/preview/route.ts");
 const sendRoute = read("src/app/api/integrations/meta-crm/manual-send/route.ts");
+const configRoute = read("src/app/api/integrations/meta-crm/config/route.ts");
 const processLead = read("src/lib/meta-lead-ads/process-lead.ts");
 const page = read("src/app/(dashboard)/workspace/page.tsx");
 const component = read("src/components/workspace/meta-crm-send-section.tsx");
@@ -100,6 +101,16 @@ describe("Lead Quality column wiring", () => {
     expect(feedback).toContain("meta_crm_config");
     expect(preview).toContain("no_token");
     expect(preview).toContain("getCrmAccessToken");
+  });
+
+  it("a missing token migration fails loudly, never as a bare 500", () => {
+    // Regression for the deployed "Internal server error" toast:
+    // when migration 176 is absent, PostgREST rejects with a plain
+    // 42703 object — routes must map it to an actionable message.
+    expect(feedback).toContain("isMissingAccessTokenColumn");
+    expect(feedback).toContain("176_meta_crm_dedicated_token");
+    expect(configRoute).toContain("migration_missing");
+    expect(configRoute).toContain("tokenMigrationMissing");
   });
 
   it("the payload honors the documented CRM wire format", () => {

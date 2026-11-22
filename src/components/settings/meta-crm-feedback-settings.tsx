@@ -118,6 +118,7 @@ export function MetaCrmFeedbackSettings() {
   const [configLoading, setConfigLoading] = useState(true);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configMigrationMissing, setConfigMigrationMissing] = useState(false);
+  const [tokenMigrationMissing, setTokenMigrationMissing] = useState(false);
   const [datasets, setDatasets] = useState<SavedDataset[]>([]);
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
@@ -175,6 +176,7 @@ export function MetaCrmFeedbackSettings() {
         ok?: boolean;
         config?: FeedbackConfig;
         migrationMissing?: boolean;
+        tokenMigrationMissing?: boolean;
         error?: string;
       };
       if (!cfgRes.ok || !cfg.ok || !cfg.config) {
@@ -183,6 +185,7 @@ export function MetaCrmFeedbackSettings() {
       setConfig(cfg.config);
       setEnableChecked(cfg.config.enabled);
       setConfigMigrationMissing(cfg.migrationMissing === true);
+      setTokenMigrationMissing(cfg.tokenMigrationMissing === true);
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : "Could not load CRM feedback.");
     } finally {
@@ -461,13 +464,13 @@ export function MetaCrmFeedbackSettings() {
                     placeholder="Paste your Meta CRM access token"
                     value={crmToken}
                     onChange={(e) => setCrmToken(e.target.value)}
-                    disabled={disabled || saving || removingToken || configMigrationMissing}
+                    disabled={disabled || saving || removingToken || configMigrationMissing || tokenMigrationMissing}
                     className="pr-10"
                   />
                   <button
                     type="button"
                     onClick={() => setShowCrmToken((v) => !v)}
-                    disabled={disabled || saving || removingToken}
+                    disabled={disabled || saving || removingToken || tokenMigrationMissing}
                     aria-label={showCrmToken ? "Hide CRM access token" : "Show CRM access token"}
                     className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
                   >
@@ -482,7 +485,7 @@ export function MetaCrmFeedbackSettings() {
                     <button
                       type="button"
                       onClick={() => void handleRemoveToken()}
-                      disabled={disabled || saving || removingToken || enableChecked}
+                      disabled={disabled || saving || removingToken || enableChecked || tokenMigrationMissing}
                       className="underline text-muted-foreground hover:text-foreground disabled:no-underline disabled:opacity-50"
                     >
                       {removingToken ? "Removing…" : "Remove saved token"}
@@ -502,6 +505,14 @@ export function MetaCrmFeedbackSettings() {
                   CRM feedback settings are not available yet — apply migration{" "}
                   <code>175_meta_crm_feedback</code> to enable configuration and event
                   tracking. Dataset registration above is unaffected.
+                </p>
+              ) : null}
+
+              {tokenMigrationMissing ? (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                  CRM token storage is not ready yet — apply migration{" "}
+                  <code>176_meta_crm_dedicated_token</code> to enable the access token
+                  field. Dataset and on/off saves keep working meanwhile.
                 </p>
               ) : null}
 
