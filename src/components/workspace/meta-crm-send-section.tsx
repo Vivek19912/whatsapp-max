@@ -16,7 +16,7 @@ interface CrmPreviewPayload {
   action_source: string;
   user_data: { lead_id: string; em?: string[]; ph?: string[] };
   custom_data: { lead_event_source: string; event_source: string };
-  event_id: string;
+  // NOTE: no event_id — intentionally omitted from the Meta payload.
 }
 
 interface CrmPreview {

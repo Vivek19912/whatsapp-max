@@ -354,8 +354,12 @@ describe("drainCrmEventsQueue", () => {
           action_source: "system_generated",
           // Documented integer form: exact digits, zero precision loss.
           user_data: { lead_id: 1176464514919762 },
-          event_id: "uuid-evt-1",
         });
+        // No event_id is ever sent — the ledger uuid stays internal.
+        expect(body.data[0]).not.toHaveProperty("event_id");
+        expect(String(init.body)).not.toContain("event_id");
+        // Internal identity is preserved on the row for auditing.
+        expect(tables.meta_crm_events[0].event_uuid).toBe("uuid-evt-1");
         return jsonResponse({ events_received: 1 });
       }) as unknown as typeof fetch,
     });

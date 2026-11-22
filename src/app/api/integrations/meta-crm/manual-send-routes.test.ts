@@ -2,8 +2,8 @@
 //
 // Guarantees: selecting/clearing never auto-sends (save path has no
 // hook — pinned by the file-content contract); the preview comes
-// from the SHARED builder (preview payload == send payload modulo
-// event_time/event_id); stale previews are rejected (409);
+// from the SHARED builder (preview payload == send payload; no
+// event_id is ever emitted); stale previews are rejected (409);
 // double taps collapse to one ledger row; missing IDs / disabled
 // config gate with reasons; tenant + ownership isolation; no
 // tokens in responses.
@@ -296,7 +296,8 @@ describe("GET preview", () => {
       user_data: { lead_id: "1176464514919762" },
       custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
     });
-    expect(p.payload.event_id).toBe(p.previewId);
+    // No event_id in the preview — the staleness fingerprint stays server-side.
+    expect(p.payload).not.toHaveProperty("event_id");
     // The complete outgoing body wraps the event in `data`.
     expect(p.requestBody.data).toHaveLength(1);
     expect(p.requestBody.data[0]).toEqual(p.payload);

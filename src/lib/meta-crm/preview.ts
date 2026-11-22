@@ -101,7 +101,7 @@ export interface LeadQualityPreview {
 export const LEAD_QUALITY_EVENT_TIME_NOTE =
   "event_time is the stage-change (occurrence) time — the moment the status was saved, or the lead creation time for the initial Lead stage — not the moment you press Send. Retries reuse the same occurrence time.";
 export const LEAD_QUALITY_EVENT_ID_NOTE =
-  "event_id is the ledger row id created at send time (reused for retries); the preview shows the server-generated preview id in its place.";
+  "WhatsApp Max intentionally omits event_id from the Meta payload; duplicates are prevented before sending by the delivery ledger (one row per status transition), and retries resend the stored occurrence unchanged.";
 
 /**
  * Assemble the send preview from live DB state. Pure reads — never
@@ -425,12 +425,12 @@ export async function assembleLeadQualityPreview(
     matchPh: match.ph,
   });
   // The preview payload comes from the SAME builder the send and
-  // drain paths use, with the occurrence fixed above.
+  // drain paths use, with the occurrence fixed above. No event_id:
+  // the builder never emits one, so preview and wire body match.
   const payload = buildCrmEventPayload({
     eventName,
     eventTimeIso: occurrenceTimeIso,
     metaLeadId: leadDigits,
-    eventUuid: previewId,
     match: { em: match.em, ph: match.ph },
   });
   // The COMPLETE outgoing body from the shared constructor — the

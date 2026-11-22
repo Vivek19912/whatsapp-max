@@ -115,7 +115,8 @@ describe("Lead Quality column wiring", () => {
 
   it("the payload honors the documented CRM wire format", () => {
     // `data` wrapper, numeric-when-safe lead_id, hashed matching,
-    // system_generated + crm event_source, stable event_id.
+    // system_generated + crm event_source. No `event_id` is ever
+    // emitted to Meta — dedup stays application-side (ledger).
     expect(leadQuality).toContain("buildCrmRequestBody");
     expect(leadQuality).toContain("serializeCrmRequestBody");
     expect(leadQuality).toContain("validateMetaLeadId");
@@ -123,6 +124,7 @@ describe("Lead Quality column wiring", () => {
     expect(leadQuality).toContain("CrmRequestBody");
     expect(leadQuality).toContain("data: [event]");
     expect(leadQuality).not.toContain("JSON.stringify({ data: [args.payload] })");
+    expect(leadQuality).not.toContain("event_id: args.eventUuid");
     // Raw contact data never reaches the builder — hashes only.
     expect(matching).toContain("sha256Hex");
     expect(matching).toContain("normalizeEmailForMeta");

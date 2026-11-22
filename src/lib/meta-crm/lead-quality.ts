@@ -134,8 +134,16 @@ export interface CrmEventPayload {
    * attribute the event to Conversion Leads optimization.
    */
   custom_data: { lead_event_source: string; event_source: "crm" };
-  /** Stable dedup id (our event row UUID). */
-  event_id: string;
+  /**
+   * NOTE: no `event_id` is sent to Meta, by product decision.
+   * Duplicate prevention is enforced application-side by the
+   * durable ledger (UNIQUE per transition + targeted pending-only
+   * drain), and every row keeps its internal `event_uuid` for
+   * history, retries, and auditing — it just never leaves our
+   * servers. Trade-off: Meta-side dedup of an uncertain/retried
+   * delivery is weaker, so the drain only retries genuinely
+   * unacknowledged rows.
+   */
 }
 
 /**
@@ -216,7 +224,6 @@ export function buildCrmEventPayload(args: {
   eventName: CrmEventName;
   eventTimeIso: string;
   metaLeadId: string;
-  eventUuid: string;
   /**
    * Optional pre-hashed matching identifiers (server-side SHA-256
    * of Meta-normalized values). Raw contact data must never reach
@@ -255,7 +262,6 @@ export function buildCrmEventPayload(args: {
       ...(ph.length > 0 ? { ph } : {}),
     },
     custom_data: { lead_event_source: CRM_LEAD_EVENT_SOURCE, event_source: CRM_EVENT_SOURCE },
-    event_id: args.eventUuid,
   };
 }
 
@@ -284,8 +290,9 @@ export interface LeadQualityPreviewFingerprint {
  * DB state and rejects mismatches (HTTP 409 + fresh preview), so a
  * preview can never be replayed after the lead, dataset, event
  * mapping, occurrence time, or match data changed underneath it.
- * The ledger-generated event_id is deliberately excluded — it is
- * created at send time; everything else must match exactly.
+ * No Meta-facing `event_id` exists anymore — staleness is checked
+ * on the inputs above; the ledger `event_uuid` stays internal and
+ * is never part of the fingerprint or the payload.
  */
 export function buildLeadQualityPreviewId(
   fingerprint: LeadQualityPreviewFingerprint,
@@ -350,7 +357,9 @@ export interface SentCrmEvent {
 /**
  * Send one CRM event to a dataset's Conversions API edge. Exactly
  * one POST; callers must not retry an uncertain response with a new
- * event — retries reuse the same `event_id`.
+ * event — retries resend the identical stored payload (same
+ * occurrence, same transition), and the ledger guarantees a row is
+ * only ever delivered while pending.
  */
 export async function sendCrmEvent(args: SendCrmEventArgs): Promise<SentCrmEvent> {
   const datasetId = args.datasetId.trim();

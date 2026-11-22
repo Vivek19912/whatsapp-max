@@ -2,7 +2,7 @@
 //
 // Pins: exact five-event mapping (case-insensitive), legacy/unmapped
 // values never map, all five states explicitly selectable, payload uses
-// system_generated + user_data.lead_id + stable event_id, invalid
+// system_generated + user_data.lead_id, no event_id, invalid
 // inputs throw without touching the network.
 
 import { describe, expect, it, vi } from "vitest";
@@ -73,12 +73,11 @@ describe("leadQualityToEvent", () => {
 });
 
 describe("buildCrmEventPayload", () => {
-  it("builds a CRM payload with system_generated + lead_id + event_id + required custom_data", () => {
+  it("builds a CRM payload with system_generated + lead_id + required custom_data and NO event_id", () => {
     const payload = buildCrmEventPayload({
       eventName: "QualifiedLead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
       metaLeadId: "123456789012345",
-      eventUuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     });
     expect(payload).toEqual({
       event_name: "QualifiedLead",
@@ -86,8 +85,31 @@ describe("buildCrmEventPayload", () => {
       action_source: "system_generated",
       user_data: { lead_id: "123456789012345" },
       custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
-      event_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     });
+    expect(payload).not.toHaveProperty("event_id");
+  });
+
+  it("omits event_id for all five CRM event types", () => {
+    const cases: Array<[string, "Lead" | "InterestedLead" | "QualifiedLead" | "BookingConfirmed" | "DisqualifiedLead"]> = [
+      ["Lead", "Lead"],
+      ["Interested Lead", "InterestedLead"],
+      ["Qualified Lead", "QualifiedLead"],
+      ["Booking Confirmed", "BookingConfirmed"],
+      ["Disqualified Lead", "DisqualifiedLead"],
+    ];
+    for (const [, eventName] of cases) {
+      const payload = buildCrmEventPayload({
+        eventName,
+        eventTimeIso: "2026-11-22T10:00:00.000Z",
+        metaLeadId: "1176464514919762",
+        match: { em: ["aaa"], ph: ["bbb"] },
+      });
+      expect(payload.event_name).toBe(eventName);
+      expect(payload).not.toHaveProperty("event_id");
+      const wire = JSON.parse(serializeCrmRequestBody(buildCrmRequestBody(payload)));
+      expect(wire.data).toHaveLength(1);
+      expect(wire.data[0]).not.toHaveProperty("event_id");
+    }
   });
 
   it("refuses fabricated times and missing lead ids", () => {
@@ -96,7 +118,6 @@ describe("buildCrmEventPayload", () => {
         eventName: "Lead",
         eventTimeIso: "not-a-date",
         metaLeadId: "123",
-        eventUuid: "u",
       }),
     ).toThrow(MetaCrmError);
     expect(() =>
@@ -104,7 +125,6 @@ describe("buildCrmEventPayload", () => {
         eventName: "Lead",
         eventTimeIso: "2026-11-22T10:00:00.000Z",
         metaLeadId: "   ",
-        eventUuid: "u",
       }),
     ).toThrow(MetaCrmError);
   });
@@ -117,7 +137,6 @@ describe("buildCrmEventPayload", () => {
           eventName: "Lead",
           eventTimeIso: "2026-11-22T10:00:00.000Z",
           metaLeadId: bad,
-          eventUuid: "u",
         }),
       ).toThrow(MetaCrmError);
     }
@@ -130,7 +149,6 @@ describe("buildCrmEventPayload", () => {
         eventName: "QualifiedLead",
         eventTimeIso: new Date(Date.now() + 60 * 60_000).toISOString(),
         metaLeadId: "1176464514919762",
-        eventUuid: "u",
       }),
     ).toThrow(MetaCrmError);
   });
@@ -140,7 +158,6 @@ describe("buildCrmEventPayload", () => {
       eventName: "QualifiedLead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
       metaLeadId: "1176464514919762",
-      eventUuid: "u",
       match: { em: ["aaa"], ph: ["bbb"] },
     });
     expect(withMatch.user_data).toEqual({
@@ -152,7 +169,6 @@ describe("buildCrmEventPayload", () => {
       eventName: "Lead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
       metaLeadId: "1176464514919762",
-      eventUuid: "u",
     });
     expect(without.user_data).toEqual({ lead_id: "1176464514919762" });
   });
@@ -165,12 +181,11 @@ describe("buildCrmEventPayload", () => {
 });
 
 describe("CRM request body (documented `data` wrapper)", () => {
-  it("wraps the event in a top-level data array with all CRM parameters", () => {
+  it("wraps the event in a top-level data array with all CRM parameters and no event_id", () => {
     const payload = buildCrmEventPayload({
       eventName: "InterestedLead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
       metaLeadId: "1176464514919762",
-      eventUuid: "fc4bb2a7482cc029",
     });
     const body = buildCrmRequestBody(payload);
     expect(body).toEqual({
@@ -181,10 +196,10 @@ describe("CRM request body (documented `data` wrapper)", () => {
           action_source: "system_generated",
           user_data: { lead_id: "1176464514919762" },
           custom_data: { lead_event_source: "WhatsApp Max", event_source: "crm" },
-          event_id: "fc4bb2a7482cc029",
         },
       ],
     });
+    expect(body.data[0]).not.toHaveProperty("event_id");
     // The serializer emits exactly-representable ids as JSON numbers
     // (Meta's documented integer type); parsing them back yields the
     // numeric form of the same event.
@@ -200,7 +215,6 @@ describe("CRM request body (documented `data` wrapper)", () => {
       eventName: "Lead",
       eventTimeIso: "2026-11-22T10:00:00.000Z",
       metaLeadId: "1176464514919762",
-      eventUuid: "u",
     });
     expect(isSafeJsonInteger("1176464514919762")).toBe(true);
     const parsed = JSON.parse(serializeCrmRequestBody(buildCrmRequestBody(payload)));
@@ -217,7 +231,6 @@ describe("CRM request body (documented `data` wrapper)", () => {
             eventName: "Lead",
             eventTimeIso: "2026-11-22T10:00:00.000Z",
             metaLeadId: huge.slice(0, 20),
-            eventUuid: "u",
           }),
         ),
       ),
@@ -225,6 +238,18 @@ describe("CRM request body (documented `data` wrapper)", () => {
     // Exact digits survive; a float conversion would corrupt them.
     expect(parsed.data[0].user_data.lead_id).toBe(huge.slice(0, 20));
     expect(typeof parsed.data[0].user_data.lead_id).toBe("string");
+  });
+
+  it("never emits event_id on the wire for any payload", () => {
+    const payload = buildCrmEventPayload({
+      eventName: "BookingConfirmed",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      metaLeadId: "1176464514919762",
+      match: { em: ["aaa"], ph: ["bbb"] },
+    });
+    const wire = String(serializeCrmRequestBody(buildCrmRequestBody(payload)));
+    expect(wire).not.toContain("event_id");
+    expect(JSON.parse(wire).data[0]).not.toHaveProperty("event_id");
   });
 });
 
@@ -243,7 +268,6 @@ describe("sendCrmEvent", () => {
         eventName: "Lead",
         eventTimeIso: "2026-11-22T10:00:00.000Z",
         metaLeadId: "123",
-        eventUuid: "uuid-1",
       }),
       fetchImpl,
     });
@@ -253,7 +277,9 @@ describe("sendCrmEvent", () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe("Bearer USER_TOKEN");
     const body = JSON.parse(String(calls[0].init.body));
     expect(body.data).toHaveLength(1);
-    expect(body.data[0].event_id).toBe("uuid-1");
+    // No event_id anywhere on the wire — by product decision.
+    expect(body.data[0]).not.toHaveProperty("event_id");
+    expect(String(calls[0].init.body)).not.toContain("event_id");
     // Documented integer form on the wire for exactly-representable ids.
     expect(body.data[0].user_data.lead_id).toBe(123);
     expect(response).toEqual({ events_received: 1 });
@@ -269,7 +295,6 @@ describe("sendCrmEvent", () => {
         eventName: "Lead",
         eventTimeIso: "2026-11-22T10:00:00.000Z",
         metaLeadId: "123",
-        eventUuid: "uuid-1",
       }),
       fetchImpl,
     }).catch((e) => e);
@@ -290,7 +315,6 @@ describe("sendCrmEvent", () => {
         eventName: "Lead",
         eventTimeIso: "2026-11-22T10:00:00.000Z",
         metaLeadId: "123",
-        eventUuid: "uuid-1",
       }),
       fetchImpl,
     }).catch((e) => e);

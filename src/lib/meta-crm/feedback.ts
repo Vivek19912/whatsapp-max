@@ -21,8 +21,9 @@
 // Deduplication: UNIQUE(account_id, flow_run_id, event_name,
 // from_quality, to_quality) — re-saving an unchanged value can
 // never create a second event; races collapse to the existing row.
-// Retries reuse the row's event_uuid as Meta `event_id`, so Meta
-// never sees a duplicate conversion.
+// The row's event_uuid stays internal (history/retries/auditing)
+// and is never sent to Meta — the Meta payload carries no
+// event_id, and retries resend the identical stored occurrence.
 // ============================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -519,8 +520,10 @@ export interface CrmDrainResult {
 
 /**
  * Send due pending events. Per-row isolated: one row's failure
- * never affects others. Retries reuse the row's event_uuid as the
- * Meta event_id. Terminal states: sent / failed (attempts spent) /
+ * never affects others. Retries resend the identical stored
+ * payload (same occurrence, same transition); no `event_id` is
+ * ever sent to Meta — the row's event_uuid stays internal.
+ * Terminal states: sent / failed (attempts spent) /
  * skipped (feedback disabled or misconfigured at send time).
  */
 export async function drainCrmEventsQueue(
@@ -597,10 +600,11 @@ export async function drainCrmEventsQueue(
           eventName: row.event_name as CrmEventName,
           eventTimeIso: row.event_time,
           metaLeadId: row.meta_lead_id,
-          eventUuid: row.event_uuid,
           // Matching identifiers are resolved from the lead at send
           // time (same resolver the preview uses) — the ledger row
-          // keeps the occurrence + identity, never raw PII.
+          // keeps the occurrence + identity, never raw PII. The
+          // row's event_uuid is intentionally NOT passed: it stays
+          // internal and never reaches Meta.
           match: await resolveRowMatchHashes(db, row),
         });
         ({ response } = await sendCrmEvent({

@@ -2,9 +2,10 @@
 //
 // Requeue one failed/skipped CRM event for this workspace
 // (admin-only). Resets it to pending with an immediate retry —
-// the SAME row (same event_uuid → same Meta event_id) is resent,
-// so Meta never sees a duplicate conversion. Never creates a new
-// Meta event, never retries from the browser to Meta directly.
+// the SAME ledger row (same stored occurrence, same transition)
+// is resent with no new Meta event created, so application-side
+// duplicates are impossible (the payload carries no event_id).
+// Never retries from the browser to Meta directly.
 
 import { NextResponse } from "next/server";
 
