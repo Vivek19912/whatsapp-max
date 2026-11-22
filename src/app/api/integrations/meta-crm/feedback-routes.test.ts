@@ -338,8 +338,25 @@ describe("PUT /api/integrations/meta-crm/config", () => {
   it("disables without verification", async () => {
     const res = await configPut(put({ enabled: false, datasetRowId: null }));
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { config: { enabled: boolean } };
+    const json = (await res.json()) as { config: { enabled: boolean; autoSendLead: boolean } };
     expect(json.config.enabled).toBe(false);
+    expect(json.config.autoSendLead).toBe(false);
+  });
+
+  it("persists the auto-send preference independently of enabled", async () => {
+    const on = await configPut(put({ enabled: false, datasetRowId: null, autoSendLead: true }));
+    expect(on.status).toBe(200);
+    const onJson = (await on.json()) as { config: { enabled: boolean; autoSendLead: boolean } };
+    expect(onJson.config.enabled).toBe(false);
+    expect(onJson.config.autoSendLead).toBe(true);
+
+    const off = await configPut(put({ enabled: false, datasetRowId: null, autoSendLead: false }));
+    expect((await off.json()) as { config: { autoSendLead: boolean } }).toMatchObject({
+      config: { autoSendLead: false },
+    });
+
+    const fetched = (await (await configGet()).json()) as { config: { autoSendLead: boolean } };
+    expect(fetched.config.autoSendLead).toBe(false);
   });
 });
 

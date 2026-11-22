@@ -46,6 +46,7 @@ import {
   enqueueLeadQualityEvent,
   getCrmAccessToken,
   getCrmFeedbackConfig,
+  maybeEnqueueInitialLeadEvent,
   saveCrmFeedbackConfig,
 } from "./feedback";
 import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
@@ -495,6 +496,116 @@ describe("drainCrmEventsQueue", () => {
   });
 });
 
+describe("maybeEnqueueInitialLeadEvent", () => {
+  function seedAuto(on: boolean, configOver: Row = {}) {
+    return makeDb({
+      meta_lead_submissions: [
+        { id: "sub-1", account_id: "acct-1", flow_run_id: "run-1", meta_lead_id: "1176464514919762" },
+      ],
+      meta_crm_config: [
+        {
+          account_id: "acct-1",
+          enabled: true,
+          dataset_id: "1830596054845292",
+          access_token: encrypt(CRM_TOKEN),
+          auto_send_lead: on,
+          ...configOver,
+        },
+      ],
+      meta_crm_events: [],
+    });
+  }
+
+  it("enqueues exactly one initial Lead event when opted in", async () => {
+    const { db, tables } = seedAuto(true);
+    const out = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-1",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T09:50:00.000Z",
+    });
+    expect(out).toMatchObject({ enqueued: true, deduplicated: false });
+    expect(tables.meta_crm_events).toHaveLength(1);
+    expect(tables.meta_crm_events[0]).toMatchObject({
+      event_name: "Lead",
+      from_quality: "",
+      to_quality: "Lead",
+      event_time: "2026-11-22T09:50:00.000Z",
+      dataset_id: "1830596054845292",
+      meta_lead_id: "1176464514919762",
+    });
+    expect(h.tokenCalls).toBe(0);
+  });
+
+  it("a webhook retry collapses to the existing row (no duplicate)", async () => {
+    const { db, tables } = seedAuto(true);
+    const first = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-1",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T09:50:00.000Z",
+    });
+    const second = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-1",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T09:50:00.000Z",
+    });
+    expect(first).toMatchObject({ enqueued: true, deduplicated: false });
+    expect(second).toMatchObject({ enqueued: true, deduplicated: true });
+    if (!first.enqueued || !second.enqueued) throw new Error("expected both sends to enqueue");
+    expect(second.eventId).toBe(first.eventId);
+    expect(tables.meta_crm_events).toHaveLength(1);
+  });
+
+  it("stays silent when opted out, disabled, unconfigured, or tokenless", async () => {
+    const off = seedAuto(false);
+    expect(
+      await maybeEnqueueInitialLeadEvent(off.db, { accountId: "acct-1", flowId: "flow-1", runId: "run-1", eventTimeIso: "2026-11-22T09:50:00.000Z" }),
+    ).toEqual({ enqueued: false, reason: "auto_send_off" });
+    expect(off.tables.meta_crm_events).toHaveLength(0);
+
+    const disabled = seedAuto(true, { enabled: false });
+    expect(
+      await maybeEnqueueInitialLeadEvent(disabled.db, { accountId: "acct-1", flowId: "flow-1", runId: "run-1", eventTimeIso: "2026-11-22T09:50:00.000Z" }),
+    ).toEqual({ enqueued: false, reason: "disabled" });
+
+    const noDataset = seedAuto(true, { dataset_id: null });
+    expect(
+      await maybeEnqueueInitialLeadEvent(noDataset.db, { accountId: "acct-1", flowId: "flow-1", runId: "run-1", eventTimeIso: "2026-11-22T09:50:00.000Z" }),
+    ).toEqual({ enqueued: false, reason: "disabled" });
+
+    const noToken = makeDb({
+      meta_lead_submissions: [
+        { id: "sub-1", account_id: "acct-1", flow_run_id: "run-1", meta_lead_id: "1176464514919762" },
+      ],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "DS", auto_send_lead: true, access_token: null }],
+      meta_crm_events: [],
+    });
+    expect(
+      await maybeEnqueueInitialLeadEvent(noToken.db, { accountId: "acct-1", flowId: "flow-1", runId: "run-1", eventTimeIso: "2026-11-22T09:50:00.000Z" }),
+    ).toEqual({ enqueued: false, reason: "no_token" });
+    expect(noToken.tables.meta_crm_events).toHaveLength(0);
+    expect(h.tokenCalls).toBe(0);
+  });
+
+  it("isolates workspaces (foreign runs never enqueue)", async () => {
+    const { db, tables } = makeDb({
+      meta_lead_submissions: [],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "DS", access_token: encrypt(CRM_TOKEN), auto_send_lead: true }],
+      meta_crm_events: [],
+    });
+    const out = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-2",
+      flowId: "flow-1",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T09:50:00.000Z",
+    });
+    expect(out.enqueued).toBe(false);
+    expect(tables.meta_crm_events).toHaveLength(0);
+  });
+});
+
 describe("saveCrmFeedbackConfig", () => {
   it("enables only after verifying the dedicated CRM token (never the Lead Ads token)", async () => {
     const { db, tables } = makeDb({
@@ -709,6 +820,49 @@ describe("saveCrmFeedbackConfig", () => {
     expect(config.enabled).toBe(false);
     expect(h.tokenCalls).toBe(callsBefore);
     expect(tables.meta_crm_config).toHaveLength(1);
+    // Untouched preference defaults to off.
+    expect(tables.meta_crm_config[0]?.auto_send_lead ?? false).toBe(false);
+  });
+
+  it("persists the auto-send preference on both paths without touching events", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        { id: "row-ds", account_id: "acct-1", dataset_id: "DS", business_portfolio_id: "BIZ", dataset_name: "IM CRM" },
+      ],
+      meta_crm_config: [],
+    });
+    const { config } = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
+      autoSendLead: true,
+    });
+    expect(config.enabled).toBe(true);
+    expect(config.auto_send_lead).toBe(true);
+    // Saving the preference never enqueues an event by itself.
+    expect(tables.meta_crm_events ?? []).toHaveLength(0);
+
+    const off = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: false,
+      datasetRowId: null,
+      actorUserId: "admin-1",
+    });
+    expect(off.config.enabled).toBe(false);
+    // Disabling preserves the stored preference (no silent reset).
+    expect(tables.meta_crm_config[0]?.auto_send_lead).toBe(true);
+
+    const { config: backOn } = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+      autoSendLead: false,
+    });
+    expect(backOn.auto_send_lead).toBe(false);
+    expect(h.tokenCalls).toBe(0);
   });
 
   it("rejects foreign-account datasets", async () => {

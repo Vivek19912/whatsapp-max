@@ -25,6 +25,7 @@ const configRoute = read("src/app/api/integrations/meta-crm/config/route.ts");
 const processLead = read("src/lib/meta-lead-ads/process-lead.ts");
 const page = read("src/app/(dashboard)/workspace/page.tsx");
 const component = read("src/components/workspace/meta-crm-send-section.tsx");
+const settings = read("src/components/settings/meta-crm-feedback-settings.tsx");
 const customCell = read("src/components/workspace/custom-cell.tsx");
 const cron = read("src/app/api/integrations/meta-lead-ads/cron/route.ts");
 const migration = read("supabase/migrations/175_meta_crm_feedback.sql");
@@ -68,10 +69,25 @@ describe("Lead Quality column wiring", () => {
     expect(valuesRoute).toContain("crmEvent: null");
   });
 
-  it("ingestion NEVER enqueues — capture stays event-free", () => {
+  it("ingestion only auto-enqueues the opted-in initial Lead — nothing else", () => {
+    // The ONLY automatic path: the opt-in initial Lead event.
+    // Its prompt drain is the single scheduleCrmDrainSoon use in
+    // this file, guarded inside the opt-in branch — status saves,
+    // edits, syncs, and retries schedule nothing.
+    expect(processLead).toContain("maybeEnqueueInitialLeadEvent");
     expect(processLead).not.toContain("enqueueLeadQualityEvent");
-    expect(processLead).not.toContain("scheduleCrmDrainSoon");
+    expect(processLead.match(/scheduleCrmDrainSoon\(\{/g)?.length ?? 0).toBe(1);
     expect(processLead).not.toContain('toQuality: "Lead"');
+    // Status changes stay manual-only (save path has no CRM hook).
+    expect(valuesRoute).not.toContain("maybeEnqueueInitialLeadEvent");
+  });
+
+  it("the auto-Lead toggle is a per-workspace stored preference", () => {
+    expect(feedback).toContain("auto_send_lead");
+    expect(feedback).toContain("maybeEnqueueInitialLeadEvent");
+    expect(configRoute).toContain("autoSendLead");
+    expect(configRoute).toContain("autoSendMigrationMissing");
+    expect(settings).toContain("Automatically Send New Lead Events");
   });
 
   it("the preview comes from the shared builder, never invented data", () => {
@@ -108,7 +124,7 @@ describe("Lead Quality column wiring", () => {
     // when migration 176 is absent, PostgREST rejects with a plain
     // 42703 object — routes must map it to an actionable message.
     expect(feedback).toContain("isMissingAccessTokenColumn");
-    expect(feedback).toContain("176_meta_crm_dedicated_token");
+    expect(feedback).toContain("176/177");
     expect(configRoute).toContain("migration_missing");
     expect(configRoute).toContain("tokenMigrationMissing");
   });

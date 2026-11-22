@@ -61,6 +61,8 @@ interface FeedbackConfig {
   lastEventAt: string | null;
   /** Whether a CRM token is stored — the value itself never reaches the frontend. */
   hasToken: boolean;
+  /** Opt-in automatic initial Lead events for new Meta leads. */
+  autoSendLead: boolean;
 }
 
 interface CrmEvent {
@@ -119,6 +121,8 @@ export function MetaCrmFeedbackSettings() {
   const [configError, setConfigError] = useState<string | null>(null);
   const [configMigrationMissing, setConfigMigrationMissing] = useState(false);
   const [tokenMigrationMissing, setTokenMigrationMissing] = useState(false);
+  const [autoSendMigrationMissing, setAutoSendMigrationMissing] = useState(false);
+  const [autoSendLead, setAutoSendLead] = useState(false);
   const [datasets, setDatasets] = useState<SavedDataset[]>([]);
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
@@ -177,6 +181,7 @@ export function MetaCrmFeedbackSettings() {
         config?: FeedbackConfig;
         migrationMissing?: boolean;
         tokenMigrationMissing?: boolean;
+        autoSendMigrationMissing?: boolean;
         error?: string;
       };
       if (!cfgRes.ok || !cfg.ok || !cfg.config) {
@@ -186,6 +191,8 @@ export function MetaCrmFeedbackSettings() {
       setEnableChecked(cfg.config.enabled);
       setConfigMigrationMissing(cfg.migrationMissing === true);
       setTokenMigrationMissing(cfg.tokenMigrationMissing === true);
+      setAutoSendMigrationMissing(cfg.autoSendMigrationMissing === true);
+      setAutoSendLead(cfg.config.autoSendLead === true);
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : "Could not load CRM feedback.");
     } finally {
@@ -274,6 +281,7 @@ export function MetaCrmFeedbackSettings() {
           // Only sent when the user typed a replacement — empty
           // keeps the stored token; removal has its own button.
           ...(crmToken !== "" ? { accessToken: crmToken } : {}),
+            autoSendLead,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
@@ -515,6 +523,28 @@ export function MetaCrmFeedbackSettings() {
                   field. Dataset and on/off saves keep working meanwhile.
                 </p>
               ) : null}
+
+              {autoSendMigrationMissing ? (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                  Automatic Lead sending is not ready yet — apply migration{" "}
+                  <code>177_meta_crm_auto_send_lead</code> to enable the toggle below.
+                </p>
+              ) : null}
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Automatically Send New Lead Events</p>
+                  <p className="text-xs text-muted-foreground">
+                    Automatically send the initial Lead event to Meta whenever a new Meta Instant Form lead is received. Later stages always stay manual.
+                  </p>
+                </div>
+                <Switch
+                  checked={autoSendLead}
+                  onCheckedChange={setAutoSendLead}
+                  disabled={disabled || saving || configMigrationMissing || autoSendMigrationMissing}
+                  aria-label="Automatically send new lead events"
+                />
+              </div>
 
               {configError ? (
                 <p className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">

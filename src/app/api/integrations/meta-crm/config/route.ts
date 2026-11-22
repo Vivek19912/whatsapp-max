@@ -19,6 +19,7 @@ import { getCurrentAccount, requireRole, toErrorResponse } from "@/lib/auth/acco
 import {
   getCrmFeedbackConfig,
   isMissingAccessTokenColumn,
+  isMissingConfigColumn,
   saveCrmFeedbackConfig,
   toPublicCrmFeedbackConfig,
   TOKEN_STORAGE_MISSING_MESSAGE,
@@ -29,29 +30,34 @@ export async function GET() {
   try {
     const ctx = await getCurrentAccount();
     const config = await getCrmFeedbackConfig(ctx.supabase, ctx.accountId);
-    // Proactive storage probe: SELECT * tolerates the missing
-    // column, so an un-migrated database would otherwise look
-    // healthy until the first token save 500s. Flag it so the UI
-    // shows guidance instead of a dead token field.
+    // Proactive storage probes: SELECT * tolerates missing columns,
+    // so an un-migrated database would otherwise look healthy until
+    // the first token save 500s. Flag each gap so the UI shows
+    // guidance instead of dead controls.
     let tokenMigrationMissing = false;
-    try {
-      const probe = await ctx.supabase
-        .from("meta_crm_config")
-        .select("access_token")
-        .eq("account_id", ctx.accountId)
-        .limit(1);
-      if (probe.error) throw probe.error;
-    } catch (err) {
-      if (isMissingAccessTokenColumn(err)) {
-        tokenMigrationMissing = true;
-      } else {
-        throw err;
+    let autoSendMigrationMissing = false;
+    for (const column of ["access_token", "auto_send_lead"] as const) {
+      try {
+        const probe = await ctx.supabase
+          .from("meta_crm_config")
+          .select(column)
+          .eq("account_id", ctx.accountId)
+          .limit(1);
+        if (probe.error) throw probe.error;
+      } catch (err) {
+        if (isMissingConfigColumn(err, column)) {
+          if (column === "access_token") tokenMigrationMissing = true;
+          else autoSendMigrationMissing = true;
+        } else {
+          throw err;
+        }
       }
     }
     return NextResponse.json({
       ok: true,
       config: toPublicCrmFeedbackConfig(config),
       tokenMigrationMissing,
+      autoSendMigrationMissing,
     });
   } catch (err) {
     // meta_crm_config table missing (migration 175 not applied yet)
@@ -90,6 +96,7 @@ export async function PUT(request: Request) {
     const accessToken =
       typeof body.accessToken === "string" ? body.accessToken : undefined;
     const removeAccessToken = body.removeAccessToken === true;
+    const autoSendLead = typeof body.autoSendLead === "boolean" ? body.autoSendLead : undefined;
     if (enabled && !datasetRowId) {
       return NextResponse.json(
         { error: "Select a CRM dataset to enable feedback." },
@@ -106,6 +113,7 @@ export async function PUT(request: Request) {
           datasetRowId,
           actorUserId: ctx.userId,
           accessToken: removeAccessToken ? "" : accessToken,
+          autoSendLead,
         },
       );
       return NextResponse.json({
@@ -125,11 +133,11 @@ export async function PUT(request: Request) {
           { status: err.status },
         );
       }
-      // Un-migrated database (migration 176 missing): the upsert
-      // references access_token and PostgREST rejects it with a
-      // plain 42703 object — map it to an actionable 503 instead
-      // of the bare "Internal server error".
-      if (isMissingAccessTokenColumn(err)) {
+      // Un-migrated database (migrations 176/177 missing): the
+      // upsert references the new columns and PostgREST rejects them
+      // with a plain 42703 object — map it to an actionable 503
+      // instead of the bare "Internal server error".
+      if (isMissingAccessTokenColumn(err) || isMissingConfigColumn(err, "auto_send_lead")) {
         return NextResponse.json(
           { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
           { status: 503 },
@@ -138,7 +146,7 @@ export async function PUT(request: Request) {
       throw err;
     }
   } catch (err) {
-    if (isMissingAccessTokenColumn(err)) {
+    if (isMissingAccessTokenColumn(err) || isMissingConfigColumn(err, "auto_send_lead")) {
       return NextResponse.json(
         { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
         { status: 503 },

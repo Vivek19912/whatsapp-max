@@ -432,11 +432,41 @@ export async function processSubmissionById(
       })
       .eq("id", submissionId);
 
-    // Meta CRM feedback — DELIBERATELY no automatic event here.
-    // A new Meta Instant Form lead enters with the Lead Quality
-    // display default ("Lead"); delivery happens solely through
-    // the explicit manual-send endpoint with a payload preview.
-    // Lead capture is unaffected by CRM config either way.
+    // Meta CRM feedback — automatic initial `Lead` event, ONLY
+    // when the workspace opted in ("Automatically Send New Lead
+    // Events"). Manual-only otherwise: status saves, edits, syncs,
+    // and retries never reach this path. Best-effort and fully
+    // isolated: it can never fail lead processing. The ledger
+    // UNIQUE key collapses webhook retries to `deduplicated`, and a
+    // later manual Lead send chains from_quality off this row, so
+    // it reports "already recorded" instead of duplicating.
+    // Delivery always uses the dedicated CRM token via the drain.
+    try {
+      const { maybeEnqueueInitialLeadEvent } = await import(
+        "@/lib/meta-crm/feedback"
+      );
+      const outcome = await maybeEnqueueInitialLeadEvent(db, {
+        accountId: submission.account_id,
+        flowId,
+        runId: (run as { id: string }).id,
+        eventTimeIso: startedAt,
+      });
+      if (outcome.enqueued && !outcome.deduplicated) {
+        try {
+          const { scheduleCrmDrainSoon } = await import(
+            "@/lib/meta-crm/trigger"
+          );
+          scheduleCrmDrainSoon({ accountId: submission.account_id });
+        } catch {
+          // Prompt drain is best-effort; the cron covers the row.
+        }
+      }
+    } catch (err) {
+      console.error(
+        "[meta-crm] automatic Lead enqueue failed (lead processing unaffected):",
+        err instanceof Error ? err.message : err,
+      );
+    }
 
     // ADDITIVE Meta Conversions API hook — the lead now exists in the
     // Workspace, so fire any configured conversion mapping. Best-effort

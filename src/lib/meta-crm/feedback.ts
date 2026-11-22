@@ -61,6 +61,12 @@ export interface CrmFeedbackConfig {
   updated_by: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Opt-in: automatically enqueue the initial `Lead` event when a
+   * new Meta Instant Form lead arrives. Defaults to false — later
+   * stages are always manual.
+   */
+  auto_send_lead: boolean;
 }
 
 export interface PublicCrmFeedbackConfig {
@@ -73,6 +79,8 @@ export interface PublicCrmFeedbackConfig {
   lastEventAt: string | null;
   /** Whether a CRM token is stored — the value itself never leaves the server. */
   hasToken: boolean;
+  /** Opt-in automatic initial Lead events for new Meta leads. */
+  autoSendLead: boolean;
 }
 
 export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): PublicCrmFeedbackConfig {
@@ -85,6 +93,7 @@ export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): Public
     lastError: row?.last_error ?? null,
     lastEventAt: row?.last_event_at ?? null,
     hasToken: !!row?.access_token,
+    autoSendLead: row?.auto_send_lead ?? false,
   };
 }
 
@@ -115,6 +124,10 @@ export async function getCrmFeedbackConfig(
  *   * non-empty   → validate + verify the replacement against the
  *     chosen dataset, then store it encrypted.
  *
+ * `autoSendLead` (when provided) is stored in both paths —
+ * disabling feedback never implies disabling the preference, and
+ * enabling never flips it on silently. Omitted → preserved.
+ *
  * The Meta Lead Ads connection token is NEVER consulted here — not
  * for verification, not for sending, not as a fallback.
  */
@@ -126,6 +139,7 @@ export async function saveCrmFeedbackConfig(
     datasetRowId: string | null;
     actorUserId: string;
     accessToken?: string;
+    autoSendLead?: boolean;
     fetchImpl?: typeof fetch;
   },
 ): Promise<{ config: CrmFeedbackConfig; ownershipVerified: boolean }> {
@@ -165,6 +179,7 @@ export async function saveCrmFeedbackConfig(
           updated_by: args.actorUserId,
           updated_at: new Date().toISOString(),
           ...tokenPatch,
+          ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
         },
         { onConflict: "account_id" },
       )
@@ -301,8 +316,10 @@ export async function saveCrmFeedbackConfig(
         updated_at: now,
         // Store the replacement only after it verified above.
         // Untouched (`keep`) omits the key so the stored token
-        // survives the upsert byte-for-byte.
+        // survives the upsert byte-for-byte. The auto-send
+        // preference rides along only when explicitly provided.
         ...(tokenOp === "replace" ? { access_token: encrypt(candidateToken as string) } : {}),
+        ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
       },
       { onConflict: "account_id" },
     )
@@ -313,27 +330,31 @@ export async function saveCrmFeedbackConfig(
 }
 
 /**
- * True when a Supabase/PostgREST error means the dedicated-token
- * column does not exist — i.e. migration
- * 176_meta_crm_dedicated_token has not been applied in this
- * environment. The error is a plain object (no `.status`), which
- * is exactly what toErrorResponse turns into a bare 500, so
- * callers must map it to an actionable message instead.
+ * True when a Supabase/PostgREST error means the named
+ * meta_crm_config column does not exist — i.e. its migration has
+ * not been applied in this environment. The error is a plain
+ * object (no `.status`), which is exactly what toErrorResponse
+ * turns into a bare 500, so callers must map it to an actionable
+ * message instead.
  */
-export function isMissingAccessTokenColumn(err: unknown): boolean {
+export function isMissingConfigColumn(err: unknown, column: "access_token" | "auto_send_lead"): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as { code?: unknown }).code;
   const message = (err as { message?: unknown }).message;
   return (
     code === "42703" &&
     typeof message === "string" &&
-    message.includes("access_token")
+    message.includes(column)
   );
 }
 
-/** Actionable message when migration 176 is missing (shared by routes). */
+export function isMissingAccessTokenColumn(err: unknown): boolean {
+  return isMissingConfigColumn(err, "access_token");
+}
+
+/** Actionable message when migrations 176/177 are missing (shared by routes). */
 export const TOKEN_STORAGE_MISSING_MESSAGE =
-  "CRM token storage is not ready: database migration 176_meta_crm_dedicated_token has not been applied. Apply it, then save the token again.";
+  "CRM storage is not ready: database migrations 176/177 have not been applied. Apply them, then save again.";
 
 /**
  * Retrieve the workspace's dedicated Meta CRM access token,
@@ -429,6 +450,61 @@ export interface EnqueueLeadQualityEventArgs {
 export type EnqueueOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
   | { enqueued: false; reason: "unchanged" | "unmapped" | "disabled" | "no_meta_lead" };
+
+export type AutoLeadOutcome =
+  | { enqueued: true; eventId: string; deduplicated: boolean }
+  | { enqueued: false; reason: "auto_send_off" | "disabled" | "no_token" | "no_meta_lead" };
+
+/**
+ * Opt-in automatic initial `Lead` event for a newly received Meta
+ * Instant Form lead. Enqueues exactly one ledger row per lead
+ * (from "" to "Lead"); webhook retries and reprocessing collapse
+ * via the ledger UNIQUE key to `deduplicated`. Returns without
+ * writing when the workspace has not opted in (`auto_send_off`),
+ * feedback is disabled/unconfigured (`disabled`), or no dedicated
+ * CRM token is stored (`no_token`). Never throws for any of those
+ * gates — only for unexpected database failures, which callers
+ * isolate so lead capture is unaffected. The dedicated CRM token
+ * is resolved (not merely presence-checked) so a corrupt row fails
+ * closed here instead of at send time.
+ */
+export async function maybeEnqueueInitialLeadEvent(
+  db: SupabaseClient,
+  args: { accountId: string; flowId: string | null; runId: string; eventTimeIso: string },
+): Promise<AutoLeadOutcome> {
+  let config: CrmFeedbackConfig | null;
+  try {
+    config = await getCrmFeedbackConfig(db, args.accountId);
+  } catch (err) {
+    // A missing auto_send_lead column (migration 177 not applied)
+    // means the opt-in cannot exist yet — treat as opted out, and
+    // never let a schema gap fail lead capture.
+    if (isMissingConfigColumn(err, "auto_send_lead")) return { enqueued: false, reason: "auto_send_off" };
+    throw err;
+  }
+  if (!config?.auto_send_lead) return { enqueued: false, reason: "auto_send_off" };
+  if (!config.enabled || !config.dataset_id) return { enqueued: false, reason: "disabled" };
+  try {
+    await getCrmAccessToken(db, args.accountId);
+  } catch {
+    return { enqueued: false, reason: "no_token" };
+  }
+  const outcome = await enqueueLeadQualityEvent(db, {
+    accountId: args.accountId,
+    flowId: args.flowId,
+    runId: args.runId,
+    fromQuality: "",
+    toQuality: "Lead",
+    eventTimeIso: args.eventTimeIso,
+    actorUserId: null,
+  });
+  if (!outcome.enqueued) {
+    return outcome.reason === "no_meta_lead"
+      ? { enqueued: false as const, reason: "no_meta_lead" as const }
+      : { enqueued: false as const, reason: "disabled" as const };
+  }
+  return outcome;
+}
 
 /**
  * Enqueue one CRM event for a genuine quality transition. Returns

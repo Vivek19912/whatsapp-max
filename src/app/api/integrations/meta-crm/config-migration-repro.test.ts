@@ -35,6 +35,7 @@ function unmigratedDb() {
     const api: Record<string, (...a: never[]) => unknown> = {
       select: () => chain(table, cols, filters),
       eq: (c: string, v: unknown) => chain(table, cols, [...filters, [c, v]]),
+      limit: () => chain(table, cols, filters),
       maybeSingle: async () => ({ data: (tables[table] ?? []).filter(filtersOf(filters))[0] ?? null, error: null }),
       single: async () => {
         if (cols.includes("*") && table === "meta_crm_config") {
@@ -133,7 +134,7 @@ describe("un-migrated database (migration 176 missing)", () => {
     const json = (await res.json()) as { error?: string; code?: string };
     expect(res.status).toBe(503);
     expect(json.code).toBe("migration_missing");
-    expect(json.error).toContain("176_meta_crm_dedicated_token");
+    expect(json.error).toContain("176");
     expect(JSON.stringify(json)).not.toContain("CRM_TOKEN_new");
     expect(json.error).not.toBe("Internal server error");
   });
