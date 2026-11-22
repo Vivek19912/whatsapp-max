@@ -36,12 +36,17 @@ import { CRM_DRAIN_LIMIT, drainCrmEventsQueue } from "./feedback";
  * outside request scope (becomes a no-op covered by the cron
  * fallback).
  */
-export function scheduleCrmDrainSoon(opts: { accountId?: string } = {}): void {
+export function scheduleCrmDrainSoon(opts: { accountId?: string; eventIds?: string[] } = {}): void {
   try {
     after(() => {
       drainCrmEventsQueue(supabaseAdmin(), {
         limit: CRM_DRAIN_LIMIT,
         ...(opts.accountId ? { onlyAccountId: opts.accountId } : {}),
+        // Targeted drain for manual sends: restrict to the just
+        // committed row(s) so one tap can never sweep unrelated
+        // rows early. The pending-only gate inside the drain still
+        // applies, so an already-sent duplicate is never re-sent.
+        ...(opts.eventIds && opts.eventIds.length > 0 ? { eventIds: opts.eventIds } : {}),
       }).catch((err) => {
         console.error(
           "[meta-crm] prompt drain failed (cron fallback covers):",

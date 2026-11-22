@@ -36,14 +36,13 @@ export function isCrmEventName(value: unknown): value is CrmEventName {
 }
 
 /**
- * Stored "Lead Quality" display values, in dropdown order. Only the
- * four CRM outcomes are user-selectable; the automatic initial
- * state "Lead" is the provisioned field default (display-only
- * fallback for empty cells) and is intentionally NOT an option,
- * so it can never be saved explicitly or generate a duplicate
- * initial event.
+ * Stored "Lead Quality" display values, in dropdown order. All five
+ * CRM states are user-selectable, including the initial "Lead" —
+ * every send is manual (an explicit Send to Meta action), so an
+ * explicitly saved "Lead" can never duplicate an automatic event.
  */
 export const LEAD_QUALITY_OPTIONS: readonly string[] = [
+  "Lead",
   "Interested Lead",
   "Qualified Lead",
   "Booking Confirmed",
@@ -58,7 +57,7 @@ export const LEAD_QUALITY_DEFAULT_VALUE = "Lead";
  * the Workspace column heading).
  */
 export const LEAD_QUALITY_TOOLTIP =
-  "Classify each travel enquiry based on genuine customer interest and booking progress. Changes are sent to Meta to help improve qualified lead optimization when CRM feedback is enabled.";
+  "Classify each travel enquiry based on genuine customer interest and booking progress. Saving a status never sends anything — use the Send to Meta button in the lead drawer to deliver the event when CRM feedback is enabled.";
 
 /**
  * Stored display value → CRM event name. Exact, case-insensitive
@@ -153,6 +152,54 @@ export function buildCrmEventPayload(args: {
     custom_data: { lead_event_source: CRM_LEAD_EVENT_SOURCE, event_source: CRM_EVENT_SOURCE },
     event_id: args.eventUuid,
   };
+}
+
+export interface LeadQualityPreviewFingerprint {
+  accountId: string;
+  flowId: string;
+  runId: string;
+  eventName: CrmEventName;
+  toQuality: string;
+  datasetId: string;
+  metaLeadId: string;
+}
+
+/**
+ * Server-generated preview id: a stable fingerprint of everything a
+ * manual send depends on. The send endpoint recomputes it from live
+ * DB state and rejects mismatches (HTTP 409 + fresh preview), so a
+ * preview can never be replayed after the lead, dataset, or event
+ * mapping changed underneath it. Volatile fields (event_time,
+ * event_id) are deliberately excluded — they are regenerated at
+ * send time from the same builder.
+ */
+export function buildLeadQualityPreviewId(
+  fingerprint: LeadQualityPreviewFingerprint,
+): string {
+  // Canonical key order keeps the fingerprint stable for identical
+  // inputs. cyrb53 (public-domain, dependency-free) is plenty for
+  // a staleness check — it is NOT a security boundary, only a
+  // change detector. Pure JS so this module stays importable from
+  // client components (the tooltip lives here too).
+  const canonical = JSON.stringify({
+    accountId: fingerprint.accountId,
+    datasetId: fingerprint.datasetId,
+    eventName: fingerprint.eventName,
+    flowId: fingerprint.flowId,
+    metaLeadId: fingerprint.metaLeadId,
+    runId: fingerprint.runId,
+    toQuality: fingerprint.toQuality,
+  });
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < canonical.length; i++) {
+    const ch = canonical.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
 }
 
 interface MetaEventsErrorBody {

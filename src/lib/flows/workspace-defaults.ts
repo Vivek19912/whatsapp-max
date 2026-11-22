@@ -122,11 +122,11 @@ export const STAGE_OPTIONS: readonly string[] = [
 ];
 
 /** Exact dropdown options for "Lead Quality" (CRM feedback), in order.
- *  Only these four are user-selectable; the automatic initial state
- *  "Lead" is the provisioned display default (read-only fallback for
- *  empty cells) and is intentionally NOT an option, so it can never
- *  be saved explicitly or generate a duplicate initial event. */
+ *  All five CRM states are user-selectable, including the initial
+ *  "Lead" — every send is manual (explicit Send to Meta), so saving
+ *  "Lead" can never duplicate an automatic event. */
 export const LEAD_QUALITY_OPTIONS: readonly string[] = [
+  "Lead",
   "Interested Lead",
   "Qualified Lead",
   "Booking Confirmed",
@@ -213,9 +213,9 @@ export const WORKSPACE_DEFAULT_FIELDS: readonly WorkspaceDefaultSpec[] = [
     name: "Lead Quality",
     field_type: "single_select",
     options: [...LEAD_QUALITY_OPTIONS],
-    // Automatic initial state for new Meta leads (display-only
-    // fallback for empty cells — never written back). The four
-    // options above are the only explicitly savable values.
+    // Lead is both the display default for empty cells and an
+    // explicitly savable option (every send is manual). The five
+    // options above are all savable values.
     default_value: "Lead",
   },
 ];

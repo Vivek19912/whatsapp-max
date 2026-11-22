@@ -40,7 +40,8 @@ import {
   UNASSIGNED_CHIP,
   type SelectChip,
 } from "@/lib/flows/workspace-select-chips";
-import { defaultBusinessValue } from "@/lib/flows/workspace-defaults";
+import { defaultBusinessValue, isLeadQualityField } from "@/lib/flows/workspace-defaults";
+import { LEAD_QUALITY_DEFAULT_VALUE } from "@/lib/meta-crm/lead-quality";
 import { TextCellPopover } from "./text-cell-popover";
 
 /**
@@ -499,7 +500,16 @@ export function CustomCell({
     // two can never disagree). Unknown/legacy values render as
     // plain text; empty cells render blank.
     const selectedChip = shown ? getSelectChip(field.name, shown) : null;
-    const fieldOptions = field.options ?? [];
+    // Lead Quality columns provisioned before "Lead" became an
+    // explicit option still carry the four-outcome option set —
+    // offer the canonical default there too (no migration, no
+    // option rewrite), first like the current spec order. Newly
+    // provisioned columns already include it; never duplicated.
+    const fieldOptions =
+      isLeadQualityField(field) &&
+      !(field.options ?? []).some((o) => o === LEAD_QUALITY_DEFAULT_VALUE)
+        ? [LEAD_QUALITY_DEFAULT_VALUE, ...(field.options ?? [])]
+        : (field.options ?? []);
     const showOptionSearch = fieldOptions.length > OPTION_SEARCH_THRESHOLD;
     const visibleOptions = showOptionSearch
       ? filterCellOptions(

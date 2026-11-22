@@ -163,7 +163,18 @@ export async function PUT(
         );
         stored = validateAssigneeValue(value, memberIds);
       } else {
-        stored = validateWorkspaceValue(field.field_type, field.options, value);
+        // Lead Quality columns provisioned before "Lead" became an
+        // explicit option still carry the four-outcome option set.
+        // Accept the canonical "Lead" display default for them (no
+        // migration, no option rewrite): chips already cover it and
+        // the CRM mapper accepts it. Every other value still
+        // validates exactly against the stored options.
+        const rawValue = typeof value === "string" ? value.trim() : value;
+        const allowLeadDefault =
+          isLeadQualityField(field) && rawValue === "Lead";
+        stored = allowLeadDefault
+          ? "Lead"
+          : validateWorkspaceValue(field.field_type, field.options, value);
       }
     } catch (err) {
       return NextResponse.json(
@@ -284,48 +295,16 @@ export async function PUT(
       console.error("[meta-capi] workspace trigger failed:", err);
     }
 
-    // ADDITIVE Meta CRM feedback — a Lead Quality cell changed.
-    // Records the genuine transition and enqueues the mapped Meta
-    // event (Lead/InterestedLead/QualifiedLead/BookingConfirmed/
-    // DisqualifiedLead). Meta-only in effect: runs without an
-    // original Meta Lead ID (every non-Meta lead) resolve to
-    // `no_meta_lead` and keep their internal status with no event.
-    // Best-effort and isolated so it can never fail the save. Uses
-    // the service-role client for the ledger write (same RLS
-    // rationale as the Sheets sync above): the queue table's RLS
-    // only allows admin inserts, and the (account, run) pair is
-    // already server-side validated above.
-    let crmEvent: { outcome: 'queued' | 'deduplicated' | 'skipped' | 'failed'; reason?: string } | null = null;
-    try {
-      if (isLeadQualityField(field) && storedValue !== previous) {
-        const { enqueueLeadQualityEvent } = await import(
-          "@/lib/meta-crm/feedback"
-        );
-        const { scheduleCrmDrainSoon } = await import(
-          "@/lib/meta-crm/trigger"
-        );
-        const outcome = await enqueueLeadQualityEvent(supabaseAdmin(), {
-          accountId,
-          flowId: id,
-          runId,
-          fromQuality: previous ?? "",
-          toQuality: storedValue ?? "",
-          eventTimeIso: new Date().toISOString(),
-          actorUserId: userId,
-        });
-        if (outcome.enqueued) {
-          crmEvent = outcome.deduplicated
-            ? { outcome: 'deduplicated' }
-            : { outcome: 'queued' };
-          scheduleCrmDrainSoon({ accountId });
-        } else {
-          crmEvent = { outcome: 'skipped', reason: outcome.reason };
-        }
-      }
-    } catch (err) {
-      console.error("[meta-crm] lead-quality enqueue failed:", err);
-      crmEvent = { outcome: 'failed' };
-    }
+    // Meta CRM feedback — DELIBERATELY no hook here. Saving
+    // (or clearing) a Lead Quality cell only stores the status;
+    // delivery happens solely through the explicit manual-send
+    // endpoint (POST /api/integrations/meta-crm/manual-send),
+    // which shows a backend-generated payload preview first.
+    // Selecting a status — including "Lead", clearing the cell,
+    // or re-saving the same value — therefore never generates an
+    // event. `crmEvent` stays in the response (always null) so
+    // existing callers keep their shape.
+    const crmEvent: null = null;
 
     // ADDITIVE Meta Sheets sync — a Workspace cell changed on a Meta
     // table; queue an in-place sheet row update. Meta-only (kind

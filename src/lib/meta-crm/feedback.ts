@@ -3,10 +3,12 @@
 // (Feature: Instant Form lead-quality → Meta Conversions API).
 //
 // Flow:
-//   * New Meta lead processed  -> enqueue "Lead" event (ingestion
-//     hook in process-lead.ts, best-effort, never fails capture).
-//   * "Lead Quality" cell saved -> enqueue mapped event when the
-//     stored value genuinely changed (workspace-values hook).
+//   * "Lead Quality" cell saved -> stores the status ONLY (the
+//     workspace-values save path deliberately contains no CRM
+//     hook; selecting, clearing, or re-saving never sends).
+//   * Explicit Send to Meta (POST .../manual-send, after the user
+//     reviews the backend-generated preview from GET .../preview)
+//     -> enqueue the mapped event for the CURRENT stored status.
 //   * Drain (cron sweep + prompt post-response trigger) sends
 //     pending rows server-side with the account's stored Meta
 //     connection token. Tokens are never persisted here, never
@@ -393,7 +395,7 @@ export interface CrmDrainResult {
  */
 export async function drainCrmEventsQueue(
   db: SupabaseClient,
-  opts: { limit?: number; onlyAccountId?: string; fetchImpl?: typeof fetch } = {},
+  opts: { limit?: number; onlyAccountId?: string; fetchImpl?: typeof fetch; eventIds?: string[] } = {},
 ): Promise<CrmDrainResult> {
   const limit = Math.max(1, Math.min(opts.limit ?? CRM_DRAIN_LIMIT, 100));
   const out: CrmDrainResult = { attempted: 0, sent: 0, failed: 0, skipped: 0 };
@@ -405,6 +407,12 @@ export async function drainCrmEventsQueue(
     .order("next_retry_at", { ascending: true })
     .limit(limit);
   if (opts.onlyAccountId) query = query.eq("account_id", opts.onlyAccountId);
+  // Targeted drain for manual sends: restrict to specific rows while
+  // keeping the pending-only gate, so an already-sent duplicate can
+  // never be re-sent by a concurrent manual click.
+  if (opts.eventIds && opts.eventIds.length > 0) {
+    query = query.in("id", opts.eventIds.slice(0, 100));
+  }
   const { data, error } = await query;
   if (error) throw error;
   const rows = ((data ?? []) as CrmEventRow[]).filter((r) => typeof r.id === "string");

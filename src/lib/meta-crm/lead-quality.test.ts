@@ -1,7 +1,7 @@
 // Meta CRM lead-quality — mapping + payload contracts.
 //
 // Pins: exact five-event mapping (case-insensitive), legacy/unmapped
-// values never map, display default is not an option, payload uses
+// values never map, all five states explicitly selectable, payload uses
 // system_generated + user_data.lead_id + stable event_id, invalid
 // inputs throw without touching the network.
 
@@ -45,7 +45,7 @@ describe("leadQualityToEvent", () => {
     }
   });
 
-  it("keeps exactly five event names and four selectable options", () => {
+  it("keeps exactly five event names and five selectable options (Lead included)", () => {
     expect([...CRM_EVENT_NAMES]).toEqual([
       "Lead",
       "InterestedLead",
@@ -54,13 +54,15 @@ describe("leadQualityToEvent", () => {
       "DisqualifiedLead",
     ]);
     expect([...LEAD_QUALITY_OPTIONS]).toEqual([
+      "Lead",
       "Interested Lead",
       "Qualified Lead",
       "Booking Confirmed",
       "Disqualified Lead",
     ]);
-    // The automatic initial state is display-only, never selectable.
-    expect(LEAD_QUALITY_OPTIONS).not.toContain("Lead");
+    // Every send is manual, so the initial state is explicitly
+    // selectable — saving it can never duplicate an auto-event.
+    expect(LEAD_QUALITY_OPTIONS).toContain("Lead");
     expect(LEAD_QUALITY_TOOLTIP.length).toBeGreaterThan(20);
   });
 });

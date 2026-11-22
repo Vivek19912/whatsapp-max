@@ -90,6 +90,7 @@ import { ColumnResizeHandle } from '@/components/workspace/column-resize-handle'
 import { HiddenRowsMenu } from '@/components/workspace/hidden-rows-menu';
 import { RowActionsMenu } from '@/components/workspace/row-actions-menu';
 import { TravelCrmAction } from '@/components/workspace/travel-crm-action';
+import { MetaCrmSendSection } from '@/components/workspace/meta-crm-send-section';
 import { DialAction } from '@/components/workspace/dial-action';
 import { WorkspacePagination } from '@/components/workspace/workspace-pagination';
 import {
@@ -702,6 +703,13 @@ export default function WorkspacePage() {
     key: string | null;
     map: Record<string, Record<string, string | null>>;
   }>({ key: null, map: {} });
+
+  // Refresh token for the Meta CRM preview: incremented after a
+  // quality-status save so the drawer section refetches the
+  // backend-generated payload for the NEW status. Server state is
+  // the source of truth — the preview survives refresh by
+  // re-assembly from the DB.
+  const [crmPreviewBump, setCrmPreviewBump] = useState(0);
 
   // Account-scoped flow list (same source as the rest of the app).
   // The initial selection is the remembered flow for this account
@@ -1532,8 +1540,18 @@ export default function WorkspacePage() {
         const field = customFields.find((f) => f.id === fieldId);
         if (field && isAssigneeField(field)) reloadTable();
       }
+      // A quality-status save stores the value ONLY (never sends —
+      // delivery is the explicit Send to Meta button). Open the
+      // lead drawer so the backend-generated payload preview + Send
+      // button are immediately visible for the new status.
+      const qualityField = customFields.find((f) => f.id === fieldId);
+      if (qualityField && isLeadQualityField(qualityField)) {
+        const row = (payload?.rows ?? []).find((r) => r.runId === runId) ?? null;
+        if (row) setSelected(row);
+        setCrmPreviewBump((n) => n + 1);
+      }
     },
-    [requestKey, appliedAssignee, customFields, reloadTable]
+    [requestKey, appliedAssignee, customFields, reloadTable, payload]
   );
   // UI-only: the Status column is hidden — the Completed/Incomplete
   // tabs already communicate classification. The column stays in the
@@ -3322,6 +3340,22 @@ export default function WorkspacePage() {
                     onWorkspaceSynced={handleTravelCrmSynced}
                   />
                 )}
+                {/* Manual Meta CRM send (Meta tables only): saving a
+                    quality status never sends — this section
+                    shows the backend-generated payload preview with
+                    an explicit Send to Meta button. Flow Tables never
+                    see it. Keyed by run + save bump so a fresh mount
+                    (fresh preview) follows every status save; the
+                    preview otherwise survives refresh by server
+                    re-assembly. */}
+                {isMetaTable && flowId !== null ? (
+                  <MetaCrmSendSection
+                    key={`${selected.runId}:${crmPreviewBump}`}
+                    flowId={flowId}
+                    runId={selected.runId}
+                    refreshToken={crmPreviewBump}
+                  />
+                ) : null}
                 {/* Meta-only provenance footer: stored submission
                     metadata not already visible elsewhere. Renders
                     AFTER Call Recordings + Create in Travel CRM, at

@@ -53,8 +53,6 @@ import {
   readAssignment,
 } from "@/lib/lead-assignment/table-helpers";
 import { ASSIGNED_TO_UNASSIGNED } from "@/lib/flows/workspace-assignee";
-import { enqueueLeadQualityEvent } from "@/lib/meta-crm/feedback";
-import { scheduleCrmDrainSoon } from "@/lib/meta-crm/trigger";
 
 export const MAX_LEAD_ATTEMPTS = 5;
 const STALE_CLAIM_MS = 5 * 60_000;
@@ -434,35 +432,11 @@ export async function processSubmissionById(
       })
       .eq("id", submissionId);
 
-    // ADDITIVE Meta CRM feedback — a new Meta Instant Form lead
-    // entered WhatsApp Max: schedule the automatic initial `Lead`
-    // event for the workspace's configured CRM dataset. Best-effort
-    // and fully isolated: it can never fail lead processing.
-    // Disabled/unconfigured workspaces and non-Meta runs resolve
-    // to a skip inside the enqueue helper (no event fabricated).
-    try {
-      const outcome = await enqueueLeadQualityEvent(db, {
-        accountId: submission.account_id,
-        flowId,
-        runId: (run as { id: string }).id,
-        fromQuality: "",
-        toQuality: "Lead",
-        eventTimeIso: startedAt,
-        actorUserId: null,
-      });
-      if (outcome.enqueued && !outcome.deduplicated) {
-        try {
-          scheduleCrmDrainSoon({ accountId: submission.account_id });
-        } catch {
-          // Prompt drain is best-effort; the cron covers the row.
-        }
-      }
-    } catch (err) {
-      console.error(
-        "[meta-crm] initial Lead enqueue failed (lead processing unaffected):",
-        err instanceof Error ? err.message : err,
-      );
-    }
+    // Meta CRM feedback — DELIBERATELY no automatic event here.
+    // A new Meta Instant Form lead enters with the Lead Quality
+    // display default ("Lead"); delivery happens solely through
+    // the explicit manual-send endpoint with a payload preview.
+    // Lead capture is unaffected by CRM config either way.
 
     // ADDITIVE Meta Conversions API hook — the lead now exists in the
     // Workspace, so fire any configured conversion mapping. Best-effort

@@ -622,7 +622,7 @@ describe("agent ownership on Meta Lead Ads Tables", () => {
   });
 });
 
-describe("PUT Lead Quality → CRM feedback hook", () => {
+describe("PUT Lead Quality → manual-send only (never auto-enqueues)", () => {
   const LEAD_QUALITY_FIELD = {
     id: "f-quality",
     account_id: "acct-1",
@@ -630,6 +630,7 @@ describe("PUT Lead Quality → CRM feedback hook", () => {
     name: "Lead Quality",
     field_type: "single_select",
     position: 0,
+    // Legacy columns provisioned before "Lead" became selectable.
     options: [
       "Interested Lead",
       "Qualified Lead",
@@ -648,25 +649,47 @@ describe("PUT Lead Quality → CRM feedback hook", () => {
     h.run = { id: "run-1", account_id: "acct-1", flow_id: "flow-1" };
   }
 
-  it("enqueues a mapped event on genuine change and reports it", async () => {
+  it("saves the status without enqueueing anything (delivery is the Send button)", async () => {
     seedQuality();
     const res = await PUT(
       put({ field_id: "f-quality", flow_run_id: "run-1", value: "Qualified Lead" }),
       params,
     );
     expect(res.status).toBe(200);
-    expect(h.crmEnqueues).toHaveLength(1);
-    expect(h.crmEnqueues[0]).toMatchObject({
-      accountId: "acct-1",
-      flowId: "flow-1",
-      runId: "run-1",
-      fromQuality: "",
-      toQuality: "Qualified Lead",
-      actorUserId: "u-admin",
-    });
-    expect(h.crmDrainSoon).toBe(1);
-    const json = (await res.json()) as { crmEvent: { outcome: string } };
-    expect(json.crmEvent).toEqual({ outcome: "queued" });
+    // No auto-send from the save path — the CRM mocks stay silent.
+    expect(h.crmEnqueues).toHaveLength(0);
+    expect(h.crmDrainSoon).toBe(0);
+    const json = (await res.json()) as { value: string; crmEvent: null };
+    expect(json.value).toBe("Qualified Lead");
+    expect(json.crmEvent).toBeNull();
+    expect(h.upserts).toHaveLength(1);
+  });
+
+  it("accepts an explicit Lead save on legacy four-option columns", async () => {
+    seedQuality();
+    const res = await PUT(
+      put({ field_id: "f-quality", flow_run_id: "run-1", value: "Lead" }),
+      params,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { value: string; crmEvent: null };
+    expect(json.value).toBe("Lead");
+    expect(json.crmEvent).toBeNull();
+    expect(h.crmEnqueues).toHaveLength(0);
+    expect(h.crmDrainSoon).toBe(0);
+  });
+
+  it("re-saving the same status still sends nothing", async () => {
+    seedQuality();
+    for (const value of ["Qualified Lead", "Qualified Lead"]) {
+      const res = await PUT(
+        put({ field_id: "f-quality", flow_run_id: "run-1", value }),
+        params,
+      );
+      expect(res.status).toBe(200);
+    }
+    expect(h.crmEnqueues).toHaveLength(0);
+    expect(h.upserts).toHaveLength(2);
   });
 
   it("does not enqueue for non-quality columns", async () => {
@@ -690,7 +713,7 @@ describe("PUT Lead Quality → CRM feedback hook", () => {
     expect(h.crmDrainSoon).toBe(0);
   });
 
-  it("does not enqueue when clearing the cell (no fabricated Lead event)", async () => {
+  it("clearing the cell deletes the value and sends nothing", async () => {
     seedQuality();
     const res = await PUT(
       put({ field_id: "f-quality", flow_run_id: "run-1", value: "" }),
@@ -699,19 +722,5 @@ describe("PUT Lead Quality → CRM feedback hook", () => {
     expect(res.status).toBe(200);
     expect(h.crmEnqueues).toHaveLength(0);
     expect(h.deletes).toBe(1);
-  });
-
-  it("never fails the save when the CRM hook throws", async () => {
-    seedQuality();
-    h.crmEnqueueThrows = true;
-    const res = await PUT(
-      put({ field_id: "f-quality", flow_run_id: "run-1", value: "Interested Lead" }),
-      params,
-    );
-    expect(res.status).toBe(200);
-    const json = (await res.json()) as { value: string; crmEvent: { outcome: string } };
-    expect(json.value).toBe("Interested Lead");
-    expect(json.crmEvent).toEqual({ outcome: "failed" });
-    expect(h.upserts).toHaveLength(1);
   });
 });
