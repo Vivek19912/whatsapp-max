@@ -4,7 +4,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { listCrmDatasets, normalizePublicDatasets, saveCrmDataset } from "./store";
+import {
+  formatCrmDatasetLabel,
+  listCrmDatasets,
+  normalizePublicDatasets,
+  saveCrmDataset,
+} from "./store";
 
 function makeDb(initial: Array<Record<string, unknown>> = []) {
   const rows = [...initial];
@@ -235,5 +240,24 @@ describe("normalizePublicDatasets", () => {
     expect(normalizePublicDatasets(null)).toEqual([]);
     expect(normalizePublicDatasets(undefined)).toEqual([]);
     expect(normalizePublicDatasets({})).toEqual([]);
+  });
+});
+
+describe("formatCrmDatasetLabel", () => {
+  it("renders the readable name and Meta ID, never the internal id", () => {
+    expect(
+      formatCrmDatasetLabel({ datasetName: "IM CRM", datasetId: "1169732842278579" }),
+    ).toBe("IM CRM · 1169732842278579");
+  });
+
+  it("trims parts and degrades gracefully", () => {
+    expect(
+      formatCrmDatasetLabel({ datasetName: "  IM CRM  ", datasetId: "  1169732842278579  " }),
+    ).toBe("IM CRM · 1169732842278579");
+    expect(formatCrmDatasetLabel({ datasetName: "", datasetId: "1169732842278579" })).toBe(
+      "1169732842278579",
+    );
+    expect(formatCrmDatasetLabel({ datasetName: "IM CRM", datasetId: "" })).toBe("IM CRM");
+    expect(formatCrmDatasetLabel({ datasetName: "  ", datasetId: "  " })).toBe("");
   });
 });

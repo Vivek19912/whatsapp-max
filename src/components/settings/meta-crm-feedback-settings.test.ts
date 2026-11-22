@@ -78,6 +78,24 @@ describe("MetaCrmFeedbackSettings", () => {
     expect(src).toContain("175_meta_crm_feedback");
   });
 
+  it("always renders the readable label for the selected dataset, never the UUID", () => {
+    // Root cause: Base UI's Select.Value resolves its text from the
+    // `items` prop, which this dropdown does not provide — an
+    // unmatched UUID value then renders verbatim. The fix passes
+    // the label explicitly as Select.Value children (same formatter
+    // as the options), which takes precedence over that resolution.
+    expect(src).toContain("formatCrmDatasetLabel(selectedDatasetOption)");
+    expect(src).toContain("const selectedDatasetOption =");
+    expect(src).toContain("const selectedDatasetLabel =");
+    expect(src).toContain("{formatCrmDatasetLabel(d)}");
+    // Stale ids (dataset removed elsewhere) reset to unselected so
+    // the placeholder shows instead of a raw internal id.
+    expect(src).toContain("setSelectedDataset(\"\")");
+    // Identity still travels in the option value, never the label.
+    expect(src).toContain("<SelectItem key={d.id} value={d.id}>");
+    expect(src).not.toContain("value={d.datasetId}");
+  });
+
   it("sizes the dataset dropdown to its content without clipping text", () => {
     // Root causes: the shared trigger pairs a fixed h-8 with py-2
     // (16px content box vs 20px text) and clamps the value with

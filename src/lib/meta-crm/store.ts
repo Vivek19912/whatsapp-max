@@ -91,6 +91,22 @@ export function normalizePublicDatasets(rows: unknown): PublicCrmDataset[] {
   return out;
 }
 
+/**
+ * Single human-readable label for a dataset dropdown row, shared by
+ * the popup options and the selected trigger value so the two can
+ * never disagree. The internal DB id is never part of the label —
+ * identity travels in the option `value`, display text here.
+ */
+export function formatCrmDatasetLabel(d: {
+  datasetName: string;
+  datasetId: string;
+}): string {
+  const name = d.datasetName.trim();
+  const id = d.datasetId.trim();
+  if (name && id) return `${name} · ${id}`;
+  return name || id;
+}
+
 export interface SaveCrmDatasetInput {
   accountId: string;
   businessPortfolioId: string;

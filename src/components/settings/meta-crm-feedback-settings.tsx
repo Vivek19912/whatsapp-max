@@ -31,7 +31,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { normalizePublicDatasets } from "@/lib/meta-crm/store";
+import { normalizePublicDatasets, formatCrmDatasetLabel } from "@/lib/meta-crm/store";
 import {
   Select,
   SelectContent,
@@ -181,11 +181,35 @@ export function MetaCrmFeedbackSettings() {
 
   // Pre-select the saved dataset once both payloads arrive. Only
   // fills an untouched select — never overrides the user's choice.
+  // Resets a stale id (dataset removed elsewhere) so the trigger
+  // can never fall back to rendering a raw internal UUID: Base UI
+  // resolves <Select.Value/> text from its `items` prop, which we
+  // don't provide, so an unmatched value would display as-is.
   useEffect(() => {
-    if (selectedDataset !== "" || !config?.datasetId || datasets.length === 0) return;
-    const current = datasets.find((d) => d.datasetId === config.datasetId);
-    if (current) setSelectedDataset(current.id);
+    if (datasets.length === 0) return;
+    if (selectedDataset === "") {
+      if (!config?.datasetId) return;
+      const current = datasets.find((d) => d.datasetId === config.datasetId);
+      if (current) setSelectedDataset(current.id);
+    } else if (!datasets.some((d) => d.id === selectedDataset)) {
+      setSelectedDataset("");
+    }
   }, [config, datasets, selectedDataset]);
+
+  // Explicit trigger label, looked up from loaded rows by internal
+  // id. Passed as <Select.Value> children (same formatter as the
+  // options), which takes precedence over Base UI's value
+  // resolution and guarantees the readable "name · id" label.
+  // A selected id with no matching row renders blank (never the
+  // raw UUID); the effect above then resets it to unselected.
+  const selectedDatasetOption =
+    selectedDataset === "" ? null : (datasets.find((d) => d.id === selectedDataset) ?? null);
+  const selectedDatasetLabel =
+    selectedDatasetOption != null
+      ? formatCrmDatasetLabel(selectedDatasetOption)
+      : selectedDataset === ""
+        ? undefined
+        : "";
 
   useEffect(() => {
     void loadDatasets();
@@ -344,12 +368,14 @@ export function MetaCrmFeedbackSettings() {
                       id="meta-crm-feedback-dataset"
                       className="h-auto min-h-9 w-full py-2 *:data-[slot=select-value]:line-clamp-none"
                     >
-                      <SelectValue placeholder={datasets.length === 0 ? "No datasets registered yet" : "Select a dataset"} />
+                      <SelectValue placeholder={datasets.length === 0 ? "No datasets registered yet" : "Select a dataset"}>
+                        {selectedDatasetLabel}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent className="w-max min-w-(--anchor-width) max-w-[calc(100vw-2rem)] [&_[data-slot=select-item-text]]:whitespace-normal [&_[data-slot=select-item-text]]:break-words">
                       {datasets.map((d) => (
                         <SelectItem key={d.id} value={d.id}>
-                          {d.datasetName} · {d.datasetId}
+                          {formatCrmDatasetLabel(d)}
                         </SelectItem>
                       ))}
                     </SelectContent>
