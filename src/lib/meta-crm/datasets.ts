@@ -396,6 +396,12 @@ export async function getBusinessDetail(
  * Best-effort ownership check: list the business's CRM datasets and
  * see whether the dataset appears. Returns null when the listing
  * itself is unavailable (callers must not treat that as proof).
+ *
+ * NOTE: a null return is AMBIGUOUS — it covers expired tokens,
+ * missing permissions, bad business IDs, Meta outages, and
+ * unsupported edges alike. Code paths that must tell the operator
+ * *why* verification failed should use verifyDatasetOwnership()
+ * instead, which preserves the underlying diagnostic.
  */
 export async function isDatasetUnderBusiness(
   businessPortfolioId: string,
@@ -403,23 +409,177 @@ export async function isDatasetUnderBusiness(
   accessToken: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean | null> {
-  const url =
-    `https://graph.facebook.com/${META_CRM_GRAPH_VERSION}/${businessPortfolioId.trim()}` +
-    `/ads_datasets?fields=id&limit=100`;
   try {
-    const res = await fetchImpl(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${accessToken.trim()}` },
-    });
-    const text = await res.text().catch(() => "");
-    const parsed = text ? (JSON.parse(text) as unknown) : null;
-    const data = (parsed ?? {}) as { data?: Array<{ id?: unknown }>; error?: MetaErrorBody["error"] };
-    if (!res.ok || data.error) return null;
-    const rows = Array.isArray(data.data) ? data.data : [];
-    return rows.some((r) => typeof r.id === "string" && r.id.trim() === datasetId.trim());
+    const ids = await fetchBusinessDatasets(
+      businessPortfolioId,
+      accessToken,
+      fetchImpl,
+    );
+    return ids.some((id) => id === datasetId.trim());
   } catch {
     return null;
   }
+}
+
+/**
+ * List a Business Portfolio's CRM dataset ids. Throws a precise
+ * MetaCrmError (never null) so callers can distinguish an expired
+ * token, missing permissions, a bad business id, and Meta outages.
+ */
+export async function fetchBusinessDatasets(
+  businessPortfolioId: string,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string[]> {
+  const businessId = businessPortfolioId.trim();
+  if (!BUSINESS_ID_PATTERN.test(businessId)) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Business Portfolio ID must be a numeric ID (5–32 digits).",
+      status: 400,
+    });
+  }
+  const token = accessToken.trim();
+  if (token === "") {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Refusing to query Meta without an access token.",
+      status: 400,
+    });
+  }
+  const url =
+    `https://graph.facebook.com/${META_CRM_GRAPH_VERSION}/${businessId}` +
+    `/ads_datasets?fields=id&limit=100`;
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new MetaCrmError({
+      code: "network_error",
+      message: "Could not reach Meta. Check your connection and try again.",
+      status: 502,
+    });
+  }
+  let parsed: unknown = null;
+  try {
+    const text = await res.text();
+    parsed = text ? (JSON.parse(text) as unknown) : null;
+  } catch {
+    parsed = null;
+  }
+  const data = (parsed ?? {}) as {
+    data?: Array<{ id?: unknown }>;
+    error?: MetaErrorBody["error"];
+  };
+  const metaError = data.error;
+  if (!res.ok || metaError) {
+    const metaCode = typeof metaError?.code === "number" ? metaError.code : null;
+    const metaSubcode =
+      typeof metaError?.error_subcode === "number" ? metaError.error_subcode : null;
+    const message = safeMetaMessage(
+      metaError ? { error: metaError } : null,
+      res.status,
+    );
+    if (metaCode === 200) {
+      throw new MetaCrmError({
+        code: "forbidden",
+        message:
+          `Meta refused: this token cannot list datasets for Business Portfolio ${businessId} (code 200). ` +
+          `Grant it dataset access. ${message}`.slice(0, 300),
+        status: 403,
+        metaCode,
+        metaSubcode,
+      });
+    }
+    if (metaCode === 190 || metaCode === 102 || res.status === 401) {
+      throw new MetaCrmError({
+        code: "auth_failed",
+        message: "Meta rejected the access token. It may be expired or invalid.",
+        status: 401,
+        metaCode,
+        metaSubcode,
+      });
+    }
+    throw new MetaCrmError({
+      code: "meta_error",
+      message,
+      status: res.status >= 500 ? 502 : res.status || 502,
+      metaCode,
+      metaSubcode,
+    });
+  }
+  const rows = Array.isArray(data.data) ? data.data : [];
+  return rows
+    .map((r) => (typeof r.id === "string" ? r.id.trim() : ""))
+    .filter((id) => id !== "");
+}
+
+export interface VerifyOwnershipArgs {
+  businessPortfolioId: string;
+  datasetId: string;
+  accessToken: string;
+  fetchImpl?: typeof fetch;
+}
+
+export type DatasetOwnershipResult =
+  | { verified: true }
+  | { verified: false; reason: string };
+
+/**
+ * Strict ownership verification for enabling CRM feedback.
+ *
+ * Unlike the best-effort isDatasetUnderBusiness() probe, every
+ * failure here is precise:
+ *   - dataset unreadable  -> the dataset read's own error
+ *     (expired token / missing dataset permission / bad id)
+ *   - business unreadable -> the business read's own error
+ *     (wrong portfolio id / no business access)
+ *   - listing unavailable -> the listing's own error (outage,
+ *     unsupported edge) — never misreported as "not owned"
+ *   - listed but absent  -> verified:false with both ids named
+ *
+ * Throws MetaCrmError for all uncertain/error states (fail closed:
+ * callers must keep feedback disabled); returns verified:false
+ * ONLY when a successful listing proves the dataset is absent.
+ * Never fabricates ownership; never logs tokens.
+ */
+export async function verifyDatasetOwnership(
+  args: VerifyOwnershipArgs,
+): Promise<DatasetOwnershipResult> {
+  const fetchImpl = args.fetchImpl ?? fetch;
+  const token = args.accessToken.trim();
+  if (token === "") {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Refusing to verify ownership without an access token.",
+      status: 400,
+    });
+  }
+  const detail = await getCrmDatasetDetail(args.datasetId, token, fetchImpl);
+  const business = await getBusinessDetail(
+    args.businessPortfolioId,
+    token,
+    fetchImpl,
+  );
+  const ids = await fetchBusinessDatasets(
+    args.businessPortfolioId,
+    token,
+    fetchImpl,
+  );
+  if (ids.includes(detail.id)) {
+    return { verified: true };
+  }
+  return {
+    verified: false,
+    reason:
+      `Dataset ${detail.id} ("${detail.name || "unnamed"}") was not found under ` +
+      `Business Portfolio ${business.id}. Check that the dataset belongs to ` +
+      `business ${business.id} (checked the first ${ids.length} datasets), or ` +
+      `move it under that business in Meta Business Settings.`,
+  };
 }
 
 export interface VerifyExistingArgs {

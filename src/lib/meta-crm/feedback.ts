@@ -29,8 +29,7 @@ import { supabaseAdmin } from "@/lib/flows/admin-client";
 import { getUserToken } from "@/lib/meta-lead-ads/store";
 
 import { isUniqueViolation } from "./store";
-import { isDatasetUnderBusiness } from "./datasets";
-import { MetaCrmError } from "./datasets";
+import { MetaCrmError, verifyDatasetOwnership } from "./datasets";
 import {
   buildCrmEventPayload,
   leadQualityToEvent,
@@ -152,7 +151,11 @@ export async function saveCrmFeedbackConfig(
   }
 
   // Verify with the account's stored credential (never a pasted
-  // token here): dataset readable + business accessible + linkage.
+  // token here): the dataset must be readable, the business must
+  // be accessible, and the listing must show the dataset under
+  // that business. Every uncertainty surfaces its own precise
+  // error (expired token, missing permission, bad portfolio id,
+  // outage) — never the generic ownership message.
   let token: string;
   try {
     token = await getUserToken(db, args.accountId);
@@ -163,13 +166,42 @@ export async function saveCrmFeedbackConfig(
       status: 409,
     });
   }
-  const linkage = await isDatasetUnderBusiness(
-    chosen.business_portfolio_id,
-    chosen.dataset_id,
-    token,
-    args.fetchImpl ?? fetch,
-  );
-  if (linkage !== true) {
+  let ownership: { verified: true } | { verified: false; reason: string };
+  try {
+    ownership = await verifyDatasetOwnership({
+      businessPortfolioId: chosen.business_portfolio_id,
+      datasetId: chosen.dataset_id,
+      accessToken: token,
+      fetchImpl: args.fetchImpl ?? fetch,
+    });
+  } catch (err) {
+    // Precise failure (auth / permission / bad id / outage):
+    // record it verbatim and stay disabled. Fail closed, but loud.
+    const message =
+      err instanceof MetaCrmError
+        ? err.message
+        : "Could not verify dataset ownership with Meta. Try again.";
+    const { error: saveErr } = await db
+      .from("meta_crm_config")
+      .upsert(
+        {
+          account_id: args.accountId,
+          dataset_ref: chosen.id,
+          dataset_id: chosen.dataset_id,
+          business_portfolio_id: chosen.business_portfolio_id,
+          dataset_name: chosen.dataset_name,
+          enabled: false,
+          verified_at: null,
+          last_error: message.slice(0, 500),
+          updated_by: args.actorUserId,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "account_id" },
+      );
+    if (saveErr) throw saveErr;
+    throw err;
+  }
+  if (!ownership.verified) {
     const { error } = await db
       .from("meta_crm_config")
       .upsert(
@@ -181,8 +213,7 @@ export async function saveCrmFeedbackConfig(
           dataset_name: chosen.dataset_name,
           enabled: false,
           verified_at: null,
-          last_error:
-            "Dataset ownership could not be verified with this workspace's Meta connection. Feedback stays disabled.",
+          last_error: ownership.reason.slice(0, 500),
           updated_by: args.actorUserId,
           updated_at: new Date().toISOString(),
         },
@@ -191,8 +222,7 @@ export async function saveCrmFeedbackConfig(
     if (error) throw error;
     throw new MetaCrmError({
       code: "forbidden",
-      message:
-        "Dataset ownership could not be verified with this workspace's Meta connection. Feedback stays disabled.",
+      message: ownership.reason,
       status: 403,
     });
   }

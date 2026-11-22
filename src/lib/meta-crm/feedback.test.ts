@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
-  linkage: true as boolean,
+  ownership: "ok" as "ok" | "not-owned" | { throw: unknown },
   token: "STORED_TOKEN",
   tokenCalls: 0,
 }));
@@ -27,7 +27,17 @@ vi.mock("./datasets", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./datasets")>();
   return {
     ...actual,
-    isDatasetUnderBusiness: async () => h.linkage,
+    verifyDatasetOwnership: async () => {
+      if (h.ownership === "ok") return { verified: true };
+      if (h.ownership === "not-owned") {
+        return {
+          verified: false,
+          reason:
+            'Dataset 1830596054845292 ("IM CRM") was not found under Business Portfolio BIZ1.',
+        };
+      }
+      throw (h.ownership as { throw: unknown }).throw;
+    },
   };
 });
 
@@ -183,7 +193,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 beforeEach(() => {
-  h.linkage = true;
+  h.ownership = "ok";
   h.token = "STORED_TOKEN";
   h.tokenCalls = 0;
 });
@@ -409,8 +419,8 @@ describe("saveCrmFeedbackConfig", () => {
     expect(tables.meta_crm_config).toHaveLength(1);
   });
 
-  it("refuses to enable when ownership cannot be verified", async () => {
-    h.linkage = false;
+  it("refuses to enable when the dataset is absent from the business listing", async () => {
+    h.ownership = "not-owned";
     const { db, tables } = makeDb({
       meta_crm_datasets: [
         {
@@ -431,6 +441,119 @@ describe("saveCrmFeedbackConfig", () => {
         actorUserId: "admin-1",
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
+    expect(tables.meta_crm_config[0]?.enabled).toBe(false);
+    expect(String(tables.meta_crm_config[0]?.last_error)).toContain("1830596054845292");
+    expect(String(tables.meta_crm_config[0]?.last_error)).toContain("BIZ1");
+  });
+
+  it("surfaces an expired token precisely instead of blaming ownership", async () => {
+    const { MetaCrmError } = await import("./datasets");
+    h.ownership = {
+      throw: new MetaCrmError({
+        code: "auth_failed",
+        message: "Meta rejected the access token. It may be expired or invalid.",
+        status: 401,
+        metaCode: 190,
+        metaSubcode: null,
+      }),
+    };
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        {
+          id: "row-ds",
+          account_id: "acct-1",
+          dataset_id: "1830596054845292",
+          business_portfolio_id: "BIZ1",
+          dataset_name: "IM CRM",
+        },
+      ],
+      meta_crm_config: [],
+    });
+    const err = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("auth_failed");
+    expect(err.status).toBe(401);
+    expect(err.metaCode).toBe(190);
+    // Fail closed, but the stored diagnostic names the real cause.
+    expect(tables.meta_crm_config[0]?.enabled).toBe(false);
+    expect(String(tables.meta_crm_config[0]?.last_error)).toContain("expired or invalid");
+  });
+
+  it("surfaces missing dataset permissions precisely, with Meta codes", async () => {
+    const { MetaCrmError } = await import("./datasets");
+    h.ownership = {
+      throw: new MetaCrmError({
+        code: "forbidden",
+        message: "Meta refused: this token cannot access that dataset (code 200).",
+        status: 403,
+        metaCode: 200,
+        metaSubcode: 7,
+      }),
+    };
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        {
+          id: "row-ds",
+          account_id: "acct-1",
+          dataset_id: "1830596054845292",
+          business_portfolio_id: "BIZ1",
+          dataset_name: "IM CRM",
+        },
+      ],
+      meta_crm_config: [],
+    });
+    const err = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("forbidden");
+    expect(err.metaCode).toBe(200);
+    expect(err.metaSubcode).toBe(7);
+    expect(String(err.message)).toContain("code 200");
+    expect(tables.meta_crm_config[0]?.enabled).toBe(false);
+  });
+
+  it("surfaces listing outages as backend failures, not ownership verdicts", async () => {
+    const { MetaCrmError } = await import("./datasets");
+    h.ownership = {
+      throw: new MetaCrmError({
+        code: "meta_error",
+        message: "Meta rejected the dataset listing (503).",
+        status: 502,
+        metaCode: null,
+        metaSubcode: null,
+      }),
+    };
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        {
+          id: "row-ds",
+          account_id: "acct-1",
+          dataset_id: "1830596054845292",
+          business_portfolio_id: "BIZ1",
+          dataset_name: "IM CRM",
+        },
+      ],
+      meta_crm_config: [],
+    });
+    const err = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("meta_error");
+    expect(err.status).toBe(502);
+    expect(String(err.message)).not.toMatch(/ownership could not be verified/i);
     expect(tables.meta_crm_config[0]?.enabled).toBe(false);
   });
 

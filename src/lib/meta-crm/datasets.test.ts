@@ -200,3 +200,161 @@ describe("verifyExistingCrmDataset", () => {
     expect(err).toBeInstanceOf(MetaCrmError);
   });
 });
+
+describe("verifyDatasetOwnership", () => {
+  function stubFetch(
+    handlers: Record<string, (url: string) => Response>,
+  ): typeof fetch {
+    return (async (url: string) => {
+      for (const [prefix, handler] of Object.entries(handlers)) {
+        if (url.includes(prefix)) return handler(url);
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as unknown as typeof fetch;
+  }
+
+  const ARGS = {
+    businessPortfolioId: "1171141236081090",
+    datasetId: "1169732842278579",
+    accessToken: "USER_TOKEN",
+  };
+
+  it("verifies ownership when the dataset is listed under the business", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const out = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+        "/ads_datasets": () => jsonResponse({ data: [{ id: "1169732842278579" }] }),
+      }),
+    });
+    expect(out).toEqual({ verified: true });
+  });
+
+  it("returns not-owned (never throws) when the listing succeeds without the dataset", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const out = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+        "/ads_datasets": () => jsonResponse({ data: [{ id: "999" }] }),
+      }),
+    });
+    expect(out.verified).toBe(false);
+    if (!out.verified) {
+      expect(out.reason).toContain("1169732842278579");
+      expect(out.reason).toContain("1171141236081090");
+    }
+  });
+
+  it("throws auth_failed for an expired token instead of blaming ownership", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse(
+            { error: { message: "Invalid OAuth access token.", code: 190 } },
+            400,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("auth_failed");
+    expect(err.status).toBe(401);
+    expect(err.metaCode).toBe(190);
+    expect(String(err.message)).not.toContain("USER_TOKEN");
+  });
+
+  it("throws forbidden with Meta codes when the token lacks dataset permission", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse(
+            { error: { message: "Insufficient permission.", type: "OAuthException", code: 200, error_subcode: 33 } },
+            400,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("forbidden");
+    expect(err.status).toBe(403);
+    expect(err.metaCode).toBe(200);
+    expect(err.metaSubcode).toBe(33);
+  });
+
+  it("throws a business-specific error for a wrong portfolio id", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      businessPortfolioId: "0000000000000000",
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/0000000000000000?": () =>
+          jsonResponse(
+            { error: { message: "Unsupported get request.", code: 100 } },
+            400,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.status).toBe(400);
+    expect(String(err.message)).not.toContain("USER_TOKEN");
+  });
+
+  it("throws meta_error (not false) when the listing edge is unavailable", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: stubFetch({
+        "/1169732842278579?": () =>
+          jsonResponse({ id: "1169732842278579", name: "IM CRM" }),
+        "/1171141236081090?": () => jsonResponse({ id: "1171141236081090", name: "Biz" }),
+        "/ads_datasets": () =>
+          jsonResponse(
+            { error: { message: "Unknown path components.", code: 2500 } },
+            404,
+          ),
+      }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("meta_error");
+    // Uncertain, never a fabricated "not owned" verdict.
+    expect(err).not.toMatchObject({ code: "forbidden" });
+  });
+
+  it("throws network_error on transport failure instead of blaming ownership", async () => {
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      fetchImpl: (async () => {
+        throw new Error("boom");
+      }) as unknown as typeof fetch,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("network_error");
+  });
+
+  it("rejects an empty token without calling Meta", async () => {
+    const calls: string[] = [];
+    const { verifyDatasetOwnership } = await import("./datasets");
+    const err = await verifyDatasetOwnership({
+      ...ARGS,
+      accessToken: "   ",
+      fetchImpl: (async (url: string) => {
+        calls.push(url);
+        throw new Error("must not call Meta");
+      }) as unknown as typeof fetch,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(MetaCrmError);
+    expect(err.code).toBe("invalid_input");
+    expect(calls).toHaveLength(0);
+  });
+});

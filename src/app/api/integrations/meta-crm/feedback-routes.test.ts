@@ -10,7 +10,7 @@ const h = vi.hoisted(() => ({
   userId: "admin-1",
   role: "admin" as string,
   tables: {} as Record<string, Array<Record<string, unknown>>>,
-  linkage: true as boolean,
+  ownership: "ok" as "ok" | "not-owned" | { throw: unknown },
   token: "STORED_TOKEN",
   configDbError: null as { code: string; message: string } | null,
 }));
@@ -45,7 +45,17 @@ vi.mock("@/lib/meta-crm/datasets", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/meta-crm/datasets")>();
   return {
     ...actual,
-    isDatasetUnderBusiness: async () => h.linkage,
+    verifyDatasetOwnership: async () => {
+      if (h.ownership === "ok") return { verified: true };
+      if (h.ownership === "not-owned") {
+        return {
+          verified: false,
+          reason:
+            'Dataset 1830596054845292 ("IM CRM") was not found under Business Portfolio BIZ1.',
+        };
+      }
+      throw (h.ownership as { throw: unknown }).throw;
+    },
   };
 });
 
@@ -142,7 +152,7 @@ beforeEach(() => {
   h.accountId = "acct-1";
   h.userId = "admin-1";
   h.role = "admin";
-  h.linkage = true;
+  h.ownership = "ok";
   h.token = "STORED_TOKEN";
   h.configDbError = null;
   h.tables = {
@@ -182,11 +192,55 @@ describe("PUT /api/integrations/meta-crm/config", () => {
     expect(JSON.stringify(json).includes("STORED_TOKEN")).toBe(false);
   });
 
-  it("refuses to enable when ownership cannot be verified", async () => {
-    h.linkage = false;
+  it("refuses to enable when the dataset is absent from the business listing", async () => {
+    h.ownership = "not-owned";
     const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
     expect(res.status).toBe(403);
+    const json = (await res.json()) as { error?: string; code?: string };
+    expect(json.code).toBe("forbidden");
+    // Names the actual ids instead of the generic ownership message.
+    expect(json.error).toContain("1830596054845292");
     expect(h.tables.meta_crm_config[0]?.enabled).toBe(false);
+  });
+
+  it("surfaces an expired token precisely instead of blaming ownership", async () => {
+    const { MetaCrmError } = await import("@/lib/meta-crm/datasets");
+    h.ownership = {
+      throw: new MetaCrmError({
+        code: "auth_failed",
+        message: "Meta rejected the access token. It may be expired or invalid.",
+        status: 401,
+        metaCode: 190,
+        metaSubcode: null,
+      }),
+    };
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    expect(res.status).toBe(401);
+    const json = (await res.json()) as { error?: string; code?: string; metaCode?: number };
+    expect(json.code).toBe("auth_failed");
+    expect(json.metaCode).toBe(190);
+    expect(json.error).toContain("expired or invalid");
+    expect(h.tables.meta_crm_config[0]?.enabled).toBe(false);
+  });
+
+  it("surfaces missing dataset permissions with Meta codes", async () => {
+    const { MetaCrmError } = await import("@/lib/meta-crm/datasets");
+    h.ownership = {
+      throw: new MetaCrmError({
+        code: "forbidden",
+        message: "Meta refused: insufficient permissions (code 200). Grant dataset creation rights to this token/business.",
+        status: 403,
+        metaCode: 200,
+        metaSubcode: 33,
+      }),
+    };
+    const res = await configPut(put({ enabled: true, datasetRowId: "row-ds" }));
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as { error?: string; code?: string; metaCode?: number; metaSubcode?: number };
+    expect(json.code).toBe("forbidden");
+    expect(json.metaCode).toBe(200);
+    expect(json.metaSubcode).toBe(33);
+    expect(JSON.stringify(json).toLowerCase()).not.toContain("ownership could not be verified");
   });
 
   it("rejects foreign datasets and requires admin", async () => {
