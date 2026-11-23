@@ -29,6 +29,7 @@ const settings = read("src/components/settings/meta-crm-feedback-settings.tsx");
 const customCell = read("src/components/workspace/custom-cell.tsx");
 const cron = read("src/app/api/integrations/meta-lead-ads/cron/route.ts");
 const migration = read("supabase/migrations/175_meta_crm_feedback.sql");
+const migration182 = read("supabase/migrations/182_lead_quality_junk.sql");
 
 describe("Lead Quality column wiring", () => {
   it("is a provisioned single_select default with a Lead display default", () => {
@@ -47,13 +48,39 @@ describe("Lead Quality column wiring", () => {
     expect(valuesRoute).toContain("allowLeadDefault");
   });
 
+  it("offers Junk with the retired red badge, never Disqualified Lead", () => {
+    // Dropdown + mapper expose Junk; the chip reuses the retired red.
+    expect(defaults).toContain('"Junk",');
+    expect(leadQuality).toContain('case "junk":');
+    expect(chips).toContain('junk: RED_STRONG');
+    // History stays renderable: old values keep their red chip and
+    // their exact event mapping (never remapped, never resent).
+    expect(chips).toContain('"disqualified lead": RED_STRONG');
+    expect(leadQuality).toContain('"DisqualifiedLead"');
+  });
+
+  it("migration 182 swaps the stored option and admits the Junk event", () => {
+    // Existing columns are rewritten in place (same position);
+    // saved lead values are untouched.
+    expect(migration182).toContain('Disqualified Lead');
+    expect(migration182).toContain("'Junk'");
+    expect(migration182).toContain("workspace_fields");
+    // Ledger keeps every historical name and gains Junk.
+    expect(migration182).toContain("meta_crm_events_event_name_check");
+    expect(migration182).toContain("DisqualifiedLead");
+  });
+
+  it("the settings event labels cover Junk for history + preview display", () => {
+    expect(settings).toContain('Junk: "Junk",');
+    expect(settings).toContain('DisqualifiedLead: "Disqualified Lead",');
+  });
   it("paints status chips without touching legacy Hot/Warm/Cold/Fake", () => {
     expect(chips).toContain('"lead quality"');
     expect(chips).toContain('"disqualified lead"');
     expect(chips).toContain("hot:");
   });
 
-  it("maps the five CRM events and never invents others", () => {
+  it("maps the CRM events (current + historical) and never invents others", () => {
     expect(leadQuality).toContain('"Lead"');
     expect(leadQuality).toContain('"BookingConfirmed"');
     expect(leadQuality).toContain('"DisqualifiedLead"');

@@ -114,6 +114,7 @@ const EVENT_LABEL: Record<string, string> = {
   QualifiedLead: "Qualified Lead",
   BookingConfirmed: "Booking Confirmed",
   DisqualifiedLead: "Disqualified Lead",
+  Junk: "Junk",
 };
 
 export function MetaCrmFeedbackSettings() {

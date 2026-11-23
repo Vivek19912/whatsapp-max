@@ -49,13 +49,16 @@ const CHIP_MAP: Readonly<Record<string, Readonly<Record<string, SelectChip>>>> =
     warm: { background: "#dcfce7", color: "#166534" },
     cold: { background: "#ffedd5", color: "#7c2d12" },
     fake: RED_STRONG,
-    // CRM feedback states: green = positive, red = disqualified,
-    // neutral = automatic initial Lead.
+    // CRM feedback states: green = positive, red = junk,
+    // neutral = automatic initial Lead. "Disqualified Lead" keeps
+    // its red chip for historical saved values (no longer
+    // selectable — migration 182 rewrites stored options).
     lead: GRAY_NEUTRAL,
     "interested lead": { background: "#dcfce7", color: "#166534" },
     "qualified lead": GREEN_DARK,
     "booking confirmed": { background: "#052e16", color: "#ffffff" },
     "disqualified lead": RED_STRONG,
+    junk: RED_STRONG,
   },
   "lead type": {
     fresh: { background: "#e0e7ff", color: "#3730a3" },

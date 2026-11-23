@@ -31,11 +31,13 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("leadQualityToEvent", () => {
-  it("maps the five CRM display values to events", () => {
+  it("maps the CRM display values to events (Junk current, Disqualified kept for history)", () => {
     expect(leadQualityToEvent("Lead")).toBe("Lead");
     expect(leadQualityToEvent("Interested Lead")).toBe("InterestedLead");
     expect(leadQualityToEvent("Qualified Lead")).toBe("QualifiedLead");
     expect(leadQualityToEvent("Booking Confirmed")).toBe("BookingConfirmed");
+    expect(leadQualityToEvent("Junk")).toBe("Junk");
+    // Historical statuses keep their exact historical event.
     expect(leadQualityToEvent("Disqualified Lead")).toBe("DisqualifiedLead");
   });
 
@@ -50,20 +52,21 @@ describe("leadQualityToEvent", () => {
     }
   });
 
-  it("keeps exactly five event names and five selectable options (Lead included)", () => {
+  it("keeps the current event names plus the retired one for history (Lead included)", () => {
     expect([...CRM_EVENT_NAMES]).toEqual([
       "Lead",
       "InterestedLead",
       "QualifiedLead",
       "BookingConfirmed",
       "DisqualifiedLead",
+      "Junk",
     ]);
     expect([...LEAD_QUALITY_OPTIONS]).toEqual([
       "Lead",
       "Interested Lead",
       "Qualified Lead",
       "Booking Confirmed",
-      "Disqualified Lead",
+      "Junk",
     ]);
     // Every send is manual, so the initial state is explicitly
     // selectable — saving it can never duplicate an auto-event.
@@ -89,13 +92,14 @@ describe("buildCrmEventPayload", () => {
     expect(payload).not.toHaveProperty("event_id");
   });
 
-  it("omits event_id for all five CRM event types", () => {
-    const cases: Array<[string, "Lead" | "InterestedLead" | "QualifiedLead" | "BookingConfirmed" | "DisqualifiedLead"]> = [
+  it("omits event_id for all CRM event types (current + historical)", () => {
+    const cases: Array<[string, "Lead" | "InterestedLead" | "QualifiedLead" | "BookingConfirmed" | "DisqualifiedLead" | "Junk"]> = [
       ["Lead", "Lead"],
       ["Interested Lead", "InterestedLead"],
       ["Qualified Lead", "QualifiedLead"],
       ["Booking Confirmed", "BookingConfirmed"],
       ["Disqualified Lead", "DisqualifiedLead"],
+      ["Junk", "Junk"],
     ];
     for (const [, eventName] of cases) {
       const payload = buildCrmEventPayload({

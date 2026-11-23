@@ -2,11 +2,16 @@
 // Meta Instant Form → WhatsApp Max CRM → Meta Conversions API
 // lead-quality feedback (Feature: CRM event delivery).
 //
-// Five standardized CRM event names, mapped from the Workspace
+// Six standardized CRM event names, mapped from the Workspace
 // "Lead Quality" column's stored display values. This module is
 // pure (mapping + payload) plus one thin Meta sender; persistence
 // and scheduling live in `./feedback` (durable outbox + cron
 // drain), so unit tests never touch Supabase or the network.
+//
+// "Junk" is the current selectable outcome; "DisqualifiedLead"
+// stays a first-class event name so historical ledger rows and
+// previously saved "Disqualified Lead" statuses keep their exact
+// meaning (preview, drain, and re-send paths unchanged).
 //
 // This is a NEW, independent integration. It does NOT inspect,
 // reuse, or depend on the retired Conversions API (`meta-capi`)
@@ -17,13 +22,17 @@
 
 import { MetaCrmError } from "./datasets";
 
-/** The five standardized CRM event names (Meta + Workspace shared). */
+/** The standardized CRM event names (Meta + Workspace shared).
+ * "Junk" is the current selectable outcome; "DisqualifiedLead"
+ * is retained for historical ledger rows and previously saved
+ * statuses (never created by new selections). */
 export const CRM_EVENT_NAMES = [
   "Lead",
   "InterestedLead",
   "QualifiedLead",
   "BookingConfirmed",
   "DisqualifiedLead",
+  "Junk",
 ] as const;
 
 export type CrmEventName = (typeof CRM_EVENT_NAMES)[number];
@@ -37,16 +46,19 @@ export function isCrmEventName(value: unknown): value is CrmEventName {
 
 /**
  * Stored "Lead Quality" display values, in dropdown order. All five
- * CRM states are user-selectable, including the initial "Lead" —
- * every send is manual (an explicit Send to Meta action), so an
- * explicitly saved "Lead" can never duplicate an automatic event.
+ * current CRM states are user-selectable, including the initial
+ * "Lead" — every send is manual (an explicit Send to Meta action),
+ * so an explicitly saved "Lead" can never duplicate an automatic
+ * event. The retired "Disqualified Lead" is intentionally absent
+ * (existing columns are rewritten by migration 182); it remains a
+ * valid event name for historical rows only.
  */
 export const LEAD_QUALITY_OPTIONS: readonly string[] = [
   "Lead",
   "Interested Lead",
   "Qualified Lead",
   "Booking Confirmed",
-  "Disqualified Lead",
+  "Junk",
 ];
 
 /** Display default for empty Lead Quality cells (provisioned rows). */
@@ -61,10 +73,11 @@ export const LEAD_QUALITY_TOOLTIP =
 
 /**
  * Stored display value → CRM event name. Exact, case-insensitive
- * match on the five known values (storage validates exact option
- * equality; tolerance here is display-only). Legacy or custom
- * values (Hot/Warm/Cold/Fake, …) map to null → no event is ever
- * sent for them.
+ * match on the known values (storage validates exact option
+ * equality; tolerance here is display-only). "Junk" is the current
+ * selectable outcome; "Disqualified Lead" still maps for
+ * historical statuses. Legacy or custom values (Hot/Warm/Cold/
+ * Fake, …) map to null → no event is ever sent for them.
  */
 export function leadQualityToEvent(value: string | null | undefined): CrmEventName | null {
   if (typeof value !== "string") return null;
@@ -79,6 +92,8 @@ export function leadQualityToEvent(value: string | null | undefined): CrmEventNa
       return "BookingConfirmed";
     case "disqualified lead":
       return "DisqualifiedLead";
+    case "junk":
+      return "Junk";
     default:
       return null;
   }

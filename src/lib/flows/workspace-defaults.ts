@@ -141,15 +141,17 @@ export const STAGE_OPTIONS: readonly string[] = [
 ];
 
 /** Exact dropdown options for "Lead Quality" (CRM feedback), in order.
- *  All five CRM states are user-selectable, including the initial
- *  "Lead" — every send is manual (explicit Send to Meta), so saving
- *  "Lead" can never duplicate an automatic event. */
+ *  All five current states are user-selectable, including the
+ *  initial "Lead" — every send is manual (explicit Send to Meta),
+ *  so saving "Lead" can never duplicate an automatic event.
+ *  ("Disqualified Lead" retired in favor of "Junk"; existing
+ *  columns are rewritten by migration 182.) */
 export const LEAD_QUALITY_OPTIONS: readonly string[] = [
   "Lead",
   "Interested Lead",
   "Qualified Lead",
   "Booking Confirmed",
-  "Disqualified Lead",
+  "Junk",
 ];
 
 /** Exact dropdown options for "Lead Received", in order. */

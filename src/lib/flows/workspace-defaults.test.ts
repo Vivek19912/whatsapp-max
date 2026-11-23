@@ -172,7 +172,7 @@ describe("default business column spec", () => {
     expect(byName.get("Lead Quality")?.field_type).toBe("single_select");
   });
 
-  it("defines Lead Quality as the five CRM outcomes with a Lead display default", () => {
+  it("defines Lead Quality as the five current CRM outcomes with a Lead display default", () => {
     const byName = new Map(WORKSPACE_DEFAULT_FIELDS.map((f) => [f.name, f]));
     const spec = byName.get("Lead Quality");
     expect(spec?.options).toEqual([
@@ -180,7 +180,7 @@ describe("default business column spec", () => {
       "Interested Lead",
       "Qualified Lead",
       "Booking Confirmed",
-      "Disqualified Lead",
+      "Junk",
     ]);
     // Every send is manual, so the initial state doubles as the
     // display default AND an explicitly savable option.

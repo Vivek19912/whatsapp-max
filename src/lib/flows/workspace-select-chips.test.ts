@@ -179,7 +179,7 @@ describe("5. Lead Quality uses the defined colors", () => {
     });
   });
 
-  it("maps CRM states: green positives, red disqualified, neutral Lead", () => {
+  it("maps CRM states: green positives, red junk, neutral Lead", () => {
     // Green family for positive outcomes.
     expect(getSelectChip("Lead Quality", "Interested Lead")).toEqual({
       background: "#dcfce7",
@@ -193,7 +193,12 @@ describe("5. Lead Quality uses the defined colors", () => {
       background: "#052e16",
       color: "#ffffff",
     });
-    // Red for disqualified, neutral gray for the automatic initial.
+    // Red for junk, neutral gray for the automatic initial.
+    expect(getSelectChip("Lead Quality", "Junk")).toEqual({
+      background: "#dc2626",
+      color: "#ffffff",
+    });
+    // Historical "Disqualified Lead" values keep the red badge.
     expect(getSelectChip("Lead Quality", "Disqualified Lead")).toEqual({
       background: "#dc2626",
       color: "#ffffff",
