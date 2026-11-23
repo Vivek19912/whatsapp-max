@@ -80,8 +80,8 @@ export interface TableConfigDetail {
 export interface AvailabilityView extends TableAssigneeRow {
   /** True when the assignee can receive a new lead right now. */
   available: boolean;
-  /** Machine reason when unavailable (paused/active/roster). */
-  unavailable_reason: "active" | "paused" | "ineligible-member" | null;
+  /** Machine reason when unavailable (paused/active/roster/holiday). */
+  unavailable_reason: "active" | "paused" | "ineligible-member" | "holiday" | null;
   /** Human status line in the config's timezone. */
   status_label: string;
 }

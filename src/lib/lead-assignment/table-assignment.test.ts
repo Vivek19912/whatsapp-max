@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   values: [] as Array<Record<string, unknown>>,
   events: [] as Array<Record<string, unknown>>,
   runs: [] as Array<Record<string, unknown>>,
+  holidays: [] as Array<Record<string, unknown>>,
   profiles: [] as Array<Record<string, unknown>>,
   accounts: [] as Array<Record<string, unknown>>,
   submissions: [] as Array<Record<string, unknown>>,
@@ -55,6 +56,7 @@ function tableRows(table: string): Array<Record<string, unknown>> {
     case "flow_runs": return h.runs;
     case "profiles": return h.profiles;
     case "accounts": return h.accounts;
+    case "lead_assignment_holidays": return h.holidays;
     case "meta_lead_submissions": return h.submissions;
     case "lead_assignment_notifications": return h.notifications;
     case "meta_lead_assignee_sequences": return h.assigneeSeqs;
@@ -309,6 +311,7 @@ function seedBase() {
   h.values = [];
   h.events = [];
   h.runs = [];
+  h.holidays = [];
   h.profiles = [
     { user_id: "u-asha", account_id: "acct-1", account_role: "agent", full_name: "Asha", email: "asha@x.com" },
     { user_id: "u-ravi", account_id: "acct-1", account_role: "admin", full_name: "Ravi", email: "ravi@x.com" },
@@ -1461,5 +1464,152 @@ describe("salesperson customer sequences (initial assignment only)", () => {
     expect(r.outcome).toBe("assigned");
     expect(h.queue).toHaveLength(0);
     expect(h.drainScheduled).toHaveLength(0);
+  });
+});
+
+describe("holidays — account-wide exclusion at assignment time", () => {
+  function holiday(userId: string, extra: Record<string, unknown> = {}) {
+    return {
+      id: `hol-${userId}`,
+      account_id: "acct-1",
+      user_id: userId,
+      // Far-past start, far-future end = deterministically active.
+      start_date: "2000-01-01",
+      end_date: "2999-12-31",
+      reason: null,
+      cancelled_at: null,
+      ...extra,
+    };
+  }
+
+  async function seedRrTable(db: ReturnType<typeof fakeSupabase>) {
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee("u-ravi", { display_name: "Ravi" }),
+      ],
+    });
+  }
+
+  it("round robin skips the on-holiday member without consuming a turn", async () => {
+    const db = fakeSupabase();
+    await seedRrTable(db);
+    h.holidays = [holiday("u-asha")];
+    run("run-h1", "flow-meta-1");
+    run("run-h2", "flow-meta-1");
+    const r1 = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h1", formId: "formdb-1",
+    });
+    const r2 = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h2", formId: "formdb-1",
+    });
+    expect(r1).toMatchObject({ outcome: "assigned", userId: "u-ravi" });
+    expect(r2).toMatchObject({ outcome: "assigned", userId: "u-ravi" });
+    // No notification was enqueued for the holiday member.
+    const ashaRow = h.assignees.find((a) => a.user_id === "u-asha");
+    expect(h.notifications.filter((n) => n.assignee_id === ashaRow?.id)).toHaveLength(0);
+  });
+
+  it("completed and cancelled holidays do not exclude anyone", async () => {
+    const db = fakeSupabase();
+    await seedRrTable(db);
+    h.holidays = [
+      holiday("u-asha", { id: "hol-past", end_date: "2000-01-02" }),
+      holiday("u-ravi", { id: "hol-cancelled", cancelled_at: "2026-11-24T00:00:00.000Z" }),
+    ];
+    run("run-h3", "flow-meta-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h3", formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-asha" });
+  });
+
+  it("restores the member automatically after cancellation (no config change)", async () => {
+    const db = fakeSupabase();
+    await seedRrTable(db);
+    h.holidays = [holiday("u-asha")];
+    run("run-h4", "flow-meta-1");
+    const during = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h4", formId: "formdb-1",
+    });
+    expect(during.userId).toBe("u-ravi");
+    // End the holiday early: the saved config is untouched and the
+    // member is eligible again on the very next assignment.
+    h.holidays[0].cancelled_at = new Date().toISOString();
+    run("run-h5", "flow-meta-1");
+    const after = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h5", formId: "formdb-1",
+    });
+    expect(["u-asha", "u-ravi"]).toContain(after.userId);
+    // Saved roster still lists both members.
+    expect(h.assignees.filter((a) => typeof a.user_id === "string")).toHaveLength(2);
+  });
+
+  it("percentage tables redistribute to available members; saved weights untouched", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "percentage",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha", weight: 60 }),
+        assignee("u-ravi", { display_name: "Ravi", weight: 40 }),
+      ],
+    });
+    h.holidays = [holiday("u-asha")];
+    for (const runId of ["run-p1", "run-p2", "run-p3"]) {
+      run(runId, "flow-meta-1");
+      const r = await engine.assignTableLead(db as never, {
+        accountId: "acct-1", flowId: "flow-meta-1", runId, formId: "formdb-1",
+      });
+      expect(r).toMatchObject({ outcome: "assigned", userId: "u-ravi" });
+    }
+    // Original saved percentages are preserved exactly.
+    const weights = Object.fromEntries(
+      h.assignees.map((a) => [a.user_id, a.weight]),
+    );
+    expect(weights).toMatchObject({ "u-asha": 60, "u-ravi": 40 });
+  });
+
+  it("all unavailable leaves the lead unassigned without touching owners", async () => {
+    const db = fakeSupabase();
+    await seedRrTable(db);
+    h.holidays = [holiday("u-asha"), holiday("u-ravi")];
+    run("run-h6", "flow-meta-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h6", formId: "formdb-1",
+    });
+    expect(r.outcome).toBe("no-eligible");
+    expect(h.values.filter((v) => v.field_id === "f-assign-1")).toHaveLength(0);
+  });
+
+  it("external recipients are never holiday-filtered", async () => {
+    const db = fakeSupabase();
+    await saveConfig(db, "flow-meta-1", {
+      enabled: true,
+      mode: "round_robin",
+      assignees: [
+        assignee("u-asha", { display_name: "Asha" }),
+        assignee(null, { display_name: "External", email: "ext@example.com" }),
+      ],
+    });
+    h.holidays = [holiday("u-asha")];
+    run("run-h7", "flow-meta-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h7", formId: "formdb-1",
+    });
+    expect(r.outcome).toBe("assigned-external");
+  });
+
+  it("other accounts' holidays never leak across tenants", async () => {
+    const db = fakeSupabase();
+    await seedRrTable(db);
+    h.holidays = [holiday("u-asha", { id: "hol-foreign", account_id: "acct-OTHER" })];
+    run("run-h8", "flow-meta-1");
+    const r = await engine.assignTableLead(db as never, {
+      accountId: "acct-1", flowId: "flow-meta-1", runId: "run-h8", formId: "formdb-1",
+    });
+    expect(r).toMatchObject({ outcome: "assigned", userId: "u-asha" });
   });
 });

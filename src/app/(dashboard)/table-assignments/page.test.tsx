@@ -101,6 +101,14 @@ describe("table assignments — active-by-default + full assignee names", () => 
     expect(src).toContain("deriveTableStatus");
     expect(src).toContain("TableAssignmentDialog");
   });
+
+  it("shows every percentage share on its own wrapping line (no truncation)", () => {
+    const src = pageSrc();
+    // One line per saved assignee with the exact stored percentage.
+    expect(src).toContain("{a.display_name}: {a.weight}%");
+    // No width cap / truncation / hover-only text on the Allocation cell.
+    expect(src).not.toContain("max-w-72");
+  });
 });
 
 describe("table assignments — listing contract", () => {

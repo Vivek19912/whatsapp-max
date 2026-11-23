@@ -40,6 +40,8 @@ import {
 } from "./table-helpers";
 import { roundRobinNext, swrrNext } from "./algorithms";
 import { getTableConfig, type TableAssigneeRow, type TableConfigDetail } from "./table-config";
+import { loadActiveHolidayUserIds, todayInZone } from "./holidays";
+import { ASSIGNMENT_TIMEZONE } from "./table-validation";
 import { enqueueTableAssignmentNotifications } from "./table-notify";
 
 export const TABLE_STATE_CAS_MAX_ATTEMPTS = 5;
@@ -127,10 +129,11 @@ async function loadAccountPauseBlocks(
 
 /**
  * The eligible pool for one assignment: active, unpaused (table
- * window AND account-wide blocks), and — for internal members —
- * on the live assignable roster. Configured order is preserved.
- * Paused-until timestamps already past count as expired (automatic
- * restore with no cron and no write).
+ * window AND account-wide blocks), not on holiday today, and —
+ * for internal members — on the live assignable roster.
+ * Configured order is preserved. Paused-until timestamps already
+ * past count as expired (automatic restore with no cron and no
+ * write); holidays behave the same way via their end dates.
  */
 export async function resolveEligibleAssignees(
   db: SupabaseClient,
@@ -140,6 +143,14 @@ export async function resolveEligibleAssignees(
 ): Promise<EligibleAssignee[]> {
   const nowIso = new Date(now).toISOString();
   const blocks = await loadAccountPauseBlocks(db, accountId, nowIso);
+  // Account-wide holidays active today (wall-clock date in the
+  // assignment zone). One extra read per assignment; volume is
+  // tiny and the result is never cached across assignments.
+  const holidayUsers = await loadActiveHolidayUserIds(
+    db,
+    accountId,
+    todayInZone(ASSIGNMENT_TIMEZONE, now),
+  );
   const internal = detail.assignees.filter((a) => typeof a.user_id === "string");
   // Reuse the roster gate (assignable roles + owner backstop).
   const rosterOk = new Set(
@@ -157,6 +168,10 @@ export async function resolveEligibleAssignees(
     if (a.user_id) {
       if (!rosterOk.has(a.user_id)) continue;
       if (blocks.users.has(a.user_id)) continue;
+      // Holiday: skipped for new assignments everywhere, with
+      // no turn consumed and no config change. External
+      // recipients (no user_id) are never holiday-filtered.
+      if (holidayUsers.has(a.user_id)) continue;
     } else {
       if (a.email && blocks.emails.has(a.email.toLowerCase())) continue;
       if (a.phone && blocks.phones.has(a.phone)) continue;

@@ -491,11 +491,18 @@ export default function TableAssignmentsPage() {
                           </span>
                         )}
                       </TableCell>
-                      <TableCell
-                        className="max-w-72 truncate border-r border-border px-2.5 py-1.5 text-[13px]"
-                        title={allocation === "—" ? undefined : allocation}
-                      >
-                        {allocation}
+                      <TableCell className="border-r border-border px-2.5 py-1.5 text-[13px]">
+                        {status === "active" && input.config?.mode === "percentage" ? (
+                          <span className="block min-w-40 whitespace-normal break-words">
+                            {row.assignees.map((a) => (
+                              <span key={a.id} className="block tabular-nums">
+                                {a.display_name}: {a.weight}%
+                              </span>
+                            ))}
+                          </span>
+                        ) : (
+                          allocation
+                        )}
                       </TableCell>
                       <TableCell className="border-r border-border px-2.5 py-1.5 text-[13px]">
                         <StatusBadge status={status} />

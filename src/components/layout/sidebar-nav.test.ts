@@ -43,6 +43,7 @@ describe('Features removal — sidebar', () => {
       '/templates',
       '/notifications',
       '/table-assignments',
+      '/team-availability',
       '/chat-assignment',
     ]);
   });
@@ -91,6 +92,16 @@ describe('Features removal — sidebar', () => {
     // API enforces 403 for everyone else — this is display-only).
     const sidebarSrc = readFileSync(join(root, 'src/components/layout/sidebar.tsx'), 'utf8');
     expect(sidebarSrc).toContain('if (item.href === "/table-assignments") return isOwner;');
+  });
+
+  it('shows Team Availability after Table Assignments and only to owners', () => {
+    const hrefs = navItems.map((i) => i.href);
+    expect(hrefs.indexOf('/team-availability')).toBe(hrefs.indexOf('/table-assignments') + 1);
+    expect(navItems.find((i) => i.href === '/team-availability')?.label).toBe(
+      'Team Availability',
+    );
+    const sidebarSrc = readFileSync(join(root, 'src/components/layout/sidebar.tsx'), 'utf8');
+    expect(sidebarSrc).toContain('if (item.href === "/team-availability") return isOwner;');
   });
 
   it('contains no Lead Assignment entry (sidebar-only visibility change)', () => {

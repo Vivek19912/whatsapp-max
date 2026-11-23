@@ -15,7 +15,8 @@ import {
 } from "@/lib/lead-assignment/table-config";
 import { AssignmentValidationError } from "@/lib/lead-assignment/table-validation";
 import { isPausedAt, resolveEligibleAssignees } from "@/lib/lead-assignment/table-assignment";
-import { formatPausedUntil } from "@/lib/lead-assignment/table-validation";
+import { loadActiveHolidayUserIds, todayInZone } from "@/lib/lead-assignment/holidays";
+import { ASSIGNMENT_TIMEZONE, formatPausedUntil } from "@/lib/lead-assignment/table-validation";
 import { eligibleMemberIds } from "@/lib/lead-assignment/members";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -65,6 +66,13 @@ export async function GET(_request: Request, { params }: Ctx) {
         (a) => a.id,
       ),
     );
+    // Account-wide holidays active today (same source the engine
+    // uses, so the wizard shows exactly what assignment will do).
+    const holidayUsers = await loadActiveHolidayUserIds(
+      admin,
+      ctx.accountId,
+      todayInZone(detail.timezone || ASSIGNMENT_TIMEZONE, now),
+    );
     // Live roster check for internal links (removed/demoted
     // members surface as ineligible without touching config).
     const { data: rosterRows } = await admin
@@ -80,9 +88,11 @@ export async function GET(_request: Request, { params }: Ctx) {
     );
     const availability: AvailabilityView[] = detail.assignees.map((a) => {
       const paused = isPausedAt(a, now);
+      const onHoliday = typeof a.user_id === "string" && holidayUsers.has(a.user_id);
       let unavailable_reason: AvailabilityView["unavailable_reason"] = null;
       if (!a.is_active) unavailable_reason = "active";
       else if (paused) unavailable_reason = "paused";
+      else if (onHoliday) unavailable_reason = "holiday";
       else if (a.user_id && !rosterOk.has(a.user_id)) {
         unavailable_reason = "ineligible-member";
       } else if (!eligibleIds.has(a.id)) {
@@ -92,7 +102,9 @@ export async function GET(_request: Request, { params }: Ctx) {
         ? "Inactive"
         : paused && a.paused_until
           ? formatPausedUntil(a.paused_until, detail.timezone)
-          : "Available";
+          : onHoliday
+            ? "On holiday"
+            : "Available";
       const base = {
         ...a,
         email: privileged ? a.email : null,

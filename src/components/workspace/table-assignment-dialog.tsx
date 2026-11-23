@@ -263,7 +263,7 @@ interface AssigneeView {
   notify_email: boolean;
   notify_whatsapp: boolean;
   available: boolean;
-  unavailable_reason: "active" | "paused" | "ineligible-member" | null;
+  unavailable_reason: "active" | "paused" | "ineligible-member" | "holiday" | null;
   status_label: string;
 }
 

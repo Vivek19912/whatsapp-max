@@ -12,6 +12,7 @@ import Image from "next/image";
 import {
   Bell,
   CalendarClock,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   FileText,
@@ -62,6 +63,7 @@ export const navItems: NavItem[] = [
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/table-assignments", label: "Table Assignments", icon: Users },
+  { href: "/team-availability", label: "Team Availability", icon: CalendarDays },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
 ];
 
@@ -127,6 +129,8 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     if (item.href === "/meta-lead-ads/team-performance") return isOwner;
     // Table Assignments is owner-only (route + API enforce it too).
     if (item.href === "/table-assignments") return isOwner;
+    // Team Availability is owner-only (route + API enforce it too).
+    if (item.href === "/team-availability") return isOwner;
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     return true;
   });
