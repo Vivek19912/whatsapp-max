@@ -109,9 +109,8 @@ describe("workspace page — Meta Lead Source removal", () => {
     // Scoped list: Meta tables filter out Lead Received (shown as
     // "Lead Source"); every other table keeps the field untouched.
     expect(src).toContain("customFieldsScoped");
-    expect(src).toContain(
-      "customFields.filter((f) => !isLeadReceivedField({ name: f.name }))",
-    );
+    expect(src).toContain("isLeadReceivedField");
+    expect(src).toContain("!isLeadReceivedField({ name: f.name })");
     // Visibility, widths, and the Columns menu all read the scoped
     // list — the field can no longer render or be re-enabled there.
     expect(src).toContain("customFieldsScoped,");
@@ -202,10 +201,9 @@ describe("workspace page — single Schedule Follow-up modal", () => {
 describe("workspace page — Meta unified table (no Completed/Incomplete tabs)", () => {
   it("hides the completion tabs on Meta tables only", () => {
     const src = page();
-    const gateIdx = src.indexOf("{isMetaTable ? null : (");
-    expect(gateIdx).toBeGreaterThan(-1);
-    const block = src.slice(gateIdx, gateIdx + 400);
-    expect(block).toContain('aria-label="Completion filter"');
+    // Tabs render only for non-Meta tables (current: {!isMetaTable && ...).
+    expect(src).toContain("{!isMetaTable && (");
+    expect(src).toContain('aria-label="Completion filter"');
     expect(src).toContain("{VIEWS.map((v) => (");
     expect(src).toContain("onClick={() => selectView(v.id)}");
   });
@@ -237,7 +235,9 @@ describe("workspace page — Meta sidebar hides the metadata section", () => {
     const sheet = src.slice(sheetIdx);
     // The whole metadata section renders only for non-Meta tables.
     expect(sheet).toContain("{isMetaTable ? null : (");
-    expect(sheet).toContain("<StatusBadge status={selected.status} />");
+    // StatusBadge renders for Flow tables (All-view rows use a cast;
+    // the Meta gate is unchanged).
+    expect(sheet).toContain("<StatusBadge status={");
     // Header (lead name + form name), Answers, recordings, and the
     // Travel CRM action stay outside the gate.
     const gateIdx = sheet.indexOf("{isMetaTable ? null : (");

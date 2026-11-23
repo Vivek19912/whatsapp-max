@@ -115,6 +115,23 @@ import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import { isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
+import {
+  ALL_META_LEADS_ID,
+  ALL_META_LEADS_LABEL,
+  ALL_META_COLUMN_IDS,
+  buildAllMetaLeadsQuery,
+  isAllMetaLeadsId,
+  type AllMetaFormAnswer,
+} from '@/lib/workspace/all-meta-leads';
+import { AllMetaAnswersCell } from '@/components/workspace/all-meta-answers-cell';
+import { AllMetaLeadsView } from '@/components/workspace/all-meta-leads-view';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 /**
  * Workspace-only typeface (DM Sans). Applied to the page root so
@@ -200,6 +217,90 @@ interface FlowOption {
   id: string;
   name?: string | null;
 }
+
+interface AllMetaLeadsRow {
+  runId: string;
+  flowId: string;
+  flowName: string | null;
+  tableName: string;
+  metaLeadId: string | null;
+  formId: string | null;
+  contactId: string | null;
+  conversationId: string | null;
+  name: string | null;
+  phone: string | null;
+  startedAt: string;
+  lastAdvancedAt: string | null;
+  source: string | null;
+  formAnswers: AllMetaFormAnswer[];
+  assignedTo: string | null;
+  type: string | null;
+  stage: string | null;
+  callStatus: string | null;
+  followUpStatus: string | null;
+  nextFollowUp: string | null;
+  fieldIds: {
+    assignedTo: string | null;
+    type: string | null;
+    stage: string | null;
+    callStatus: string | null;
+    followUpStatus: string | null;
+    nextFollowUp: string | null;
+  };
+  metaDetails: {
+    metaLeadId: string | null;
+    formId: string | null;
+    adId: string | null;
+    adName: string | null;
+    campaignName: string | null;
+    isOrganic: boolean | null;
+    metaCreatedTime: string | null;
+    phoneNumberVerified: string | null;
+  } | null;
+  sourceUrl?: string | null;
+}
+
+interface AllMetaLeadsTable {
+  flowId: string;
+  flowName: string | null;
+  tableName: string;
+  formId: string | null;
+  formName: string | null;
+  enabled: boolean | null;
+}
+
+interface AllMetaLeadsPayload {
+  meta: {
+    total: number;
+    assignedTotal: number;
+    tablesCount: number;
+    page: number;
+    pageSize: number;
+    filters: {
+      dateFrom: string | null;
+      dateTo: string | null;
+      assignee: string;
+      tableId: string | null;
+    };
+  };
+  tables: AllMetaLeadsTable[];
+  rows: AllMetaLeadsRow[];
+  customValues: Record<string, Record<string, string | null>>;
+  mediaByConversation: Record<string, Array<{ contentText: string | null; mediaUrl: string | null; contentType: string | null }>>;
+  latestRecordingByContact: Record<string, {
+    id: string;
+    contact_id: string;
+    duration_seconds: number | null;
+    recorded_at: string | null;
+    created_at: string;
+    file_name: string | null;
+    uploader_name: string | null;
+  }>;
+}
+
+type SelectedLead =
+  | (FlowTableRow & { originFlowId?: string; originTableName?: string })
+  | (AllMetaLeadsRow & { originFlowId: string; originTableName: string });
 
 const VIEWS: Array<{ id: Exclude<FlowTableView, 'all'>; label: string }> = [
   { id: 'completed', label: 'Completed' },
@@ -629,7 +730,18 @@ export default function WorkspacePage() {
   const [payload, setPayload] = useState<FlowTablePayload | null>(null);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [tableError, setTableError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<FlowTableRow | null>(null);
+  const [selected, setSelected] = useState<SelectedLead | null>(null);
+  // All Meta Leads virtual combined view (first selector option).
+  // Virtual id, never a real flow: rows carry their originating flowId
+  // + runId and every action operates on the original. Hidden +
+  // disabled forms still contribute leads (backend includes all Meta
+  // flows); no duplicate rows, no copies, no flow/run rewrites.
+  const [allPayload, setAllPayload] = useState<AllMetaLeadsPayload | null>(null);
+  const [allLoadedKey, setAllLoadedKey] = useState<string | null>(null);
+  const [allTableError, setAllTableError] = useState<string | null>(null);
+  const [allTableFilter, setAllTableFilter] = useState<string | null>(null);
+  const [allStageFilter, setAllStageFilter] = useState<string[]>([]);
+  const [allTypeFilter, setAllTypeFilter] = useState<string[]>([]);
   const [refreshSeq, setRefreshSeq] = useState(0);
   const [addColumnOpen, setAddColumnOpen] = useState(false);
   // Per-table Google Sheets configuration dialog (Meta Lead Ads
@@ -745,11 +857,14 @@ export default function WorkspacePage() {
         );
         if (ctrl.signal.aborted) return;
         setFlows(list);
+        // All Meta Leads is always the first selector option (virtual
+        // combined view, never hidden). Default to it for fresh users;
+        // remembered selections (including All) win when still listed.
         setFlowId(
           resolveInitialFlowId(
-            visibleWorkspaceTables(list, hiddenTableIdsRef.current).map(
+            [ALL_META_LEADS_ID, ...visibleWorkspaceTables(list, hiddenTableIdsRef.current).map(
               (f) => f.id
-            ),
+            )],
             loadSelectedFlowId(accountId),
           ),
         );
@@ -803,9 +918,11 @@ export default function WorkspacePage() {
   // a hidden selection. Hidden tables keep receiving leads; only
   // the selector filters them. When nothing is visible, the
   // selection clears (the Manage Options popup stays available
-  // for restoring).
+  // for restoring). The All Meta Leads virtual view is never hidden
+  // and always stays selectable.
   useEffect(() => {
     if (visibleFlows === null) return;
+    if (isAllMetaLeadsId(flowId)) return;
     const ids = visibleFlows.map((f) => f.id);
     if (flowId !== null && ids.includes(flowId)) return;
     const next = ids[0] ?? null;
@@ -1046,6 +1163,10 @@ export default function WorkspacePage() {
     setKpiBucket(null);
     setPage(0);
     setSelected(null);
+    // All-view-specific filters reset on table change (same as view reset).
+    setAllTableFilter(null);
+    setAllStageFilter([]);
+    setAllTypeFilter([]);
     saveSelectedFlowId(accountId, id);
   }, [accountId]);
 
@@ -1207,12 +1328,12 @@ export default function WorkspacePage() {
       nextFollowUp: { mode: "range" as const, from, to },
     };
   }, [appliedColumns, kpiRange]);
-  const requestKey = flowId
+  const requestKey = flowId && !isAllMetaLeadsId(flowId)
     ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(effectiveColumns)}|${page}|${pageSize}`
     : null;
   const loading = requestKey !== null && requestKey !== loadedKey;
   useEffect(() => {
-    if (!flowId || !requestKey) return;
+    if (!flowId || isAllMetaLeadsId(flowId) || !requestKey) return;
     const ctrl = new AbortController();
     const qs = buildWorkspaceTableQuery({
       view: effectiveView,
@@ -1258,10 +1379,70 @@ export default function WorkspacePage() {
     return () => ctrl.abort();
   }, [flowId, requestKey, effectiveView, debouncedSearch, appliedDateRange, appliedAssignee, effectiveColumns, page, pageSize, refreshSeq]);
 
+  // All Meta Leads virtual view: server-side combined read across every
+  // Meta table (hidden + disabled included). Same search/date/assignee/
+  // column-filter semantics as individual tables, plus table + stage +
+  // type filters. Pagination applies to the FILTERED combined set.
+  const isAllMetaLeads = isAllMetaLeadsId(flowId);
+  const allRequestKey = isAllMetaLeads
+    ? `all|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(effectiveColumns)}|${allTableFilter ?? ''}|${[...allStageFilter].sort().join(',')}|${[...allTypeFilter].sort().join(',')}|${page}|${pageSize}`
+    : null;
+  const allLoading = allRequestKey !== null && allRequestKey !== allLoadedKey;
+  useEffect(() => {
+    if (!isAllMetaLeads || !allRequestKey) return;
+    const ctrl = new AbortController();
+    const qs = buildAllMetaLeadsQuery({
+      search: debouncedSearch,
+      page,
+      pageSize,
+      dateFrom: appliedDateRange?.from ?? null,
+      dateTo: appliedDateRange?.to ?? null,
+      assignee: serializeAssigneeSelection(appliedAssignee),
+      tableId: allTableFilter,
+      stage: allStageFilter.length > 0 ? allStageFilter : null,
+      leadType: allTypeFilter.length > 0 ? allTypeFilter : null,
+      callStatus: effectiveColumns.callStatus.length > 0 ? effectiveColumns.callStatus : null,
+      followUpStatus: effectiveColumns.followUpStatus.length > 0 ? effectiveColumns.followUpStatus : null,
+    });
+    fetch(`/api/workspace/all-meta-leads?${qs}`, {
+      signal: ctrl.signal,
+      cache: 'no-store',
+    })
+      .then(async (res) => {
+        if (handleExpiredSessionResponse(res)) return;
+        const json = (await res.json().catch(() => null)) as
+          (AllMetaLeadsPayload & { error?: unknown }) | null;
+        if (!res.ok || !json || !('rows' in json)) {
+          throw new Error(
+            json && typeof json.error === 'string'
+              ? json.error
+              : `Couldn't load All Meta Leads (${res.status})`
+          );
+        }
+        if (ctrl.signal.aborted) return;
+        setAllPayload(json as AllMetaLeadsPayload);
+        setAllTableError(null);
+        setAllLoadedKey(allRequestKey);
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        if (ctrl.signal.aborted) return;
+        setAllTableError(
+          err instanceof Error ? err.message : "Couldn't load All Meta Leads."
+        );
+        setAllLoadedKey(allRequestKey);
+      });
+    return () => ctrl.abort();
+  }, [isAllMetaLeads, allRequestKey, debouncedSearch, appliedDateRange, appliedAssignee, effectiveColumns, allTableFilter, allStageFilter, allTypeFilter, page, pageSize, refreshSeq]);
+
   const totalPages = useMemo(() => {
+    if (isAllMetaLeads) {
+      const total = allPayload?.meta.total ?? 0;
+      return Math.max(1, Math.ceil(total / pageSize));
+    }
     const total = payload?.meta.total ?? 0;
     return Math.max(1, Math.ceil(total / pageSize));
-  }, [payload, pageSize]);
+  }, [payload, allPayload, pageSize, isAllMetaLeads]);
   // Deep link (e.g. from Call Recordings): ?contact=<contacts.id>
   // selects the first row for that lead — the exact same `selected`
   // state a row click sets, so the same drawer opens. Inbox "Open in
@@ -1365,7 +1546,9 @@ export default function WorkspacePage() {
     return () => window.clearTimeout(t);
   }, [highlightContactId, payload]);
 
-  const activeFlowName = flows?.find((f) => f.id === flowId)?.name ?? null;
+  const activeFlowName = isAllMetaLeadsId(flowId)
+    ? ALL_META_LEADS_LABEL
+    : (flows?.find((f) => f.id === flowId)?.name ?? null);
 
   const customFields = useMemo(() => payload?.customFields ?? [], [payload]);
   // Meta Lead Ads only: drop the "Lead Received" business column
@@ -1374,7 +1557,8 @@ export default function WorkspacePage() {
   // instead, so the derived duplicate is redundant. Stored values,
   // field definitions, filter metadata, and Flow Tables are
   // untouched; the field stays manageable from any Flow Table.
-  const isMetaTable = payload?.meta?.kind === 'meta_lead_ads';
+  // The All Meta Leads combined view is Meta-only too.
+  const isMetaTable = payload?.meta?.kind === 'meta_lead_ads' || isAllMetaLeads;
   const customFieldsScoped = useMemo(
     () =>
       customFields.filter(
@@ -1463,7 +1647,9 @@ export default function WorkspacePage() {
               ...prev,
               ...(patch.name !== null ? { name: patch.name } : {}),
               ...(patch.phone !== null ? { phone: patch.phone } : {}),
-              answers: { ...prev.answers, ...patch.answers },
+              ...('answers' in prev
+                ? { answers: { ...(prev as FlowTableRow).answers, ...patch.answers } }
+                : {}),
             },
       );
       reloadTable();
@@ -1495,12 +1681,14 @@ export default function WorkspacePage() {
     name: string | null;
     phone: string | null;
     initialValue: string | null;
+    originFlowId?: string | null;
   } | null>(null);
 
   // Follow-up cell entry point (simple workflow): open the
   // schedule dialog directly with the row's identity, column, and
   // current value. No attempt lookup, no result gating — the
   // salesperson can always schedule, edit, or clear.
+  // All-view rows pass their originating flowId (never the virtual id).
   const openFollowupForRow = useCallback(
     (
       row: {
@@ -1509,15 +1697,18 @@ export default function WorkspacePage() {
         phone: string | null;
       },
       fieldId: string,
-      initialValue: string | null
+      initialValue: string | null,
+      originFlowId?: string | null,
     ) => {
-      if (!flowId) return;
+      const effectiveFlowId = originFlowId ?? flowId;
+      if (!effectiveFlowId) return;
       setScheduleModal({
         runId: row.runId,
         fieldId,
         name: row.name,
         phone: row.phone,
         initialValue,
+        originFlowId: originFlowId ?? null,
       });
     },
     [flowId]
@@ -1527,10 +1718,12 @@ export default function WorkspacePage() {
   // audited endpoint (write + history in one step). The save runs
   // for the Assigned To column via CustomCell's saveAssignee
   // override; Flow Tables never pass that override.
+  // All-view rows pass their originating flowId.
   const manualAssignMetaLead = useCallback(
-    async (runId: string, raw: unknown): Promise<string | null> => {
-      if (!flowId) throw new Error('Could not save the value.');
-      const res = await fetch(`/api/flows/${flowId}/leads/${runId}/assign`, {
+    async (runId: string, raw: unknown, originFlowId?: string | null): Promise<string | null> => {
+      const effectiveFlowId = originFlowId ?? flowId;
+      if (!effectiveFlowId) throw new Error('Could not save the value.');
+      const res = await fetch(`/api/flows/${effectiveFlowId}/leads/${runId}/assign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: raw ?? null }),
@@ -1580,6 +1773,132 @@ export default function WorkspacePage() {
     },
     [requestKey, appliedAssignee, customFields, reloadTable, payload]
   );
+
+  // All Meta Leads: custom-cell save with the ORIGINATING flow id.
+  // Same optimistic override pattern as individual tables, but keyed by
+  // the All-view request so a stale edit never leaks into a newer fetch.
+  // Assignment edits re-sync (assignee filter); all actions operate on
+  // the original flow/run (never the virtual id).
+  const handleAllCustomSaved = useCallback(
+    (originFlowId: string, fieldId: string, runId: string, value: string | null) => {
+      if (!allRequestKey) return;
+      void originFlowId;
+      setValueOverrides((prev) => ({
+        key: allRequestKey,
+        map: {
+          ...(prev.key === allRequestKey ? prev.map : {}),
+          [runId]: {
+            ...((prev.key === allRequestKey ? prev.map : {})[runId] ?? {}),
+            [fieldId]: value,
+          },
+        },
+      }));
+      if (appliedAssignee.type !== 'all') reloadTable();
+    },
+    [allRequestKey, appliedAssignee, reloadTable]
+  );
+
+  // All Meta Leads: pin/hide via the ORIGINATING flow's prefs (per-user
+  // per-flow, same API as individual tables). Best-effort optimistic.
+  const handleAllTogglePin = useCallback(
+    async (originFlowId: string, runId: string) => {
+      const key = `${originFlowId}:${runId}`;
+      if (rowActionPending.has(key)) return;
+      const pinned = pinnedIds.has(runId);
+      setPinnedIds((prev) => {
+        const next = new Set(prev);
+        if (pinned) next.delete(runId);
+        else next.add(runId);
+        return next;
+      });
+      setRowActionPending((prev) => new Set(prev).add(key));
+      try {
+        const res = await fetch(`/api/flows/${originFlowId}/row-prefs`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_run_id: runId, pinned: !pinned }),
+        });
+        if (!res.ok) throw new Error('Could not save pin.');
+        toast.success(pinned ? 'Row unpinned' : 'Row pinned to the top');
+      } catch (err) {
+        setPinnedIds((prev) => {
+          const next = new Set(prev);
+          if (pinned) next.add(runId);
+          else next.delete(runId);
+          return next;
+        });
+        toast.error(err instanceof Error ? err.message : 'Could not save pin.');
+      } finally {
+        setRowActionPending((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [rowActionPending, pinnedIds]
+  );
+
+  const handleAllHideRow = useCallback(
+    async (originFlowId: string, runId: string) => {
+      const key = `${originFlowId}:${runId}`;
+      if (rowActionPending.has(key)) return;
+      const row = allPayload?.rows.find((r) => r.runId === runId) ?? null;
+      setHiddenRows((prev) =>
+        prev.some((h) => h.flow_run_id === runId)
+          ? prev
+          : [...prev, { flow_run_id: runId, name: row?.name ?? null, phone: row?.phone ?? null }]
+      );
+      setRowActionPending((prev) => new Set(prev).add(key));
+      try {
+        const res = await fetch(`/api/flows/${originFlowId}/row-prefs`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_run_id: runId, hidden: true }),
+        });
+        if (!res.ok) throw new Error('Could not hide row.');
+        toast.success('Row hidden');
+      } catch (err) {
+        setHiddenRows((prev) => prev.filter((h) => h.flow_run_id !== runId));
+        toast.error(err instanceof Error ? err.message : 'Could not hide row.');
+      } finally {
+        setRowActionPending((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [rowActionPending, allPayload]
+  );
+
+  // All-view stage/type options (from the tables list + common defaults).
+  // Stage/Type values live per-flow; the filter offers the union of the
+  // canonical defaults plus any values seen on the current page.
+  const allStageOptions = useMemo(() => {
+    const base = [
+      "New Lead", "Contacted", "Qualified", "Quotation Required", "Quotation Sent",
+      "In Negotiation", "Ready To Book", "Booking Confirmed", "Follow Up",
+      "Amendment", "Lost", "Cancelled", "Invalid", "On Hold", "Not connected",
+    ];
+    const seen = new Set(base);
+    for (const r of allPayload?.rows ?? []) {
+      if (r.stage && !seen.has(r.stage)) seen.add(r.stage);
+    }
+    return [...seen];
+  }, [allPayload]);
+
+  const allTypeOptions = useMemo(() => {
+    const base = ["Fresh", "Hot", "Warm", "Cold", "Prospect"];
+    const seen = new Set(base);
+    for (const r of allPayload?.rows ?? []) {
+      if (r.type && !seen.has(r.type)) seen.add(r.type);
+    }
+    return [...seen];
+  }, [allPayload]);
+
+  // All-view column visibility (virtual scope, localStorage-backed).
+  const allVisibility = useWorkspaceVisibility(accountId, isAllMetaLeads ? ALL_META_LEADS_ID : null, []);
   // UI-only: the Status column is hidden — the Completed/Incomplete
   // tabs already communicate classification. The column stays in the
   // payload (drawer badges, types, API untouched).
@@ -2314,7 +2633,7 @@ export default function WorkspacePage() {
                       row,
                       f.id,
                       overridesForRequest[row.runId]?.[f.id] ??
-                        payload.customValues?.[row.runId]?.[f.id] ??
+                        payload?.customValues?.[row.runId]?.[f.id] ??
                         null,
                     )
                 : undefined
@@ -2709,20 +3028,36 @@ export default function WorkspacePage() {
     }
   }, [flowId, rowActionPending, hiddenRows, markRowPending, reloadRowPrefs, reloadTable]);
 
+  // Selector options: All Meta Leads first (virtual, never hidden),
+  // then the visible tables. `allFlows` stays the real tables only
+  // (Manage Options never hides the virtual view).
+  const selectorFlows = useMemo(() => {
+    const visible = visibleFlows ?? [];
+    return [{ id: ALL_META_LEADS_ID, name: ALL_META_LEADS_LABEL }, ...visible];
+  }, [visibleFlows]);
+
+  const displayNameForSelector = useCallback(
+    (name: string | null | undefined) => {
+      if (name === ALL_META_LEADS_LABEL) return ALL_META_LEADS_LABEL;
+      return flowDisplayName(name);
+    },
+    [],
+  );
+
   return (
     <div className={cn('space-y-4', dmSans.className)}>
       <WorkspacePageHeader
         subtitle={
           /* Meta Lead Ads tables hide this subtitle; Flow Tables
              keep it exactly as before. */
-          payload?.meta.kind === 'meta_lead_ads'
+          isAllMetaLeads || payload?.meta.kind === 'meta_lead_ads'
             ? undefined
             : 'One live table per flow — every run, completed or not.'
         }
         kindLabel={
           /* Meta Lead Ads tables show no badge beside the Workspace
              title; Flow Tables keep their badge exactly as before. */
-          payload?.meta.kind === 'meta_lead_ads'
+          isAllMetaLeads || payload?.meta.kind === 'meta_lead_ads'
             ? null
             : payload
               ? 'Flow'
@@ -2731,7 +3066,7 @@ export default function WorkspacePage() {
         selector={
           flows !== null && flows.length > 0 ? (
             <WorkspaceTableSelector
-              flows={visibleFlows ?? []}
+              flows={selectorFlows}
               allFlows={flows}
               hiddenIds={hiddenTableIds}
               canManage={isOwner}
@@ -2740,17 +3075,43 @@ export default function WorkspacePage() {
               flowId={flowId}
               onSelect={selectFlow}
               wide={isMetaTable}
-              displayName={flowDisplayName}
+              displayName={displayNameForSelector}
             />
           ) : null
         }
       />
+      {/* All Meta Leads KPI cards (mockup): Total Leads, Assigned Leads,
+          Meta Tables — existing-style cards where supported. Individual
+          tables keep their follow-up KPIs exactly as before. */}
+      {isAllMetaLeads ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="border-border bg-card rounded-xl border p-4">
+            <p className="text-[13px] text-muted-foreground">Total Leads</p>
+            <p className="text-2xl font-semibold tabular-nums">
+              {allLoading && !allPayload ? '—' : (allPayload?.meta.total ?? 0).toLocaleString()}
+            </p>
+          </div>
+          <div className="border-border bg-card rounded-xl border p-4">
+            <p className="text-[13px] text-muted-foreground">Assigned Leads</p>
+            <p className="text-2xl font-semibold tabular-nums">
+              {allLoading && !allPayload ? '—' : (allPayload?.meta.assignedTotal ?? 0).toLocaleString()}
+            </p>
+          </div>
+          <div className="border-border bg-card rounded-xl border p-4">
+            <p className="text-[13px] text-muted-foreground">Meta Tables</p>
+            <p className="text-2xl font-semibold tabular-nums">
+              {(allPayload?.meta.tablesCount ?? allPayload?.tables.length ?? 0).toLocaleString()}
+            </p>
+          </div>
+        </div>
+      ) : null}
       {/* Follow-up workload KPIs: account- and table-scoped counts of
           the canonical "Next Follow-up Date & Time" values across ALL
           leads (never the visible page). Meta tables with the column
           only — Flow Tables keep their exact previous layout.
           Clicking a card filters the Leads table below by that
-          bucket; clicking it again clears the filter. */}
+          bucket; clicking it again clears the filter. All Meta Leads
+          uses its own KPI cards above. */}
       {isMetaTable && followupFieldId && flowId ? (
         <WorkspaceFollowupKpis
           key={`${flowId}:${followupFieldId}`}
@@ -2801,6 +3162,104 @@ export default function WorkspacePage() {
         />
       ) : (
         <>
+          {isAllMetaLeads ? (
+            <AllMetaLeadsView
+              search={search}
+              onSearchChange={setSearch}
+              appliedDate={appliedDate}
+              appliedAssignee={appliedAssignee}
+              appliedColumns={appliedColumns}
+              onApplyFilters={applyFilters}
+              teamMembers={teamMembers}
+              columnFilterOptions={columnFilterOptions}
+              tables={(allPayload?.tables ?? []).map((t) => ({
+                flowId: t.flowId,
+                tableName: t.tableName,
+                formName: t.formName,
+                enabled: t.enabled,
+              }))}
+              tableFilter={allTableFilter}
+              onTableFilter={(v) => {
+                setAllTableFilter(v);
+                setPage(0);
+                setSelected(null);
+              }}
+              stageFilter={allStageFilter}
+              onStageFilter={(v) => {
+                setAllStageFilter(v);
+                setPage(0);
+                setSelected(null);
+              }}
+              typeFilter={allTypeFilter}
+              onTypeFilter={(v) => {
+                setAllTypeFilter(v);
+                setPage(0);
+                setSelected(null);
+              }}
+              stageOptions={allStageOptions}
+              typeOptions={allTypeOptions}
+              rows={(allPayload?.rows ?? []) as unknown as Array<{
+                runId: string;
+                flowId: string;
+                flowName: string | null;
+                tableName: string;
+                metaLeadId: string | null;
+                contactId: string | null;
+                conversationId: string | null;
+                name: string | null;
+                phone: string | null;
+                startedAt: string;
+                source: string | null;
+                formAnswers: Array<{ key: string; question: string; answer: string; legacy: boolean }>;
+                assignedTo: string | null;
+                type: string | null;
+                stage: string | null;
+                callStatus: string | null;
+                followUpStatus: string | null;
+                nextFollowUp: string | null;
+                fieldIds: {
+                  assignedTo: string | null;
+                  type: string | null;
+                  stage: string | null;
+                  callStatus: string | null;
+                  followUpStatus: string | null;
+                  nextFollowUp: string | null;
+                };
+              }>}
+              total={allPayload?.meta.total ?? 0}
+              page={page}
+              pageSize={pageSize}
+              onPage={setPage}
+              onPageSize={(size) => selectPageSize(String(size))}
+              loading={allLoading}
+              error={allTableError}
+              hiddenIds={allVisibility.hiddenIds}
+              onRowSelect={(row) =>
+                setSelected({
+                  ...row,
+                  originFlowId: row.flowId,
+                  originTableName: row.tableName,
+                  metaDetails: (allPayload?.rows.find((r) => r.runId === row.runId)?.metaDetails ?? null) as unknown as FlowTableRow['metaDetails'],
+                  answers: {},
+                  status: 'completed' as const,
+                  runStatus: 'completed',
+                  lastAdvancedAt: row.startedAt ?? null,
+                  completedAt: null,
+                } as unknown as SelectedLead)
+              }
+              canSendMessages={canSendMessages}
+              isAgent={isAgent}
+              canManageAssignments={canManageAssignments}
+              onCustomSaved={handleAllCustomSaved}
+              valueOverrides={valueOverrides.key === allRequestKey ? valueOverrides.map : {}}
+              customValues={allPayload?.customValues ?? {}}
+              onTogglePin={handleAllTogglePin}
+              onHideRow={handleAllHideRow}
+              pinnedIds={pinnedIds}
+              pendingIds={rowActionPending}
+            />
+          ) : (
+            <>
           {/* Meta Lead Ads tables show one unified table (view=all),
               so the Completed/Incomplete tabs are hidden here.
               Flow Tables keep the tabs exactly as before. */}
@@ -3167,11 +3626,13 @@ export default function WorkspacePage() {
             </>
           )}
           </>
+            </>
+          )}
         </>
       )}
 
       <AddColumnDialog
-        flowId={flowId}
+        flowId={isAllMetaLeads ? null : flowId}
         editing={editingField}
         open={addColumnOpen}
         onOpenChange={(v) => {
@@ -3186,8 +3647,9 @@ export default function WorkspacePage() {
 
       {/* Per-table Google Sheets configuration (Meta Lead Ads tables
           only — never rendered for Flow Tables). Keyed by flow so
-          switching tables loads that table's own settings. */}
-      {isMetaTable && flowId ? (
+          switching tables loads that table's own settings.
+          Hidden in the All combined view (no single table). */}
+      {isAllMetaLeads ? null : isMetaTable && flowId ? (
         <MetaTableSheetsDialog
           key={flowId}
           flowId={flowId}
@@ -3198,8 +3660,10 @@ export default function WorkspacePage() {
 
       {/* Per-table Lead Assignment (Meta tables AND Flow tables).
           Keyed by flow so switching tables loads that table's own
-          settings; Flow tables never touch the Sheets sync system. */}
-      {flowId ? (
+          settings; Flow tables never touch the Sheets sync system.
+          Hidden in the All combined view (row actions use the
+          originating flow). */}
+      {!isAllMetaLeads && flowId ? (
         <TableAssignmentDialog
           key={`assign-${flowId}`}
           flowId={flowId}
@@ -3213,8 +3677,8 @@ export default function WorkspacePage() {
 
       {/* Per-table Travel CRM defaults (Meta tables AND Flow tables).
           Controlled from the Workspace actions menu with separate
-          view and edit entries. */}
-      {flowId ? (
+          view and edit entries. Hidden in All view. */}
+      {!isAllMetaLeads && flowId ? (
         <TravelCrmSettings
           key={`travel-${flowId}`}
           flowId={flowId}
@@ -3235,20 +3699,20 @@ export default function WorkspacePage() {
               <SheetHeader>
                 <SheetTitle>{selected.name ?? 'Run'}</SheetTitle>
                 <SheetDescription>
-                  {activeFlowName ?? 'Flow run'} · started{' '}
+                  {('originTableName' in selected && (selected as unknown as { originTableName?: string }).originTableName)
+                    ? (selected as unknown as { originTableName: string }).originTableName
+                    : (activeFlowName ?? 'Flow run')} · started{' '}
                   {formatDateTime(selected.startedAt)}
                 </SheetDescription>
               </SheetHeader>
               <div className="mt-4 space-y-4 overflow-y-auto px-5 pb-6">
-                {/* Meta Lead Ads sidebars skip this metadata section
-                    (status badge, Phone, Submission time, Completed
-                    at, Flow run ID) — the lead name, form name,
-                    Answers, and everything below stay exactly as
-                    before. Flow Tables keep the section untouched. */}
+                {/* All Meta Leads rows skip the Flow-table metadata section
+                    (same as Meta tables): name, table, answers and below
+                    stay. Flow Tables keep the section untouched. */}
                 {isMetaTable ? null : (
                   <>
                     <div className="flex items-center gap-2">
-                      <StatusBadge status={selected.status} />
+                      <StatusBadge status={(selected as FlowTableRow).status ?? 'completed'} />
                     </div>
                     <dl className="space-y-2 text-sm">
                       <div className="flex justify-between gap-4">
@@ -3266,7 +3730,7 @@ export default function WorkspacePage() {
                       <div className="flex justify-between gap-4">
                         <dt className="text-muted-foreground">Completed at</dt>
                         <dd className="text-foreground tabular-nums">
-                          {formatDateTime(selected.completedAt)}
+                          {formatDateTime((selected as FlowTableRow).completedAt ?? null)}
                         </dd>
                       </div>
                       <div className="flex justify-between gap-4">
@@ -3278,6 +3742,27 @@ export default function WorkspacePage() {
                     </dl>
                   </>
                 )}
+                {/* All-view Answers: single Form Answers list with each
+                    answer's own original question (never truncated). */}
+                {'formAnswers' in selected && Array.isArray((selected as unknown as { formAnswers?: unknown }).formAnswers) ? (
+                  <div>
+                    <h3 className="text-foreground text-sm font-semibold">
+                      Answers
+                    </h3>
+                    <dl className="mt-2 space-y-2 text-sm">
+                      {((selected as unknown as { formAnswers: AllMetaFormAnswer[] }).formAnswers ?? []).map((a) => (
+                        <div key={a.key} className="flex justify-between gap-4">
+                          <dt className="text-muted-foreground shrink-0 max-w-[45%] break-words whitespace-normal">
+                            {a.question}
+                          </dt>
+                          <dd className="text-foreground text-right break-words whitespace-normal max-w-[55%]">
+                            {a.answer}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
+                ) : (
                 <div>
                   <h3 className="text-foreground text-sm font-semibold">
                     Answers
@@ -3287,9 +3772,12 @@ export default function WorkspacePage() {
                       {(() => {
                         // Workspace display values (agent overrides win
                         // where present; originals otherwise).
+                        // This branch renders individual tables only (All
+                        // rows take the formAnswers branch above).
+                        const flowRow = selected as FlowTableRow;
                         const display = resolveFlowAnswers(
-                          selected.answers,
-                          payload.flowOverrides?.[selected.runId],
+                          flowRow.answers,
+                          payload.flowOverrides?.[flowRow.runId],
                         );
                         return payload.columns
                           .filter((c) => !c.system)
@@ -3326,6 +3814,7 @@ export default function WorkspacePage() {
                     </p>
                   )}
                 </div>
+                )}
                 {selected.conversationId ? (
                   <Button
                     className="w-full"
@@ -3359,14 +3848,21 @@ export default function WorkspacePage() {
                     </p>
                   </div>
                 )}
-                {flowId !== null && (
-                  <TravelCrmAction
-                    key={selected.runId}
-                    flowId={flowId}
-                    runId={selected.runId}
-                    onWorkspaceSynced={handleTravelCrmSynced}
-                  />
-                )}
+                {(() => {
+                  const originFlowId =
+                    ('originFlowId' in selected && typeof (selected as unknown as { originFlowId?: string }).originFlowId === 'string')
+                      ? (selected as unknown as { originFlowId: string }).originFlowId
+                      : flowId;
+                  if (originFlowId === null) return null;
+                  return (
+                    <TravelCrmAction
+                      key={selected.runId}
+                      flowId={originFlowId}
+                      runId={selected.runId}
+                      onWorkspaceSynced={handleTravelCrmSynced}
+                    />
+                  );
+                })()}
                 {/* Manual Meta CRM send (Meta tables only): saving a
                     quality status never sends — this section
                     shows the backend-generated payload preview with
@@ -3374,15 +3870,22 @@ export default function WorkspacePage() {
                     see it. Keyed by run + save bump so a fresh mount
                     (fresh preview) follows every status save; the
                     preview otherwise survives refresh by server
-                    re-assembly. */}
-                {isMetaTable && flowId !== null ? (
-                  <MetaCrmSendSection
-                    key={`${selected.runId}:${crmPreviewBump}`}
-                    flowId={flowId}
-                    runId={selected.runId}
-                    refreshToken={crmPreviewBump}
-                  />
-                ) : null}
+                    re-assembly. All-view rows use their originating flow. */}
+                {(() => {
+                  const originFlowId =
+                    ('originFlowId' in selected && typeof (selected as unknown as { originFlowId?: string }).originFlowId === 'string')
+                      ? (selected as unknown as { originFlowId: string }).originFlowId
+                      : flowId;
+                  if (!isMetaTable || originFlowId === null) return null;
+                  return (
+                    <MetaCrmSendSection
+                      key={`${selected.runId}:${crmPreviewBump}`}
+                      flowId={originFlowId}
+                      runId={selected.runId}
+                      refreshToken={crmPreviewBump}
+                    />
+                  );
+                })()}
                 {/* Meta-only provenance footer: stored submission
                     metadata not already visible elsewhere. Renders
                     AFTER Call Recordings + Create in Travel CRM, at
@@ -3448,14 +3951,14 @@ export default function WorkspacePage() {
       {/* Meta-only single Schedule Follow-up modal: opened
           directly by clicking the follow-up cell (no inline
           picker, no second dialog). Flow Tables never set this
-          state. */}
-      {scheduleModal !== null && flowId !== null && (
+          state. All-view rows use their originating flowId. */}
+      {scheduleModal !== null && (scheduleModal.originFlowId ?? flowId) !== null && (
         <ScheduleFollowupDialog
           open={scheduleModal !== null}
           onOpenChange={(v) => {
             if (!v) setScheduleModal(null);
           }}
-          flowId={flowId}
+          flowId={(scheduleModal.originFlowId ?? flowId) as string}
           runId={scheduleModal.runId}
           fieldId={scheduleModal.fieldId}
           leadName={scheduleModal.name}
