@@ -73,6 +73,36 @@ describe("table assignments — table-name regression (blank column fix)", () =>
   });
 });
 
+describe("table assignments — active-by-default + full assignee names", () => {
+  it("loads with the Status filter preselected to Active (All Status still available)", () => {
+    const src = pageSrc();
+    expect(src).toContain('useState<AssignmentStatusFilter>("active")');
+    // Every status option stays selectable — nothing is hidden or deleted.
+    for (const value of ['value="active"', 'value="paused"', 'value="not_configured"', 'value="all"']) {
+      expect(src).toContain(value);
+    }
+  });
+
+  it("renders every assignee's full name with wrapping (no avatars, no +N truncation)", () => {
+    const src = pageSrc();
+    // Full comma-separated names from the saved roster rows.
+    expect(src).toContain('join(", ")');
+    expect(src).toContain("whitespace-normal");
+    // The old avatar/+N presentation is gone.
+    expect(src).not.toContain("MAX_VISIBLE_ASSIGNEES");
+    expect(src).not.toContain("avatarToneFor");
+    expect(src).not.toContain("initialsFor");
+    expect(src).not.toContain("+{overflow}");
+  });
+
+  it("keeps allocation + status rendering from the saved configuration", () => {
+    const src = pageSrc();
+    expect(src).toContain("allocationText");
+    expect(src).toContain("deriveTableStatus");
+    expect(src).toContain("TableAssignmentDialog");
+  });
+});
+
 describe("table assignments — listing contract", () => {
   it("derives method/status/KPIs from saved config (no invented states)", () => {
     const src = pageSrc();

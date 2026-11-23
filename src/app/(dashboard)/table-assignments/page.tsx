@@ -61,19 +61,16 @@ import {
 import { saveSelectedFlowId } from "@/lib/flows/workspace-selected-flow";
 import {
   allocationText,
-  avatarToneFor,
   computeKpis,
   deriveMethodLabel,
   deriveTableStatus,
   filterOverviewTables,
-  initialsFor,
   normalizeAssignmentTableRow,
   type AssignmentMethodFilter,
   type AssignmentStatusFilter,
   type NormalizedAssignmentTable,
   type OverviewTableInput,
 } from "@/lib/lead-assignment/table-overview";
-import { cn } from "@/lib/utils";
 
 type TableAssignmentRow = NormalizedAssignmentTable;
 
@@ -171,8 +168,6 @@ function StatusBadge({ status }: { status: "active" | "paused" | "not_configured
   );
 }
 
-const MAX_VISIBLE_ASSIGNEES = 3;
-
 export default function TableAssignmentsPage() {
   const { accountId, accountRole, profileLoading } = useAuth();
   const router = useRouter();
@@ -184,7 +179,7 @@ export default function TableAssignmentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [methodFilter, setMethodFilter] = useState<AssignmentMethodFilter>("all");
-  const [statusFilter, setStatusFilter] = useState<AssignmentStatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<AssignmentStatusFilter>("active");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<WorkspacePageSize>(DEFAULT_WORKSPACE_PAGE_SIZE);
   const [editFlow, setEditFlow] = useState<{ flowId: string; tableName: string } | null>(null);
@@ -468,8 +463,6 @@ export default function TableAssignmentsPage() {
                   const status = deriveTableStatus(input);
                   const method = deriveMethodLabel(input);
                   const allocation = allocationText(input);
-                  const visible = row.assignees.slice(0, MAX_VISIBLE_ASSIGNEES);
-                  const overflow = row.assignees.length - visible.length;
                   const fullNames = row.assignees.map((a) => a.display_name).join(", ");
                   return (
                     <TableRow key={row.flowId} className="cursor-default">
@@ -489,29 +482,12 @@ export default function TableAssignmentsPage() {
                       <TableCell className="border-r border-border px-2.5 py-1.5 text-[13px]">
                         <MethodBadge method={method} />
                       </TableCell>
-                      <TableCell className="max-w-64 border-r border-border px-2.5 py-1.5 text-[13px]">
+                      <TableCell className="border-r border-border px-2.5 py-1.5 text-[13px]">
                         {row.assignees.length === 0 ? (
                           <span className="text-muted-foreground">—</span>
                         ) : (
-                          <span className="flex items-center gap-1.5" title={fullNames}>
-                            {visible.map((a) => (
-                              <span
-                                key={a.id}
-                                aria-hidden
-                                className={cn(
-                                  "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold",
-                                  avatarToneFor(a.id),
-                                )}
-                              >
-                                {initialsFor(a.display_name)}
-                              </span>
-                            ))}
-                            {overflow > 0 && (
-                              <span className="inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-muted px-1 text-[11px] font-semibold text-muted-foreground">
-                                +{overflow}
-                              </span>
-                            )}
-                            <span className="sr-only">{fullNames}</span>
+                          <span className="block min-w-40 whitespace-normal break-words">
+                            {fullNames}
                           </span>
                         )}
                       </TableCell>
