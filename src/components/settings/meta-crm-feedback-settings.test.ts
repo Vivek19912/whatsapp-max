@@ -109,4 +109,23 @@ describe("MetaCrmFeedbackSettings", () => {
     // Long option labels may wrap instead of clipping on narrow screens.
     expect(src).toContain("[&_[data-slot=select-item-text]]:whitespace-normal");
   });
+
+  it("offers a searchable table multi-select bound to stable flow ids", () => {
+    expect(src).toContain("Select Workspace Tables for Meta CRM Events");
+    expect(src).toContain("Choose which Workspace tables are allowed to send lead-quality events to Meta");
+    expect(src).toContain("/api/flows?kind=meta_lead_ads");
+    expect(src).toContain("Search tables by name");
+    expect(src).toContain("Select all");
+    expect(src).toContain("Clear");
+    // Options are keyed by the internal id; the visible label is the name.
+    expect(src).toContain("key={t.id}");
+    expect(src).toContain("checked={effectiveTableIdSet.has(t.id)}");
+    expect(src).toContain("{t.name}");
+    // Unrestricted legacy state shows every table checked without writing back.
+    expect(src).toContain("selectedTableIds");
+    expect(src).toContain("tablesDirty");
+    expect(src).toContain("allowedFlowIds");
+    // An explicit empty selection warns that sending is blocked.
+    expect(src).toContain("blocked for all tables");
+  });
 });

@@ -21,11 +21,13 @@ import { toast } from "sonner";
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   Eye,
   EyeOff,
   Loader2,
   RefreshCw,
   RotateCcw,
+  Search,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/use-auth";
@@ -43,6 +45,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface SavedDataset {
   id: string;
@@ -65,6 +73,17 @@ interface FeedbackConfig {
   autoSendLead: boolean;
   /** UI-only: display the Lead Quality column in Workspace tables. */
   showLeadQuality: boolean;
+  /**
+   * Enforced table allowlist (Meta Lead Ads flow ids). Null =
+   * unrestricted legacy behavior (never configured); an explicit
+   * array (even empty) restricts sending to those tables.
+   */
+  allowedFlowIds: string[] | null;
+}
+
+interface WorkspaceTableOption {
+  id: string;
+  name: string;
 }
 
 interface CrmEvent {
@@ -128,6 +147,19 @@ export function MetaCrmFeedbackSettings() {
   const [autoSendLead, setAutoSendLead] = useState(false);
   const [showLeadQuality, setShowLeadQuality] = useState(true);
   const [showLeadQualityMigrationMissing, setShowLeadQualityMigrationMissing] = useState(false);
+  const [tables, setTables] = useState<WorkspaceTableOption[]>([]);
+  const [tablesLoading, setTablesLoading] = useState(true);
+  const [tablesError, setTablesError] = useState<string | null>(null);
+  /**
+   * Table allowlist selection. Null = unrestricted (never
+   * configured — every table stays eligible). An explicit array
+   * is enforced on save. `tablesDirty` tracks user edits so an
+   * untouched legacy selection is preserved, never rewritten.
+   */
+  const [selectedTableIds, setSelectedTableIds] = useState<string[] | null>(null);
+  const [tablesDirty, setTablesDirty] = useState(false);
+  const [tablesMigrationMissing, setTablesMigrationMissing] = useState(false);
+  const [tableSearch, setTableSearch] = useState("");
   const [datasets, setDatasets] = useState<SavedDataset[]>([]);
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
@@ -176,6 +208,36 @@ export function MetaCrmFeedbackSettings() {
     }
   }, []);
 
+  // Workspace tables load INDEPENDENTLY of the feedback config:
+  // a config failure must never blank the table picker.
+  const loadTables = useCallback(async () => {
+    setTablesLoading(true);
+    setTablesError(null);
+    try {
+      const tRes = await fetch("/api/flows?kind=meta_lead_ads", { cache: "no-store" });
+      const body = (await tRes.json().catch(() => ({}))) as {
+        flows?: unknown;
+        error?: string;
+      };
+      if (!tRes.ok || !Array.isArray(body.flows)) {
+        throw new Error(typeof body.error === "string" && body.error ? body.error : `Could not load tables (${tRes.status}).`);
+      }
+      const list = (body.flows as Array<Record<string, unknown>>)
+        .filter((f) => typeof f.id === "string" && f.kind === "meta_lead_ads")
+        .map((f) => ({
+          id: f.id as string,
+          name: typeof f.name === "string" && f.name.trim() !== "" ? f.name : "Untitled table",
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setTables(list);
+    } catch (err) {
+      setTablesError(err instanceof Error ? err.message : "Could not load Workspace tables.");
+      setTables([]);
+    } finally {
+      setTablesLoading(false);
+    }
+  }, []);
+
   const loadConfigState = useCallback(async () => {
     setConfigLoading(true);
     setConfigError(null);
@@ -188,6 +250,7 @@ export function MetaCrmFeedbackSettings() {
         tokenMigrationMissing?: boolean;
         autoSendMigrationMissing?: boolean;
         showLeadQualityMigrationMissing?: boolean;
+        tablesMigrationMissing?: boolean;
         error?: string;
       };
       if (!cfgRes.ok || !cfg.ok || !cfg.config) {
@@ -201,6 +264,13 @@ export function MetaCrmFeedbackSettings() {
       setAutoSendLead(cfg.config.autoSendLead === true);
       setShowLeadQualityMigrationMissing(cfg.showLeadQualityMigrationMissing === true);
       setShowLeadQuality(cfg.config.showLeadQuality !== false);
+      setTablesMigrationMissing(cfg.tablesMigrationMissing === true);
+      // Saved selection (ids only — names may have changed since).
+      // Null = unrestricted legacy: every table stays eligible.
+      setSelectedTableIds(
+        Array.isArray(cfg.config.allowedFlowIds) ? [...cfg.config.allowedFlowIds] : null,
+      );
+      setTablesDirty(false);
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : "Could not load CRM feedback.");
     } finally {
@@ -240,10 +310,44 @@ export function MetaCrmFeedbackSettings() {
         ? undefined
         : "";
 
+  // Effective selection: an explicit array is enforced as-is;
+  // null (never configured) means every table is eligible, so the
+  // picker shows all boxes checked without writing anything back
+  // until the user changes the selection.
+  const effectiveTableIds = selectedTableIds ?? tables.map((t) => t.id);
+  const effectiveTableIdSet = new Set(effectiveTableIds);
+  const staleSelectedCount = (selectedTableIds ?? []).filter(
+    (id) => !tables.some((t) => t.id === id),
+  ).length;
+  const tableSearchQuery = tableSearch.trim().toLowerCase();
+  const filteredTables =
+    tableSearchQuery === ""
+      ? tables
+      : tables.filter((t) => t.name.toLowerCase().includes(tableSearchQuery));
+
+  const applyTableToggle = (tableId: string, checked: boolean) => {
+    const base = new Set(selectedTableIds ?? tables.map((t) => t.id));
+    if (checked) base.add(tableId);
+    else base.delete(tableId);
+    setSelectedTableIds(tables.filter((t) => base.has(t.id)).map((t) => t.id));
+    setTablesDirty(true);
+  };
+
+  const applySelectAllTables = () => {
+    setSelectedTableIds(tables.map((t) => t.id));
+    setTablesDirty(true);
+  };
+
+  const applyClearTables = () => {
+    setSelectedTableIds([]);
+    setTablesDirty(true);
+  };
+
   useEffect(() => {
     void loadDatasets();
     void loadConfigState();
-  }, [loadDatasets, loadConfigState]);
+    void loadTables();
+  }, [loadDatasets, loadConfigState, loadTables]);
 
   const loadEvents = useCallback(async () => {
     setEventsLoading(true);
@@ -280,6 +384,15 @@ export function MetaCrmFeedbackSettings() {
     if (saving) return;
     setSaving(true);
     try {
+      // Only send the table selection when the user changed it (or
+      // a stored explicit list must round-trip): an untouched
+      // legacy (unrestricted) selection is omitted so the server
+      // preserves it instead of rewriting history. Unknown ids
+      // (deleted tables) are dropped, never sent.
+      const knownTableIds =
+        selectedTableIds === null
+          ? null
+          : selectedTableIds.filter((id) => tables.some((t) => t.id === id));
       const res = await fetch("/api/integrations/meta-crm/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -291,6 +404,7 @@ export function MetaCrmFeedbackSettings() {
           ...(crmToken !== "" ? { accessToken: crmToken } : {}),
           autoSendLead,
           showLeadQuality,
+          ...(tablesDirty && knownTableIds !== null ? { allowedFlowIds: knownTableIds } : {}),
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
@@ -307,6 +421,12 @@ export function MetaCrmFeedbackSettings() {
       setConfig(json.config);
       setCrmToken("");
       setShowCrmToken(false);
+      // Server truth wins for the table selection; a preserved
+      // (unrestricted) legacy selection keeps the current UI state.
+      if (Array.isArray(json.config.allowedFlowIds)) {
+        setSelectedTableIds([...json.config.allowedFlowIds]);
+      }
+      setTablesDirty(false);
       if (json.config.enabled) {
         toast.success(
           json.ownershipVerified
@@ -470,6 +590,126 @@ export function MetaCrmFeedbackSettings() {
                   listed here — register datasets in “Created CRM Datasets” above.
                 </p>
               </div>
+
+              <div className="space-y-2">
+                <Label id="meta-crm-tables-label">Select Workspace Tables for Meta CRM Events</Label>
+                {tablesLoading ? (
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" /> Loading tables…
+                  </p>
+                ) : (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      id="meta-crm-tables-trigger"
+                      aria-labelledby="meta-crm-tables-label meta-crm-tables-trigger"
+                      className="flex h-auto min-h-9 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-3 py-2 text-sm transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={disabled || saving || tables.length === 0 || tablesMigrationMissing}
+                    >
+                      <span className="min-w-0 flex-1 truncate text-left font-normal">
+                        {tables.length === 0
+                          ? "No tables available"
+                          : selectedTableIds === null
+                            ? `All tables selected (${tables.length} of ${tables.length})`
+                            : `${effectiveTableIds.length} of ${tables.length} tables selected`}
+                      </span>
+                      <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      className="w-72 max-w-[calc(100vw-2rem)]"
+                      align="start"
+                    >
+                      <div className="p-1.5" onKeyDown={(e) => e.stopPropagation()}>
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            value={tableSearch}
+                            onChange={(e) => setTableSearch(e.target.value)}
+                            placeholder="Search tables by name..."
+                            aria-label="Search Workspace tables by name"
+                            className="h-8 pl-8 text-sm"
+                          />
+                        </div>
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 flex-1 text-xs"
+                            onClick={applySelectAllTables}
+                          >
+                            Select all
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 flex-1 text-xs"
+                            onClick={applyClearTables}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="max-h-64 overflow-y-auto p-1 pt-0">
+                        {filteredTables.length === 0 ? (
+                          <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+                            {tables.length === 0 ? "No Meta Lead Ads tables found." : "No matching tables."}
+                          </p>
+                        ) : (
+                          filteredTables.map((t) => (
+                            <DropdownMenuCheckboxItem
+                              key={t.id}
+                              checked={effectiveTableIdSet.has(t.id)}
+                              closeOnClick={false}
+                              onCheckedChange={(v) => applyTableToggle(t.id, v === true)}
+                            >
+                              <span className="truncate" title={t.name}>
+                                {t.name}
+                              </span>
+                            </DropdownMenuCheckboxItem>
+                          ))
+                        )}
+                      </div>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+                {tablesError ? (
+                  <p className="text-sm text-destructive">
+                    {tablesError}{" "}
+                    <button
+                      type="button"
+                      className="underline"
+                      onClick={() => void loadTables()}
+                    >
+                      Retry
+                    </button>
+                  </p>
+                ) : null}
+                {staleSelectedCount > 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    {staleSelectedCount} previously selected table{staleSelectedCount === 1 ? "" : "s"} no
+                    longer {staleSelectedCount === 1 ? "exists" : "exist"} and will be removed on save.
+                  </p>
+                ) : null}
+                {selectedTableIds !== null && selectedTableIds.length === 0 ? (
+                  <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                    No tables selected — CRM event sending is blocked for all tables until you select at
+                    least one.
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  Choose which Workspace tables are allowed to send lead-quality events to Meta. Only
+                  leads belonging to selected tables will be eligible.
+                </p>
+              </div>
+
+              {tablesMigrationMissing ? (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                  Table selection is not ready yet — apply migration{" "}
+                  <code>183_meta_crm_allowed_tables</code> to enable per-table sending control. Event
+                  delivery keeps working for all tables meanwhile.
+                </p>
+              ) : null}
 
               <div className="space-y-2">
                 <Label htmlFor="meta-crm-access-token">Meta CRM Access Token</Label>

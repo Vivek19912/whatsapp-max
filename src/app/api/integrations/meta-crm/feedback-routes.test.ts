@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   ownership: "ok" as "ok" | "not-owned" | { throw: unknown },
   token: "STORED_TOKEN",
   configDbError: null as { code: string; message: string } | null,
+  upsertDbError: null as { code: string; message: string } | null,
   tokensSeen: [] as unknown[],
   getUserTokenCalls: 0,
 }));
@@ -73,32 +74,34 @@ type Row = Record<string, unknown>;
 function fakeDb() {
   const tables = h.tables;
   function chain(table: string, filters: Array<[string, unknown]> = []) {
+    const matches = (r: Row) =>
+      filters.every(([c, v]) => {
+        if (c === "__limit") return true;
+        if (typeof c === "string" && c.startsWith("__in:")) {
+          return (v as unknown[]).includes(r[c.slice(5)]);
+        }
+        return r[c] === v;
+      });
     const api: Record<string, (...a: never[]) => unknown> = {
       select: () => chain(table, filters),
       eq: (c: string, v: unknown) => chain(table, [...filters, [c, v]]),
-      in: () => chain(table, filters),
+      in: (c: string, vals: unknown) => chain(table, [...filters, [`__in:${c}`, vals]]),
       order: () => chain(table, filters),
       limit: (n: number) => chain(table, [...filters, ["__limit", n]] as never),
       maybeSingle: async () => {
         if (table === "meta_crm_config" && h.configDbError) throw h.configDbError;
-        const rows = (tables[table] ?? []).filter((r) =>
-          filters.every(([c, v]) => (c === "__limit" ? true : r[c] === v)),
-        );
+        const rows = (tables[table] ?? []).filter(matches);
         return { data: rows[0] ?? null, error: null };
       },
       single: async () => {
-        const rows = (tables[table] ?? []).filter((r) =>
-          filters.every(([c, v]) => (c === "__limit" ? true : r[c] === v)),
-        );
+        const rows = (tables[table] ?? []).filter(matches);
         return rows.length > 0
           ? { data: rows[0], error: null }
           : { data: null, error: { message: "none" } };
       },
       then: (resolve: (v: { data: Row[]; error: null }) => void) => {
         const lim = filters.find(([c]) => c === "__limit")?.[1] as number | undefined;
-        let rows = (tables[table] ?? []).filter((r) =>
-          filters.every(([c, v]) => (c === "__limit" ? true : r[c] === v)),
-        );
+        let rows = (tables[table] ?? []).filter(matches);
         if (typeof lim === "number") rows = rows.slice(0, lim);
         return Promise.resolve({ data: rows, error: null }).then(resolve);
       },
@@ -130,7 +133,10 @@ function fakeDb() {
           else rows.push(row);
           return {
             select: () => ({
-              single: async () => ({ data: row, error: null }),
+              single: async () => {
+                if (table === "meta_crm_config" && h.upsertDbError) throw h.upsertDbError;
+                return { data: row, error: null };
+              },
             }),
           };
         },
@@ -164,6 +170,7 @@ beforeEach(() => {
   h.ownership = "ok";
   h.token = "STORED_TOKEN";
   h.configDbError = null;
+  h.upsertDbError = null;
   h.tokensSeen = [];
   h.getUserTokenCalls = 0;
   h.tables = {
@@ -370,6 +377,61 @@ describe("PUT /api/integrations/meta-crm/config", () => {
     const fetched = (await (await configGet()).json()) as { config: { showLeadQuality: boolean } };
     expect(fetched.config.showLeadQuality).toBe(false);
   });
+
+  it("persists the table allowlist by id, defaulting to unrestricted (null)", async () => {
+    h.tables.flows = [
+      { id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads", name: "Rajasthan" },
+      { id: "flow-b", account_id: "acct-1", kind: "meta_lead_ads", name: "Kerala" },
+    ];
+    const def = await configPut(put({ enabled: false, datasetRowId: null }));
+    expect(((await def.json()) as { config: { allowedFlowIds: string[] | null } }).config.allowedFlowIds).toBeNull();
+
+    const saved = await configPut(
+      put({ enabled: false, datasetRowId: null, allowedFlowIds: ["flow-a"] }),
+    );
+    expect(saved.status).toBe(200);
+    expect(((await saved.json()) as { config: { allowedFlowIds: string[] } }).config.allowedFlowIds).toEqual([
+      "flow-a",
+    ]);
+
+    // Omitted = preserved, not cleared.
+    const untouched = await configPut(put({ enabled: false, datasetRowId: null }));
+    expect(((await untouched.json()) as { config: { allowedFlowIds: string[] } }).config.allowedFlowIds).toEqual([
+      "flow-a",
+    ]);
+
+    // Empty array is an explicit block-all.
+    const emptied = await configPut(put({ enabled: false, datasetRowId: null, allowedFlowIds: [] }));
+    expect(((await emptied.json()) as { config: { allowedFlowIds: string[] } }).config.allowedFlowIds).toEqual(
+      [],
+    );
+
+    const fetched = (await (await configGet()).json()) as { config: { allowedFlowIds: string[] } };
+    expect(fetched.config.allowedFlowIds).toEqual([]);
+  });
+
+  it("rejects foreign, non-Meta, and malformed table ids", async () => {
+    h.tables.flows = [
+      { id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads", name: "Rajasthan" },
+      { id: "flow-chat", account_id: "acct-1", kind: "whatsapp_flow", name: "Chat" },
+      { id: "flow-x", account_id: "acct-OTHER", kind: "meta_lead_ads", name: "Foreign" },
+    ];
+    for (const bad of [["flow-x"], ["flow-chat"], ["flow-gone"], "not-an-array"]) {
+      const res = await configPut(put({ enabled: false, datasetRowId: null, allowedFlowIds: bad }));
+      expect(res.status).toBe(400);
+    }
+    expect(h.tables.meta_crm_config).toHaveLength(0);
+  });
+
+  it("maps a missing allowlist column to an actionable 503", async () => {
+    h.tables.flows = [{ id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads", name: "Rajasthan" }];
+    h.upsertDbError = { code: "42703", message: 'column "allowed_flow_ids" does not exist' };
+    const res = await configPut(put({ enabled: false, datasetRowId: null, allowedFlowIds: ["flow-a"] }));
+    expect(res.status).toBe(503);
+    const json = (await res.json()) as { code?: string; error?: string };
+    expect(json.code).toBe("migration_missing");
+    expect(json.error).toContain("183");
+  });
 });
 
 describe("GET /api/integrations/meta-crm/config", () => {
@@ -407,6 +469,37 @@ describe("GET /api/integrations/meta-crm/config", () => {
     expect(json.migrationMissing).toBe(true);
     expect(json.config.enabled).toBe(false);
     expect(json.config.datasetId).toBeNull();
+  });
+
+  it("returns the stored allowlist (null when never configured)", async () => {
+    h.tables.meta_crm_config = [{ account_id: "acct-1", enabled: true, dataset_id: "DS1" }];
+    const legacy = (await (await configGet()).json()) as {
+      config: { allowedFlowIds: string[] | null };
+    };
+    expect(legacy.config.allowedFlowIds).toBeNull();
+
+    h.tables.meta_crm_config = [
+      { account_id: "acct-1", enabled: true, dataset_id: "DS1", allowed_flow_ids: ["flow-a"] },
+    ];
+    const explicit = (await (await configGet()).json()) as {
+      config: { allowedFlowIds: string[] | null };
+    };
+    expect(explicit.config.allowedFlowIds).toEqual(["flow-a"]);
+  });
+});
+
+describe("migration 183_meta_crm_allowed_tables", () => {
+  it("adds a nullable allowlist column (legacy rows stay unrestricted)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const sql = readFileSync(
+      `${process.cwd()}/supabase/migrations/183_meta_crm_allowed_tables.sql`,
+      "utf8",
+    );
+    expect(sql).toContain("ADD COLUMN IF NOT EXISTS allowed_flow_ids UUID[]");
+    // Nullable with no NOT NULL / DEFAULT: pre-existing rows read as
+    // NULL, which the code treats as unrestricted legacy behavior.
+    expect(sql).not.toMatch(/allowed_flow_ids[^;]*NOT NULL/);
+    expect(sql).not.toMatch(/allowed_flow_ids[^;]*DEFAULT/);
   });
 });
 

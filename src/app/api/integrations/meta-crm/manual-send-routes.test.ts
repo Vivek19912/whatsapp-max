@@ -171,6 +171,8 @@ function seed(o: {
   /** Dedicated CRM token: encrypted string stored, null = none configured. */
   crmToken?: string | null;
   legacy?: boolean;
+  /** Stored table allowlist (undefined = never configured = unrestricted). */
+  allowedFlowIds?: string[] | null;
 } = {}) {
   const {
     stored = "Qualified Lead",
@@ -187,6 +189,7 @@ function seed(o: {
     datasetId = "DS1",
     crmToken = "CRM_TOKEN_dedicated",
     legacy = false,
+    allowedFlowIds,
   } = o;
   h.tables = {
     flow_runs: [
@@ -234,6 +237,7 @@ function seed(o: {
         dataset_name: "IM CRM",
         // Dedicated token at rest (encrypted) — never the Lead Ads one.
         access_token: crmToken === null ? null : encrypt(crmToken),
+        ...(allowedFlowIds === undefined ? {} : { allowed_flow_ids: allowedFlowIds }),
       },
     ],
     flows: [{ id: FLOW, account_id: "acct-1", kind: "meta_lead_ads" }],
@@ -550,5 +554,61 @@ describe("POST manual-send", () => {
     h.role = "viewer";
     const roleDenied = await sendPost(post({ flow_id: FLOW, run_id: RUN, preview_id: "x" }));
     expect(roleDenied.status).toBe(403);
+  });
+});
+
+describe("table allowlist enforcement (preview + manual send)", () => {
+  const TABLE_MESSAGE =
+    "Meta CRM sending is disabled for this Workspace table. Enable this table in CRM Integration settings to send events.";
+
+  it("preview gates unselected tables with the exact message, allows selected ones", async () => {
+    seed({ allowedFlowIds: ["flow-other"] });
+    const blocked = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: string; message: string; payload: null };
+    };
+    expect(blocked.preview.sendable).toBe(false);
+    expect(blocked.preview.reason).toBe("table_not_selected");
+    expect(blocked.preview.message).toBe(TABLE_MESSAGE);
+    expect(blocked.preview.payload).toBeNull();
+
+    seed({ allowedFlowIds: [FLOW] });
+    const allowed = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: null };
+    };
+    expect(allowed.preview.sendable).toBe(true);
+    expect(allowed.preview.reason).toBeNull();
+  });
+
+  it("preview treats an explicit empty list as block-all", async () => {
+    seed({ allowedFlowIds: [] });
+    const json = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { sendable: boolean; reason: string };
+    };
+    expect(json.preview.sendable).toBe(false);
+    expect(json.preview.reason).toBe("table_not_selected");
+  });
+
+  it("manual send is blocked server-side for unselected tables (exact message, no ledger row)", async () => {
+    seed({ allowedFlowIds: ["flow-other"] });
+    // No sendable preview exists, so any send attempt fails closed.
+    const res = await sendPost(post({ flow_id: FLOW, run_id: RUN, preview_id: "stale-or-missing" }));
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: string; reason: string };
+    expect(json.reason).toBe("table_not_selected");
+    expect(json.error).toBe(TABLE_MESSAGE);
+    expect(h.tables.meta_crm_events).toHaveLength(0);
+  });
+
+  it("manual send works for selected tables (agent included)", async () => {
+    seed({ allowedFlowIds: [FLOW] });
+    h.role = "agent";
+    h.owned = true;
+    const preview = (await (await previewGet(new Request(previewUrl))).json()) as {
+      preview: { previewId: string };
+    };
+    const res = await sendPost(post({ flow_id: FLOW, run_id: RUN, preview_id: preview.preview.previewId }));
+    expect(res.status).toBe(200);
+    expect(h.tables.meta_crm_events).toHaveLength(1);
+    expect(h.tables.meta_crm_events[0].event_name).toBe("QualifiedLead");
   });
 });

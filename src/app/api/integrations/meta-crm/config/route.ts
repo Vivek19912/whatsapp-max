@@ -21,6 +21,7 @@ import {
   isMissingAccessTokenColumn,
   isMissingConfigColumn,
   saveCrmFeedbackConfig,
+  TABLES_STORAGE_MISSING_MESSAGE,
   toPublicCrmFeedbackConfig,
   TOKEN_STORAGE_MISSING_MESSAGE,
 } from "@/lib/meta-crm/feedback";
@@ -37,7 +38,8 @@ export async function GET() {
     let tokenMigrationMissing = false;
     let autoSendMigrationMissing = false;
     let showLeadQualityMigrationMissing = false;
-    for (const column of ["access_token", "auto_send_lead", "show_lead_quality"] as const) {
+    let tablesMigrationMissing = false;
+    for (const column of ["access_token", "auto_send_lead", "show_lead_quality", "allowed_flow_ids"] as const) {
       try {
         const probe = await ctx.supabase
           .from("meta_crm_config")
@@ -49,7 +51,8 @@ export async function GET() {
         if (isMissingConfigColumn(err, column)) {
           if (column === "access_token") tokenMigrationMissing = true;
           else if (column === "auto_send_lead") autoSendMigrationMissing = true;
-          else showLeadQualityMigrationMissing = true;
+          else if (column === "show_lead_quality") showLeadQualityMigrationMissing = true;
+          else tablesMigrationMissing = true;
         } else {
           throw err;
         }
@@ -61,6 +64,7 @@ export async function GET() {
       tokenMigrationMissing,
       autoSendMigrationMissing,
       showLeadQualityMigrationMissing,
+      tablesMigrationMissing,
     });
   } catch (err) {
     // meta_crm_config table missing (migration 175 not applied yet)
@@ -101,6 +105,21 @@ export async function PUT(request: Request) {
     const removeAccessToken = body.removeAccessToken === true;
     const autoSendLead = typeof body.autoSendLead === "boolean" ? body.autoSendLead : undefined;
     const showLeadQuality = typeof body.showLeadQuality === "boolean" ? body.showLeadQuality : undefined;
+    // Table allowlist: omitted = preserve the stored selection;
+    // an explicit array (even empty) replaces it after ownership
+    // validation in saveCrmFeedbackConfig.
+    const allowedFlowIds =
+      body.allowedFlowIds === undefined
+        ? undefined
+        : Array.isArray(body.allowedFlowIds)
+          ? body.allowedFlowIds
+          : null;
+    if (allowedFlowIds === null) {
+      return NextResponse.json(
+        { error: "allowedFlowIds must be an array of Workspace table ids." },
+        { status: 400 },
+      );
+    }
     if (enabled && !datasetRowId) {
       return NextResponse.json(
         { error: "Select a CRM dataset to enable feedback." },
@@ -119,6 +138,7 @@ export async function PUT(request: Request) {
           accessToken: removeAccessToken ? "" : accessToken,
           autoSendLead,
           showLeadQuality,
+          allowedFlowIds,
         },
       );
       return NextResponse.json({
@@ -138,10 +158,10 @@ export async function PUT(request: Request) {
           { status: err.status },
         );
       }
-      // Un-migrated database (migrations 176–178 missing): the
-      // upsert references the new columns and PostgREST rejects them
-      // with a plain 42703 object — map it to an actionable 503
-      // instead of the bare "Internal server error".
+      // Un-migrated database (migrations 176–178 or 183 missing):
+      // the upsert references the new columns and PostgREST
+      // rejects them with a plain 42703 object — map it to an
+      // actionable 503 instead of the bare "Internal server error".
       if (
         isMissingAccessTokenColumn(err) ||
         isMissingConfigColumn(err, "auto_send_lead") ||
@@ -149,6 +169,12 @@ export async function PUT(request: Request) {
       ) {
         return NextResponse.json(
           { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
+          { status: 503 },
+        );
+      }
+      if (isMissingConfigColumn(err, "allowed_flow_ids")) {
+        return NextResponse.json(
+          { error: TABLES_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
           { status: 503 },
         );
       }
@@ -162,6 +188,12 @@ export async function PUT(request: Request) {
     ) {
       return NextResponse.json(
         { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
+        { status: 503 },
+      );
+    }
+    if (isMissingConfigColumn(err, "allowed_flow_ids")) {
+      return NextResponse.json(
+        { error: TABLES_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
         { status: 503 },
       );
     }

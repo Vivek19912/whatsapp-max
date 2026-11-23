@@ -72,6 +72,15 @@ export interface CrmFeedbackConfig {
    * Defaults to true. Hiding changes nothing stored or sent.
    */
   show_lead_quality: boolean;
+  /**
+   * Enforced table allowlist: Meta Lead Ads flow ids whose leads
+   * may send CRM events to Meta. NULL (including all rows created
+   * before this column existed) = unrestricted legacy behavior.
+   * An explicit array — even empty — is enforced everywhere
+   * (enqueue, preview/manual send, drain). Names are never
+   * stored, so renames cannot corrupt the selection.
+   */
+  allowed_flow_ids: string[] | null;
 }
 
 export interface PublicCrmFeedbackConfig {
@@ -88,6 +97,11 @@ export interface PublicCrmFeedbackConfig {
   autoSendLead: boolean;
   /** UI-only: display the Lead Quality column in Workspace tables. */
   showLeadQuality: boolean;
+  /**
+   * Enforced table allowlist (flow ids). Null = unrestricted
+   * legacy behavior; an explicit array (even empty) is enforced.
+   */
+  allowedFlowIds: string[] | null;
 }
 
 export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): PublicCrmFeedbackConfig {
@@ -102,6 +116,9 @@ export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): Public
     hasToken: !!row?.access_token,
     autoSendLead: row?.auto_send_lead ?? false,
     showLeadQuality: row?.show_lead_quality ?? true,
+    allowedFlowIds: Array.isArray(row?.allowed_flow_ids)
+      ? (row.allowed_flow_ids as unknown[]).filter((v): v is string => typeof v === "string")
+      : null,
   };
 }
 
@@ -117,6 +134,45 @@ export async function getCrmFeedbackConfig(
   if (error) throw error;
   return (data as CrmFeedbackConfig | null) ?? null;
 }
+
+/**
+ * Table allowlist check: may this Workspace table's leads send CRM
+ * events to Meta?
+ *
+ * - No config row, or an `allowed_flow_ids` of NULL (every row
+ *   predating migration 183), means the owner never configured a
+ *   selection → unrestricted legacy behavior (true).
+ * - A missing `allowed_flow_ids` column (migration 183 not
+ *   applied) also means no selection could exist → unrestricted
+ *   (true), never a send-time 500.
+ * - An explicit array (even empty) is enforced by stable flow id:
+ *   names are never consulted, so renames cannot bypass or break
+ *   the check. An unattributable (empty/unknown) flow id under an
+ *   explicit allowlist fails closed (false).
+ */
+export async function isFlowAllowedForCrm(
+  db: SupabaseClient,
+  accountId: string,
+  flowId: string | null | undefined,
+): Promise<boolean> {
+  let config: CrmFeedbackConfig | null;
+  try {
+    config = await getCrmFeedbackConfig(db, accountId);
+  } catch (err) {
+    if (isMissingConfigColumn(err, "allowed_flow_ids")) return true;
+    throw err;
+  }
+  if (!config) return true;
+  const raw: unknown = (config as { allowed_flow_ids?: unknown }).allowed_flow_ids;
+  if (raw === null || raw === undefined) return true;
+  if (!Array.isArray(raw)) return true;
+  if (typeof flowId !== "string" || flowId === "") return false;
+  return (raw as unknown[]).some((v) => v === flowId);
+}
+
+/** Exact user-facing message when a table is not selected for CRM sending. */
+export const TABLE_NOT_SELECTED_MESSAGE =
+  "Meta CRM sending is disabled for this Workspace table. Enable this table in CRM Integration settings to send events.";
 
 /**
  * Save the per-account feedback config. Enabling requires a
@@ -150,6 +206,13 @@ export async function saveCrmFeedbackConfig(
     accessToken?: string;
     autoSendLead?: boolean;
     showLeadQuality?: boolean;
+    /**
+     * Enforced table allowlist (Meta Lead Ads flow ids).
+     * `undefined` = preserve the stored value. An explicit array
+     * (even empty) replaces it after ownership validation: every
+     * id must be one of this account's Meta Lead Ads tables.
+     */
+    allowedFlowIds?: string[];
     fetchImpl?: typeof fetch;
   },
 ): Promise<{ config: CrmFeedbackConfig; ownershipVerified: boolean }> {
@@ -174,6 +237,9 @@ export async function saveCrmFeedbackConfig(
         : args.accessToken.trim() === ""
           ? { access_token: null }
           : { access_token: encrypt(args.accessToken.trim()) };
+    // Ownership-validated table allowlist rides along when the
+    // caller provides it (omitted = preserved).
+    const tablesPatch = await resolveAllowedFlowIdsPatch(db, args.accountId, args.allowedFlowIds);
     const { data, error } = await db
       .from("meta_crm_config")
       .upsert(
@@ -189,6 +255,7 @@ export async function saveCrmFeedbackConfig(
           updated_by: args.actorUserId,
           updated_at: new Date().toISOString(),
           ...tokenPatch,
+          ...tablesPatch,
           ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
           ...(args.showLeadQuality === undefined ? {} : { show_lead_quality: args.showLeadQuality }),
         },
@@ -311,6 +378,8 @@ export async function saveCrmFeedbackConfig(
   }
 
   const now = new Date().toISOString();
+  // Ownership-validated table allowlist (omitted = preserved).
+  const tablesPatch = await resolveAllowedFlowIdsPatch(db, args.accountId, args.allowedFlowIds);
   const { data, error } = await db
     .from("meta_crm_config")
     .upsert(
@@ -330,6 +399,7 @@ export async function saveCrmFeedbackConfig(
         // survives the upsert byte-for-byte. The auto-send
         // preference rides along only when explicitly provided.
         ...(tokenOp === "replace" ? { access_token: encrypt(candidateToken as string) } : {}),
+        ...tablesPatch,
         ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
         ...(args.showLeadQuality === undefined ? {} : { show_lead_quality: args.showLeadQuality }),
       },
@@ -342,6 +412,48 @@ export async function saveCrmFeedbackConfig(
 }
 
 /**
+ * Validate + normalize a caller-provided table allowlist. Omitted
+ * (`undefined`) = preserve the stored value (no key in the patch).
+ * An explicit array replaces it after ownership validation: every
+ * id must be one of this account's Meta Lead Ads tables
+ * (names are never trusted — ids only). Unknown, foreign, or
+ * non-Meta ids are rejected, never silently stored.
+ */
+async function resolveAllowedFlowIdsPatch(
+  db: SupabaseClient,
+  accountId: string,
+  allowedFlowIds: string[] | undefined,
+): Promise<Record<string, unknown>> {
+  if (allowedFlowIds === undefined) return {};
+  if (!Array.isArray(allowedFlowIds)) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Select Workspace tables from this account's Meta Lead Ads tables.",
+      status: 400,
+    });
+  }
+  const ids = [...new Set(allowedFlowIds.filter((v): v is string => typeof v === "string"))];
+  if (ids.length === 0) return { allowed_flow_ids: [] };
+  const { data, error } = await db
+    .from("flows")
+    .select("id")
+    .eq("account_id", accountId)
+    .eq("kind", "meta_lead_ads")
+    .in("id", ids);
+  if (error) throw error;
+  const own = new Set(((data ?? []) as Array<{ id: unknown }>).map((r) => r.id));
+  const foreign = ids.filter((id) => !own.has(id));
+  if (foreign.length > 0) {
+    throw new MetaCrmError({
+      code: "invalid_input",
+      message: "Select Workspace tables from this account's Meta Lead Ads tables.",
+      status: 400,
+    });
+  }
+  return { allowed_flow_ids: ids };
+}
+
+/**
  * True when a Supabase/PostgREST error means the named
  * meta_crm_config column does not exist — i.e. its migration has
  * not been applied in this environment. The error is a plain
@@ -349,7 +461,7 @@ export async function saveCrmFeedbackConfig(
  * turns into a bare 500, so callers must map it to an actionable
  * message instead.
  */
-export function isMissingConfigColumn(err: unknown, column: "access_token" | "auto_send_lead" | "show_lead_quality"): boolean {
+export function isMissingConfigColumn(err: unknown, column: "access_token" | "auto_send_lead" | "show_lead_quality" | "allowed_flow_ids"): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as { code?: unknown }).code;
   const message = (err as { message?: unknown }).message;
@@ -367,6 +479,10 @@ export function isMissingAccessTokenColumn(err: unknown): boolean {
 /** Actionable message when migrations 176–178 are missing (shared by routes). */
 export const TOKEN_STORAGE_MISSING_MESSAGE =
   "CRM storage is not ready: database migrations 176–178 have not been applied. Apply them, then save again.";
+
+/** Actionable message when migration 183 is missing (shared by routes). */
+export const TABLES_STORAGE_MISSING_MESSAGE =
+  "CRM table selection is not ready yet: database migration 183_meta_crm_allowed_tables has not been applied. Apply it, then save again.";
 
 /**
  * Retrieve the workspace's dedicated Meta CRM access token,
@@ -461,11 +577,11 @@ export interface EnqueueLeadQualityEventArgs {
 
 export type EnqueueOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
-  | { enqueued: false; reason: "unchanged" | "unmapped" | "disabled" | "no_meta_lead" };
+  | { enqueued: false; reason: "unchanged" | "unmapped" | "disabled" | "no_meta_lead" | "table_not_selected" };
 
 export type AutoLeadOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
-  | { enqueued: false; reason: "auto_send_off" | "disabled" | "no_token" | "no_meta_lead" };
+  | { enqueued: false; reason: "auto_send_off" | "disabled" | "no_token" | "no_meta_lead" | "table_not_selected" };
 
 /**
  * Opt-in automatic initial `Lead` event for a newly received Meta
@@ -511,9 +627,12 @@ export async function maybeEnqueueInitialLeadEvent(
     actorUserId: null,
   });
   if (!outcome.enqueued) {
-    return outcome.reason === "no_meta_lead"
-      ? { enqueued: false as const, reason: "no_meta_lead" as const }
-      : { enqueued: false as const, reason: "disabled" as const };
+    // Preserve the precise downstream reason: an unmapped status
+    // or an unselected table is not a generic "disabled".
+    if (outcome.reason === "no_meta_lead" || outcome.reason === "table_not_selected") {
+      return { enqueued: false as const, reason: outcome.reason };
+    }
+    return { enqueued: false as const, reason: "disabled" as const };
   }
   return outcome;
 }
@@ -552,6 +671,14 @@ export async function enqueueLeadQualityEvent(
   const config = await getCrmFeedbackConfig(db, args.accountId);
   if (!config || !config.enabled || !config.dataset_id) {
     return { enqueued: false, reason: "disabled" };
+  }
+
+  // Table allowlist: only leads from selected Workspace tables
+  // may enqueue (automatic and manual alike). Unconfigured (NULL)
+  // or pre-migration configs stay unrestricted; an explicit
+  // selection (even empty) is enforced by stable flow id.
+  if (!(await isFlowAllowedForCrm(db, args.accountId, args.flowId))) {
+    return { enqueued: false, reason: "table_not_selected" };
   }
 
   const { data, error } = await db
@@ -639,6 +766,32 @@ export async function drainCrmEventsQueue(
   const rows = ((data ?? []) as CrmEventRow[]).filter((r) => typeof r.id === "string");
   if (rows.length === 0) return out;
 
+  // Attribute rows whose flow was nulled (flow deleted) back to
+  // their run's flow in ONE batched read — never N+1. Rows that
+  // stay unattributable keep their stored flow (possibly null)
+  // and are decided by the allowlist check below.
+  const missingFlowRunIds = [
+    ...new Set(
+      rows
+        .filter((r) => typeof r.flow_id !== "string" || r.flow_id === "")
+        .map((r) => r.flow_run_id)
+        .filter((v): v is string => typeof v === "string" && v !== ""),
+    ),
+  ];
+  const flowIdByRun = new Map<string, string>();
+  if (missingFlowRunIds.length > 0) {
+    const { data: runRows, error: runErr } = await db
+      .from("flow_runs")
+      .select("id, flow_id")
+      .in("id", missingFlowRunIds);
+    if (runErr) throw runErr;
+    for (const r of ((runRows ?? []) as Array<{ id: unknown; flow_id: unknown }>)) {
+      if (typeof r.id === "string" && typeof r.flow_id === "string") {
+        flowIdByRun.set(r.id, r.flow_id);
+      }
+    }
+  }
+
   for (const row of rows) {
     out.attempted += 1;
     try {
@@ -649,6 +802,29 @@ export async function drainCrmEventsQueue(
           .update({
             status: "skipped",
             last_error: "CRM feedback disabled or unconfigured at send time.",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", row.id);
+        out.skipped += 1;
+        continue;
+      }
+      // Table allowlist re-check at delivery time: a table
+      // deselected after enqueue must not deliver. Unconfigured
+      // (NULL) or pre-migration configs stay unrestricted;
+      // previously sent rows are history and never revisited
+      // (pending-only selection above).
+      const rowFlowId =
+        typeof row.flow_id === "string" && row.flow_id !== ""
+          ? row.flow_id
+          : typeof row.flow_run_id === "string"
+            ? (flowIdByRun.get(row.flow_run_id) ?? null)
+            : null;
+      if (!(await isFlowAllowedForCrm(db, row.account_id, rowFlowId))) {
+        await db
+          .from("meta_crm_events")
+          .update({
+            status: "skipped",
+            last_error: TABLE_NOT_SELECTED_MESSAGE,
             updated_at: new Date().toISOString(),
           })
           .eq("id", row.id);

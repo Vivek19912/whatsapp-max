@@ -3213,7 +3213,7 @@ export default function WorkspacePage() {
           Clicking a card filters the Leads table below by that
           bucket; clicking it again clears the filter. All Meta Leads
           uses its own KPI cards above. */}
-      {isMetaTable && followupFieldId && flowId ? (
+      {isMetaTable && !isAllMetaLeads && followupFieldId && flowId ? (
         <WorkspaceFollowupKpis
           key={`${flowId}:${followupFieldId}`}
           flowId={flowId}

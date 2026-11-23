@@ -46,8 +46,10 @@ import {
   enqueueLeadQualityEvent,
   getCrmAccessToken,
   getCrmFeedbackConfig,
+  isFlowAllowedForCrm,
   maybeEnqueueInitialLeadEvent,
   saveCrmFeedbackConfig,
+  TABLE_NOT_SELECTED_MESSAGE,
 } from "./feedback";
 import { decrypt, encrypt } from "@/lib/whatsapp/encryption";
 
@@ -67,6 +69,9 @@ function makeDb(seed: Record<string, Row[]> = {}) {
   function matches(row: Row, filters: Array<[string, unknown]>): boolean {
     return filters.every(([c, v]) => {
       if (c === "__lte_next_retry") return true;
+      if (typeof c === "string" && c.startsWith("__in:")) {
+        return (v as unknown[]).includes(row[c.slice(5)]);
+      }
       return row[c] === v;
     });
   }
@@ -78,6 +83,7 @@ function makeDb(seed: Record<string, Row[]> = {}) {
         return chain(table, filters, limit);
       },
       eq: (c: string, v: unknown) => chain(table, [...filters, [c, v]], limit),
+      in: (c: string, vals: unknown) => chain(table, [...filters, [`__in:${c}`, vals]], limit),
       order: () => chain(table, filters, limit),
       lte: () => chain(table, filters, limit),
       limit: (n: number) => chain(table, filters, n),
@@ -888,5 +894,309 @@ describe("saveCrmFeedbackConfig", () => {
     expect(
       toPublicCrmFeedbackConfig({ enabled: false } as never).showLeadQuality,
     ).toBe(true);
+  });
+
+  it("column visibility defaults to visible on pre-migration rows", async () => {
+    const { toPublicCrmFeedbackConfig } = await import("./feedback");
+    expect(toPublicCrmFeedbackConfig(null).showLeadQuality).toBe(true);
+    expect(
+      toPublicCrmFeedbackConfig({ enabled: false } as never).showLeadQuality,
+    ).toBe(true);
+  });
+
+  it("stores, preserves, and validates the table allowlist", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_datasets: [
+        {
+          id: "row-ds",
+          account_id: "acct-1",
+          dataset_id: "1830596054845292",
+          business_portfolio_id: "BIZ1",
+          dataset_name: "IM CRM",
+        },
+      ],
+      meta_crm_config: [],
+      flows: [
+        { id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads" },
+        { id: "flow-b", account_id: "acct-1", kind: "meta_lead_ads" },
+        { id: "flow-chat", account_id: "acct-1", kind: "whatsapp_flow" },
+        { id: "flow-x", account_id: "acct-OTHER", kind: "meta_lead_ads" },
+      ],
+    });
+    // Explicit list is stored.
+    const { config } = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
+      allowedFlowIds: ["flow-a"],
+    });
+    expect(config.allowed_flow_ids).toEqual(["flow-a"]);
+    // Omitted = preserved, not cleared.
+    const { config: kept } = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
+    });
+    expect(kept.allowed_flow_ids).toEqual(["flow-a"]);
+    // Foreign, non-Meta, and deleted (unknown) ids are rejected.
+    for (const bad of [["flow-x"], ["flow-chat"], ["flow-gone"], ["flow-a", "flow-x"]]) {
+      await expect(
+        saveCrmFeedbackConfig(db, {
+          accountId: "acct-1",
+          enabled: true,
+          datasetRowId: "row-ds",
+          actorUserId: "admin-1",
+          accessToken: CRM_TOKEN,
+          allowedFlowIds: bad,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_input" });
+    }
+    expect(tables.meta_crm_config).toHaveLength(1);
+    // Empty array is a valid explicit block-all.
+    const { config: empty } = await saveCrmFeedbackConfig(db, {
+      accountId: "acct-1",
+      enabled: true,
+      datasetRowId: "row-ds",
+      actorUserId: "admin-1",
+      accessToken: CRM_TOKEN,
+      allowedFlowIds: [],
+    });
+    expect(empty.allowed_flow_ids).toEqual([]);
+  });
+});
+
+describe("table allowlist enforcement", () => {
+  const submission = {
+    id: "sub-1",
+    account_id: "acct-1",
+    flow_run_id: "run-1",
+    meta_lead_id: "1176464514919762",
+  };
+  const flows = [
+    { id: "flow-allowed", account_id: "acct-1", kind: "meta_lead_ads" },
+    { id: "flow-other", account_id: "acct-1", kind: "meta_lead_ads" },
+  ];
+
+  function seedDb(configExtra: Record<string, unknown> = {}) {
+    return makeDb({
+      meta_lead_submissions: [{ ...submission }],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "DS1", ...configExtra }],
+      flows: [...flows],
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-other" }],
+    });
+  }
+
+  function enqueueArgs(flowId: string) {
+    return {
+      accountId: "acct-1",
+      flowId,
+      runId: "run-1",
+      fromQuality: "",
+      toQuality: "Qualified Lead",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      actorUserId: "u1",
+    };
+  }
+
+  it("isFlowAllowedForCrm: legacy NULL and missing-column reads stay unrestricted", async () => {
+    const { db } = seedDb();
+    expect(await isFlowAllowedForCrm(db, "acct-1", "flow-other")).toBe(true);
+    expect(await isFlowAllowedForCrm(db, "acct-1", null)).toBe(true);
+    // Pre-migration database (no allowed_flow_ids column) fails open.
+    const throwing = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => {
+              throw { code: "42703", message: 'column "allowed_flow_ids" does not exist' };
+            },
+          }),
+        }),
+      }),
+    } as never;
+    expect(await isFlowAllowedForCrm(throwing, "acct-1", "flow-other")).toBe(true);
+  });
+
+  it("enqueue: allows selected tables, blocks the rest without writing", async () => {
+    const { db, tables } = seedDb({ allowed_flow_ids: ["flow-allowed"] });
+    const ok = await enqueueLeadQualityEvent(db, enqueueArgs("flow-allowed"));
+    expect(ok.enqueued).toBe(true);
+    const blocked = await enqueueLeadQualityEvent(db, enqueueArgs("flow-other"));
+    expect(blocked).toEqual({ enqueued: false, reason: "table_not_selected" });
+    expect(tables.meta_crm_events ?? []).toHaveLength(1);
+    expect(tables.meta_crm_events[0].flow_id).toBe("flow-allowed");
+  });
+
+  it("enqueue: an explicit empty list blocks every table", async () => {
+    const { db, tables } = seedDb({ allowed_flow_ids: [] });
+    const out = await enqueueLeadQualityEvent(db, enqueueArgs("flow-allowed"));
+    expect(out).toEqual({ enqueued: false, reason: "table_not_selected" });
+    expect(tables.meta_crm_events ?? []).toHaveLength(0);
+  });
+
+  it("auto-send maps the table gate through (no silent disabled)", async () => {
+    const { db } = seedDb({
+      auto_send_lead: true,
+      access_token: encrypt(CRM_TOKEN),
+      allowed_flow_ids: ["flow-allowed"],
+    });
+    const blocked = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-other",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+    });
+    expect(blocked).toEqual({ enqueued: false, reason: "table_not_selected" });
+    const allowed = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-allowed",
+      runId: "run-1",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+    });
+    expect(allowed.enqueued).toBe(true);
+  });
+
+  it("drain: skips queued rows from deselected tables, delivers selected ones", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_events: [
+        {
+          id: "evt-blocked",
+          account_id: "acct-1",
+          flow_id: "flow-other",
+          flow_run_id: "run-9",
+          submission_id: "sub-1",
+          meta_lead_id: "1176464514919762",
+          event_name: "Lead",
+          from_quality: "",
+          to_quality: "Lead",
+          event_time: "2026-11-22T10:00:00.000Z",
+          event_uuid: "uuid-blocked",
+          dataset_id: "DS1",
+          status: "pending",
+          attempts: 0,
+          max_attempts: 8,
+          last_error: null,
+          next_retry_at: new Date(0).toISOString(),
+          sent_at: null,
+        },
+      ],
+      meta_crm_config: [
+        {
+          account_id: "acct-1",
+          enabled: true,
+          dataset_id: "DS1",
+          access_token: encrypt(CRM_TOKEN),
+          allowed_flow_ids: ["flow-allowed"],
+        },
+      ],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        throw new Error("must not call Meta for a deselected table");
+      }) as unknown as typeof fetch,
+    });
+    expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
+    expect(tables.meta_crm_events[0].status).toBe("skipped");
+    expect(String(tables.meta_crm_events[0].last_error)).toBe(TABLE_NOT_SELECTED_MESSAGE);
+  });
+
+  it("drain: resolves the flow via flow_runs when the row flow is null", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_events: [
+        {
+          id: "evt-norun-flow",
+          account_id: "acct-1",
+          flow_id: null,
+          flow_run_id: "run-1",
+          submission_id: "sub-1",
+          meta_lead_id: "1176464514919762",
+          event_name: "Lead",
+          from_quality: "",
+          to_quality: "Lead",
+          event_time: "2026-11-22T10:00:00.000Z",
+          event_uuid: "uuid-norun",
+          dataset_id: "DS1",
+          status: "pending",
+          attempts: 0,
+          max_attempts: 8,
+          last_error: null,
+          next_retry_at: new Date(0).toISOString(),
+          sent_at: null,
+        },
+      ],
+      flow_runs: [{ id: "run-1", account_id: "acct-1", flow_id: "flow-other" }],
+      meta_crm_config: [
+        {
+          account_id: "acct-1",
+          enabled: true,
+          dataset_id: "DS1",
+          access_token: encrypt(CRM_TOKEN),
+          allowed_flow_ids: ["flow-allowed"],
+        },
+      ],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        throw new Error("must not call Meta for a deselected table");
+      }) as unknown as typeof fetch,
+    });
+    expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
+    expect(tables.meta_crm_events[0].status).toBe("skipped");
+  });
+
+  it("drain: delivers rows from selected tables (history rows keep working)", async () => {
+    const { db, tables } = makeDb({
+      meta_crm_events: [
+        {
+          id: "evt-ok",
+          account_id: "acct-1",
+          flow_id: "flow-allowed",
+          flow_run_id: "run-1",
+          submission_id: "sub-1",
+          meta_lead_id: "1176464514919762",
+          event_name: "Lead",
+          from_quality: "",
+          to_quality: "Lead",
+          event_time: "2026-11-22T10:00:00.000Z",
+          event_uuid: "uuid-ok",
+          dataset_id: "1830596054845292",
+          status: "pending",
+          attempts: 0,
+          max_attempts: 8,
+          last_error: null,
+          next_retry_at: new Date(0).toISOString(),
+          sent_at: null,
+        },
+      ],
+      meta_crm_config: [
+        {
+          account_id: "acct-1",
+          enabled: true,
+          dataset_id: "1830596054845292",
+          access_token: encrypt(CRM_TOKEN),
+          allowed_flow_ids: ["flow-allowed"],
+        },
+      ],
+    });
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => jsonResponse({ events_received: 1 })) as unknown as typeof fetch,
+    });
+    expect(out).toEqual({ attempted: 1, sent: 1, failed: 0, skipped: 0 });
+    expect(tables.meta_crm_events[0].status).toBe("sent");
+  });
+
+  it("toPublicCrmFeedbackConfig exposes the allowlist (null when never configured)", async () => {
+    const { toPublicCrmFeedbackConfig } = await import("./feedback");
+    expect(toPublicCrmFeedbackConfig(null).allowedFlowIds).toBeNull();
+    expect(
+      toPublicCrmFeedbackConfig({ allowed_flow_ids: ["flow-a"] } as never).allowedFlowIds,
+    ).toEqual(["flow-a"]);
+    expect(
+      toPublicCrmFeedbackConfig({ allowed_flow_ids: "nope" } as never).allowedFlowIds,
+    ).toBeNull();
   });
 });

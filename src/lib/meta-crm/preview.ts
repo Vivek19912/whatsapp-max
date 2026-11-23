@@ -20,7 +20,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { getCrmAccessToken, getCrmFeedbackConfig } from "./feedback";
+import { getCrmAccessToken, getCrmFeedbackConfig, isFlowAllowedForCrm, TABLE_NOT_SELECTED_MESSAGE } from "./feedback";
 import { MetaCrmError } from "./datasets";
 import {
   LEAD_QUALITY_DEFAULT_VALUE,
@@ -42,6 +42,7 @@ export type LeadQualitySendGate =
   | "unmapped"
   | "no_meta_lead"
   | "disabled"
+  | "table_not_selected"
   | "no_token"
   | "invalid_lead_id"
   | "invalid_timestamp";
@@ -326,6 +327,32 @@ export async function assembleLeadQualityPreview(
       sendable: false,
       reason: "disabled",
       message: "Meta CRM feedback is not enabled for this workspace, so sending is disabled.",
+      flowId: args.flowId,
+      runId: args.runId,
+      status,
+      stored,
+      eventName,
+      datasetId: config?.dataset_id ?? null,
+      metaLeadId: leadDigits,
+      occurrenceTimeIso,
+      previewId: null,
+      payload: null,
+      requestBody: null,
+      warnings: [],
+      matchInfo: { hasEmail: false, hasPhone: false },
+      lastEvent: await readLastEvent(db, args.accountId, args.runId),
+    };
+  }
+
+  // Table allowlist: only leads from selected Workspace tables
+  // may send. Unconfigured (NULL) or pre-migration configs stay
+  // unrestricted; an explicit selection (even empty) is enforced
+  // by stable flow id — the drawer explains exactly why.
+  if (!(await isFlowAllowedForCrm(db, args.accountId, args.flowId))) {
+    return {
+      sendable: false,
+      reason: "table_not_selected",
+      message: TABLE_NOT_SELECTED_MESSAGE,
       flowId: args.flowId,
       runId: args.runId,
       status,
