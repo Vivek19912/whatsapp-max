@@ -25,6 +25,7 @@ import {
   Route,
   Settings,
   Table2,
+  Users,
   UsersRound,
   X,
   Zap,
@@ -60,6 +61,7 @@ export const navItems: NavItem[] = [
   { href: "/followups", label: "Reminders", icon: CalendarClock },
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/notifications", label: "Notifications", icon: Bell },
+  { href: "/table-assignments", label: "Table Assignments", icon: Users },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
 ];
 
@@ -123,6 +125,8 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     if (item.href === "/chat-assignment") return false;
     // Team Performance is owner-only (route + RPC enforce it too).
     if (item.href === "/meta-lead-ads/team-performance") return isOwner;
+    // Table Assignments is owner-only (route + API enforce it too).
+    if (item.href === "/table-assignments") return isOwner;
     if (item.href === "/workspace") return isOwner || canEditSettings || isAgent;
     return true;
   });

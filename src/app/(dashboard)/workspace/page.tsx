@@ -835,6 +835,15 @@ export default function WorkspacePage() {
   // re-assembly from the DB.
   const [crmPreviewBump, setCrmPreviewBump] = useState(0);
 
+  // Table Assignments deep-link (?table=<flowId>): the management
+  // page navigates here with an explicit table, including hidden
+  // ones. The param is read inside the flows effect (no hook dep —
+  // the effect re-runs on account/agent change, and cross-route
+  // navigation always remounts this page). Validated against the
+  // account's own flow list below; absent or foreign values change
+  // nothing.
+  const explicitTableRef = useRef<string | null>(null);
+
   // Account-scoped flow list (same source as the rest of the app).
   // The initial selection is the remembered flow for this account
   // when it is still listed, else the first flow — resolved in the
@@ -869,6 +878,22 @@ export default function WorkspacePage() {
         );
         if (ctrl.signal.aborted) return;
         setFlows(list);
+        // An explicit ?table= deep-link (e.g. from Table Assignments)
+        // wins over the remembered selection when it names one of
+        // this account's own flows — hidden tables included.
+        const tableParam =
+          typeof window === "undefined"
+            ? null
+            : new URLSearchParams(window.location.search).get("table");
+        const deepLinked = tableParam && list.some((f) => f.id === tableParam) ? tableParam : null;
+        if (deepLinked) {
+          explicitTableRef.current = deepLinked;
+          setFlowId(deepLinked);
+          saveSelectedFlowId(accountId, deepLinked);
+          setPage(0);
+          setSelected(null);
+          return;
+        }
         // All Meta Leads is always the first selector option (virtual
         // combined view, never hidden). Default to it for fresh users;
         // remembered selections (including All) win when still listed.
@@ -934,6 +959,10 @@ export default function WorkspacePage() {
   // and always stays selectable.
   useEffect(() => {
     if (visibleFlows === null) return;
+    // An explicit ?table= deep-link pins the selection even when the
+    // table is hidden — the user asked for that exact table.
+    // Manual selection clears the pin (see selectFlow).
+    if (explicitTableRef.current !== null && explicitTableRef.current === flowId) return;
     if (isAllMetaLeadsId(flowId)) return;
     const ids = visibleFlows.map((f) => f.id);
     if (flowId !== null && ids.includes(flowId)) return;
@@ -1170,6 +1199,8 @@ export default function WorkspacePage() {
 
   const selectFlow = useCallback((id: string | null) => {
     if (!id) return;
+    // Manual selection releases any ?table= deep-link pin.
+    explicitTableRef.current = null;
     setFlowId(id);
     setView('completed');
     setKpiBucket(null);

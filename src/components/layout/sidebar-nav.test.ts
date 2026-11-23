@@ -42,6 +42,7 @@ describe('Features removal — sidebar', () => {
       '/followups',
       '/templates',
       '/notifications',
+      '/table-assignments',
       '/chat-assignment',
     ]);
   });
@@ -78,6 +79,18 @@ describe('Features removal — sidebar', () => {
   it('places Chat Assignment last', () => {
     const hrefs = navItems.map((i) => i.href);
     expect(hrefs[hrefs.length - 1]).toBe('/chat-assignment');
+  });
+
+  it('shows Table Assignments after Notifications and only to owners', () => {
+    const hrefs = navItems.map((i) => i.href);
+    expect(hrefs.indexOf('/table-assignments')).toBe(hrefs.indexOf('/notifications') + 1);
+    expect(navItems.find((i) => i.href === '/table-assignments')?.label).toBe(
+      'Table Assignments',
+    );
+    // Owner-only gate lives next to the Team Performance gate (the
+    // API enforces 403 for everyone else — this is display-only).
+    const sidebarSrc = readFileSync(join(root, 'src/components/layout/sidebar.tsx'), 'utf8');
+    expect(sidebarSrc).toContain('if (item.href === "/table-assignments") return isOwner;');
   });
 
   it('contains no Lead Assignment entry (sidebar-only visibility change)', () => {
