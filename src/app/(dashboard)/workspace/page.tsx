@@ -849,6 +849,27 @@ export default function WorkspacePage() {
     [hiddenTableIds]
   );
 
+  // Column visibility preference — Settings → Meta →
+  // CRM Integration → CRM Feedback, per workspace (account). Server
+  // truth is the source; default ON. Best-effort: a failed fetch
+  // leaves `true` so the column keeps rendering exactly as before.
+  const [showLeadQualityColumn, setShowLeadQualityColumn] = useState(true);
+  useEffect(() => {
+    if (accountId === null) return;
+    const ctrl = new AbortController();
+    fetch('/api/integrations/meta-crm/config', { signal: ctrl.signal, cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => null)) as {
+          config?: { showLeadQuality?: boolean } | null;
+        } | null;
+        if (ctrl.signal.aborted || !json || !json.config) return;
+        setShowLeadQualityColumn(json.config.showLeadQuality !== false);
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [accountId]);
+
   // Assigned-To roster — same endpoint as Settings → Team Members.
   // Best-effort: a failed fetch leaves [] so Clear + Unassigned
   // still work and preserved legacy values keep rendering as-is.
@@ -1356,10 +1377,16 @@ export default function WorkspacePage() {
   const isMetaTable = payload?.meta?.kind === 'meta_lead_ads';
   const customFieldsScoped = useMemo(
     () =>
-      isMetaTable
-        ? customFields.filter((f) => !isLeadReceivedField({ name: f.name }))
-        : customFields,
-    [isMetaTable, customFields]
+      customFields.filter(
+        (f) =>
+          (isMetaTable ? !isLeadReceivedField({ name: f.name }) : true) &&
+          // UI-only visibility toggle (Settings → Meta → CRM
+          // Integration): hiding drops the header, every cell, and
+          // the Columns-menu entry with no empty space — values,
+          // statuses, events, and tokens are untouched.
+          (showLeadQualityColumn ? true : !isLeadQualityField(f)),
+      ),
+    [isMetaTable, customFields, showLeadQualityColumn]
   );
   // Live business-column metadata for the Filters panel: each
   // column's own options (never hardcoded) + presence flags for

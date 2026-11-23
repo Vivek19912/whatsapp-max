@@ -67,6 +67,11 @@ export interface CrmFeedbackConfig {
    * stages are always manual.
    */
   auto_send_lead: boolean;
+  /**
+   * UI-only: display the Lead Quality column in Workspace tables.
+   * Defaults to true. Hiding changes nothing stored or sent.
+   */
+  show_lead_quality: boolean;
 }
 
 export interface PublicCrmFeedbackConfig {
@@ -81,6 +86,8 @@ export interface PublicCrmFeedbackConfig {
   hasToken: boolean;
   /** Opt-in automatic initial Lead events for new Meta leads. */
   autoSendLead: boolean;
+  /** UI-only: display the Lead Quality column in Workspace tables. */
+  showLeadQuality: boolean;
 }
 
 export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): PublicCrmFeedbackConfig {
@@ -94,6 +101,7 @@ export function toPublicCrmFeedbackConfig(row: CrmFeedbackConfig | null): Public
     lastEventAt: row?.last_event_at ?? null,
     hasToken: !!row?.access_token,
     autoSendLead: row?.auto_send_lead ?? false,
+    showLeadQuality: row?.show_lead_quality ?? true,
   };
 }
 
@@ -124,7 +132,8 @@ export async function getCrmFeedbackConfig(
  *   * non-empty   → validate + verify the replacement against the
  *     chosen dataset, then store it encrypted.
  *
- * `autoSendLead` (when provided) is stored in both paths —
+ * `autoSendLead` / `showLeadQuality` (when provided) are stored
+  * in both paths —
  * disabling feedback never implies disabling the preference, and
  * enabling never flips it on silently. Omitted → preserved.
  *
@@ -140,6 +149,7 @@ export async function saveCrmFeedbackConfig(
     actorUserId: string;
     accessToken?: string;
     autoSendLead?: boolean;
+    showLeadQuality?: boolean;
     fetchImpl?: typeof fetch;
   },
 ): Promise<{ config: CrmFeedbackConfig; ownershipVerified: boolean }> {
@@ -180,6 +190,7 @@ export async function saveCrmFeedbackConfig(
           updated_at: new Date().toISOString(),
           ...tokenPatch,
           ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
+          ...(args.showLeadQuality === undefined ? {} : { show_lead_quality: args.showLeadQuality }),
         },
         { onConflict: "account_id" },
       )
@@ -320,6 +331,7 @@ export async function saveCrmFeedbackConfig(
         // preference rides along only when explicitly provided.
         ...(tokenOp === "replace" ? { access_token: encrypt(candidateToken as string) } : {}),
         ...(args.autoSendLead === undefined ? {} : { auto_send_lead: args.autoSendLead }),
+        ...(args.showLeadQuality === undefined ? {} : { show_lead_quality: args.showLeadQuality }),
       },
       { onConflict: "account_id" },
     )
@@ -337,7 +349,7 @@ export async function saveCrmFeedbackConfig(
  * turns into a bare 500, so callers must map it to an actionable
  * message instead.
  */
-export function isMissingConfigColumn(err: unknown, column: "access_token" | "auto_send_lead"): boolean {
+export function isMissingConfigColumn(err: unknown, column: "access_token" | "auto_send_lead" | "show_lead_quality"): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as { code?: unknown }).code;
   const message = (err as { message?: unknown }).message;
@@ -352,9 +364,9 @@ export function isMissingAccessTokenColumn(err: unknown): boolean {
   return isMissingConfigColumn(err, "access_token");
 }
 
-/** Actionable message when migrations 176/177 are missing (shared by routes). */
+/** Actionable message when migrations 176–178 are missing (shared by routes). */
 export const TOKEN_STORAGE_MISSING_MESSAGE =
-  "CRM storage is not ready: database migrations 176/177 have not been applied. Apply them, then save again.";
+  "CRM storage is not ready: database migrations 176–178 have not been applied. Apply them, then save again.";
 
 /**
  * Retrieve the workspace's dedicated Meta CRM access token,

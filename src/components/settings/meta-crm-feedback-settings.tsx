@@ -63,6 +63,8 @@ interface FeedbackConfig {
   hasToken: boolean;
   /** Opt-in automatic initial Lead events for new Meta leads. */
   autoSendLead: boolean;
+  /** UI-only: display the Lead Quality column in Workspace tables. */
+  showLeadQuality: boolean;
 }
 
 interface CrmEvent {
@@ -123,6 +125,8 @@ export function MetaCrmFeedbackSettings() {
   const [tokenMigrationMissing, setTokenMigrationMissing] = useState(false);
   const [autoSendMigrationMissing, setAutoSendMigrationMissing] = useState(false);
   const [autoSendLead, setAutoSendLead] = useState(false);
+  const [showLeadQuality, setShowLeadQuality] = useState(true);
+  const [showLeadQualityMigrationMissing, setShowLeadQualityMigrationMissing] = useState(false);
   const [datasets, setDatasets] = useState<SavedDataset[]>([]);
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
@@ -182,6 +186,7 @@ export function MetaCrmFeedbackSettings() {
         migrationMissing?: boolean;
         tokenMigrationMissing?: boolean;
         autoSendMigrationMissing?: boolean;
+        showLeadQualityMigrationMissing?: boolean;
         error?: string;
       };
       if (!cfgRes.ok || !cfg.ok || !cfg.config) {
@@ -193,6 +198,8 @@ export function MetaCrmFeedbackSettings() {
       setTokenMigrationMissing(cfg.tokenMigrationMissing === true);
       setAutoSendMigrationMissing(cfg.autoSendMigrationMissing === true);
       setAutoSendLead(cfg.config.autoSendLead === true);
+      setShowLeadQualityMigrationMissing(cfg.showLeadQualityMigrationMissing === true);
+      setShowLeadQuality(cfg.config.showLeadQuality !== false);
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : "Could not load CRM feedback.");
     } finally {
@@ -281,7 +288,8 @@ export function MetaCrmFeedbackSettings() {
           // Only sent when the user typed a replacement — empty
           // keeps the stored token; removal has its own button.
           ...(crmToken !== "" ? { accessToken: crmToken } : {}),
-            autoSendLead,
+          autoSendLead,
+          showLeadQuality,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as {
@@ -543,6 +551,28 @@ export function MetaCrmFeedbackSettings() {
                   onCheckedChange={setAutoSendLead}
                   disabled={disabled || saving || configMigrationMissing || autoSendMigrationMissing}
                   aria-label="Automatically send new lead events"
+                />
+              </div>
+
+              {showLeadQualityMigrationMissing ? (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                  Column visibility is not ready yet — apply migration{" "}
+                  <code>178_meta_crm_show_lead_quality</code> to enable the toggle below.
+                </p>
+              ) : null}
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Show Lead Quality Column</p>
+                  <p className="text-xs text-muted-foreground">
+                    Show the Lead Quality column in the Workspace table. Turning it off hides the column without changing any statuses or data.
+                  </p>
+                </div>
+                <Switch
+                  checked={showLeadQuality}
+                  onCheckedChange={setShowLeadQuality}
+                  disabled={disabled || saving || configMigrationMissing || showLeadQualityMigrationMissing}
+                  aria-label="Show Lead Quality column"
                 />
               </div>
 

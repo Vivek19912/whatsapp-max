@@ -358,6 +358,18 @@ describe("PUT /api/integrations/meta-crm/config", () => {
     const fetched = (await (await configGet()).json()) as { config: { autoSendLead: boolean } };
     expect(fetched.config.autoSendLead).toBe(false);
   });
+
+  it("persists the column-visibility preference, defaulting to visible", async () => {
+    const def = await configPut(put({ enabled: false, datasetRowId: null }));
+    expect(((await def.json()) as { config: { showLeadQuality: boolean } }).config.showLeadQuality).toBe(true);
+
+    const hidden = await configPut(put({ enabled: false, datasetRowId: null, showLeadQuality: false }));
+    expect(hidden.status).toBe(200);
+    expect(((await hidden.json()) as { config: { showLeadQuality: boolean } }).config.showLeadQuality).toBe(false);
+
+    const fetched = (await (await configGet()).json()) as { config: { showLeadQuality: boolean } };
+    expect(fetched.config.showLeadQuality).toBe(false);
+  });
 });
 
 describe("GET /api/integrations/meta-crm/config", () => {

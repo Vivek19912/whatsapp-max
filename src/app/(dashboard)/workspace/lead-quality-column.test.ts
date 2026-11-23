@@ -124,9 +124,23 @@ describe("Lead Quality column wiring", () => {
     // when migration 176 is absent, PostgREST rejects with a plain
     // 42703 object — routes must map it to an actionable message.
     expect(feedback).toContain("isMissingAccessTokenColumn");
-    expect(feedback).toContain("176/177");
+    expect(feedback).toContain("migrations 176");
     expect(configRoute).toContain("migration_missing");
     expect(configRoute).toContain("tokenMigrationMissing");
+  });
+
+  it("the Lead Quality column visibility is a stored per-workspace preference", () => {
+    // UI-only toggle: hiding filters the column out of the table
+    // (header, cells, Columns menu) with no empty space — values,
+    // saves, events, tokens, and the drawer stay untouched.
+    expect(feedback).toContain("show_lead_quality");
+    expect(feedback).toContain("showLeadQuality");
+    expect(configRoute).toContain("showLeadQuality");
+    expect(configRoute).toContain("showLeadQualityMigrationMissing");
+    expect(settings).toContain("Show Lead Quality Column");
+    expect(settings).toContain("setShowLeadQuality");
+    expect(page).toContain("showLeadQualityColumn");
+    expect(page).toContain("/api/integrations/meta-crm/config");
   });
 
   it("the payload honors the documented CRM wire format", () => {

@@ -36,7 +36,8 @@ export async function GET() {
     // guidance instead of dead controls.
     let tokenMigrationMissing = false;
     let autoSendMigrationMissing = false;
-    for (const column of ["access_token", "auto_send_lead"] as const) {
+    let showLeadQualityMigrationMissing = false;
+    for (const column of ["access_token", "auto_send_lead", "show_lead_quality"] as const) {
       try {
         const probe = await ctx.supabase
           .from("meta_crm_config")
@@ -47,7 +48,8 @@ export async function GET() {
       } catch (err) {
         if (isMissingConfigColumn(err, column)) {
           if (column === "access_token") tokenMigrationMissing = true;
-          else autoSendMigrationMissing = true;
+          else if (column === "auto_send_lead") autoSendMigrationMissing = true;
+          else showLeadQualityMigrationMissing = true;
         } else {
           throw err;
         }
@@ -58,6 +60,7 @@ export async function GET() {
       config: toPublicCrmFeedbackConfig(config),
       tokenMigrationMissing,
       autoSendMigrationMissing,
+      showLeadQualityMigrationMissing,
     });
   } catch (err) {
     // meta_crm_config table missing (migration 175 not applied yet)
@@ -97,6 +100,7 @@ export async function PUT(request: Request) {
       typeof body.accessToken === "string" ? body.accessToken : undefined;
     const removeAccessToken = body.removeAccessToken === true;
     const autoSendLead = typeof body.autoSendLead === "boolean" ? body.autoSendLead : undefined;
+    const showLeadQuality = typeof body.showLeadQuality === "boolean" ? body.showLeadQuality : undefined;
     if (enabled && !datasetRowId) {
       return NextResponse.json(
         { error: "Select a CRM dataset to enable feedback." },
@@ -114,6 +118,7 @@ export async function PUT(request: Request) {
           actorUserId: ctx.userId,
           accessToken: removeAccessToken ? "" : accessToken,
           autoSendLead,
+          showLeadQuality,
         },
       );
       return NextResponse.json({
@@ -133,11 +138,15 @@ export async function PUT(request: Request) {
           { status: err.status },
         );
       }
-      // Un-migrated database (migrations 176/177 missing): the
+      // Un-migrated database (migrations 176–178 missing): the
       // upsert references the new columns and PostgREST rejects them
       // with a plain 42703 object — map it to an actionable 503
       // instead of the bare "Internal server error".
-      if (isMissingAccessTokenColumn(err) || isMissingConfigColumn(err, "auto_send_lead")) {
+      if (
+        isMissingAccessTokenColumn(err) ||
+        isMissingConfigColumn(err, "auto_send_lead") ||
+        isMissingConfigColumn(err, "show_lead_quality")
+      ) {
         return NextResponse.json(
           { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
           { status: 503 },
@@ -146,7 +155,11 @@ export async function PUT(request: Request) {
       throw err;
     }
   } catch (err) {
-    if (isMissingAccessTokenColumn(err) || isMissingConfigColumn(err, "auto_send_lead")) {
+    if (
+      isMissingAccessTokenColumn(err) ||
+      isMissingConfigColumn(err, "auto_send_lead") ||
+      isMissingConfigColumn(err, "show_lead_quality")
+    ) {
       return NextResponse.json(
         { error: TOKEN_STORAGE_MISSING_MESSAGE, code: "migration_missing" },
         { status: 503 },

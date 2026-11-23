@@ -881,4 +881,12 @@ describe("saveCrmFeedbackConfig", () => {
     const { db } = makeDb({ meta_crm_config: [] });
     expect(await getCrmFeedbackConfig(db, "acct-1")).toBeNull();
   });
+
+  it("column visibility defaults to visible on pre-migration rows", async () => {
+    const { toPublicCrmFeedbackConfig } = await import("./feedback");
+    expect(toPublicCrmFeedbackConfig(null).showLeadQuality).toBe(true);
+    expect(
+      toPublicCrmFeedbackConfig({ enabled: false } as never).showLeadQuality,
+    ).toBe(true);
+  });
 });

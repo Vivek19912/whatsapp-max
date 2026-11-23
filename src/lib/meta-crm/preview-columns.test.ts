@@ -52,7 +52,7 @@ const COLUMNS: Record<string, Set<string>> = {
   meta_crm_config: new Set([
     "account_id", "dataset_ref", "dataset_id", "business_portfolio_id",
     "dataset_name", "access_token", "enabled", "verified_at", "last_error",
-    "last_event_at", "updated_by", "created_at", "updated_at", "auto_send_lead",
+    "last_event_at", "updated_by", "created_at", "updated_at", "auto_send_lead", "show_lead_quality",
   ]),
   meta_crm_events: new Set([
     "id", "account_id", "flow_id", "flow_run_id", "submission_id",
