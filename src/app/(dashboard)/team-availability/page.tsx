@@ -187,6 +187,17 @@ export default function TeamAvailabilityPage() {
   }, [isOwner, reload]);
 
   const members = useMemo(() => overview?.members ?? [], [overview]);
+  // Display label for the member dropdown trigger: the Select
+  // keeps the stable user UUID as its value (submitted as-is),
+  // while the visible trigger resolves back to the full name.
+  // Undefined = no selection (placeholder) or unknown member.
+  const selectedMemberName = useMemo(
+    () =>
+      memberId === ""
+        ? undefined
+        : (members.find((m) => m.user_id === memberId)?.full_name ?? undefined),
+    [members, memberId],
+  );
   const onHolidayIds = useMemo(
     () => new Set(members.filter((m) => m.availability === "on_holiday").map((m) => m.user_id)),
     [members],
@@ -404,7 +415,9 @@ export default function TeamAvailabilityPage() {
                 </label>
                 <Select value={memberId} onValueChange={(v) => setMemberId(v ?? "")} disabled={editingId !== null}>
                   <SelectTrigger id="holiday-member" className="h-9 w-full text-sm">
-                    <SelectValue placeholder="Select a team member" />
+                    <SelectValue placeholder="Select a team member">
+                      {selectedMemberName}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {members.map((m) => (

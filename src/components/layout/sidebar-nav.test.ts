@@ -41,7 +41,6 @@ describe('Features removal — sidebar', () => {
       '/automations',
       '/followups',
       '/templates',
-      '/notifications',
       '/table-assignments',
       '/team-availability',
       '/chat-assignment',
@@ -82,9 +81,9 @@ describe('Features removal — sidebar', () => {
     expect(hrefs[hrefs.length - 1]).toBe('/chat-assignment');
   });
 
-  it('shows Table Assignments after Notifications and only to owners', () => {
+  it('shows Table Assignments after Templates and only to owners', () => {
     const hrefs = navItems.map((i) => i.href);
-    expect(hrefs.indexOf('/table-assignments')).toBe(hrefs.indexOf('/notifications') + 1);
+    expect(hrefs.indexOf('/table-assignments')).toBe(hrefs.indexOf('/templates') + 1);
     expect(navItems.find((i) => i.href === '/table-assignments')?.label).toBe(
       'Table Assignments',
     );

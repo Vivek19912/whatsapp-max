@@ -51,6 +51,17 @@ describe("team availability — dashboard sections", () => {
     expect(src).toContain("Set Holiday");
   });
 
+  it("shows the member's full name in the dropdown trigger (never the UUID)", () => {
+    const src = pageSrc();
+    // The UUID stays the option value (submitted as-is); the
+    // trigger label resolves back to the member's full name.
+    expect(src).toContain("value={m.user_id}");
+    expect(src).toContain("members.find((m) => m.user_id === memberId)?.full_name");
+    expect(src).toContain("{selectedMemberName}");
+    // The submit path still sends the stable UUID.
+    expect(src).toContain("user_id: memberId");
+  });
+
   it("has availability tabs, search, and the member table", () => {
     const src = pageSrc();
     for (const label of ["All Members", "On Holiday", "Available"]) {

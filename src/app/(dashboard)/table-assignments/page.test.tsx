@@ -18,11 +18,12 @@ describe("table assignments — owner-only access", () => {
     expect(apiSrc()).toContain('requireRole("owner")');
   });
 
-  it("sidebar lists Table Assignments after Notifications and gates it to owners", () => {
+  it("sidebar lists Table Assignments after Templates and gates it to owners", () => {
     const src = sidebarSrc();
     const itemIdx = src.indexOf('"/table-assignments"');
     expect(itemIdx).toBeGreaterThan(-1);
-    expect(src.indexOf('"/notifications"')).toBeLessThan(itemIdx);
+    expect(src).not.toContain('"/notifications"');
+    expect(src.indexOf('"/templates"')).toBeLessThan(itemIdx);
     const gateIdx = src.indexOf('if (item.href === "/table-assignments") return isOwner;');
     expect(gateIdx).toBeGreaterThan(-1);
   });

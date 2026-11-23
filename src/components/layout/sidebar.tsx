@@ -7,10 +7,8 @@ import { cn } from "@/lib/utils";
 import { getTravelCrmUrl } from "@/lib/travel-crm";
 import { useAuth } from "@/hooks/use-auth";
 import { useTotalUnread } from "@/hooks/use-total-unread";
-import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import Image from "next/image";
 import {
-  Bell,
   CalendarClock,
   CalendarDays,
   ChevronLeft,
@@ -61,7 +59,6 @@ export const navItems: NavItem[] = [
   { href: "/automations", label: "Automations", icon: Zap },
   { href: "/followups", label: "Reminders", icon: CalendarClock },
   { href: "/templates", label: "Templates", icon: FileText },
-  { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/table-assignments", label: "Table Assignments", icon: Users },
   { href: "/team-availability", label: "Team Availability", icon: CalendarDays },
   { href: "/chat-assignment", label: "Chat Assignment", icon: Route },
@@ -135,7 +132,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
     return true;
   });
   const totalUnread = useTotalUnread();
-  const unreadNotifications = useUnreadNotifications();
   // Cross-app card target — centralized in getTravelCrmUrl so a
   // missing/invalid value falls back to the default Travel CRM URL
   // instead of hiding the card. Wait for the profile fetch to settle
@@ -261,13 +257,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
               const showUnreadDot =
                 item.href === "/inbox" && totalUnread > 0 && !isActive;
 
-              // Unlike the inbox dot, the notifications count stays visible
-              // even while the page is active — it reflects unread state
-              // (cleared by marking notifications read), not "currently
-              // viewing this section".
-              const showNotificationBadge =
-                item.href === "/notifications" && unreadNotifications > 0;
-
               return (
                 <li key={item.href}>
                   <NavTip label={item.label} collapsed={collapsed}>
@@ -305,17 +294,6 @@ export function Sidebar({ open = false, onClose, collapsed = false, onToggleColl
                       >
                         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
                         <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
-                      </span>
-                    )}
-                    {showNotificationBadge && (
-                      <span
-                        aria-label={`${unreadNotifications} unread notification${unreadNotifications === 1 ? "" : "s"}`}
-                        className={cn(
-                          "flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground",
-                          collapsed && "lg:hidden"
-                        )}
-                      >
-                        {unreadNotifications > 9 ? "9+" : unreadNotifications}
                       </span>
                     )}
                   </Link>
