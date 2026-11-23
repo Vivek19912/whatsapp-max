@@ -48,7 +48,33 @@ describe("table assignments — reuse of the existing assignment system", () => 
   });
 });
 
-describe("table assignments — listing contract", () => {  it("derives method/status/KPIs from saved config (no invented states)", () => {
+describe("table assignments — table-name regression (blank column fix)", () => {
+  it("normalizes the payload into the page model instead of trusting wire keys", () => {
+    const src = pageSrc();
+    // The page normalizes every payload row so a key mismatch can never
+    // blank the Meta Lead Ads Table column again; the legacy
+    // snake_case fallbacks live in the shared overview helper.
+    expect(src).toContain("normalizeAssignmentTableRow");
+    const libSrc = readFileSync(
+      `${root}/src/lib/lead-assignment/table-overview.ts`,
+      "utf8",
+    );
+    expect(libSrc).toContain("flow_id");
+    expect(libSrc).toContain("flow_name");
+  });
+
+  it("renders the verbatim Workspace table name (full flows.name)", () => {
+    const src = pageSrc();
+    expect(src).toContain("{row.tableName}");
+    // The API guarantees tableName is the full flows.name; the page
+    // must not strip the "Meta Lead Ads ·" prefix or substitute ids.
+    expect(apiSrc()).toContain("tableName");
+    expect(apiSrc()).not.toContain("stripMetaPrefix");
+  });
+});
+
+describe("table assignments — listing contract", () => {
+  it("derives method/status/KPIs from saved config (no invented states)", () => {
     const src = pageSrc();
     expect(src).toContain("deriveTableStatus");
     expect(src).toContain("deriveMethodLabel");

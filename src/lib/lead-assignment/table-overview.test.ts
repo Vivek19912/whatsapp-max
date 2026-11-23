@@ -13,6 +13,7 @@ import {
   filterOverviewTables,
   hasConfiguredRecipients,
   initialsFor,
+  normalizeAssignmentTableRow,
   type OverviewTableInput,
 } from "./table-overview";
 
@@ -197,5 +198,74 @@ describe("avatar helpers", () => {
   it("assigns deterministic tones per identity", () => {
     expect(avatarToneFor("user:1")).toBe(avatarToneFor("user:1"));
     expect(typeof avatarToneFor("user:1")).toBe("string");
+  });
+});
+
+describe("normalizeAssignmentTableRow — wire contract (blank-name regression)", () => {
+  it("passes the current camelCase payload through untouched", () => {
+    const raw = {
+      flowId: "flow-1",
+      tableName: "Meta Lead Ads · Rajasthan Instant Form | 21 NOV",
+      formName: "Rajasthan Instant Form | 21 NOV",
+      config: {
+        id: "cfg-1",
+        enabled: true,
+        mode: "percentage",
+        whatsapp_template_name: null,
+        whatsapp_template_language: "en_US",
+        updated_at: "2026-11-20T10:00:00.000Z",
+      },
+      assignees: [assignee("Pooja", 100)],
+    };
+    expect(normalizeAssignmentTableRow(raw)).toMatchObject({
+      flowId: "flow-1",
+      tableName: "Meta Lead Ads · Rajasthan Instant Form | 21 NOV",
+      formName: "Rajasthan Instant Form | 21 NOV",
+    });
+  });
+
+  it("recovers the legacy snake_case shape (flow_name preferred over stripped names)", () => {
+    const raw = {
+      flow_id: "flow-2",
+      flow_name: "Meta Lead Ads · Himachal Trip Instant Form 20 NOV",
+      table_name: "Himachal Trip Instant Form 20 NOV",
+      form_id: "9f8a7b6c-0000-4000-8000-000000000000",
+      config: null,
+      assignees: [],
+    };
+    const row = normalizeAssignmentTableRow(raw)!;
+    expect(row.flowId).toBe("flow-2");
+    // Full Workspace name wins; the raw form UUID never surfaces.
+    expect(row.tableName).toBe("Meta Lead Ads · Himachal Trip Instant Form 20 NOV");
+    expect(row.formName).toBeNull();
+  });
+
+  it("drops rows without a flow identity so no action can target an undefined table", () => {
+    expect(normalizeAssignmentTableRow({ tableName: "Orphan", assignees: [] })).toBeNull();
+    expect(normalizeAssignmentTableRow({ flow_id: "   ", table_name: "Blank" })).toBeNull();
+    expect(normalizeAssignmentTableRow(null)).toBeNull();
+  });
+
+  it("never returns a blank display name", () => {
+    expect(
+      normalizeAssignmentTableRow({ flowId: "f", tableName: "  ", formName: "Kerala Form" }),
+    ).toMatchObject({ tableName: "Kerala Form" });
+    expect(
+      normalizeAssignmentTableRow({ flowId: "f", tableName: "  " }),
+    ).toMatchObject({ tableName: "Untitled table" });
+  });
+
+  it("keeps method/status inputs intact and coerces assignee defaults", () => {
+    const row = normalizeAssignmentTableRow({
+      flowId: "f",
+      tableName: "T",
+      config: { id: "c", enabled: true, mode: "weird", updated_at: null },
+      assignees: [{ id: "a1" }, { display_name: "No Id" }],
+    })!;
+    expect(row.config?.mode).toBe("round_robin");
+    expect(row.assignees).toHaveLength(1);
+    expect(deriveTableStatus({ config: row.config, assignees: row.assignees })).toBe(
+      "active",
+    );
   });
 });

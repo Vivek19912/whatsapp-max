@@ -67,32 +67,15 @@ import {
   deriveTableStatus,
   filterOverviewTables,
   initialsFor,
+  normalizeAssignmentTableRow,
   type AssignmentMethodFilter,
   type AssignmentStatusFilter,
+  type NormalizedAssignmentTable,
   type OverviewTableInput,
 } from "@/lib/lead-assignment/table-overview";
 import { cn } from "@/lib/utils";
 
-interface TableAssignmentRow {
-  flowId: string;
-  tableName: string;
-  formName: string | null;
-  config: {
-    id: string;
-    enabled: boolean;
-    mode: "round_robin" | "percentage";
-    whatsapp_template_name: string | null;
-    whatsapp_template_language: string;
-    updated_at: string | null;
-  } | null;
-  assignees: Array<{
-    id: string;
-    user_id: string | null;
-    display_name: string;
-    weight: number;
-    is_active: boolean;
-  }>;
-}
+type TableAssignmentRow = NormalizedAssignmentTable;
 
 function toOverviewInput(row: TableAssignmentRow): OverviewTableInput {
   return {
@@ -216,11 +199,19 @@ export default function TableAssignmentsPage() {
     try {
       const res = await fetch("/api/workspace/table-assignments", { cache: "no-store" });
       const body = (await res.json().catch(() => null)) as {
-        tables?: TableAssignmentRow[];
+        tables?: unknown;
         error?: string;
       } | null;
       if (!res.ok) throw new Error(body?.error ?? "Could not load table assignments.");
-      setRows(Array.isArray(body?.tables) ? body.tables : []);
+      // Normalize every payload row (current camelCase shape plus the
+      // legacy snake_case shape): rows without a flow identity are
+      // dropped so no action can fire against an undefined table id.
+      const rawTables = Array.isArray(body?.tables) ? body.tables : [];
+      setRows(
+        rawTables
+          .map((t) => normalizeAssignmentTableRow(t))
+          .filter((t): t is TableAssignmentRow => t !== null),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load table assignments.");
       setRows([]);
@@ -256,7 +247,6 @@ export default function TableAssignmentsPage() {
           status: statusFilter,
         },
       ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [overviewRows, search, methodFilter, statusFilter],
   );
 
@@ -484,7 +474,7 @@ export default function TableAssignmentsPage() {
                   return (
                     <TableRow key={row.flowId} className="cursor-default">
                       <TableCell className="border-r border-border px-4 text-sm tabular-nums text-muted-foreground">
-                        {(safePage * pageSize + index + 1).toLocaleString()}
+                        {workspaceRowNumber({ page: safePage, pageSize, index }).toLocaleString()}
                       </TableCell>
                       <TableCell className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] font-medium">
                         <button
@@ -545,11 +535,7 @@ export default function TableAssignmentsPage() {
                             size="icon"
                             aria-label={`Edit assignment for ${row.tableName}`}
                             title={`Edit assignment for ${row.tableName}`}
-                            onClick={() => {
-                              setEditFlow({ flowId: row.flowId, tableName: row.tableName });
-                              setViewMode(false);
-                              setDialogOpen(true);
-                            }}
+                            onClick={() => openEdit(row, false)}
                             className="h-8 w-8"
                           >
                             <Pencil className="h-4 w-4" aria-hidden />
@@ -563,11 +549,7 @@ export default function TableAssignmentsPage() {
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-52">
                               <DropdownMenuItem
-                                onClick={() => {
-                                  setEditFlow({ flowId: row.flowId, tableName: row.tableName });
-                                  setViewMode(true);
-                                  setDialogOpen(true);
-                                }}
+                                onClick={() => openEdit(row, true)}
                               >
                                 <Eye className="h-4 w-4" aria-hidden />
                                 View configuration
@@ -609,6 +591,7 @@ export default function TableAssignmentsPage() {
               disabled={false}
               onPage={setPage}
               onPageSize={(size) => {
+                if (!isWorkspacePageSize(size)) return;
                 setPageSize(size);
                 setPage(0);
               }}

@@ -148,8 +148,8 @@ describe("GET /api/workspace/table-assignments", () => {
 
   it("includes every Meta table including hidden/disabled; excludes other kinds + tenants", async () => {
     const res = await GET();
-    const body = (await res.json()) as { tables: Array<{ flow_id: string }> };
-    const ids = body.tables.map((t) => t.flow_id).sort();
+    const body = (await res.json()) as { tables: Array<{ flowId: string }> };
+    const ids = body.tables.map((t) => t.flowId).sort();
     // flow-3 has no config (disabled/never configured) but must appear;
     // whatsapp_flow and foreign-tenant flows must not.
     expect(ids).toEqual(["flow-1", "flow-2", "flow-3"]);
@@ -159,14 +159,18 @@ describe("GET /api/workspace/table-assignments", () => {
     const res = await GET();
     const body = (await res.json()) as {
       tables: Array<{
-        flow_id: string;
-        table_name: string;
+        flowId: string;
+        tableName: string;
+        formName: string | null;
         config: { enabled: boolean; mode: string; updated_at: string } | null;
         assignees: Array<Record<string, unknown>>;
       }>;
     };
-    const hiring = body.tables.find((t) => t.flow_id === "flow-1")!;
-    expect(hiring.table_name).toBe("Hiring");
+    const hiring = body.tables.find((t) => t.flowId === "flow-1")!;
+    // Canonical display name is the verbatim Workspace table name ...
+    expect(hiring.tableName).toBe("Meta Lead Ads · Hiring");
+    // ... with the original form name alongside for search richness.
+    expect(hiring.formName).toBe("Hiring");
     expect(hiring.config?.enabled).toBe(true);
     expect(hiring.config?.updated_at).toBe("2026-11-20T10:00:00.000Z");
     expect(hiring.assignees).toHaveLength(2);
@@ -180,16 +184,33 @@ describe("GET /api/workspace/table-assignments", () => {
         expect(a).not.toHaveProperty("whatsapp_numbers");
       }
     }
-    const travel = body.tables.find((t) => t.flow_id === "flow-2")!;
+    const travel = body.tables.find((t) => t.flowId === "flow-2")!;
     expect(travel.config?.enabled).toBe(false);
-    expect(body.tables.find((t) => t.flow_id === "flow-3")!.config).toBeNull();
+    expect(body.tables.find((t) => t.flowId === "flow-3")!.config).toBeNull();
   });
 
-  it("falls back to the stripped flow name when the form row is gone", async () => {
+  it("keeps the full Workspace table name when the form row is gone", async () => {
     h.forms = [];
     const res = await GET();
-    const body = (await res.json()) as { tables: Array<{ flow_id: string; table_name: string }> };
-    expect(body.tables.find((t) => t.flow_id === "flow-1")!.table_name).toBe("Hiring");
+    const body = (await res.json()) as {
+      tables: Array<{ flowId: string; tableName: string; formName: string | null }>;
+    };
+    const hiring = body.tables.find((t) => t.flowId === "flow-1")!;
+    expect(hiring.tableName).toBe("Meta Lead Ads · Hiring");
+    expect(hiring.formName).toBeNull();
+  });
+
+  it("falls back to the form name (never blank) when the flow name is missing", async () => {
+    h.flows = [
+      { id: "flow-blank", account_id: "acct-1", kind: "meta_lead_ads", name: "   ", meta_form_id: "form-1" },
+      { id: "flow-noname", account_id: "acct-1", kind: "meta_lead_ads", name: null, meta_form_id: null },
+    ];
+    const res = await GET();
+    const body = (await res.json()) as {
+      tables: Array<{ flowId: string; tableName: string; formName: string | null }>;
+    };
+    expect(body.tables.find((t) => t.flowId === "flow-blank")!.tableName).toBe("Hiring");
+    expect(body.tables.find((t) => t.flowId === "flow-noname")!.tableName).toBe("Untitled table");
   });
 
   it("returns an empty list when the account has no Meta tables", async () => {

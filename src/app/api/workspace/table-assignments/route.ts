@@ -9,6 +9,13 @@ import { requireRole, toErrorResponse } from "@/lib/auth/account";
  * and disabled forms' tables, with its saved per-table assignment
  * configuration (or null when never configured).
  *
+ * The display name is the verbatim Workspace table name
+ * (flows.name, e.g. "Meta Lead Ads · Rajasthan Instant Form |
+ * 21 NOV") — never a stripped or substituted value. The original
+ * Instant Form name rides along separately as formName for search
+ * richness. Keys are camelCase to match the Table Assignments
+ * page model (flowId/tableName/formName).
+ *
  * Owner-only: admin/agent/viewer get 403 (hiding the nav entry is
  * not sufficient). Reads are account-scoped. Contact channels
  * (emails/phone numbers) are never exposed in this listing — the
@@ -160,9 +167,13 @@ export async function GET() {
 
     const tables = flows.map((f) => {
       const configRow = configByFlow.get(f.id) ?? null;
+      // Canonical display name: the verbatim Workspace table name.
+      // A blank/missing flow name falls back to the original form
+      // name (never a UUID or invented value).
       const formName =
-        (f.meta_form_id ? formNameById.get(f.meta_form_id) : undefined) ??
-        stripMetaPrefix(f.name);
+        f.meta_form_id ? (formNameById.get(f.meta_form_id) ?? null) : null;
+      const rawName = typeof f.name === "string" ? f.name.trim() : "";
+      const tableName = rawName !== "" ? f.name : (formName ?? "Untitled table");
       const assignees = configRow
         ? (assigneesByConfig.get(configRow.id as string) ?? []).map((a) => ({
             id: a.id,
@@ -174,10 +185,9 @@ export async function GET() {
           }))
         : [];
       return {
-        flow_id: f.id,
-        flow_name: f.name,
-        table_name: formName,
-        form_id: f.meta_form_id,
+        flowId: f.id,
+        tableName,
+        formName,
         config: configRow
           ? {
               id: configRow.id,
@@ -198,9 +208,4 @@ export async function GET() {
   } catch (err) {
     return toErrorResponse(err);
   }
-}
-
-/** Display name for the Workspace table (strips the virtual-flow prefix). */
-function stripMetaPrefix(name: string | null): string {
-  return (name ?? "").replace(/^Meta Lead Ads\s*·\s*/, "").trim() || "Untitled table";
 }

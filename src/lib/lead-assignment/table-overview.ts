@@ -174,6 +174,107 @@ export interface OverviewTableFilters {
   status: AssignmentStatusFilter;
 }
 
+/**
+ * One normalized listing row for the Table Assignments page.
+ * The page model is camelCase (flowId/tableName/formName); the
+ * listing endpoint returns exactly this shape. The normalizer
+ * below additionally accepts the legacy snake_case wire shape
+ * (flow_id/flow_name/table_name) so a key mismatch can never
+ * blank the table column again — it always resolves a display
+ * name or drops the row when the flow identity is missing.
+ */
+export interface NormalizedAssignmentTable {
+  flowId: string;
+  tableName: string;
+  formName: string | null;
+  config: {
+    id: string;
+    enabled: boolean;
+    mode: "round_robin" | "percentage";
+    whatsapp_template_name: string | null;
+    whatsapp_template_language: string;
+    updated_at: string | null;
+  } | null;
+  assignees: OverviewAssignee[];
+}
+
+function nonBlankString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed !== "" ? trimmed : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * Normalize one raw listing payload row into the page model.
+ * Returns null when the flow identity is missing (a row without
+ * a flow id can never be displayed, edited, or paused — the page
+ * drops it instead of firing requests against an undefined id).
+ * The display name prefers the verbatim Workspace table name and
+ * never surfaces a form UUID.
+ */
+export function normalizeAssignmentTableRow(raw: unknown): NormalizedAssignmentTable | null {
+  const r = asRecord(raw);
+  if (!r) return null;
+  const flowId =
+    nonBlankString(r.flowId) ?? nonBlankString(r.flow_id);
+  if (flowId === null) return null;
+
+  const tableName =
+    nonBlankString(r.tableName) ??
+    nonBlankString(r.flow_name) ??
+    nonBlankString(r.flowName) ??
+    nonBlankString(r.table_name) ??
+    nonBlankString(r.formName) ??
+    nonBlankString(r.form_name) ??
+    "Untitled table";
+  const formName =
+    nonBlankString(r.formName) ?? nonBlankString(r.form_name) ?? null;
+
+  let config: NormalizedAssignmentTable["config"] = null;
+  const c = asRecord(r.config);
+  if (c) {
+    const id = nonBlankString(c.id);
+    if (id !== null) {
+      config = {
+        id,
+        enabled: c.enabled === true,
+        mode: c.mode === "percentage" ? "percentage" : "round_robin",
+        whatsapp_template_name: nonBlankString(c.whatsapp_template_name),
+        whatsapp_template_language:
+          nonBlankString(c.whatsapp_template_language) ?? "en_US",
+        updated_at:
+          typeof c.updated_at === "string" ? c.updated_at : null,
+      };
+    }
+  }
+
+  const assignees: OverviewAssignee[] = [];
+  if (Array.isArray(r.assignees)) {
+    for (const entry of r.assignees) {
+      const a = asRecord(entry);
+      if (!a) continue;
+      const id = nonBlankString(a.id);
+      if (id === null) continue;
+      assignees.push({
+        id,
+        user_id:
+          a.user_id === null || typeof a.user_id === "string" ? a.user_id : null,
+        display_name: nonBlankString(a.display_name) ?? "Unnamed",
+        weight: typeof a.weight === "number" ? a.weight : 0,
+        is_active: a.is_active !== false,
+      });
+    }
+  }
+
+  return { flowId, tableName, formName, config, assignees };
+}
+
 /** Client-side search/filter over the (small, bounded) table list. */
 export function filterOverviewTables<T extends OverviewTableInput>(
   tables: readonly T[],
