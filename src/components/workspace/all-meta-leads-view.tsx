@@ -35,6 +35,7 @@ import { HiddenRowsMenu } from "@/components/workspace/hidden-rows-menu";
 import type { HiddenRowInfo } from "@/lib/flows/workspace-row-prefs";
 import { WorkspacePagination } from "@/components/workspace/workspace-pagination";
 import { CustomCell } from "@/components/workspace/custom-cell";
+import { LatestRecordingCell } from "@/components/workspace/latest-recording-cell";
 import { RowActionsMenu } from "@/components/workspace/row-actions-menu";
 import { DialAction } from "@/components/workspace/dial-action";
 import { AllMetaAnswersCell } from "@/components/workspace/all-meta-answers-cell";
@@ -43,6 +44,9 @@ import {
   ALL_META_COLUMN_IDS,
   ALL_META_LEADS_ID,
   allMetaFlowColumns,
+  buildAllMetaUnionColumns,
+  findUnionFieldDef,
+  type AllMetaUnionColumn,
 } from "@/lib/workspace/all-meta-leads";
 import {
   assignHeaderBackgrounds,
@@ -62,6 +66,7 @@ import { isWideTextColumnName } from "@/lib/flows/workspace-column-widths";
 import { isWorkspaceFieldType, type WorkspaceField } from "@/lib/flows/workspace-fields";
 import { formatPhoneForDisplay } from "@/lib/whatsapp/phone-utils";
 import { workspaceRowNumber, type WorkspacePageSize } from "@/lib/flows/workspace-pagination";
+import type { FlowTableColumn, LatestRecordingEntry } from "@/lib/flows/flow-tables";
 import {
   TableHScrollbar,
   useShiftWheel,
@@ -110,6 +115,7 @@ export interface AllMetaFieldDef {
   field_type: string;
   options: string[] | null;
   default_value: string | null;
+  position?: number | null;
 }
 
 type BusinessKind = "assignedTo" | "type" | "stage" | "callStatus" | "followUp";
@@ -249,6 +255,7 @@ export function AllMetaLeadsView(props: {
   valueOverrides: Record<string, Record<string, string | null>>;
   customValues: Record<string, Record<string, string | null>>;
   fieldsByFlow: Record<string, AllMetaFieldDef[] | undefined>;
+  latestRecordingByContact: Record<string, LatestRecordingEntry>;
   onTogglePin: (flowId: string, runId: string) => void;
   onHideRow: (flowId: string, runId: string) => void;
   pinnedIds: ReadonlySet<string>;
@@ -300,6 +307,7 @@ export function AllMetaLeadsView(props: {
     valueOverrides,
     customValues,
     fieldsByFlow,
+    latestRecordingByContact,
     onTogglePin,
     onHideRow,
     pinnedIds,
@@ -310,10 +318,30 @@ export function AllMetaLeadsView(props: {
   } = props;
 
   // Fixed All-view columns as shared Workspace flow-column entries
-  // (spec order). Rendered through the same table primitives,
-  // frozen offsets, pastel header paint, and cell styling as
-  // individual Meta tables.
-  const allFlowColumns = useMemo(() => allMetaFlowColumns(), []);
+  // (spec order) plus the shared Latest Recording system column
+  // and the dynamically discovered union of every other Workspace
+  // field across all included flows. Rendered through the same
+  // table primitives, frozen offsets, pastel header paint, and
+  // cell styling as individual Meta tables.
+  //
+  // Union columns come from the already-batched fieldsByFlow
+  // payload (no extra requests): each lead renders through its
+  // OWN originating flow's field definition, so types, options,
+  // and defaults match the individual table exactly. Flows
+  // lacking the field render a blank cell.
+  const unionColumns: AllMetaUnionColumn[] = useMemo(
+    () => buildAllMetaUnionColumns(tables, fieldsByFlow),
+    [tables, fieldsByFlow],
+  );
+  const allFlowColumns: FlowTableColumn[] = useMemo(
+    () => [
+      ...allMetaFlowColumns(),
+      { key: "latest_recording", label: "Latest Recording", system: true },
+      ...unionColumns.map((u): FlowTableColumn => ({ key: u.key, label: u.label, system: false })),
+    ],
+    [unionColumns],
+  );
+  const unionByKey = useMemo(() => new Map(unionColumns.map((u) => [u.key, u])), [unionColumns]);
   const hidden = useMemo(() => new Set(hiddenIds), [hiddenIds]);
   const visibleColumns = useMemo(
     () => allFlowColumns.filter((c) => !hidden.has(flowColumnVisId(c.key))),
@@ -598,6 +626,103 @@ export function AllMetaLeadsView(props: {
           className="border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
         >
           <AllMetaAnswersCell answers={row.formAnswers} tableName={row.tableName} />
+        </TableCell>
+      );
+    }
+    if (columnKey === "latest_recording") {
+      return (
+        <TableCell
+          key={columnKey}
+          className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
+        >
+          <LatestRecordingCell entry={latestRecordingByContact[row.contactId ?? ""] ?? null} />
+        </TableCell>
+      );
+    }
+    const unionCol = unionByKey.get(columnKey);
+    if (unionCol) {
+      // Union column: this lead renders through its OWN
+      // originating flow's field definition (types, options, and
+      // defaults match the individual table exactly). Flows
+      // without the field render a blank cell — never another
+      // flow's value. Saves reuse the shared CustomCell path
+      // keyed by the originating (flowId, fieldId).
+      const def = findUnionFieldDef(fieldsByFlow[row.flowId], unionCol);
+      const field: WorkspaceField | null =
+        def && isWorkspaceFieldType(def.field_type)
+          ? {
+              id: def.id,
+              account_id: "",
+              flow_id: row.flowId,
+              name: def.name,
+              field_type: def.field_type,
+              position: 0,
+              options: def.options ?? null,
+              default_value: def.default_value ?? null,
+              currency_code: null,
+              created_at: "",
+              updated_at: "",
+            }
+          : null;
+      const realFieldId = def?.id ?? null;
+      const canEditCell =
+        canSendMessages &&
+        !(isAgent && isAssigneeField({ name: field?.name ?? "" }) && !canManageAssignments);
+      const storedValue = resolveStored(realFieldId, null);
+      if (!field || !canEditCell) {
+        return (
+          <TableCell
+            key={columnKey}
+            className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+          >
+            {field ? (
+              <CustomCell
+                flowId={row.flowId}
+                runId={row.runId}
+                field={field}
+                stored={storedValue}
+                canEdit={false}
+                onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+                members={teamMembers}
+                twoLineClamp={isWideTextColumnName(field.name)}
+              />
+            ) : (
+              <span>{storedValue ?? ""}</span>
+            )}
+          </TableCell>
+        );
+      }
+      return (
+        <TableCell
+          key={columnKey}
+          className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <CustomCell
+            flowId={row.flowId}
+            runId={row.runId}
+            field={field}
+            stored={storedValue}
+            canEdit={canEditCell}
+            onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+            members={teamMembers}
+            twoLineClamp={isWideTextColumnName(field.name)}
+            onEditIntercept={
+              isWorkspaceFollowupFieldName(field.name)
+                ? () =>
+                    onOpenFollowup(
+                      row,
+                      field.id,
+                      storedValue,
+                    )
+                : undefined
+            }
+            saveAssignee={
+              isAssigneeField(field)
+                ? async (raw) => manualAssign(row.runId, raw, row.flowId)
+                : undefined
+            }
+          />
         </TableCell>
       );
     }

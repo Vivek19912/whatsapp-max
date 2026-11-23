@@ -186,7 +186,6 @@ import type {
   FlowTablePayload,
   FlowTableRow,
   FlowTableView,
-  LatestRecordingEntry,
 } from '@/lib/flows/flow-tables';
 import {
   flowColumnRenderKey,
@@ -347,48 +346,7 @@ function formatMetaYesNo(raw: string | null | undefined): string | null {
   return t;
 }
 
-/**
- * Latest-recording header cell: same shared player popover as the
- * Recordings page (one blue Play button + duration; the full
- * player floats in a portaled popover, never a native audio
- * element in the row). Player clicks never bubble to the row
- * (the row opens the lead drawer). No recording → "No
- * recording".
- */
-function LatestRecordingCell({ entry }: { entry: LatestRecordingEntry | null }) {
-  const [open, setOpen] = useState(false);
-  const [autoplay, setAutoplay] = useState(false);
-  const closePlayer = () => {
-    setOpen(false);
-    setAutoplay(false);
-  };
-  if (!entry) {
-    return <span className="text-muted-foreground text-sm">No recording</span>;
-  }
-  return (
-    <span
-      className="flex items-center gap-2"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <RecordingPlayerPopover
-        recordingId={entry.id}
-        open={open}
-        autoplay={autoplay}
-        onOpenChange={(next) => {
-          if (next) setOpen(true);
-          else closePlayer();
-        }}
-        onPlayIntent={() => setAutoplay(true)}
-        onClose={closePlayer}
-        playLabel="Play latest recording"
-        durationText={formatRecordingDuration(entry.duration_seconds)}
-      />
-      <span className="text-muted-foreground max-w-[120px] truncate text-sm">
-        {entry.uploader_name ?? 'Unknown'}
-      </span>
-    </span>
-  );
-}
+import { LatestRecordingCell } from "@/components/workspace/latest-recording-cell";
 
 /**
  * Lead recordings section for the row drawer: every recording
@@ -3407,6 +3365,7 @@ export default function WorkspacePage() {
               valueOverrides={valueOverrides.key === allRequestKey ? valueOverrides.map : {}}
               customValues={allPayload?.customValues ?? {}}
               fieldsByFlow={allPayload?.fieldsByFlow ?? {}}
+              latestRecordingByContact={allPayload?.latestRecordingByContact ?? {}}
               onTogglePin={handleAllTogglePin}
               onHideRow={handleAllHideRow}
               pinnedIds={pinnedIds}

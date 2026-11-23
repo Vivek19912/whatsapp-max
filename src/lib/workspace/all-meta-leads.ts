@@ -302,6 +302,134 @@ export const ALL_META_BUSINESS_SPECS: readonly AllMetaBusinessSpec[] = [
 /** Follow-up Status options for the All-view column filter (canonical per-flow options). */
 export const ALL_META_FOLLOW_UP_STATUS_OPTIONS: readonly string[] = FOLLOW_UP_STATUS_OPTIONS;
 
+/**
+ * Workspace field names already covered by dedicated All-view
+ * columns (normalized). Union columns skip these so shared system
+ * columns are never duplicated — "Follow-Up Status" is NOT in
+ * this set: it has no dedicated column and arrives via the union.
+ */
+export const ALL_META_DEDICATED_FIELD_NAMES: ReadonlySet<string> = new Set([
+  "assigned to",
+  "lead type",
+  "stage",
+  "call status",
+  "next follow-up date & time",
+]);
+
+/** One dynamically discovered union column for the combined view. */
+export interface AllMetaUnionColumn {
+  /**
+   * Stable synthetic slot key (`all_union_<slug>[__<n>]`). The
+   * shared visibility scheme prefixes it (`flow:<key>`) exactly
+   * like every other fixed column, so prefs, header paint, and
+   * the Columns menu stay stable across sessions without any
+   * stored migration when new fields appear.
+   */
+  key: string;
+  /** Original display label (first-seen casing, never rewritten). */
+  label: string;
+  /** Normalized match name shared by every contributing field. */
+  nameKey: string;
+  /** Field type shared by every contributing field. */
+  fieldType: string;
+}
+
+export interface AllMetaUnionFieldDef {
+  id: string;
+  name: string;
+  field_type: string;
+  options?: string[] | null;
+  default_value?: string | null;
+  position?: number | null;
+}
+
+function normalizeUnionName(name: unknown): string | null {
+  if (typeof name !== "string") return null;
+  const t = name.trim().toLowerCase();
+  return t !== "" ? t : null;
+}
+
+function slugUnionName(normalized: string): string {
+  const slug = normalized.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return slug !== "" ? slug : "field";
+}
+
+/**
+ * Dynamic union of every applicable Workspace field across the
+ * included Meta flows. Pure + dependency-free: the caller passes
+ * the already-batched `fieldsByFlow` payload (no I/O, no N+1).
+ *
+ * Rules:
+ * - Fields covered by dedicated All-view columns are skipped
+ *   (never duplicated).
+ * - Grouping key is normalized name + field type: same-label
+ *   fields of different types become separate columns with
+ *   distinct stable keys, so unrelated fields never merge and
+ *   every original field keeps its own value mapping.
+ * - Order is deterministic: flows in the given order, fields by
+ *   (position, name) within each flow, first-seen group wins.
+ * - Form questions are never inputs here (only workspace_fields),
+ *   so no Meta question can leak out of the Form Answers column.
+ */
+export function buildAllMetaUnionColumns(
+  tables: ReadonlyArray<{ flowId: string }>,
+  fieldsByFlow: Record<string, ReadonlyArray<AllMetaUnionFieldDef> | undefined>,
+): AllMetaUnionColumn[] {
+  const groups = new Map<string, AllMetaUnionColumn>();
+  const usedKeys = new Set<string>();
+  for (const t of tables) {
+    const defs = [...(fieldsByFlow[t.flowId] ?? [])].sort((a, b) => {
+      const pa = typeof a.position === "number" ? a.position : Number.MAX_SAFE_INTEGER;
+      const pb = typeof b.position === "number" ? b.position : Number.MAX_SAFE_INTEGER;
+      if (pa !== pb) return pa - pb;
+      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
+    });
+    for (const d of defs) {
+      const nameKey = normalizeUnionName(d.name);
+      const fieldType =
+        typeof d.field_type === "string" && d.field_type.trim() !== ""
+          ? d.field_type.trim()
+          : "text";
+      if (nameKey === null) continue;
+      if (ALL_META_DEDICATED_FIELD_NAMES.has(nameKey)) continue;
+      const groupKey = `${nameKey}||${fieldType}`;
+      if (groups.has(groupKey)) continue;
+      const base = `all_union_${slugUnionName(nameKey)}`;
+      let key = base;
+      for (let n = 2; usedKeys.has(key); n += 1) key = `${base}__${n}`;
+      usedKeys.add(key);
+      groups.set(groupKey, {
+        key,
+        label: typeof d.name === "string" ? d.name.trim() : nameKey,
+        nameKey,
+        fieldType,
+      });
+    }
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Find one flow's contributing field for a union column (exact
+ * name + type match). Null when the flow has no such field, in
+ * which case the cell renders blank.
+ */
+export function findUnionFieldDef(
+  defs: ReadonlyArray<AllMetaUnionFieldDef> | undefined,
+  column: Pick<AllMetaUnionColumn, "nameKey" | "fieldType">,
+): AllMetaUnionFieldDef | null {
+  for (const d of defs ?? []) {
+    if (normalizeUnionName(d.name) !== column.nameKey) continue;
+    const t =
+      typeof d.field_type === "string" && d.field_type.trim() !== ""
+        ? d.field_type.trim()
+        : "text";
+    if (t !== column.fieldType) continue;
+    return d;
+  }
+  return null;
+}
+
 /** Query params for GET /api/workspace/all-meta-leads (client → server). */
 export interface AllMetaLeadsQuery {
   search?: string | null;

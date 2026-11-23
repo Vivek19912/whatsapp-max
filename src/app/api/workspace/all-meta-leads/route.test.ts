@@ -158,4 +158,30 @@ describe("all-meta-leads — frontend virtual view", () => {
     expect(v).not.toContain("bg-blue-50");
     expect(v).not.toContain("rounded-full");
   });
+
+  it("unions every Workspace field across flows (no hardcoded column cap)", () => {
+    const v = viewSrc();
+    const lib = readFileSync(`${root}/src/lib/workspace/all-meta-leads.ts`, "utf8");
+    // Dynamic discovery from the batched fieldsByFlow payload.
+    expect(v).toContain("buildAllMetaUnionColumns");
+    expect(v).toContain("findUnionFieldDef");
+    expect(lib).toContain("ALL_META_DEDICATED_FIELD_NAMES");
+    // Dedicated slots are never duplicated by the union.
+    expect(v).toContain("unionColumns");
+    // Per-row values resolve through the originating flow's field.
+    expect(v).toContain("fieldsByFlow[row.flowId]");
+    // Missing fields render blank — never another flow's value.
+    expect(v).toContain("findUnionFieldDef(fieldsByFlow[row.flowId], unionCol)");
+    // Saves reuse the shared CustomCell path keyed by origin.
+    expect(v).toContain("onCustomSaved(row.flowId, fieldId, runId, value)");
+  });
+
+  it("shows Latest Recording through the shared player cell", () => {
+    const v = viewSrc();
+    expect(v).toContain("LatestRecordingCell");
+    expect(v).toContain("latest_recording");
+    expect(v).toContain("latestRecordingByContact");
+    // The page feeds the combined payload's per-contact recordings.
+    expect(pageSrc()).toContain("latestRecordingByContact={allPayload?.latestRecordingByContact ?? {}}");
+  });
 });

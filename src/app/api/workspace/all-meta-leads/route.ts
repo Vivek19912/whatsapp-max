@@ -399,7 +399,7 @@ export async function GET(request: Request) {
     // Workspace business fields for all Meta flows (batched).
     const { data: fieldsData } = await supabase
       .from("workspace_fields")
-      .select("id, flow_id, name, field_type, options, default_value")
+      .select("id, flow_id, name, field_type, options, default_value, position")
       .eq("account_id", accountId)
       .in("flow_id", flowIds);
     const fieldsByFlow = new Map<string, Array<{ id: string; name: string }>>();
@@ -414,8 +414,9 @@ export async function GET(request: Request) {
       field_type: string;
       options: string[] | null;
       default_value: string | null;
+      position: number | null;
     }>> = {};
-    for (const f of ((fieldsData ?? []) as Array<{ id: string; flow_id: string; name: string; field_type?: unknown; options?: unknown; default_value?: unknown }>)) {
+    for (const f of ((fieldsData ?? []) as Array<{ id: string; flow_id: string; name: string; field_type?: unknown; options?: unknown; default_value?: unknown; position?: unknown }>)) {
       if (!fieldsByFlow.has(f.flow_id)) {
         fieldsByFlow.set(f.flow_id, []);
         fieldDefsByFlow[f.flow_id] = [];
@@ -427,6 +428,7 @@ export async function GET(request: Request) {
         field_type: typeof f.field_type === "string" ? f.field_type : "text",
         options: Array.isArray(f.options) ? (f.options as string[]) : null,
         default_value: typeof f.default_value === "string" ? f.default_value : null,
+        position: typeof f.position === "number" ? f.position : null,
       });
     }
     const fieldIdByFlowAndName = new Map<string, Map<string, string>>();

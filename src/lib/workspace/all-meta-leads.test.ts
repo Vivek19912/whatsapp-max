@@ -4,6 +4,8 @@ import {
   ALL_META_LEADS_ID,
   ALL_META_ANSWERS_EXCLUDED_KEYS,
   buildAllMetaFormAnswers,
+  buildAllMetaUnionColumns,
+  findUnionFieldDef,
   humanizeAnswerKey,
   defaultAllMetaColumnOrder,
   buildAllMetaLeadsQuery,
@@ -118,5 +120,113 @@ describe("all-meta-leads — columns + query", () => {
     expect(qs).toContain("tableId=flow-1");
     expect(qs).toContain("stage=New+Lead");
     expect(qs).toContain("leadType=Fresh");
+  });
+});
+
+describe("all-meta-leads — dynamic column union", () => {
+  const tables = [{ flowId: "flow-a" }, { flowId: "flow-b" }];
+  const defs = {
+    "flow-a": [
+      { id: "a1", name: "Assigned To", field_type: "single_select", position: 0 },
+      { id: "a2", name: "Customer Response", field_type: "text", position: 1 },
+      { id: "a3", name: "Call Status", field_type: "single_select", position: 2 },
+      { id: "a4", name: "Next Action", field_type: "text", position: 3 },
+      { id: "a5", name: "Final Remark", field_type: "text", position: 4 },
+    ],
+    "flow-b": [
+      { id: "b1", name: "Customer Response", field_type: "text", position: 0 },
+      { id: "b2", name: "Reason for Lost Lead", field_type: "single_select", position: 1 },
+      { id: "b3", name: "Lead Type", field_type: "single_select", position: 2 },
+      { id: "b4", name: "Stage", field_type: "single_select", position: 3 },
+      { id: "b5", name: "Follow-Up Status", field_type: "single_select", position: 4 },
+      { id: "b6", name: "No. of Calls Tried", field_type: "single_select", position: 5 },
+      { id: "b7", name: "Last Contact Date", field_type: "date", position: 6 },
+      { id: "b8", name: "Next Follow-up Date & Time", field_type: "datetime", position: 7 },
+    ],
+  };
+
+  it("includes every operational field while skipping dedicated columns", () => {
+    const cols = buildAllMetaUnionColumns(tables, defs);
+    const labels = cols.map((c) => c.label);
+    for (const expected of [
+      "Customer Response",
+      "Next Action",
+      "Final Remark",
+      "Reason for Lost Lead",
+      "Follow-Up Status",
+      "No. of Calls Tried",
+      "Last Contact Date",
+    ]) {
+      expect(labels).toContain(expected);
+    }
+    // Dedicated slots are never duplicated.
+    for (const dedicated of [
+      "Assigned To",
+      "Call Status",
+      "Lead Type",
+      "Stage",
+      "Next Follow-up Date & Time",
+    ]) {
+      expect(labels).not.toContain(dedicated);
+    }
+  });
+
+  it("deduplicates genuinely shared columns across flows", () => {
+    const cols = buildAllMetaUnionColumns(tables, defs);
+    expect(cols.filter((c) => c.label === "Customer Response")).toHaveLength(1);
+  });
+
+  it("keeps unrelated same-label fields of different types separate", () => {
+    const cols = buildAllMetaUnionColumns(
+      [{ flowId: "flow-a" }, { flowId: "flow-c" }],
+      {
+        ...defs,
+        "flow-c": [{ id: "c1", name: "Customer Response", field_type: "single_select", position: 0 }],
+      },
+    );
+    const matches = cols.filter((c) => c.label === "Customer Response");
+    expect(matches).toHaveLength(2);
+    expect(new Set(matches.map((c) => c.key)).size).toBe(2);
+    expect(new Set(matches.map((c) => c.fieldType)).size).toBe(2);
+  });
+
+  it("orders deterministically: flow order, then field position", () => {
+    const cols = buildAllMetaUnionColumns(tables, defs);
+    expect(cols.map((c) => c.label)).toEqual([
+      "Customer Response",
+      "Next Action",
+      "Final Remark",
+      "Reason for Lost Lead",
+      "Follow-Up Status",
+      "No. of Calls Tried",
+      "Last Contact Date",
+    ]);
+  });
+
+  it("discovers newly added custom fields without code changes", () => {
+    const cols = buildAllMetaUnionColumns([{ flowId: "flow-a" }], {
+      "flow-a": [
+        { id: "a9", name: "Preferred Language", field_type: "single_select", position: 9 },
+      ],
+    });
+    expect(cols.map((c) => c.label)).toEqual(["Preferred Language"]);
+  });
+
+  it("resolves each row to its own flow field, or null when absent", () => {
+    const cols = buildAllMetaUnionColumns(tables, defs);
+    const customer = cols.find((c) => c.label === "Customer Response")!;
+    const action = cols.find((c) => c.label === "Next Action")!;
+    expect(findUnionFieldDef(defs["flow-a"], customer)?.id).toBe("a2");
+    expect(findUnionFieldDef(defs["flow-b"], customer)?.id).toBe("b1");
+    // flow-b has no Next Action → blank cell, never flow-a's value.
+    expect(findUnionFieldDef(defs["flow-b"], action)).toBeNull();
+  });
+
+  it("produces stable visibility keys", () => {
+    const first = buildAllMetaUnionColumns(tables, defs).map((c) => c.key);
+    const second = buildAllMetaUnionColumns(tables, defs).map((c) => c.key);
+    expect(first).toEqual(second);
+    expect(new Set(first).size).toBe(first.length);
+    for (const key of first) expect(key.startsWith("all_union_")).toBe(true);
   });
 });
