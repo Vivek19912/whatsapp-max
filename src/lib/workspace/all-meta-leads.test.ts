@@ -98,8 +98,11 @@ describe("all-meta-leads — Form Answers mapping", () => {
 describe("all-meta-leads — columns + query", () => {
   it("has a single Form Answers column in the default order", () => {
     const order = defaultAllMetaColumnOrder();
-    expect(order).toContain("all:form_answers");
-    expect(order.filter((id) => id === "all:form_answers")).toHaveLength(1);
+    // Visibility ids reuse the shared Workspace scheme so the
+    // Columns menu, pastel header paint, and prefs behave exactly
+    // like individual tables.
+    expect(order).toContain("flow:form_answers");
+    expect(order.filter((id) => id === "flow:form_answers")).toHaveLength(1);
   });
 
   it("builds the table query with table + stage filters", () => {

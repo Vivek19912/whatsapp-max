@@ -93,6 +93,25 @@ export const CALLS_TRIED_OPTIONS: readonly string[] = [
 /** Exact dropdown options for "Quotation / Package" (legacy — kept for reference). */
 export const QUOTATION_OPTIONS: readonly string[] = ["Sent", "Not Yet"];
 
+/** Exact dropdown options for "Call Status", in order. */
+export const CALL_STATUS_OPTIONS: readonly string[] = [
+  "Connected",
+  "Not Answering",
+  "Switched Off",
+  "Busy",
+  "Call Back Later",
+  "Invalid Number",
+];
+
+/** Exact dropdown options for "Follow-Up Status", in order. */
+export const FOLLOW_UP_STATUS_OPTIONS: readonly string[] = [
+  "Follow-up Pending",
+  "Negotiation Going On",
+  "Booked",
+  "Lost",
+  "No Plan",
+];
+
 /** Exact dropdown options for "Lead Type", in order. */
 export const LEAD_TYPE_OPTIONS: readonly string[] = [
   "Fresh",
@@ -154,14 +173,7 @@ export const WORKSPACE_DEFAULT_FIELDS: readonly WorkspaceDefaultSpec[] = [
   {
     name: "Call Status",
     field_type: "single_select",
-    options: [
-      "Connected",
-      "Not Answering",
-      "Switched Off",
-      "Busy",
-      "Call Back Later",
-      "Invalid Number",
-    ],
+    options: [...CALL_STATUS_OPTIONS],
   },
   { name: "No. of Calls Tried", field_type: "single_select", options: [...CALLS_TRIED_OPTIONS] },
   {
@@ -179,13 +191,7 @@ export const WORKSPACE_DEFAULT_FIELDS: readonly WorkspaceDefaultSpec[] = [
   {
     name: "Follow-Up Status",
     field_type: "single_select",
-    options: [
-      "Follow-up Pending",
-      "Negotiation Going On",
-      "Booked",
-      "Lost",
-      "No Plan",
-    ],
+    options: [...FOLLOW_UP_STATUS_OPTIONS],
   },
   { name: "Last Contact Date", field_type: "date", options: null },
   { name: "Customer Response", field_type: "text", options: null },

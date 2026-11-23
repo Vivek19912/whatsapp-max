@@ -173,3 +173,79 @@ export function WorkspaceFollowupKpis({
     />
   );
 }
+
+/**
+ * All Meta Leads KPI strip. Server-aggregated over every lead across
+ * every Meta Lead Ads table in the account (hidden + disabled
+ * included — the same lead set as the combined table), keyed by
+ * nothing per-table so switching the table filter can never flash
+ * stale counts. Refreshes whenever the parent's refreshSeq ticks.
+ * Styling, hint text, and bucket-filter semantics are identical to
+ * the per-table strip above (same FollowupKpiCards).
+ */
+export function AllMetaFollowupKpis({
+  refreshSeq,
+  activeBucket = null,
+  onSelectBucket,
+}: {
+  refreshSeq: number;
+  activeBucket?: FollowupKpiBucket | null;
+  onSelectBucket?: (bucket: FollowupKpiBucket | null) => void;
+}) {
+  const [counts, setCounts] = useState<FollowupKpiCounts>(EMPTY_COUNTS);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Viewer-local day windows (same convention as the scheduling UI).
+  const windowQuery = useMemo(() => {
+    const now = new Date();
+    const today = localDayWindow(now);
+    const tomorrow = localDayWindowOffset(now, 1);
+    const qs = new URLSearchParams({
+      todayStart: today.start,
+      todayEnd: today.end,
+      tomorrowStart: tomorrow.start,
+      tomorrowEnd: tomorrow.end,
+    });
+    return qs.toString();
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspace/all-meta-leads/followup-counts?${windowQuery}`, {
+        cache: "no-store",
+      });
+      const payload = (await res.json().catch(() => null)) as (Partial<FollowupKpiCounts> & {
+        error?: string;
+      }) | null;
+      if (!res.ok) throw new Error(payload?.error ?? `HTTP ${res.status}`);
+      setCounts({
+        overdue: Number(payload?.overdue ?? 0) || 0,
+        today: Number(payload?.today ?? 0) || 0,
+        tomorrow: Number(payload?.tomorrow ?? 0) || 0,
+        upcoming: Number(payload?.upcoming ?? 0) || 0,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load follow-up counts");
+    } finally {
+      setLoading(false);
+    }
+  }, [windowQuery]);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshSeq]);
+
+  return (
+    <FollowupKpiCards
+      counts={counts}
+      loading={loading}
+      error={error}
+      onRetry={() => void load()}
+      activeBucket={activeBucket}
+      onSelectBucket={onSelectBucket}
+    />
+  );
+}

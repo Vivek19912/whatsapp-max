@@ -123,11 +123,15 @@ describe("all-meta-leads — frontend virtual view", () => {
   it("Form Answers is a single column (no per-question columns)", () => {
     const v = viewSrc();
     const lib = readFileSync(`${root}/src/lib/workspace/all-meta-leads.ts`, "utf8");
-    expect(v).toContain("ALL_META_COLUMN_IDS.answers");
+    expect(v).toContain("allMetaFlowColumns");
+    expect(v).toContain("form_answers");
     expect(lib).toContain("Form Answers");
     expect(v).toContain("AllMetaAnswersCell");
     // No per-question column generation here.
     expect(v).not.toContain("buildFlowTableColumns");
+    // Plain-text answers — no pill badges anywhere in the view.
+    expect(v).not.toContain("bg-blue-50");
+    expect(v).not.toContain("rounded-full");
   });
 
   it("reuses existing styling, pagination, and horizontal scrolling", () => {
@@ -135,7 +139,23 @@ describe("all-meta-leads — frontend virtual view", () => {
     expect(v).toContain("WorkspacePagination");
     expect(v).toContain("WorkspaceSearchField");
     expect(v).toContain("WorkspaceFilters");
-    expect(v).toContain("overflow-x-auto");
-    expect(v).toContain("Badge");
+    expect(v).toContain("WorkspaceActionsMenu");
+    expect(v).toContain("ColumnsMenu");
+    expect(v).toContain("HiddenRowsMenu");
+    expect(v).toContain("CustomCell");
+    expect(v).toContain("RowActionsMenu");
+    expect(v).toContain("DialAction");
+    // Same scroll contract as individual tables: hidden native
+    // horizontal overflow + one shared bottom thumb strip.
+    expect(v).toContain("workspace-table-viewport");
+    expect(v).toContain("overflow-x-hidden");
+    expect(v).toContain("TableHScrollbar");
+    expect(v).toContain("useShiftWheel");
+    // Same pastel header paint pass as individual tables.
+    expect(v).toContain("assignHeaderBackgrounds");
+    expect(v).toContain("headerTextColor");
+    // Plain-text answers — no pill badges anywhere in the view.
+    expect(v).not.toContain("bg-blue-50");
+    expect(v).not.toContain("rounded-full");
   });
 });

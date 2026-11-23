@@ -127,6 +127,18 @@ function textOrNull(v: unknown): string | null {
   return null;
 }
 
+function parseInstant(raw: string | null, what: string): string | null {
+  if (raw === null || raw.trim() === '') return null
+  const ms = Date.parse(raw.trim())
+  if (Number.isNaN(ms)) {
+    throw new Error(`${what} must be a valid datetime.`)
+  }
+  // Canonical UTC ISO (toISOString shape) — the same
+  // normalization stored values carry, so text comparison in the
+  // RPC is chronological with no tz skew.
+  return new Date(ms).toISOString()
+}
+
 export async function GET(request: Request) {
   try {
     const ctx: AccountContext = await getCurrentAccount();
@@ -212,6 +224,8 @@ export async function GET(request: Request) {
     let leadType: string[] | null = null;
     let callStatus: string[] | null = null;
     let followUpStatus: string[] | null = null;
+    let nextFollowUpFrom: string | null = null;
+    let nextFollowUpTo: string | null = null;
     try {
       stage = parseMultiValues(url, "stage");
       leadType = parseMultiValues(url, "leadType");
@@ -224,6 +238,15 @@ export async function GET(request: Request) {
       }
       callStatus = parseMultiValues(url, "callStatus");
       followUpStatus = parseMultiValues(url, "followUpStatus");
+      nextFollowUpFrom = parseInstant(url.searchParams.get("nextFollowUpFrom"), "nextFollowUpFrom");
+      nextFollowUpTo = parseInstant(url.searchParams.get("nextFollowUpTo"), "nextFollowUpTo");
+      if (
+        nextFollowUpFrom !== null &&
+        nextFollowUpTo !== null &&
+        nextFollowUpFrom > nextFollowUpTo
+      ) {
+        throw new Error("nextFollowUpFrom must be on or before nextFollowUpTo.");
+      }
     } catch (err) {
       return NextResponse.json(
         { error: err instanceof Error ? err.message : "Invalid filter." },
@@ -266,6 +289,7 @@ export async function GET(request: Request) {
         tables: [],
         rows: [],
         customValues: {},
+        fieldsByFlow: {},
         mediaByConversation: {},
         latestRecordingByContact: {},
       });
@@ -286,6 +310,8 @@ export async function GET(request: Request) {
         p_lead_type: leadType,
         p_call_status: callStatus,
         p_followup_status: followUpStatus,
+        p_next_followup_from: nextFollowUpFrom,
+        p_next_followup_to: nextFollowUpTo,
       },
     );
     if (rpcErr) {
@@ -377,9 +403,31 @@ export async function GET(request: Request) {
       .eq("account_id", accountId)
       .in("flow_id", flowIds);
     const fieldsByFlow = new Map<string, Array<{ id: string; name: string }>>();
-    for (const f of ((fieldsData ?? []) as Array<{ id: string; flow_id: string; name: string }>)) {
-      if (!fieldsByFlow.has(f.flow_id)) fieldsByFlow.set(f.flow_id, []);
+    // Full per-flow field definitions for the combined view: each All
+    // row renders its OWN originating flow's field through the shared
+    // CustomCell, so the combined table needs the definition (type,
+    // options, default) per flow, not just the id. Additive to the
+    // response — existing keys untouched.
+    const fieldDefsByFlow: Record<string, Array<{
+      id: string;
+      name: string;
+      field_type: string;
+      options: string[] | null;
+      default_value: string | null;
+    }>> = {};
+    for (const f of ((fieldsData ?? []) as Array<{ id: string; flow_id: string; name: string; field_type?: unknown; options?: unknown; default_value?: unknown }>)) {
+      if (!fieldsByFlow.has(f.flow_id)) {
+        fieldsByFlow.set(f.flow_id, []);
+        fieldDefsByFlow[f.flow_id] = [];
+      }
       fieldsByFlow.get(f.flow_id)!.push({ id: f.id, name: f.name });
+      fieldDefsByFlow[f.flow_id].push({
+        id: f.id,
+        name: f.name,
+        field_type: typeof f.field_type === "string" ? f.field_type : "text",
+        options: Array.isArray(f.options) ? (f.options as string[]) : null,
+        default_value: typeof f.default_value === "string" ? f.default_value : null,
+      });
     }
     const fieldIdByFlowAndName = new Map<string, Map<string, string>>();
     for (const [flowIdKey, fields] of fieldsByFlow) {
@@ -623,6 +671,7 @@ export async function GET(request: Request) {
       tables,
       rows,
       customValues,
+      fieldsByFlow: fieldDefsByFlow,
       mediaByConversation,
       latestRecordingByContact,
     });

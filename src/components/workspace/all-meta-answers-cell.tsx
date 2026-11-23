@@ -14,17 +14,16 @@ import type { AllMetaFormAnswer } from "@/lib/workspace/all-meta-leads";
 /**
  * Form Answers cell for the All Meta Leads combined view.
  *
- * Critical UI contract (spec §3–4):
- *   - ONE column only; every actual answer visible in full, one per line.
- *   - Answer values directly (never question labels, never a generic
- *     "5 Answers" link, never hidden behind a click).
- *   - No truncation, no ellipsis, no line clamping, no fixed cell height
- *     that cuts off answers. Long text wraps; row height expands.
- *   - Every answer has its OWN hover interaction showing ITS original
- *     question + complete answer (never the whole form).
- *   - Touch devices get an equivalent tap/focus interaction.
- *   - Readable in light and dark modes, stays within the viewport,
- *     supports long Q&A with wrapping.
+ * Exactly ONE column. Every actual answer renders as plain cell
+ * text — one answer per own line, in the lead's original form
+ * order — with no question labels, no pills, no badges, no
+ * "N Answers" link, no truncation, no ellipsis, and no fixed
+ * height. Long answers wrap fully and rows expand naturally.
+ *
+ * Each answer is independently hoverable (keyboard-focusable and
+ * tappable on touch): hovering one answer shows ONLY that
+ * answer's original Meta form question + complete answer in a
+ * viewport-safe tooltip. Never the whole form's question list.
  */
 export function AllMetaAnswersCell({
   answers,
@@ -44,9 +43,9 @@ export function AllMetaAnswersCell({
 
   return (
     <span className="block min-w-0">
-      <span className="flex min-w-0 flex-col items-start gap-1.5 py-0.5">
-        {answers.map((a) => (
-          <TooltipProvider key={a.key} delay={150}>
+      {answers.map((a) => (
+        <span key={a.key} className="block min-w-0">
+          <TooltipProvider delay={150}>
             <Tooltip
               open={pinnedKey === a.key ? true : undefined}
               onOpenChange={(open) => {
@@ -68,28 +67,22 @@ export function AllMetaAnswersCell({
                       setPinnedKey((prev) => (prev === a.key ? null : prev))
                     }
                     aria-label={`Answer: ${a.answer}. Question: ${a.question}`}
-                    title={`${a.question}: ${a.answer}`}
                     className={cn(
-                      "inline-flex max-w-full cursor-help items-start rounded-md border px-2 py-1 text-left text-[12.5px] leading-[18px]",
-                      "border-blue-200/70 bg-blue-50 text-blue-900",
-                      "dark:border-blue-400/20 dark:bg-blue-500/10 dark:text-blue-100",
-                      "hover:border-blue-300 hover:bg-blue-100",
-                      "dark:hover:border-blue-400/40 dark:hover:bg-blue-500/20",
+                      "block w-full min-w-0 cursor-help rounded px-1 text-left whitespace-normal break-words",
+                      "transition-colors hover:bg-muted hover:underline hover:underline-offset-2 hover:decoration-dotted",
                       "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
-                      // Wrapping, never truncation.
-                      "whitespace-normal break-words",
                     )}
                     style={{ overflowWrap: "anywhere" }}
                   />
                 }
               >
-                <span className="min-w-0 break-words">{a.answer}</span>
+                <span className="min-w-0 break-words whitespace-normal">{a.answer}</span>
               </TooltipTrigger>
               <TooltipContent
                 side="top"
                 align="start"
                 sideOffset={8}
-                className="z-[70] w-[min(92vw,22rem)] rounded-xl border border-border bg-popover px-3 py-2.5 text-left text-popover-foreground shadow-xl"
+                className="z-[70] w-[min(92vw,22rem)] max-w-[22rem] rounded-xl border border-border bg-popover px-3 py-2.5 text-left text-popover-foreground shadow-xl dark:bg-popover dark:text-popover-foreground"
               >
                 {tableName ? (
                   <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
@@ -111,8 +104,8 @@ export function AllMetaAnswersCell({
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-        ))}
-      </span>
+        </span>
+      ))}
     </span>
   );
 }

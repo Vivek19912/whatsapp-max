@@ -114,11 +114,12 @@ import { MetaColumnHeaderMenu } from '@/components/workspace/meta-header-menu';
 import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-dialog';
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
-import { isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
+import {
+  isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
+import { AllMetaFollowupKpis } from '@/components/workspace/workspace-followup-kpis';
 import {
   ALL_META_LEADS_ID,
   ALL_META_LEADS_LABEL,
-  ALL_META_COLUMN_IDS,
   buildAllMetaLeadsQuery,
   isAllMetaLeadsId,
   type AllMetaFormAnswer,
@@ -162,10 +163,14 @@ import {
   type ColumnOrderEntry,
 } from '@/lib/flows/workspace-column-order';
 import {
+  CALL_STATUS_OPTIONS,
+  FOLLOW_UP_STATUS_OPTIONS,
   isLeadQualityField,
   isLeadReceivedField,
+  LEAD_TYPE_OPTIONS,
   orderBusinessColumns,
   receivedDefaultLabel,
+  STAGE_OPTIONS,
 } from '@/lib/flows/workspace-defaults';
 import { LEAD_QUALITY_TOOLTIP } from '@/lib/meta-crm/lead-quality';
 import { adSourcePlatform } from '@/lib/flows/workspace-ad-source';
@@ -286,6 +291,13 @@ interface AllMetaLeadsPayload {
   tables: AllMetaLeadsTable[];
   rows: AllMetaLeadsRow[];
   customValues: Record<string, Record<string, string | null>>;
+  fieldsByFlow: Record<string, Array<{
+    id: string;
+    name: string;
+    field_type: string;
+    options: string[] | null;
+    default_value: string | null;
+  }> | undefined>;
   mediaByConversation: Record<string, Array<{ contentText: string | null; mediaUrl: string | null; contentType: string | null }>>;
   latestRecordingByContact: Record<string, {
     id: string;
@@ -1403,6 +1415,11 @@ export default function WorkspacePage() {
       leadType: allTypeFilter.length > 0 ? allTypeFilter : null,
       callStatus: effectiveColumns.callStatus.length > 0 ? effectiveColumns.callStatus : null,
       followUpStatus: effectiveColumns.followUpStatus.length > 0 ? effectiveColumns.followUpStatus : null,
+      // KPI bucket → server-side follow-up datetime range (same
+      // intersection as individual tables, so counts and filtering
+      // always agree).
+      nextFollowUpFrom: effectiveColumns.nextFollowUp?.from ?? null,
+      nextFollowUpTo: effectiveColumns.nextFollowUp?.to ?? null,
     });
     fetch(`/api/workspace/all-meta-leads?${qs}`, {
       signal: ctrl.signal,
@@ -1872,30 +1889,140 @@ export default function WorkspacePage() {
     [rowActionPending, allPayload]
   );
 
-  // All-view stage/type options (from the tables list + common defaults).
-  // Stage/Type values live per-flow; the filter offers the union of the
-  // canonical defaults plus any values seen on the current page.
-  const allStageOptions = useMemo(() => {
-    const base = [
-      "New Lead", "Contacted", "Qualified", "Quotation Required", "Quotation Sent",
-      "In Negotiation", "Ready To Book", "Booking Confirmed", "Follow Up",
-      "Amendment", "Lost", "Cancelled", "Invalid", "On Hold", "Not connected",
-    ];
-    const seen = new Set(base);
-    for (const r of allPayload?.rows ?? []) {
-      if (r.stage && !seen.has(r.stage)) seen.add(r.stage);
-    }
-    return [...seen];
-  }, [allPayload]);
+  // All-view stage/type options (canonical business defaults —
+  // the same option sets individual tables provision per flow).
+  const allStageOptions = useMemo(() => [...STAGE_OPTIONS], []);
+  const allTypeOptions = useMemo(() => [...LEAD_TYPE_OPTIONS], []);
 
-  const allTypeOptions = useMemo(() => {
-    const base = ["Fresh", "Hot", "Warm", "Cold", "Prospect"];
-    const seen = new Set(base);
-    for (const r of allPayload?.rows ?? []) {
-      if (r.type && !seen.has(r.type)) seen.add(r.type);
+  // All-view column-filter metadata: canonical business-column
+  // options (same sets individual tables provision), so the Call
+  // Status / Follow-Up Status sections render even though no single
+  // flow's field list backs the combined view.
+  const allColumnFilterOptions = useMemo(
+    () => ({
+      callStatus: [...CALL_STATUS_OPTIONS],
+      followUpStatus: [...FOLLOW_UP_STATUS_OPTIONS],
+      lastContactDate: false,
+      nextFollowUp: true,
+    }),
+    []
+  );
+
+  // All-view visible rows: hidden rows removed, pinned rows first
+  // (both stable — relative order within each group is the
+  // server's). The server RPC has no per-user prefs, so the client
+  // applies them here exactly like the individual fallback path.
+  const allHiddenIdSet = useMemo(
+    () => new Set(hiddenRows.map((h) => h.flow_run_id)),
+    [hiddenRows]
+  );
+  const allVisibleRows = useMemo(
+    () =>
+      orderPinnedFirst(
+        excludeHiddenRows(allPayload?.rows ?? [], allHiddenIdSet),
+        pinnedIds
+      ),
+    [allPayload, allHiddenIdSet, pinnedIds]
+  );
+  const allHiddenRows = useMemo(
+    () =>
+      hiddenRows.filter((h) =>
+        (allPayload?.rows ?? []).some((r) => r.runId === h.flow_run_id)
+      ),
+    [hiddenRows, allPayload]
+  );
+
+  // All Meta Leads: restore one hidden row via its ORIGINATING
+  // flow's prefs (per-user per-flow, same API as individual tables).
+  const handleAllRestoreRow = useCallback(
+    async (runId: string) => {
+      const row = allPayload?.rows.find((r) => r.runId === runId) ?? null;
+      const originFlowId = row?.flowId ?? null;
+      const key = originFlowId ? `${originFlowId}:${runId}` : runId;
+      if (!originFlowId || rowActionPending.has(key)) return;
+      const prevHidden = hiddenRows;
+      setHiddenRows((prev) => prev.filter((h) => h.flow_run_id !== runId));
+      setRowActionPending((prev) => new Set(prev).add(key));
+      try {
+        const res = await fetch(`/api/flows/${originFlowId}/row-prefs`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flow_run_id: runId, hidden: false }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(
+            (body as { error?: string }).error ?? 'Could not restore the row.'
+          );
+        }
+        toast.success('Row restored');
+        reloadTable();
+      } catch (err) {
+        setHiddenRows(prevHidden);
+        toast.error(
+          err instanceof Error ? err.message : 'Could not restore the row.'
+        );
+      } finally {
+        setRowActionPending((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
+    },
+    [allPayload, hiddenRows, rowActionPending, reloadTable]
+  );
+
+  // All Meta Leads: restore every hidden row in this view, grouped
+  // by originating flow (one precise per-row unhide each — never a
+  // per-flow wipe, so other hidden rows outside this view survive).
+  const handleAllRestoreAllHidden = useCallback(async () => {
+    if (rowActionPending.has('__all__') || allHiddenRows.length === 0) return;
+    const prevHidden = hiddenRows;
+    const ids = new Set(allHiddenRows.map((h) => h.flow_run_id));
+    setHiddenRows((prev) => prev.filter((h) => !ids.has(h.flow_run_id)));
+    setRowActionPending((prev) => new Set(prev).add('__all__'));
+    try {
+      const results = await Promise.allSettled(
+        allHiddenRows.map((h) => {
+          const row = allPayload?.rows.find((r) => r.runId === h.flow_run_id) ?? null;
+          const originFlowId = row?.flowId ?? null;
+          if (!originFlowId) throw new Error('Could not restore hidden rows.');
+          return fetch(`/api/flows/${originFlowId}/row-prefs`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flow_run_id: h.flow_run_id, hidden: false }),
+          }).then(async (res) => {
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(
+                (body as { error?: string }).error ?? 'Could not restore hidden rows.'
+              );
+            }
+          });
+        })
+      );
+      const failed = results.some((r) => r.status === 'rejected');
+      if (failed) throw new Error('Could not restore hidden rows.');
+      toast.success(
+        allHiddenRows.length > 0
+          ? `Restored ${allHiddenRows.length} hidden row${allHiddenRows.length === 1 ? '' : 's'}`
+          : 'Hidden rows restored'
+      );
+      reloadTable();
+    } catch (err) {
+      setHiddenRows(prevHidden);
+      toast.error(
+        err instanceof Error ? err.message : 'Could not restore hidden rows.'
+      );
+    } finally {
+      setRowActionPending((prev) => {
+        const next = new Set(prev);
+        next.delete('__all__');
+        return next;
+      });
     }
-    return [...seen];
-  }, [allPayload]);
+  }, [allHiddenRows, allPayload, hiddenRows, rowActionPending, reloadTable]);
 
   // All-view column visibility (virtual scope, localStorage-backed).
   const allVisibility = useWorkspaceVisibility(accountId, isAllMetaLeads ? ALL_META_LEADS_ID : null, []);
@@ -3080,30 +3207,15 @@ export default function WorkspacePage() {
           ) : null
         }
       />
-      {/* All Meta Leads KPI cards (mockup): Total Leads, Assigned Leads,
-          Meta Tables — existing-style cards where supported. Individual
-          tables keep their follow-up KPIs exactly as before. */}
+      {/* All Meta Leads aggregated follow-up cards — identical
+          styling and bucket-filter semantics as individual Meta
+          tables, aggregated across every Meta Lead Ads form. */}
       {isAllMetaLeads ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="border-border bg-card rounded-xl border p-4">
-            <p className="text-[13px] text-muted-foreground">Total Leads</p>
-            <p className="text-2xl font-semibold tabular-nums">
-              {allLoading && !allPayload ? '—' : (allPayload?.meta.total ?? 0).toLocaleString()}
-            </p>
-          </div>
-          <div className="border-border bg-card rounded-xl border p-4">
-            <p className="text-[13px] text-muted-foreground">Assigned Leads</p>
-            <p className="text-2xl font-semibold tabular-nums">
-              {allLoading && !allPayload ? '—' : (allPayload?.meta.assignedTotal ?? 0).toLocaleString()}
-            </p>
-          </div>
-          <div className="border-border bg-card rounded-xl border p-4">
-            <p className="text-[13px] text-muted-foreground">Meta Tables</p>
-            <p className="text-2xl font-semibold tabular-nums">
-              {(allPayload?.meta.tablesCount ?? allPayload?.tables.length ?? 0).toLocaleString()}
-            </p>
-          </div>
-        </div>
+        <AllMetaFollowupKpis
+          refreshSeq={refreshSeq}
+          activeBucket={kpiBucket}
+          onSelectBucket={selectKpiBucket}
+        />
       ) : null}
       {/* Follow-up workload KPIs: account- and table-scoped counts of
           the canonical "Next Follow-up Date & Time" values across ALL
@@ -3122,7 +3234,7 @@ export default function WorkspacePage() {
           onSelectBucket={selectKpiBucket}
         />
       ) : null}
-      {isMetaTable && followupFieldId ? (
+      {isMetaTable && (followupFieldId || isAllMetaLeads) ? (
         kpiBucket === null ? (
           <p className="text-xs text-muted-foreground">
             Click any card to filter leads by follow-up schedule. Click the
@@ -3131,7 +3243,7 @@ export default function WorkspacePage() {
         ) : (
           <div className="flex items-center gap-2 text-xs" aria-live="polite">
             <span className="text-muted-foreground">
-              Showing {payload?.meta.total ?? 0} {kpiBucket === null ? "leads" : KPI_BUCKET_NOUNS[kpiBucket]}
+              Showing {isAllMetaLeads ? (allPayload?.meta.total ?? 0) : (payload?.meta.total ?? 0)} {kpiBucket === null ? "leads" : KPI_BUCKET_NOUNS[kpiBucket]}
             </span>
             <Button
               variant="ghost"
@@ -3171,7 +3283,7 @@ export default function WorkspacePage() {
               appliedColumns={appliedColumns}
               onApplyFilters={applyFilters}
               teamMembers={teamMembers}
-              columnFilterOptions={columnFilterOptions}
+              columnFilterOptions={allColumnFilterOptions}
               tables={(allPayload?.tables ?? []).map((t) => ({
                 flowId: t.flowId,
                 tableName: t.tableName,
@@ -3198,7 +3310,7 @@ export default function WorkspacePage() {
               }}
               stageOptions={allStageOptions}
               typeOptions={allTypeOptions}
-              rows={(allPayload?.rows ?? []) as unknown as Array<{
+              rows={allVisibleRows as unknown as Array<{
                 runId: string;
                 flowId: string;
                 flowName: string | null;
@@ -3234,6 +3346,12 @@ export default function WorkspacePage() {
               loading={allLoading}
               error={allTableError}
               hiddenIds={allVisibility.hiddenIds}
+              onToggleVisibility={allVisibility.toggle}
+              onShowAllColumns={allVisibility.showAll}
+              onResetColumns={allVisibility.reset}
+              hiddenRows={allHiddenRows}
+              onRestoreRow={handleAllRestoreRow}
+              onRestoreAllHidden={handleAllRestoreAllHidden}
               onRowSelect={(row) =>
                 setSelected({
                   ...row,
@@ -3251,12 +3369,20 @@ export default function WorkspacePage() {
               isAgent={isAgent}
               canManageAssignments={canManageAssignments}
               onCustomSaved={handleAllCustomSaved}
+              manualAssign={manualAssignMetaLead}
+              onOpenFollowup={(row, fieldId, value) =>
+                openFollowupForRow(row, fieldId, value, row.flowId)
+              }
               valueOverrides={valueOverrides.key === allRequestKey ? valueOverrides.map : {}}
               customValues={allPayload?.customValues ?? {}}
+              fieldsByFlow={allPayload?.fieldsByFlow ?? {}}
               onTogglePin={handleAllTogglePin}
               onHideRow={handleAllHideRow}
               pinnedIds={pinnedIds}
               pendingIds={rowActionPending}
+              kpiBucket={kpiBucket}
+              kpiEmptyTitle={kpiBucket !== null ? KPI_EMPTY_TITLES[kpiBucket] : null}
+              onClearKpiBucket={() => selectKpiBucket(null)}
             />
           ) : (
             <>

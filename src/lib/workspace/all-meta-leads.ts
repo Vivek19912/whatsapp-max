@@ -32,6 +32,15 @@ import {
 import {
   META_SOURCE_COLUMN_KEY,
 } from "@/lib/meta-lead-ads/virtual-flow";
+import type { FlowTableColumn } from "@/lib/flows/flow-tables";
+import {
+  CALL_STATUS_OPTIONS,
+  FOLLOW_UP_STATUS_OPTIONS,
+  LEAD_TYPE_DEFAULT_VALUE,
+  LEAD_TYPE_OPTIONS,
+  LEAD_STAGE_DEFAULT_VALUE,
+  STAGE_OPTIONS,
+} from "@/lib/flows/workspace-defaults";
 
 /** Virtual selector id for the combined view (never a real flow UUID). */
 export const ALL_META_LEADS_ID = "all-meta-leads";
@@ -179,21 +188,27 @@ export function isEmailAnswerKey(key: string): boolean {
   return (EMAIL_KEYS as readonly string[]).includes(key);
 }
 
-/** All-view fixed column ids (visibility + order, never backend keys). */
+/** All-view fixed columns (stable visibility ids shared with the
+ *  existing Workspace visibility scheme: `flow:<key>` for column
+ *  slots and `core:*` for structural slots, so the Columns menu,
+ *  pastel header paint, and localStorage prefs behave exactly like
+ *  individual Meta tables. Business columns use per-view stable
+ *  synthetic keys (one slot for the combined view — per-row values
+ *  still resolve from each lead's OWN originating flow field). */
 export const ALL_META_COLUMN_IDS = {
-  row: "all:row",
-  name: "all:name",
-  phone: "all:phone",
-  submissionTime: "all:submission_time",
-  table: "all:table",
-  source: "all:source",
-  answers: "all:form_answers",
-  assignedTo: "all:assigned_to",
-  type: "all:type",
-  stage: "all:stage",
-  callStatus: "all:call_status",
-  followUp: "all:follow_up",
-  actions: "all:actions",
+  row: "core:row",
+  actions: "core:actions",
+  name: "flow:name",
+  phone: "flow:phone",
+  submissionTime: "flow:submission_time",
+  table: "flow:meta_table",
+  source: "flow:meta_lead_source",
+  answers: "flow:form_answers",
+  assignedTo: "flow:all_assigned_to",
+  type: "flow:all_lead_type",
+  stage: "flow:all_stage",
+  callStatus: "flow:all_call_status",
+  followUp: "flow:all_follow_up",
 } as const;
 
 export type AllMetaColumnId =
@@ -235,6 +250,58 @@ export const ALL_META_COLUMN_LABELS: Record<string, string> = {
   [ALL_META_COLUMN_IDS.actions]: "Actions",
 };
 
+/**
+ * Fixed All-view columns as shared Workspace flow-column entries, in
+ * spec order. Rendered through the SAME table primitives, header
+ * paint, and cell styling as individual Meta tables — the only
+ * special column is Form Answers (plain wrapped text, one answer
+ * per line). Business slots reuse per-row originating-flow field
+ * definitions at render time; these entries only drive header
+ * paint, the Columns menu, and visibility identity.
+ */
+export function allMetaFlowColumns(): FlowTableColumn[] {
+  const col = (
+    key: string,
+    label: string,
+    system: boolean,
+  ): FlowTableColumn => ({ key, label, system });
+  return [
+    col("submission_time", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.submissionTime], true),
+    col("name", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.name], true),
+    col("phone", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.phone], true),
+    col("meta_table", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.table], false),
+    col(META_SOURCE_COLUMN_KEY, ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.source], false),
+    col("form_answers", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.answers], false),
+    col("all_assigned_to", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.assignedTo], false),
+    col("all_lead_type", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.type], false),
+    col("all_stage", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.stage], false),
+    col("all_call_status", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.callStatus], false),
+    col("all_follow_up", ALL_META_COLUMN_LABELS[ALL_META_COLUMN_IDS.followUp], false),
+  ];
+}
+
+/** Canonical All-view business column specs (fallback when a flow lacks its own field row). */
+export interface AllMetaBusinessSpec {
+  /** Stable key matching AllMetaLeadsRow.fieldIds entries. */
+  key: "assignedTo" | "type" | "stage" | "callStatus" | "followUp";
+  /** Canonical stored field name (same identity individual tables match by). */
+  name: string;
+  field_type: "single_select" | "datetime";
+  options: string[] | null;
+  default_value: string | null;
+}
+
+export const ALL_META_BUSINESS_SPECS: readonly AllMetaBusinessSpec[] = [
+  { key: "assignedTo", name: "Assigned To", field_type: "single_select", options: ["Unassigned"], default_value: null },
+  { key: "type", name: "Lead Type", field_type: "single_select", options: [...LEAD_TYPE_OPTIONS], default_value: LEAD_TYPE_DEFAULT_VALUE },
+  { key: "stage", name: "Stage", field_type: "single_select", options: [...STAGE_OPTIONS], default_value: LEAD_STAGE_DEFAULT_VALUE },
+  { key: "callStatus", name: "Call Status", field_type: "single_select", options: [...CALL_STATUS_OPTIONS], default_value: null },
+  { key: "followUp", name: "Next Follow-up Date & Time", field_type: "datetime", options: null, default_value: null },
+];
+
+/** Follow-up Status options for the All-view column filter (canonical per-flow options). */
+export const ALL_META_FOLLOW_UP_STATUS_OPTIONS: readonly string[] = FOLLOW_UP_STATUS_OPTIONS;
+
 /** Query params for GET /api/workspace/all-meta-leads (client → server). */
 export interface AllMetaLeadsQuery {
   search?: string | null;
@@ -248,6 +315,9 @@ export interface AllMetaLeadsQuery {
   leadType?: string[] | null;
   callStatus?: string[] | null;
   followUpStatus?: string[] | null;
+  /** Next-follow-up half-open [from, to) UTC ISO bounds (KPI bucket filter). */
+  nextFollowUpFrom?: string | null;
+  nextFollowUpTo?: string | null;
 }
 
 /** Compose the All-view table query string (server paginates the set). */
@@ -275,5 +345,7 @@ export function buildAllMetaLeadsQuery(q: AllMetaLeadsQuery): string {
   for (const v of q.followUpStatus ?? []) {
     if (v.trim() !== "") qs.append("followUpStatus", v.trim());
   }
+  if (q.nextFollowUpFrom) qs.set("nextFollowUpFrom", q.nextFollowUpFrom);
+  if (q.nextFollowUpTo) qs.set("nextFollowUpTo", q.nextFollowUpTo);
   return qs.toString();
 }
