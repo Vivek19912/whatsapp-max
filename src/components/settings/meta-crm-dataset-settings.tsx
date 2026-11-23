@@ -16,11 +16,20 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -142,6 +151,13 @@ export function MetaCrmDatasetSettings() {
   const [regBusy, setRegBusy] = useState(false);
   const [regErrors, setRegErrors] = useState<Record<string, string>>({});
 
+  // Local-only removal (never touches Meta): the dialog target plus
+  // a live "currently selected by CRM Feedback" check.
+  const [removeTarget, setRemoveTarget] = useState<SavedDataset | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeBlocked, setRemoveBlocked] = useState(false);
+  const [removeCheckPending, setRemoveCheckPending] = useState(false);
+
   const disabled = !canEditSettings || profileLoading || busy;
 
   const loadDatasets = useCallback(async () => {
@@ -254,6 +270,78 @@ export function MetaCrmDatasetSettings() {
       toast.success("Dataset ID copied.");
     } catch {
       toast.error("Could not copy the Dataset ID.");
+    }
+  }
+
+  /**
+   * Open the remove confirmation for one row. Before showing the
+   * action, check live CRM Feedback config: removing the dataset
+   * it currently uses would silently break sending, so the dialog
+   * warns and the server enforces (409) until feedback is
+   * disabled or pointed elsewhere.
+   */
+  async function openRemove(dataset: SavedDataset) {
+    setRemoveTarget(dataset);
+    setRemoveBlocked(false);
+    setRemoveCheckPending(true);
+    try {
+      const res = await fetch("/api/integrations/meta-crm/config", { cache: "no-store" });
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        config?: { enabled?: boolean; datasetId?: string | null } | null;
+      };
+      const cfg = json.config ?? null;
+      setRemoveBlocked(
+        !!cfg &&
+          cfg.enabled === true &&
+          typeof cfg.datasetId === "string" &&
+          cfg.datasetId !== "" &&
+          cfg.datasetId === dataset.datasetId,
+      );
+    } catch {
+      // Unknown counts as not-blocked: the server re-checks
+      // authoritatively on confirm, so a failed probe can never
+      // bypass the guard — it only skips the advance warning.
+      setRemoveBlocked(false);
+    } finally {
+      setRemoveCheckPending(false);
+    }
+  }
+
+  function closeRemove() {
+    if (removing) return;
+    setRemoveTarget(null);
+    setRemoveBlocked(false);
+  }
+
+  async function handleRemove() {
+    if (!removeTarget || removing) return;
+    setRemoving(true);
+    try {
+      const res = await fetch(
+        `/api/integrations/meta-crm/datasets/${encodeURIComponent(removeTarget.id)}`,
+        { method: "DELETE" },
+      );
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        code?: string;
+        error?: string;
+      };
+      if (!res.ok || !json.ok) {
+        throw new Error(
+          typeof json.error === "string" && json.error
+            ? json.error
+            : `Could not remove the dataset (${res.status}).`,
+        );
+      }
+      toast.success("Dataset removed from WhatsApp Max. It still exists in Meta Events Manager.");
+      setRemoveTarget(null);
+      setRemoveBlocked(false);
+      await loadDatasets();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not remove the dataset.");
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -603,7 +691,7 @@ export function MetaCrmDatasetSettings() {
                   <TableHead>Type</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Date saved</TableHead>
-                  <TableHead className="text-right">Copy</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -616,9 +704,23 @@ export function MetaCrmDatasetSettings() {
                     <TableCell>{d.creationStatus}</TableCell>
                     <TableCell className="whitespace-nowrap">{formatDate(d.createdAt)}</TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" onClick={() => handleCopy(d.datasetId)} aria-label={`Copy dataset ID ${d.datasetId}`}>
-                        <Copy className="size-4" />
-                      </Button>
+                      <div className="inline-flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => handleCopy(d.datasetId)} aria-label={`Copy dataset ID ${d.datasetId}`}>
+                          <Copy className="size-4" />
+                        </Button>
+                        {canEditSettings && !profileLoading ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void openRemove(d)}
+                            aria-label={`Remove dataset ${d.datasetName}`}
+                            title={`Remove dataset ${d.datasetName}`}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        ) : null}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -627,6 +729,61 @@ export function MetaCrmDatasetSettings() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={removeTarget !== null} onOpenChange={(open) => { if (!open) closeRemove(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Remove CRM Dataset</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove this CRM dataset from WhatsApp Max?
+            </DialogDescription>
+          </DialogHeader>
+          {removeTarget ? (
+            <dl className="grid gap-2 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-muted-foreground">Dataset Name</dt>
+                <dd className="font-medium text-foreground">{removeTarget.datasetName || "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Business Portfolio ID</dt>
+                <dd className="font-mono break-all text-foreground">{removeTarget.businessPortfolioId || "—"}</dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-muted-foreground">Meta Dataset ID</dt>
+                <dd className="font-mono break-all text-foreground">{removeTarget.datasetId}</dd>
+              </div>
+            </dl>
+          ) : null}
+          <p className="rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+            This will only remove the dataset registration from WhatsApp Max.
+            Your dataset and its events will remain unchanged in Meta Events Manager.
+          </p>
+          {removeBlocked ? (
+            <p className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-foreground" role="alert">
+              This dataset is currently used by CRM Feedback. Disable CRM feedback
+              (or select a different dataset) before removing it.
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={closeRemove} disabled={removing}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleRemove()}
+              disabled={removing || removeCheckPending || removeBlocked || !canEditSettings}
+            >
+              {removing ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" /> Removing…
+                </>
+              ) : (
+                "Remove from WhatsApp Max"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
