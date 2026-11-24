@@ -256,6 +256,14 @@ export function AllMetaLeadsView(props: {
   customValues: Record<string, Record<string, string | null>>;
   fieldsByFlow: Record<string, AllMetaFieldDef[] | undefined>;
   latestRecordingByContact: Record<string, LatestRecordingEntry>;
+  /**
+   * CRM-eligible Workspace table ids (Settings → Meta → CRM
+   * Integration → Select Workspace Tables). Null/omitted =
+   * unrestricted: every row stays editable. An explicit list locks
+   * the Lead Quality dropdown for rows whose ORIGINATING flow id
+   * is absent — evaluated per row, never by the combined view.
+   */
+  crmAllowedFlowIds?: string[] | null;
   onTogglePin: (flowId: string, runId: string) => void;
   onHideRow: (flowId: string, runId: string) => void;
   pinnedIds: ReadonlySet<string>;
@@ -308,6 +316,7 @@ export function AllMetaLeadsView(props: {
     customValues,
     fieldsByFlow,
     latestRecordingByContact,
+    crmAllowedFlowIds,
     onTogglePin,
     onHideRow,
     pinnedIds,
@@ -685,6 +694,7 @@ export function AllMetaLeadsView(props: {
                 onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
                 members={teamMembers}
                 twoLineClamp={isWideTextColumnName(field.name)}
+                crmAllowedFlowIds={crmAllowedFlowIds}
               />
             ) : (
               <span>{storedValue ?? ""}</span>
@@ -707,6 +717,7 @@ export function AllMetaLeadsView(props: {
             onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
             members={teamMembers}
             twoLineClamp={isWideTextColumnName(field.name)}
+            crmAllowedFlowIds={crmAllowedFlowIds}
             onEditIntercept={
               isWorkspaceFollowupFieldName(field.name)
                 ? () =>
@@ -763,6 +774,7 @@ export function AllMetaLeadsView(props: {
                 onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
                 members={teamMembers}
                 twoLineClamp={isWideTextColumnName(field.name)}
+                crmAllowedFlowIds={crmAllowedFlowIds}
               />
             ) : (
               <span>{shown}</span>
@@ -785,6 +797,7 @@ export function AllMetaLeadsView(props: {
             onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
             members={teamMembers}
             twoLineClamp={isWideTextColumnName(field.name)}
+            crmAllowedFlowIds={crmAllowedFlowIds}
             onEditIntercept={
               isWorkspaceFollowupFieldName(field.name)
                 ? () =>

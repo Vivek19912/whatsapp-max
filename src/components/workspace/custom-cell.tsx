@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
-import { Check, ExternalLink, Loader2 } from "lucide-react";
+import { Check, ExternalLink, Loader2, Lock } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
@@ -220,6 +220,14 @@ function deliverySuffix(status: string | undefined) {
 }
 
 /**
+ * Shown when the Lead Quality dropdown is locked because the lead's
+ * originating Workspace table is not selected for Meta CRM events.
+ * The badge stays visible; only selection is disabled.
+ */
+export const CRM_TABLE_LOCKED_MESSAGE =
+  "Lead Quality is read-only because this Workspace table is not selected for Meta CRM events. Enable this table in CRM Integration settings to edit Lead Quality.";
+
+/**
  * Lead Quality dropdown with per-option delivery states. Fetches
  * the lead's recorded event states when opened (never on table
  * render), refreshes after each save, and re-polls while open if
@@ -235,6 +243,7 @@ function LeadQualitySelect({
   shown,
   saving,
   onPick,
+  readOnly,
 }: {
   field: WorkspaceField;
   flowId: string;
@@ -243,6 +252,13 @@ function LeadQualitySelect({
   saving: boolean;
   /** Persist the pick; resolves when the save (and its outcome) settles. */
   onPick: (value: string | null) => Promise<unknown>;
+  /**
+   * Locked mode: the originating table is not selected for Meta
+   * CRM events. Renders the saved badge plus recorded delivery
+   * state with no interactive dropdown — nothing can be selected,
+   * saved, or sent from here.
+   */
+  readOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [states, setStates] = useState<Record<string, string>>({});
@@ -281,6 +297,37 @@ function LeadQualitySelect({
   }, [open, hasPending, fetchStates]);
 
   const selectedChip = shown ? getSelectChip(field.name, shown) : null;
+  const selectedEvent = shown ? leadQualityToEvent(shown) : null;
+
+  // Locked mode: badge + recorded delivery state only. Badges are
+  // fetched once on mount (no dropdown ever opens, so there is no
+  // open-time fetch); nothing here can save or send.
+  useEffect(() => {
+    if (!readOnly) return;
+    // Intentional mount fetch (mirrors the open-trigger fetch
+    // below): locked cells never open, so badges would otherwise
+    // never load. Read-only, no save path is reachable from here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchStates();
+  }, [readOnly, fetchStates]);
+
+  if (readOnly) {
+    return (
+      <span
+        className="inline-flex items-center gap-1.5"
+        title={CRM_TABLE_LOCKED_MESSAGE}
+        aria-label={`${shown ?? ""}. ${CRM_TABLE_LOCKED_MESSAGE}`}
+      >
+        {selectedChip ? (
+          <SelectChipView chip={selectedChip}>{shown as string}</SelectChipView>
+        ) : (
+          <span>{shown ?? ""}</span>
+        )}
+        {selectedEvent && selectedEvent in states ? deliverySuffix(states[selectedEvent]) : null}
+        <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      </span>
+    );
+  }
   // Legacy columns provisioned before "Lead" became an explicit
   // option still carry the four-outcome option set — offer the
   // canonical default there too (no migration, no option
@@ -330,7 +377,9 @@ function LeadQualitySelect({
             )}
           </SelectValue>
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent
+          className="w-max min-w-56 max-w-[min(22rem,calc(100vw-2rem))] [&_[data-slot=select-item-text]]:break-words [&_[data-slot=select-item-text]]:whitespace-normal [&_[data-slot=select-item-text]]:flex-wrap"
+        >
           <SelectItem value="__clear__">
             <span className="text-muted-foreground">Clear</span>
           </SelectItem>
@@ -438,6 +487,7 @@ export function CustomCell({
   saveAssignee,
   twoLineClamp = false,
   members,
+  crmAllowedFlowIds,
 }: {
   flowId: string;
   runId: string;
@@ -477,6 +527,15 @@ export function CustomCell({
    * available.
    */
   members?: readonly AssigneeMember[];
+  /**
+   * CRM-eligible Workspace table ids (Settings → Meta → CRM
+   * Integration → Select Workspace Tables). Null/omitted =
+   * unrestricted (never configured): everything stays editable.
+   * An explicit list locks the Lead Quality dropdown for rows
+   * whose originating flow id is absent — badge stays visible,
+   * selection is disabled. Other columns ignore this entirely.
+   */
+  crmAllowedFlowIds?: string[] | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -550,6 +609,17 @@ export function CustomCell({
 
   const shown =
     displayWorkspaceValue(field, stored ?? null) ?? defaultBusinessValue(field);
+
+  // CRM table gate: the Lead Quality dropdown is read-only for rows
+  // whose originating table is absent from an explicit CRM table
+  // selection. Null/omitted = unrestricted (never configured), so
+  // only an explicit allowlist can lock a cell. Other columns
+  // ignore this entirely. (Backend enforces the same rule on
+  // send; this only removes the UI affordance.)
+  const crmLocked =
+    isLeadQualityField(field) &&
+    crmAllowedFlowIds != null &&
+    !crmAllowedFlowIds.includes(flowId);
 
   // "Assigned To" is dynamic: Clear + Unassigned + the live account
   // roster (Settings → Team Members via /api/account/members).
@@ -714,6 +784,7 @@ export function CustomCell({
           runId={runId}
           shown={shown}
           saving={saving}
+          readOnly={crmLocked}
           onPick={(v) => save(v, { triggerCrmEvent: v !== null })}
         />
       );

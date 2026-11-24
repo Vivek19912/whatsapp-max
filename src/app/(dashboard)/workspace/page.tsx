@@ -970,6 +970,12 @@ export default function WorkspacePage() {
   // truth is the source; default ON. Best-effort: a failed fetch
   // leaves `true` so the column keeps rendering exactly as before.
   const [showLeadQualityColumn, setShowLeadQualityColumn] = useState(true);
+  // CRM-eligible Workspace table ids (same settings page). Null =
+  // unrestricted (never configured): every quality dropdown
+  // stays editable. An explicit list locks the dropdown for rows
+  // whose originating table is absent. Best-effort: a failed fetch
+  // leaves null (editable), since the backend still blocks sending.
+  const [crmAllowedFlowIds, setCrmAllowedFlowIds] = useState<string[] | null>(null);
   useEffect(() => {
     if (accountId === null) return;
     const ctrl = new AbortController();
@@ -977,10 +983,15 @@ export default function WorkspacePage() {
       .then(async (res) => {
         if (!res.ok) return;
         const json = (await res.json().catch(() => null)) as {
-          config?: { showLeadQuality?: boolean } | null;
+          config?: { showLeadQuality?: boolean; allowedFlowIds?: unknown } | null;
         } | null;
         if (ctrl.signal.aborted || !json || !json.config) return;
         setShowLeadQualityColumn(json.config.showLeadQuality !== false);
+        setCrmAllowedFlowIds(
+          Array.isArray(json.config.allowedFlowIds)
+            ? json.config.allowedFlowIds.filter((v): v is string => typeof v === "string")
+            : null,
+        );
       })
       .catch(() => {});
     return () => ctrl.abort();
@@ -2720,6 +2731,7 @@ export default function WorkspacePage() {
                 ? (receivedDefaults[row.runId] ?? null)
                 : null)
             }
+            crmAllowedFlowIds={crmAllowedFlowIds}
             canEdit={
               // Agents work their own Meta leads; reassignment of the
               // Assigned To cell requires the Manage Assignments grant
@@ -3366,6 +3378,7 @@ export default function WorkspacePage() {
               customValues={allPayload?.customValues ?? {}}
               fieldsByFlow={allPayload?.fieldsByFlow ?? {}}
               latestRecordingByContact={allPayload?.latestRecordingByContact ?? {}}
+              crmAllowedFlowIds={crmAllowedFlowIds}
               onTogglePin={handleAllTogglePin}
               onHideRow={handleAllHideRow}
               pinnedIds={pinnedIds}
