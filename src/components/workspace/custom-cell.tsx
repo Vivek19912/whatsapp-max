@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,7 +41,7 @@ import {
   type SelectChip,
 } from "@/lib/flows/workspace-select-chips";
 import { defaultBusinessValue, isLeadQualityField } from "@/lib/flows/workspace-defaults";
-import { LEAD_QUALITY_DEFAULT_VALUE } from "@/lib/meta-crm/lead-quality";
+import { LEAD_QUALITY_DEFAULT_VALUE, leadQualityToEvent } from "@/lib/meta-crm/lead-quality";
 import { TextCellPopover } from "./text-cell-popover";
 
 /**
@@ -170,6 +170,190 @@ export function OptionSearchBox({
         className="h-7 text-[13px]"
       />
     </div>
+  );
+}
+
+/**
+ * Delivery suffix for one Lead Quality option: the recorded
+ * per-lead state for the mapped Meta event, if any. Kept
+ * text-only so the status chip keeps its colors; the trigger
+ * still shows the plain status chip (selected value vs delivery
+ * state stay visually distinct).
+ */
+/**
+ * Delivery badge text for a Lead Quality option, given the
+ * recorded ledger status for its mapped event (undefined = never
+ * recorded). Pure so the dropdown, the save toast, and tests share
+ * one wording: Sent only after Meta confirms delivery, Queued
+ * while pending, honest terminal states otherwise.
+ */
+export function leadQualityDeliveryLabel(status: string | undefined): string {
+  switch (status) {
+    case "sent":
+      return "✓ Sent";
+    case "pending":
+      return "Queued";
+    case "failed":
+      return "Failed";
+    case "skipped":
+      return "Skipped";
+    default:
+      return "Not sent";
+  }
+}
+
+function deliverySuffix(status: string | undefined) {
+  const label = leadQualityDeliveryLabel(status);
+  if (status === "sent") {
+    return <span className="text-xs font-normal text-emerald-600"> · {label}</span>;
+  }
+  if (status === "pending") {
+    return <span className="text-xs font-normal text-amber-600"> · {label}</span>;
+  }
+  if (status === "failed") {
+    return <span className="text-xs font-normal text-destructive"> · {label}</span>;
+  }
+  if (status === "skipped") {
+    return <span className="text-xs font-normal text-muted-foreground"> · {label}</span>;
+  }
+  return <span className="text-muted-foreground text-xs font-normal"> · {label}</span>;
+}
+
+/**
+ * Lead Quality dropdown with per-option delivery states. Fetches
+ * the lead's recorded event states when opened (never on table
+ * render), refreshes after each save, and re-polls while open if
+ * anything is still queued — so Sent/Queued badges track the real
+ * ledger across refreshes, tabs, and salespeople. Selecting an
+ * already-recorded option still saves the status; the save path
+ * dedups against the ledger and reports instead of sending.
+ */
+function LeadQualitySelect({
+  field,
+  flowId,
+  runId,
+  shown,
+  saving,
+  onPick,
+}: {
+  field: WorkspaceField;
+  flowId: string;
+  runId: string;
+  shown: string | null;
+  saving: boolean;
+  /** Persist the pick; resolves when the save (and its outcome) settles. */
+  onPick: (value: string | null) => Promise<unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [states, setStates] = useState<Record<string, string>>({});
+  const [optionQuery, setOptionQuery] = useState("");
+
+  const fetchStates = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/integrations/meta-crm/lead-events?flow_id=${encodeURIComponent(flowId)}&run_id=${encodeURIComponent(runId)}`,
+        { cache: "no-store" },
+      );
+      const body = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        events?: Array<{ eventName: string; status: string }>;
+      } | null;
+      if (!res.ok || !body?.ok) return;
+      const map: Record<string, string> = {};
+      for (const e of body.events ?? []) {
+        if (typeof e.eventName === "string" && e.eventName !== "") map[e.eventName] = e.status;
+      }
+      setStates(map);
+    } catch {
+      // Badges stay empty; the save path still enforces + reports.
+    }
+  }, [flowId, runId]);
+
+  const hasPending = Object.values(states).some((s) => s === "pending");
+  useEffect(() => {
+    if (!open || !hasPending) return;
+    // Subscription-style refresh while queued work may still land;
+    // stops on close (cleanup) or once nothing is pending.
+    const t = window.setInterval(() => {
+      void fetchStates();
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [open, hasPending, fetchStates]);
+
+  const selectedChip = shown ? getSelectChip(field.name, shown) : null;
+  // Legacy columns provisioned before "Lead" became an explicit
+  // option still carry the four-outcome option set — offer the
+  // canonical default there too (no migration, no option
+  // rewrite), first like the current spec order. Newly
+  // provisioned columns already include it; never duplicated.
+  const fieldOptions =
+    isLeadQualityField(field) &&
+    !(field.options ?? []).some((o) => o === LEAD_QUALITY_DEFAULT_VALUE)
+      ? [LEAD_QUALITY_DEFAULT_VALUE, ...(field.options ?? [])]
+      : (field.options ?? []);
+  const showOptionSearch = fieldOptions.length > OPTION_SEARCH_THRESHOLD;
+  const visibleOptions = showOptionSearch
+    ? filterCellOptions(
+        fieldOptions.map((o) => ({ value: o, label: o })),
+        optionQuery,
+      )
+    : fieldOptions.map((o) => ({ value: o, label: o }));
+
+  return (
+    <span onClick={(e) => e.stopPropagation()}>
+      <Select
+        value={shown ?? ""}
+        disabled={saving}
+        onValueChange={(v) => {
+          void (async () => {
+            await onPick(v === "__clear__" ? null : v);
+            void fetchStates();
+          })();
+        }}
+        onOpenChange={(o) => {
+          setOpen(o);
+          if (o) {
+            // Fetch on open (event-driven): the popup is unmounted
+            // while closed, so there is nothing to badge otherwise.
+            void fetchStates();
+          } else {
+            setOptionQuery("");
+          }
+        }}
+      >
+        <SelectTrigger className={SELECT_CELL_TRIGGER_CLASS}>
+          <SelectValue placeholder="">
+            {shown == null || shown === "" ? undefined : selectedChip ? (
+              <SelectChipView chip={selectedChip}>{shown}</SelectChipView>
+            ) : (
+              shown
+            )}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__clear__">
+            <span className="text-muted-foreground">Clear</span>
+          </SelectItem>
+          {showOptionSearch && (
+            <OptionSearchBox
+              query={optionQuery}
+              onQuery={setOptionQuery}
+              fieldName={field.name}
+            />
+          )}
+          {visibleOptions.map((o) => {
+            const chip = getSelectChip(field.name, o.value);
+            const eventName = leadQualityToEvent(o.value);
+            return (
+              <SelectItem key={o.value} value={o.value}>
+                {chip ? <SelectChipView chip={chip}>{o.label}</SelectChipView> : o.label}
+                {eventName ? deliverySuffix(states[eventName]) : null}
+              </SelectItem>
+            );
+          })}
+        </SelectContent>
+      </Select>
+    </span>
   );
 }
 
@@ -304,7 +488,7 @@ export function CustomCell({
     if (editing) inputRef.current?.focus();
   }, [editing]);
 
-  async function save(raw: unknown): Promise<boolean> {
+  async function save(raw: unknown, opts?: { triggerCrmEvent?: boolean }): Promise<boolean> {
     setSaving(true);
     try {
       let stored: string | null;
@@ -322,14 +506,36 @@ export function CustomCell({
             field_id: field.id,
             flow_run_id: runId,
             value: raw,
+            // Explicit Lead Quality dropdown selection only: asks
+            // the server to auto-enqueue the mapped CRM event
+            // (deduped by the ledger). Absent everywhere else.
+            ...(opts?.triggerCrmEvent === true ? { triggerCrmEvent: true } : {}),
           }),
         });
         const json = (await res.json().catch(() => null)) as {
           error?: string;
           value?: string | null;
+          crmEvent?: {
+            state: "queued" | "duplicate" | "blocked";
+            eventName?: string;
+            deliveryStatus?: string;
+            reason?: string;
+            message?: string;
+          } | null;
         } | null;
         if (!res.ok) throw new Error(json?.error ?? "Could not save the value.");
         stored = json?.value ?? null;
+        // Surface the auto-send outcome (status itself is already
+        // saved above; these toasts never block it).
+        const crm = json?.crmEvent ?? null;
+        if (crm?.state === "queued") {
+          toast.success(crm.message || "Event queued for delivery to Meta.");
+        } else if (crm?.state === "duplicate") {
+          if (crm.deliveryStatus === "sent") toast.warning(crm.message || "Already sent to Meta.");
+          else toast.info(crm.message || "Already recorded — no duplicate event was created.");
+        } else if (crm?.state === "blocked" && crm.message) {
+          toast.error(crm.message);
+        }
       }
       onSaved(field.id, runId, stored);
       setEditing(false);
@@ -495,6 +701,23 @@ export function CustomCell({
   }
 
   if (field.field_type === "single_select") {
+    // Lead Quality dropdown: per-option delivery badges from the
+    // recorded ledger (fetched on open, refreshed after saves and
+    // while queued). Selecting an option saves the status AND
+    // auto-enqueues the mapped event server-side (deduped); other
+    // single-selects keep the plain save path below.
+    if (isLeadQualityField(field)) {
+      return (
+        <LeadQualitySelect
+          field={field}
+          flowId={flowId}
+          runId={runId}
+          shown={shown}
+          saving={saving}
+          onPick={(v) => save(v, { triggerCrmEvent: v !== null })}
+        />
+      );
+    }
     // Business dropdowns paint Sheets-style chips in both the
     // selected value and every option (same pure mapping, so the
     // two can never disagree). Unknown/legacy values render as

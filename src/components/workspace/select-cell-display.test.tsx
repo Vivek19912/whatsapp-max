@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { CustomCell } from "./custom-cell";
-import { filterCellOptions, OPTION_SEARCH_THRESHOLD } from "./custom-cell";
+import { filterCellOptions, leadQualityDeliveryLabel, OPTION_SEARCH_THRESHOLD } from "./custom-cell";
 import type { WorkspaceField } from "@/lib/flows/workspace-fields";
 
 // ---------------------------------------------------------------------------
@@ -104,8 +104,9 @@ describe("1–5. selected and empty cells show no visible arrow", () => {
 
   it("both select branches share one trigger style (no one-off fixes)", () => {
     const uses = cellSrc.split("SELECT_CELL_TRIGGER_CLASS").length - 1;
-    // Definition + assignee trigger + single-select trigger.
-    expect(uses).toBe(3);
+    // Definition + assignee trigger + single-select trigger +
+    // Lead Quality trigger (badges reuse the same shared style).
+    expect(uses).toBe(4);
   });
 });
 
@@ -127,8 +128,7 @@ describe("6+7. the whole cell opens the existing dropdown", () => {
   });
 });
 
-describe("8. options remain unchanged (search only filters display)", () => {
-  it("filter matches labels and values case-insensitively", () => {
+describe("8. options remain unchanged (search only filters display)", () => {  it("filter matches labels and values case-insensitively", () => {
     const options = [
       { value: "NEW_LEAD", label: "New Lead" },
       { value: "CONTACTED", label: "Contacted" },
@@ -233,5 +233,25 @@ describe("17+18. text and date fields are unaffected", () => {
 describe("19. column wiring unchanged", () => {
   it("the table still renders CustomCell for business fields", () => {
     expect(pageSrc).toContain("<CustomCell");
+  });
+});
+
+describe("20. Lead Quality delivery badges", () => {
+  it("labels recorded states honestly and never claims Sent prematurely", () => {
+    expect(leadQualityDeliveryLabel("sent")).toBe("✓ Sent");
+    expect(leadQualityDeliveryLabel("pending")).toBe("Queued");
+    expect(leadQualityDeliveryLabel("failed")).toBe("Failed");
+    expect(leadQualityDeliveryLabel("skipped")).toBe("Skipped");
+    // Never-recorded (or unknown) states read as unsent.
+    expect(leadQualityDeliveryLabel(undefined)).toBe("Not sent");
+    expect(leadQualityDeliveryLabel("bogus")).toBe("Not sent");
+  });
+
+  it("sends the explicit-selection flag only from the Lead Quality dropdown", () => {
+    // Only a real option pick flips the flag (never Clear, never the
+    // assignee or generic single-select paths, which call save
+    // without it).
+    expect(cellSrc).toContain("onPick={(v) => save(v, { triggerCrmEvent: v !== null })}");
+    expect(cellSrc).toContain("triggerCrmEvent === true");
   });
 });

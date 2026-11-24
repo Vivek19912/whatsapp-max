@@ -128,4 +128,13 @@ describe("MetaCrmFeedbackSettings", () => {
     // An explicit empty selection warns that sending is blocked.
     expect(src).toContain("blocked for all tables");
   });
+
+  it("never truncates table names (wrap in a roomy popup)", () => {
+    // Full names wrap onto multiple lines instead of ellipsis.
+    expect(src).toContain("whitespace-normal break-words");
+    expect(src).not.toContain('className="truncate"');
+    // Roomy popup that stays on-screen on small viewports.
+    expect(src).toContain("w-96");
+    expect(src).toContain("max-w-[calc(100vw-2rem)]");
+  });
 });

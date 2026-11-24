@@ -1766,10 +1766,10 @@ export default function WorkspacePage() {
         const field = customFields.find((f) => f.id === fieldId);
         if (field && isAssigneeField(field)) reloadTable();
       }
-      // A quality-status save stores the value ONLY (never sends —
-      // delivery is the explicit Send to Meta button). Open the
-      // lead drawer so the backend-generated payload preview + Send
-      // button are immediately visible for the new status.
+      // A quality-status save stores the value and auto-enqueues
+      // the mapped Meta event server-side (deduped). Open the lead
+      // drawer so the delivery status is immediately visible for
+      // the new status.
       const qualityField = customFields.find((f) => f.id === fieldId);
       if (qualityField && isLeadQualityField(qualityField)) {
         const row = (payload?.rows ?? []).find((r) => r.runId === runId) ?? null;
@@ -3979,14 +3979,14 @@ export default function WorkspacePage() {
                     />
                   );
                 })()}
-                {/* Manual Meta CRM send (Meta tables only): saving a
-                    quality status never sends — this section
-                    shows the backend-generated payload preview with
-                    an explicit Send to Meta button. Flow Tables never
-                    see it. Keyed by run + save bump so a fresh mount
-                    (fresh preview) follows every status save; the
-                    preview otherwise survives refresh by server
-                    re-assembly. All-view rows use their originating flow. */}
+                {/* Meta CRM delivery status (Meta tables only): selecting
+                    a quality status auto-sends the mapped event — this
+                    section reports delivery (never the payload UI).
+                    Flow Tables never see it. Keyed by run + save bump
+                    so a fresh mount (fresh preview) follows every
+                    status save; the preview otherwise survives refresh
+                    by server re-assembly. All-view rows use their
+                    originating flow. */}
                 {(() => {
                   const originFlowId =
                     ('originFlowId' in selected && typeof (selected as unknown as { originFlowId?: string }).originFlowId === 'string')

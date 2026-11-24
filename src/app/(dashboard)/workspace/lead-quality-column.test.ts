@@ -88,12 +88,18 @@ describe("Lead Quality column wiring", () => {
     expect(leadQuality).toContain("user_data");
   });
 
-  it("the save path NEVER enqueues — it stores the status only", () => {
+  it("the save path auto-sends ONLY on explicit dropdown selection (flag-gated)", () => {
+    // Explicit selection carries triggerCrmEvent: true → enqueue
+    // through the existing outbox (deduped, table-gated). Every
+    // other save (programmatic, clear, unchanged, non-quality)
+    // stays send-free.
     expect(valuesRoute).toContain("isLeadQualityField(field)");
-    expect(valuesRoute).not.toContain("enqueueLeadQualityEvent");
-    expect(valuesRoute).not.toContain("scheduleCrmDrainSoon");
-    // Clearing and unchanged saves also stay send-free.
-    expect(valuesRoute).toContain("crmEvent: null");
+    expect(valuesRoute).toContain("triggerCrmEvent");
+    expect(valuesRoute).toContain("enqueueLeadQualityEvent");
+    expect(valuesRoute).toContain("scheduleCrmDrainSoon");
+    // Clearing and unchanged saves never reach the enqueue branch.
+    expect(valuesRoute).toContain("storedValue !== previous");
+    expect(valuesRoute).toContain("let crmEvent");
   });
 
   it("ingestion only auto-enqueues the opted-in initial Lead — nothing else", () => {
@@ -126,7 +132,7 @@ describe("Lead Quality column wiring", () => {
     expect(previewRoute).toContain("assembleLeadQualityPreview");
   });
 
-  it("only the explicit send endpoint enqueues, with stale-preview protection", () => {
+  it("the manual-send endpoint keeps stale-preview protection (backend intact)", () => {
     expect(sendRoute).toContain("enqueueLeadQualityEvent");
     expect(sendRoute).toContain("scheduleCrmDrainSoon");
     expect(sendRoute).toContain("stale_preview");
@@ -201,27 +207,28 @@ describe("Lead Quality column wiring", () => {
     expect(feedback).toContain("invalid_input");
   });
 
-  it("the drawer shows the preview with an explicit Send button", () => {
+  it("the drawer reports delivery instead of sending (no Send button, no payload UI)", () => {
     expect(page).toContain("MetaCrmSendSection");
-    expect(component).toContain("Send to Meta");
     expect(component).toContain("/api/integrations/meta-crm/preview");
-    expect(component).toContain("/api/integrations/meta-crm/manual-send");
-    // Full outgoing body, occurrence + send times, warnings, copy.
-    expect(component).toContain("requestBody");
+    expect(component).toContain("Refresh Status");
+    // Full outgoing body, occurrence + send times, warnings.
     expect(component).toContain("Event time");
     expect(component).toContain("Sent at");
-    expect(component).toContain("Copy Payload");
-    expect(component).toContain("Refresh Status");
-    // Queued is never shown as Sent.
-    expect(component).toContain('"queued"');
+    // The visible drawer never shows the raw payload and never
+    // offers a manual send: selection auto-sends, the drawer only
+    // reports. Backend construction stays intact behind the flag.
+    expect(component).toContain("SHOW_CRM_PAYLOAD");
+    expect(component).not.toContain("Send to Meta");
+    expect(component).not.toContain("Copy Payload");
+    expect(component).not.toContain("onClick={send}");
     // Saving a status opens the drawer on the edited lead.
     expect(page).toContain("setCrmPreviewBump");
   });
 
-  it("the Workspace header explains the manual purpose", () => {
+  it("the Workspace header explains the automatic sending purpose", () => {
     expect(page).toContain("isLeadQualityField(f)");
     expect(page).toContain("LEAD_QUALITY_TOOLTIP");
-    expect(leadQuality).toContain("never sends");
+    expect(leadQuality).toContain("automatically sends");
   });
 
   it("the existing cron sweep drains CRM events additively", () => {
@@ -248,7 +255,6 @@ describe("Lead Quality column wiring", () => {
     // import each, zero new references from this feature.
     expect(valuesRoute.match(/meta-capi/g)?.length ?? 0).toBe(2);
     expect(processLead.match(/meta-capi/g)?.length ?? 0).toBe(1);
-    expect(valuesRoute).not.toContain("enqueueLeadQualityEvent");
     expect(processLead).not.toContain("enqueueLeadQualityEvent");
   });
 });

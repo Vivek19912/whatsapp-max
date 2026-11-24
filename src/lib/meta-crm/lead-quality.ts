@@ -69,7 +69,7 @@ export const LEAD_QUALITY_DEFAULT_VALUE = "Lead";
  * the Workspace column heading).
  */
 export const LEAD_QUALITY_TOOLTIP =
-  "Classify each travel enquiry based on genuine customer interest and booking progress. Saving a status never sends anything — use the Send to Meta button in the lead drawer to deliver the event when CRM feedback is enabled.";
+  "Classify each travel enquiry based on genuine customer interest and booking progress. Selecting a status automatically sends the mapped event to Meta when CRM feedback is enabled for this table.";
 
 /**
  * Stored display value → CRM event name. Exact, case-insensitive

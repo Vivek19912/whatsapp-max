@@ -81,6 +81,11 @@ export async function PUT(
     if (typeof runId !== "string" || !runId) {
       return NextResponse.json({ error: "flow_run_id is required." }, { status: 400 });
     }
+    // Explicit dropdown selection only: the Lead Quality editor
+    // passes triggerCrmEvent when the salesperson picks an option.
+    // Programmatic saves (imports, syncs, retries) omit it and
+    // stay send-free, as do clears and unchanged re-saves below.
+    const triggerCrmEvent = body.triggerCrmEvent === true;
 
     const field = await loadField(supabase, accountId, id, fieldId);
     if (!field) {
@@ -295,16 +300,94 @@ export async function PUT(
       console.error("[meta-capi] workspace trigger failed:", err);
     }
 
-    // Meta CRM feedback — DELIBERATELY no hook here. Saving
-    // (or clearing) a Lead Quality cell only stores the status;
-    // delivery happens solely through the explicit manual-send
-    // endpoint (POST /api/integrations/meta-crm/manual-send),
-    // which shows a backend-generated payload preview first.
-    // Selecting a status — including "Lead", clearing the cell,
-    // or re-saving the same value — therefore never generates an
-    // event. `crmEvent` stays in the response (always null) so
-    // existing callers keep their shape.
-    const crmEvent: null = null;
+    // Meta CRM feedback — AUTOMATIC send on explicit Lead Quality
+    // selection. Saving a status through the Lead Quality dropdown
+    // (triggerCrmEvent: true) enqueues the mapped event through the
+    // EXISTING durable outbox (same ledger, same UNIQUE dedup, same
+    // drain); selecting, clearing, or re-saving without the flag
+    // never enqueues. No new pipeline, no second send path: gated
+    // states (disabled, unmapped, non-Meta, unselected table) only
+    // store the status, and duplicates resolve to the recorded
+    // delivery state instead of a new Meta request.
+    type SaveCrmEvent =
+      | { state: "queued"; eventName: string; message: string }
+      | {
+          state: "duplicate";
+          eventName: string;
+          deliveryStatus: "pending" | "sent" | "failed" | "skipped";
+          message: string;
+        }
+      | { state: "blocked"; reason: string; message: string };
+    let crmEvent: SaveCrmEvent | null = null;
+    if (
+      isLeadQualityField(field) &&
+      storedValue !== null &&
+      storedValue !== previous &&
+      triggerCrmEvent
+    ) {
+      try {
+        const { enqueueLeadQualityEvent } = await import("@/lib/meta-crm/feedback");
+        const outcome = await enqueueLeadQualityEvent(supabaseAdmin(), {
+          accountId,
+          flowId: id,
+          runId,
+          fromQuality: previous ?? "",
+          toQuality: storedValue,
+          eventTimeIso: new Date().toISOString(),
+          actorUserId: userId,
+        });
+        if (outcome.enqueued && !outcome.deduplicated) {
+          const { scheduleCrmDrainSoon } = await import("@/lib/meta-crm/trigger");
+          scheduleCrmDrainSoon({ accountId, eventIds: [outcome.eventId] });
+          crmEvent = {
+            state: "queued",
+            eventName: storedValue,
+            message: "Event queued for delivery to Meta.",
+          };
+        } else if (outcome.enqueued) {
+          // Duplicate transition: no new event, no Meta request —
+          // report the RECORDED delivery state instead.
+          const { data: existing } = await supabase
+            .from("meta_crm_events")
+            .select("status")
+            .eq("account_id", accountId)
+            .eq("id", outcome.eventId)
+            .maybeSingle();
+          const recorded = (existing as { status?: unknown } | null)?.status;
+          const deliveryStatus =
+            recorded === "sent" ||
+            recorded === "pending" ||
+            recorded === "failed" ||
+            recorded === "skipped"
+              ? recorded
+              : "pending";
+          crmEvent = {
+            state: "duplicate",
+            eventName: storedValue,
+            deliveryStatus,
+            message:
+              deliveryStatus === "sent"
+                ? `${storedValue} has already been sent to Meta for this lead.`
+                : deliveryStatus === "pending"
+                  ? `${storedValue} is already queued for delivery to Meta.`
+                  : `${storedValue} was already recorded (${deliveryStatus}).`,
+          };
+        } else if (outcome.reason === "table_not_selected") {
+          const { TABLE_NOT_SELECTED_MESSAGE } = await import("@/lib/meta-crm/feedback");
+          crmEvent = {
+            state: "blocked",
+            reason: outcome.reason,
+            message: TABLE_NOT_SELECTED_MESSAGE,
+          };
+        } else {
+          // disabled / unmapped / no_meta_lead: status saves, nothing
+          // to report — the UI shows the plain saved state.
+          crmEvent = { state: "blocked", reason: outcome.reason, message: "" };
+        }
+      } catch (err) {
+        console.error("[meta-crm] workspace auto-send enqueue failed:", err);
+      }
+    }
 
     // ADDITIVE Meta Sheets sync — a Workspace cell changed on a Meta
     // table; queue an in-place sheet row update. Meta-only (kind

@@ -615,7 +615,7 @@ export function MetaCrmFeedbackSettings() {
                       <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent
-                      className="w-72 max-w-[calc(100vw-2rem)]"
+                      className="w-96 max-w-[calc(100vw-2rem)]"
                       align="start"
                     >
                       <div className="p-1.5" onKeyDown={(e) => e.stopPropagation()}>
@@ -662,8 +662,9 @@ export function MetaCrmFeedbackSettings() {
                               checked={effectiveTableIdSet.has(t.id)}
                               closeOnClick={false}
                               onCheckedChange={(v) => applyTableToggle(t.id, v === true)}
+                              className="items-start py-1.5 [&_[data-slot=dropdown-menu-checkbox-item-indicator]]:top-2"
                             >
-                              <span className="truncate" title={t.name}>
+                              <span className="min-w-0 flex-1 whitespace-normal break-words" title={t.name}>
                                 {t.name}
                               </span>
                             </DropdownMenuCheckboxItem>

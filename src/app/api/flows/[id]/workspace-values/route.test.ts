@@ -31,6 +31,7 @@ const h = vi.hoisted(() => ({
     | { enqueued: true; eventId: string; deduplicated: boolean }
     | { enqueued: false; reason: string },
   crmEnqueueThrows: false,
+  crmEventRows: [] as Array<Record<string, unknown>>,
   crmDrainSoon: 0,
 }));
 
@@ -101,6 +102,8 @@ vi.mock("@/lib/meta-crm/feedback", () => ({
     if (h.crmEnqueueThrows) throw new Error("crm down");
     return h.crmEnqueueResult;
   },
+  TABLE_NOT_SELECTED_MESSAGE:
+    "Meta CRM sending is disabled for this Workspace table. Enable this table in CRM Integration settings to send events.",
 }));
 
 vi.mock("@/lib/meta-crm/trigger", () => ({
@@ -145,6 +148,12 @@ function fakeSupabase() {
         data: h.flowKind ? { id: "flow-1", kind: h.flowKind } : null,
         error: null,
       };
+    }
+    if (state.table === "meta_crm_events") {
+      const list = h.crmEventRows.filter((r) =>
+        state.filters.every(([c, v]) => r[c] === v),
+      );
+      return { data: list[0] ?? null, error: null };
     }
     if (state.table === "agent_inbox_permissions") {
       // Honor the account_id + user_id equality filters so
@@ -208,6 +217,7 @@ beforeEach(() => {
   h.triggers = [];
   h.perms = [];
   h.crmEnqueues = [];
+  h.crmEventRows = [];
   h.crmEnqueueResult = { enqueued: true, eventId: "evt-1", deduplicated: false };
   h.crmEnqueueThrows = false;
   h.crmDrainSoon = 0;
@@ -716,11 +726,155 @@ describe("PUT Lead Quality → manual-send only (never auto-enqueues)", () => {
   it("clearing the cell deletes the value and sends nothing", async () => {
     seedQuality();
     const res = await PUT(
-      put({ field_id: "f-quality", flow_run_id: "run-1", value: "" }),
+      put({ field_id: "f-quality", flow_run_id: "run-1", value: "", triggerCrmEvent: true }),
       params,
     );
     expect(res.status).toBe(200);
     expect(h.crmEnqueues).toHaveLength(0);
     expect(h.deletes).toBe(1);
+    const json = (await res.json()) as { crmEvent?: unknown };
+    expect(json.crmEvent ?? null).toBeNull();
+  });
+});
+
+describe("PUT Lead Quality → explicit selection auto-sends (deduped)", () => {
+  const LEAD_QUALITY_FIELD = {
+    id: "f-quality",
+    account_id: "acct-1",
+    flow_id: "flow-1",
+    name: "Lead Quality",
+    field_type: "single_select",
+    position: 0,
+    options: ["Lead", "Interested Lead", "Qualified Lead", "Booking Confirmed", "Junk"],
+    default_value: "Lead",
+  };
+
+  function seedQuality(previous: string | null) {
+    h.role = "admin";
+    h.userId = "u-admin";
+    h.flowKind = "meta_lead_ads";
+    h.field = { ...LEAD_QUALITY_FIELD };
+    h.run =
+      previous === null
+        ? { id: "run-1", account_id: "acct-1", flow_id: "flow-1" }
+        : { id: "run-1", account_id: "acct-1", flow_id: "flow-1", value_text: previous };
+  }
+
+  function triggered(value: string) {
+    return put({ field_id: "f-quality", flow_run_id: "run-1", value, triggerCrmEvent: true });
+  }
+
+  it("enqueues on explicit selection and reports queued (no duplicate Meta call)", async () => {
+    seedQuality("Qualified Lead");
+    const res = await PUT(triggered("Booking Confirmed"), params);
+    expect(res.status).toBe(200);
+    expect(h.crmEnqueues).toHaveLength(1);
+    expect(h.crmEnqueues[0]).toMatchObject({
+      accountId: "acct-1",
+      flowId: "flow-1",
+      runId: "run-1",
+      fromQuality: "Qualified Lead",
+      toQuality: "Booking Confirmed",
+    });
+    expect(h.crmDrainSoon).toBe(1);
+    const json = (await res.json()) as {
+      value: string;
+      crmEvent: { state: string; eventName: string; message: string };
+    };
+    expect(json.value).toBe("Booking Confirmed");
+    expect(json.crmEvent.state).toBe("queued");
+    expect(json.crmEvent.eventName).toBe("Booking Confirmed");
+  });
+
+  it("reports already-sent instead of a new event on duplicate transitions", async () => {
+    seedQuality("Qualified Lead");
+    h.crmEnqueueResult = { enqueued: true, eventId: "evt-9", deduplicated: true };
+    h.crmEventRows = [{ id: "evt-9", account_id: "acct-1", status: "sent" }];
+    const res = await PUT(triggered("Booking Confirmed"), params);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      crmEvent: { state: string; message: string };
+    };
+    expect(json.crmEvent.state).toBe("duplicate");
+    expect(json.crmEvent.message).toBe("Booking Confirmed has already been sent to Meta for this lead.");
+    expect(h.crmDrainSoon).toBe(0);
+  });
+
+  it("reports already-queued for pending duplicates", async () => {
+    seedQuality("Qualified Lead");
+    h.crmEnqueueResult = { enqueued: true, eventId: "evt-9", deduplicated: true };
+    h.crmEventRows = [{ id: "evt-9", account_id: "acct-1", status: "pending" }];
+    const res = await PUT(triggered("Booking Confirmed"), params);
+    const json = (await res.json()) as {
+      crmEvent: { state: string; message: string };
+    };
+    expect(json.crmEvent.state).toBe("duplicate");
+    expect(json.crmEvent.message).toBe("Booking Confirmed is already queued for delivery to Meta.");
+  });
+
+  it("blocks unselected tables with the exact message and still saves", async () => {
+    seedQuality(null);
+    h.crmEnqueueResult = { enqueued: false, reason: "table_not_selected" };
+    const res = await PUT(triggered("Junk"), params);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      value: string;
+      crmEvent: { state: string; message: string };
+    };
+    expect(json.value).toBe("Junk");
+    expect(json.crmEvent.state).toBe("blocked");
+    expect(json.crmEvent.message).toBe(
+      "Meta CRM sending is disabled for this Workspace table. Enable this table in CRM Integration settings to send events.",
+    );
+    expect(h.upserts).toHaveLength(1);
+  });
+
+  it("saves quietly when feedback is disabled (no extra calls)", async () => {
+    seedQuality(null);
+    h.crmEnqueueResult = { enqueued: false, reason: "disabled" };
+    const res = await PUT(triggered("Interested Lead"), params);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { crmEvent: { state: string; message: string } };
+    expect(json.crmEvent.state).toBe("blocked");
+    expect(json.crmEvent.message).toBe("");
+  });
+
+  it("never fails the save when the CRM path throws", async () => {
+    seedQuality(null);
+    h.crmEnqueueThrows = true;
+    const res = await PUT(triggered("Qualified Lead"), params);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { value: string; crmEvent: unknown };
+    expect(json.value).toBe("Qualified Lead");
+    expect(json.crmEvent).toBeNull();
+  });
+
+  it("unchanged re-saves with the flag still send nothing", async () => {
+    seedQuality("Qualified Lead");
+    const res = await PUT(triggered("Qualified Lead"), params);
+    expect(res.status).toBe(200);
+    expect(h.crmEnqueues).toHaveLength(0);
+    const json = (await res.json()) as { crmEvent: unknown };
+    expect(json.crmEvent).toBeNull();
+  });
+
+  it("ignores the flag for non-quality columns", async () => {
+    seedQuality("Qualified Lead");
+    h.field = {
+      id: "field-1",
+      account_id: "acct-1",
+      flow_id: "flow-1",
+      name: "Status",
+      field_type: "single_select",
+      position: 0,
+      options: ["New", "Contacted"],
+      default_value: "New",
+    };
+    const res = await PUT(
+      put({ field_id: "field-1", flow_run_id: "run-1", value: "Contacted", triggerCrmEvent: true }),
+      params,
+    );
+    expect(res.status).toBe(200);
+    expect(h.crmEnqueues).toHaveLength(0);
   });
 });
