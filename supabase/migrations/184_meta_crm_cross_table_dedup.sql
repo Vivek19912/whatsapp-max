@@ -1,41 +1,52 @@
 -- ============================================================
--- 184_meta_crm_cross_table_dedup.sql — one dataset + one Meta
--- lead + one event name = at most one in-flight or delivered
--- CRM event, regardless of Workspace table or run.
+-- 184_meta_crm_cross_table_dedup.sql — SUPERSEDED by 185.
 --
--- Background: the original ledger key
---   UNIQUE (account_id, flow_run_id, event_name,
---            from_quality, to_quality)
--- is per-run, so the same Meta lead in two tables could queue
--- and deliver the same event twice (once per run). Application
--- code now checks across runs before inserting; this partial
--- unique index enforces the pending/sent subset atomically so
--- two concurrent submissions cannot both slip through.
+-- Background: the original version of this migration created a
+-- partial unique index
+--   UNIQUE (account_id, dataset_id, meta_lead_id, event_name)
+--   WHERE status IN ('pending', 'sent')
+-- to cap one dataset + one Meta lead + one event name at a single
+-- in-flight/delivered row. Production proved that constraint
+-- wrong: legitimate history already contains TWO sent rows for
+-- one identity (Lead → QualifiedLead AND Booking Confirmed →
+-- QualifiedLead for the same dataset + Meta lead, both actually
+-- transmitted to Meta with events_received: 1). The DO-block
+-- guard therefore raised
+--   ERROR P0001: Migration 184 blocked: 1 duplicate group
+-- and the index could never be applied without deleting or
+-- falsifying real Sent history — which is forbidden.
 --
--- Scope decisions (deliberate):
--- - failed/skipped rows are EXCLUDED: terminal history is never
---   rewritten, and the controlled retry path requeues the
---   existing row in place instead of inserting a new one.
--- - The index does not replace the application check, which also
---   reports the recorded delivery state (already sent / queued)
---   instead of merely failing the insert.
+-- Redesign (185): a separate `meta_crm_event_claims` table holds
+-- ONE claim row per (account, dataset, lead, event) with a plain
+-- PRIMARY KEY. Historical duplicates stay untouched in the
+-- ledger; the seed picks one canonical event per identity (sent
+-- first, then pending, failed, skipped — newest first, the same
+-- rule the application display path already uses). New
+-- submissions claim the identity atomically inside a single
+-- Postgres transaction (see `enqueue_meta_crm_event()` in 185),
+-- so concurrent submits serialize on the claim PK instead of
+-- racing past an application pre-check.
 --
--- Safety: the DO block below aborts the migration with an
--- actionable error if live duplicate pending/sent rows already
--- exist (list them with the query in the message). It never
--- deletes or modifies event history — resolve those rows first
--- (let them drain, or cancel the extras), then re-run.
+-- This file is now a safe convergence stub:
+--   - drops the partial index when it exists (clean environments
+--     that applied the original 184 keep working; every
+--     environment converges on the claim mechanism),
+--   - reports duplicate groups with a NOTICE for pre-apply review
+--     (never raises, never blocks),
+--   - performs NO data mutation: no DELETE, no UPDATE, no status
+--     changes to meta_crm_events.
 --
--- Idempotent: the index uses IF NOT EXISTS; the guard is a pure
--- read. Safe to run multiple times.
+-- Idempotent — safe to run multiple times, before or after 185.
 -- ============================================================
+
+DROP INDEX IF EXISTS public.meta_crm_events_dataset_lead_event_key;
 
 DO $$
 DECLARE
-  v_dup_count integer;
+  v_dup_groups integer;
   v_sample text;
 BEGIN
-  SELECT COUNT(*) INTO v_dup_count
+  SELECT COUNT(*) INTO v_dup_groups
   FROM (
     SELECT account_id, dataset_id, meta_lead_id, event_name
     FROM public.meta_crm_events
@@ -44,14 +55,19 @@ BEGIN
     HAVING COUNT(*) > 1
   ) dups;
 
-  IF v_dup_count > 0 THEN
+  IF v_dup_groups IS NOT NULL AND v_dup_groups > 0 THEN
     SELECT string_agg(
-      format('account=%s dataset=%s lead=%s event=%s (n=%s)', account_id, dataset_id, meta_lead_id, event_name, n),
+      format(
+        'account=%s dataset=%s lead=%s event=%s (n=%s, statuses=%s)',
+        account_id, dataset_id, meta_lead_id, event_name, n, statuses
+      ),
       '; '
     )
     INTO v_sample
     FROM (
-      SELECT account_id, dataset_id, meta_lead_id, event_name, COUNT(*) AS n
+      SELECT account_id, dataset_id, meta_lead_id, event_name,
+             COUNT(*) AS n,
+             string_agg(DISTINCT status::text, ',' ORDER BY status::text) AS statuses
       FROM public.meta_crm_events
       WHERE status IN ('pending', 'sent')
       GROUP BY account_id, dataset_id, meta_lead_id, event_name
@@ -60,16 +76,11 @@ BEGIN
       LIMIT 5
     ) dups;
 
-    RAISE EXCEPTION
-      'Migration 184 blocked: % duplicate (account, dataset, Meta lead, event) group(s) with status pending/sent already exist. Resolve them first (let pending rows drain, or keep exactly one live row per group via the controlled retry/cancel flow — do NOT delete sent history). Sample: %',
-      v_dup_count, v_sample;
+    RAISE NOTICE
+      'Migration 184 (superseded by 185): % duplicate (account, dataset, Meta lead, event) group(s) with status pending/sent remain preserved in the ledger. Canonical claims for them are seeded by 185 — no manual cleanup required, do NOT delete history. Sample: %',
+      v_dup_groups, v_sample;
+  ELSE
+    RAISE NOTICE 'Migration 184 (superseded by 185): no duplicate pending/sent groups; ledger already unique per identity.';
   END IF;
 END
 $$;
-
-CREATE UNIQUE INDEX IF NOT EXISTS meta_crm_events_dataset_lead_event_key
-  ON public.meta_crm_events (account_id, dataset_id, meta_lead_id, event_name)
-  WHERE status IN ('pending', 'sent');
-
-COMMENT ON INDEX public.meta_crm_events_dataset_lead_event_key IS
-  'Cross-table duplicate guard: at most one pending or sent row per (account, dataset, Meta lead, event). Terminal (failed/skipped) history is intentionally excluded.';

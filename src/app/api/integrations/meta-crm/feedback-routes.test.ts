@@ -503,30 +503,84 @@ describe("migration 183_meta_crm_allowed_tables", () => {
   });
 });
 
-describe("migration 184 cross-table dedup guard", () => {
-  it("adds a pending/sent-only partial unique index with a pre-check", async () => {
+describe("migration 184 cross-table dedup guard (superseded by 185)", () => {
+  it("never blocks and never mutates the ledger", async () => {
     const { readFileSync } = await import("node:fs");
     const sql = readFileSync(
       `${process.cwd()}/supabase/migrations/184_meta_crm_cross_table_dedup.sql`,
       "utf8",
     );
-    // Atomic guard scoped to the cross-table event identity.
-    expect(sql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS");
-    expect(sql).toContain("meta_crm_events_dataset_lead_event_key");
-    expect(sql).toContain("dataset_id");
-    expect(sql).toContain("meta_lead_id");
-    expect(sql).toContain("event_name");
-    // In-flight + delivered rows are protected; terminal history
-    // (failed/skipped) can never block the migration.
-    expect(sql).toContain("pending");
-    expect(sql).toContain("sent");
-    expect(sql).not.toMatch(/status IN \([^)]*failed/);
-    // Fails loudly with a remediation query instead of silently
-    // applying over duplicates.
-    expect(sql).toContain("RAISE EXCEPTION");
-    // No data mutation: the migration only inspects and indexes.
+    // The partial unique index could not be applied over preserved
+    // historical duplicates, so 184 is a convergence stub: it drops
+    // the index when a clean environment already created it, then
+    // only reports duplicate groups for review.
+    expect(sql).toContain("DROP INDEX IF EXISTS public.meta_crm_events_dataset_lead_event_key");
+    expect(sql).not.toContain("RAISE EXCEPTION");
+    expect(sql).toContain("RAISE NOTICE");
+    // No data mutation: the stub never deletes rows and never flips
+    // a Sent row to another status to satisfy an index.
     expect(sql).not.toMatch(/DELETE FROM/i);
     expect(sql).not.toMatch(/UPDATE public\.meta_crm_events/i);
+    expect(sql).not.toContain("CREATE UNIQUE INDEX");
+  });
+});
+
+describe("migration 185 event-identity claims (atomic, history-preserving)", () => {
+  async function sql(): Promise<string> {
+    const { readFileSync } = await import("node:fs");
+    return readFileSync(
+      `${process.cwd()}/supabase/migrations/185_meta_crm_event_claims.sql`,
+      "utf8",
+    );
+  }
+
+  it("creates one claim row per event identity with a primary key", async () => {
+    const text = await sql();
+    expect(text).toContain("CREATE TABLE IF NOT EXISTS public.meta_crm_event_claims");
+    expect(text).toContain("PRIMARY KEY (account_id, dataset_id, meta_lead_id, event_name)");
+    expect(text).toContain("canonical_event_id");
+  });
+
+  it("accepts every event name the ledger accepts (incl. historical Junk)", async () => {
+    // Derived from the authoritative definition — any future
+    // CRM_EVENT_NAMES addition without a matching claims CHECK
+    // fails here instead of in production with a 23514.
+    const { CRM_EVENT_NAMES } = await import("@/lib/meta-crm/lead-quality");
+    const text = await sql();
+    expect(CRM_EVENT_NAMES).toContain("Junk");
+    expect(CRM_EVENT_NAMES).toContain("DisqualifiedLead");
+    for (const name of CRM_EVENT_NAMES) {
+      expect(text).toContain(`'${name}'`);
+    }
+  });
+
+  it("seeds claims from all history without touching the ledger", async () => {
+    const text = await sql();
+    expect(text).toContain("INSERT INTO public.meta_crm_event_claims");
+    expect(text).toContain("ON CONFLICT (account_id, dataset_id, meta_lead_id, event_name) DO NOTHING");
+    // Canonical preference: sent first, then pending/failed/skipped.
+    expect(text).toMatch(/WHEN 'sent' THEN 0/);
+    expect(text).toMatch(/WHEN 'pending' THEN 1/);
+    // No destructive statements against the ledger, ever.
+    expect(text).not.toMatch(/DELETE FROM public\.meta_crm_events/i);
+    expect(text).not.toMatch(/DELETE FROM/i);
+    expect(text).not.toMatch(/UPDATE public\.meta_crm_events/i);
+  });
+
+  it("provides an atomic enqueue function and converges clean environments", async () => {
+    const text = await sql();
+    expect(text).toContain("CREATE OR REPLACE FUNCTION public.enqueue_meta_crm_event(");
+    // Claim first (mutual exclusion), then insert, then finalize.
+    expect(text).toContain("ON CONFLICT (account_id, dataset_id, meta_lead_id, event_name) DO NOTHING");
+    expect(text).toContain("FOR UPDATE");
+    // Environments that applied the original 184 converge here.
+    expect(text).toContain("DROP INDEX IF EXISTS public.meta_crm_events_dataset_lead_event_key");
+    // Verification is read-only and never blocks reruns: the only
+    // RAISE EXCEPTION in the file is the RPC's null-identity
+    // programmer guard, not a migration gate.
+    expect(text).toContain("meta lead id and dataset id are required");
+    expect(text.match(/RAISE EXCEPTION/g)?.length).toBe(1);
+    expect(text).toContain("RAISE NOTICE");
   });
 });
 

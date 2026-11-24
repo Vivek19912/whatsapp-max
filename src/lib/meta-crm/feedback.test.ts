@@ -44,6 +44,7 @@ vi.mock("./datasets", async (importOriginal) => {
 import {
   drainCrmEventsQueue,
   enqueueLeadQualityEvent,
+  type EnqueueOutcome,
   getCrmAccessToken,
   getCrmFeedbackConfig,
   isFlowAllowedForCrm,
@@ -60,7 +61,7 @@ const LEAD_ADS_TOKEN = "LEAD_ADS_TOKEN_xyz";
 
 type Row = Record<string, unknown>;
 
-function makeDb(seed: Record<string, Row[]> = {}) {
+function makeDb(seed: Record<string, Row[]> = {}, opts: { rpcMissing?: boolean } = {}) {
   const tables: Record<string, Row[]> = {};
   for (const [k, v] of Object.entries(seed)) tables[k] = v.map((r) => ({ ...r }));
   const ops: Array<{ table: string; op: string }> = [];
@@ -103,6 +104,23 @@ function makeDb(seed: Record<string, Row[]> = {}) {
       },
     };
     return api;
+  }
+
+  const claimKey = (accountId: unknown, datasetId: unknown, metaLeadId: unknown, eventName: unknown): string =>
+    [accountId, datasetId, metaLeadId, eventName].map((v) => String(v ?? "")).join("|");
+
+  function claimWinner(events: Row[]): Row | null {
+    const rank = (s: unknown): number =>
+      s === "sent" ? 0 : s === "pending" ? 1 : s === "failed" ? 2 : 3;
+    const sorted = [...events].sort((a, b) => {
+      const byStatus = rank(a.status) - rank(b.status);
+      if (byStatus !== 0) return byStatus;
+      if (String(b.created_at ?? "") !== String(a.created_at ?? "")) {
+        return String(b.created_at ?? "") < String(a.created_at ?? "") ? -1 : 1;
+      }
+      return String(b.id ?? "") < String(a.id ?? "") ? -1 : 1;
+    });
+    return sorted[0] ?? null;
   }
 
   const db = {
@@ -194,6 +212,98 @@ function makeDb(seed: Record<string, Row[]> = {}) {
           };
         },
       };
+    },
+    rpc: async (fn: string, params: Row) => {
+      ops.push({ table: `rpc:${fn}`, op: "rpc" });
+      if (fn !== "enqueue_meta_crm_event" || opts.rpcMissing) {
+        return { data: null, error: { code: "42883", message: `function ${fn} does not exist` } };
+      }
+      const accountId = params.p_account_id as string;
+      const datasetId = String(params.p_dataset_id ?? "").trim();
+      const metaLeadId = String(params.p_meta_lead_id ?? "").trim();
+      const eventName = params.p_event_name as string;
+      const identity = (r: Row): boolean =>
+        r.account_id === accountId &&
+        r.dataset_id === datasetId &&
+        String(r.meta_lead_id ?? "").trim() === metaLeadId &&
+        r.event_name === eventName;
+      // Fast path mirrors the SQL function: any recorded event wins.
+      const winner = claimWinner((tables.meta_crm_events ?? []).filter(identity));
+      if (winner) {
+        const claims = (tables.meta_crm_event_claims ??= []);
+        const key = claimKey(accountId, datasetId, metaLeadId, eventName);
+        if (!claims.some((c) => claimKey(c.account_id, c.dataset_id, c.meta_lead_id, c.event_name) === key)) {
+          claims.push({
+            account_id: accountId,
+            dataset_id: datasetId,
+            meta_lead_id: metaLeadId,
+            event_name: eventName,
+            canonical_event_id: winner.id,
+            claimed_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        }
+        return { data: [{ event_id: winner.id, deduplicated: true }], error: null };
+      }
+      // Force a real race window so concurrent callers interleave
+      // here, exactly like concurrent Postgres transactions: the
+      // re-check below is the claim-PK serialization point.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const claims = (tables.meta_crm_event_claims ??= []);
+      const key = claimKey(accountId, datasetId, metaLeadId, eventName);
+      const raced = claimWinner((tables.meta_crm_events ?? []).filter(identity));
+      const racedClaim = claims.find((c) => claimKey(c.account_id, c.dataset_id, c.meta_lead_id, c.event_name) === key);
+      if (raced) {
+        if (!racedClaim) {
+          claims.push({
+            account_id: accountId,
+            dataset_id: datasetId,
+            meta_lead_id: metaLeadId,
+            event_name: eventName,
+            canonical_event_id: raced.id,
+            claimed_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        }
+        return { data: [{ event_id: (racedClaim?.canonical_event_id as string) ?? raced.id, deduplicated: true }], error: null };
+      }
+      if (racedClaim?.canonical_event_id) {
+        return { data: [{ event_id: racedClaim.canonical_event_id, deduplicated: true }], error: null };
+      }
+      const row: Row = {
+        id: `evt-${seq++}`,
+        status: "pending",
+        attempts: 0,
+        max_attempts: 8,
+        next_retry_at: new Date(0).toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        event_uuid: `uuid-${seq}`,
+        account_id: accountId,
+        flow_id: (params.p_flow_id as string | null) ?? null,
+        flow_run_id: params.p_flow_run_id as string,
+        submission_id: params.p_submission_id as string,
+        meta_lead_id: metaLeadId,
+        event_name: eventName,
+        from_quality: (params.p_from_quality as string) ?? "",
+        to_quality: (params.p_to_quality as string) ?? "",
+        event_time: params.p_event_time as string,
+        dataset_id: datasetId,
+      };
+      (tables.meta_crm_events ??= []).push(row);
+      if (racedClaim) racedClaim.canonical_event_id = row.id;
+      else {
+        claims.push({
+          account_id: accountId,
+          dataset_id: datasetId,
+          meta_lead_id: metaLeadId,
+          event_name: eventName,
+          canonical_event_id: row.id,
+          claimed_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        });
+      }
+      return { data: [{ event_id: row.id, deduplicated: false }], error: null };
     },
   };
   return { db: db as never, tables, ops };
@@ -1438,5 +1548,319 @@ describe("cross-table duplicate prevention (dataset + lead + event)", () => {
     });
     expect(out).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-sent" });
     expect(tables.meta_crm_events).toHaveLength(1);
+  });
+});
+
+describe("event-identity claims (migration 185) — production duplicates preserved", () => {
+  const DATASET = "1169732842278579";
+  const LEAD = "2089880891696333";
+
+  function seedProd(extraEvents: Array<Record<string, unknown>> = []) {
+    return makeDb({
+      meta_lead_submissions: [
+        { id: "sub-a", account_id: "acct-1", flow_run_id: "run-a", meta_lead_id: LEAD },
+        { id: "sub-b", account_id: "acct-1", flow_run_id: "run-b", meta_lead_id: LEAD },
+      ],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: DATASET, access_token: encrypt(CRM_TOKEN) }],
+      flows: [
+        { id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads" },
+        { id: "flow-b", account_id: "acct-1", kind: "meta_lead_ads" },
+      ],
+      flow_runs: [
+        { id: "run-a", account_id: "acct-1", flow_id: "flow-a" },
+        { id: "run-b", account_id: "acct-1", flow_id: "flow-b" },
+      ],
+      meta_crm_events: extraEvents as Row[],
+    });
+  }
+
+  function prodSent(id: string, from: string, created: string): Row {
+    return {
+      id,
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: LEAD,
+      event_name: "QualifiedLead",
+      from_quality: from,
+      to_quality: "Qualified Lead",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: `uuid-${id}`,
+      dataset_id: DATASET,
+      status: "sent",
+      attempts: 1,
+      max_attempts: 8,
+      last_error: null,
+      meta_response: { events_received: 1 },
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: created,
+      created_at: created,
+    };
+  }
+
+  it("migration succeeds with two historical Sent rows: neither is modified, repeats are blocked", async () => {
+    const first = prodSent("evt-first", "Lead", "2026-11-22T10:00:00.000Z");
+    const second = prodSent("evt-second", "Booking Confirmed", "2026-11-22T11:00:00.000Z");
+    const before = JSON.parse(JSON.stringify([first, second]));
+    // Seeded claim (as migration 185 does): canonical = newest sent.
+    const { db, tables } = seedProd([first, second]);
+    (tables.meta_crm_event_claims ??= []).push({
+      account_id: "acct-1",
+      dataset_id: DATASET,
+      meta_lead_id: LEAD,
+      event_name: "QualifiedLead",
+      canonical_event_id: "evt-second",
+      claimed_at: "2026-11-22T12:00:00.000Z",
+      created_at: "2026-11-22T12:00:00.000Z",
+    });
+    const out = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      fromQuality: "Booking Confirmed",
+      toQuality: "Qualified Lead",
+      eventTimeIso: "2026-11-22T12:00:00.000Z",
+      actorUserId: "u1",
+    });
+    // Blocked as a duplicate of the recorded event — no new row.
+    expect(out).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-second" });
+    expect(tables.meta_crm_events).toHaveLength(2);
+    // Neither historical record modified: statuses, responses,
+    // timestamps and ids byte-identical.
+    expect(JSON.parse(JSON.stringify(tables.meta_crm_events))).toEqual(before);
+    expect(tables.meta_crm_events.every((r) => r.status === "sent")).toBe(true);
+  });
+
+  it("Mohan scenario: QualifiedLead sent twice stays sent; BookingConfirmed still eligible once", async () => {
+    const { db, tables } = seedProd([
+      prodSent("evt-q1", "Lead", "2026-11-22T10:00:00.000Z"),
+      prodSent("evt-q2", "Booking Confirmed", "2026-11-22T11:00:00.000Z"),
+    ]);
+    // Step 3 from the report: QualifiedLead again → blocked.
+    const blocked = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      fromQuality: "Interested Lead",
+      toQuality: "Qualified Lead",
+      eventTimeIso: "2026-11-22T12:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(blocked).toMatchObject({ enqueued: true, deduplicated: true });
+    // A different event name on the same lead+dataset → allowed.
+    const allowed = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      fromQuality: "Qualified Lead",
+      toQuality: "Booking Confirmed",
+      eventTimeIso: "2026-11-22T12:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(allowed.enqueued).toBe(true);
+    expect((allowed as { deduplicated?: boolean }).deduplicated).toBe(false);
+    expect(tables.meta_crm_events).toHaveLength(3);
+  });
+
+  it("two simultaneous submissions create exactly one event and one claim", async () => {
+    const { db, tables } = seedProd([]);
+    const attempt = (): Promise<EnqueueOutcome> =>
+      enqueueLeadQualityEvent(db as never, {
+        accountId: "acct-1",
+        flowId: "flow-a",
+        runId: "run-a",
+        fromQuality: "",
+        toQuality: "Qualified Lead",
+        eventTimeIso: "2026-11-22T10:00:00.000Z",
+        actorUserId: "u1",
+      }) as Promise<EnqueueOutcome>;
+    const [a, b] = await Promise.all([attempt(), attempt()]);
+    const fresh = [a, b].filter((o) => o.enqueued && !(o as { deduplicated?: boolean }).deduplicated);
+    const dups = [a, b].filter((o) => o.enqueued && (o as { deduplicated?: boolean }).deduplicated);
+    expect(fresh).toHaveLength(1);
+    expect(dups).toHaveLength(1);
+    expect((dups[0] as { eventId?: string }).eventId).toBe((fresh[0] as { eventId?: string }).eventId);
+    expect(tables.meta_crm_events).toHaveLength(1);
+    expect((tables.meta_crm_event_claims ?? [])).toHaveLength(1);
+    // Repeated enqueue afterwards stays deduplicated (rerun-safe).
+    const again = await attempt();
+    expect(again).toMatchObject({ enqueued: true, deduplicated: true });
+    expect(tables.meta_crm_events).toHaveLength(1);
+  });
+
+  it("queue never transmits an extra copy when an equivalent event was already sent", async () => {
+    const sent = prodSent("evt-sent", "Lead", "2026-11-22T10:00:00.000Z");
+    const pending: Row = {
+      ...prodSent("evt-pending", "Booking Confirmed", "2026-11-22T11:00:00.000Z"),
+      status: "pending",
+      attempts: 0,
+      sent_at: null,
+      meta_response: null,
+    };
+    const { db, tables } = seedProd([sent, pending]);
+    let calls = 0;
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        calls += 1;
+        return jsonResponse({ events_received: 1 });
+      }) as unknown as typeof fetch,
+    });
+    expect(calls).toBe(0);
+    expect(out).toEqual({ attempted: 1, sent: 0, failed: 0, skipped: 1 });
+    const stoodDown = (tables.meta_crm_events as Row[]).find((r) => r.id === "evt-pending") as Row;
+    expect(stoodDown.status).toBe("skipped");
+    expect(String(stoodDown.last_error)).toMatch(/uplicate of event evt-sent/);
+    // Sent history untouched.
+    const kept = (tables.meta_crm_events as Row[]).find((r) => r.id === "evt-sent") as Row;
+    expect(kept.status).toBe("sent");
+    expect(kept.meta_response).toEqual({ events_received: 1 });
+  });
+
+  it("queue sends the canonical pending once and stands down its non-canonical twin", async () => {
+    const pending = (id: string, created: string): Row => ({
+      id,
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: LEAD,
+      event_name: "QualifiedLead",
+      from_quality: "Lead",
+      to_quality: "Qualified Lead",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: `uuid-${id}`,
+      dataset_id: DATASET,
+      status: "pending",
+      attempts: 0,
+      max_attempts: 8,
+      last_error: null,
+      meta_response: null,
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: null,
+      created_at: created,
+    });
+    // Non-canonical row drains first: still must not transmit.
+    const { db, tables } = seedProd([pending("evt-twin", "2026-11-22T10:00:00.000Z"), pending("evt-canon", "2026-11-22T10:01:00.000Z")]);
+    (tables.meta_crm_event_claims ??= []).push({
+      account_id: "acct-1",
+      dataset_id: DATASET,
+      meta_lead_id: LEAD,
+      event_name: "QualifiedLead",
+      canonical_event_id: "evt-canon",
+      claimed_at: "2026-11-22T10:02:00.000Z",
+      created_at: "2026-11-22T10:02:00.000Z",
+    });
+    let calls = 0;
+    const out = await drainCrmEventsQueue(db, {
+      fetchImpl: (async () => {
+        calls += 1;
+        return jsonResponse({ events_received: 1 });
+      }) as unknown as typeof fetch,
+    });
+    expect(calls).toBe(1);
+    expect(out).toEqual({ attempted: 2, sent: 1, failed: 0, skipped: 1 });
+    expect((tables.meta_crm_events as Row[]).find((r) => r.id === "evt-canon")).toMatchObject({ status: "sent" });
+    const twin = (tables.meta_crm_events as Row[]).find((r) => r.id === "evt-twin") as Row;
+    expect(twin.status).toBe("skipped");
+    expect(String(twin.last_error)).toMatch(/uplicate of event evt-canon/);
+  });
+
+  it("pre-185 databases fall back to the legacy insert without duplicating", async () => {
+    // No claim RPC deployed: advisory check + per-run ledger key apply.
+    const { db, tables } = makeDb(
+      {
+        meta_lead_submissions: [{ id: "sub-a", account_id: "acct-1", flow_run_id: "run-a", meta_lead_id: LEAD }],
+        meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: DATASET, access_token: encrypt(CRM_TOKEN) }],
+        flows: [{ id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads" }],
+        flow_runs: [{ id: "run-a", account_id: "acct-1", flow_id: "flow-a" }],
+        meta_crm_events: [prodSent("evt-sent", "Lead", "2026-11-22T10:00:00.000Z")],
+      },
+      { rpcMissing: true },
+    );
+    const dup = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-a",
+      runId: "run-a",
+      fromQuality: "Interested Lead",
+      toQuality: "Qualified Lead",
+      eventTimeIso: "2026-11-22T11:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(dup).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-sent" });
+    expect(tables.meta_crm_events).toHaveLength(1);
+    // A genuinely new identity still inserts through the legacy path.
+    const fresh = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-a",
+      runId: "run-a",
+      fromQuality: "Qualified Lead",
+      toQuality: "Booking Confirmed",
+      eventTimeIso: "2026-11-22T11:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(fresh.enqueued).toBe(true);
+    expect((fresh as { deduplicated?: boolean }).deduplicated).toBe(false);
+    expect(tables.meta_crm_events).toHaveLength(2);
+  });
+
+  it("preserves duplicate historical Junk events and blocks a repeat Junk", async () => {
+    const junk = (id: string, from: string, created: string): Row => ({
+      id,
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: LEAD,
+      event_name: "Junk",
+      from_quality: from,
+      to_quality: "Junk",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: `uuid-${id}`,
+      dataset_id: DATASET,
+      status: "sent",
+      attempts: 1,
+      max_attempts: 8,
+      last_error: null,
+      meta_response: { events_received: 1 },
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: created,
+      created_at: created,
+    });
+    const first = junk("evt-junk-1", "Lead", "2026-11-22T10:00:00.000Z");
+    const second = junk("evt-junk-2", "Qualified Lead", "2026-11-22T11:00:00.000Z");
+    const before = JSON.parse(JSON.stringify([first, second]));
+    const { db, tables } = seedProd([first, second]);
+    const out = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      fromQuality: "Booking Confirmed",
+      toQuality: "Junk",
+      eventTimeIso: "2026-11-22T12:00:00.000Z",
+      actorUserId: "u1",
+    });
+    // Same dataset + lead + Junk already sent: blocked, no new row.
+    expect(out).toMatchObject({ enqueued: true, deduplicated: true });
+    expect(tables.meta_crm_events).toHaveLength(2);
+    expect(JSON.parse(JSON.stringify(tables.meta_crm_events))).toEqual(before);
+  });
+
+  it("allows a first Junk event for a new identity", async () => {
+    const { db, tables } = seedProd([]);
+    const out = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-a",
+      runId: "run-a",
+      fromQuality: "Lead",
+      toQuality: "Junk",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(out.enqueued).toBe(true);
+    expect((out as { deduplicated?: boolean }).deduplicated).toBe(false);
+    expect(tables.meta_crm_events).toHaveLength(1);
+    expect(tables.meta_crm_events[0].event_name).toBe("Junk");
+    expect((tables.meta_crm_event_claims ?? [])).toHaveLength(1);
   });
 });

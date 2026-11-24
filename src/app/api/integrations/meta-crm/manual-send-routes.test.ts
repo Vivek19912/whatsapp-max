@@ -81,7 +81,91 @@ function chain(table: string, filters: Array<[string, unknown]> = [], sort: { co
 }
 
 function fakeDb() {
+  function claimWinner(events: Row[]): Row | null {
+    const rank = (s: unknown): number =>
+      s === "sent" ? 0 : s === "pending" ? 1 : s === "failed" ? 2 : 3;
+    return (
+      [...events].sort((a, b) => {
+        const byStatus = rank(a.status) - rank(b.status);
+        if (byStatus !== 0) return byStatus;
+        return String(b.created_at ?? "") < String(a.created_at ?? "") ? -1 : 1;
+      })[0] ?? null
+    );
+  }
   return {
+    rpc: async (fn: string, params: Row) => {
+      if (fn !== "enqueue_meta_crm_event") {
+        return { data: null, error: { code: "42883", message: `function ${fn} does not exist` } };
+      }
+      const accountId = params.p_account_id as string;
+      const datasetId = String(params.p_dataset_id ?? "").trim();
+      const metaLeadId = String(params.p_meta_lead_id ?? "").trim();
+      const eventName = params.p_event_name as string;
+      const identity = (r: Row): boolean =>
+        r.account_id === accountId &&
+        r.dataset_id === datasetId &&
+        String(r.meta_lead_id ?? "").trim() === metaLeadId &&
+        r.event_name === eventName;
+      const key = [accountId, datasetId, metaLeadId, eventName].join("|");
+      const winner = claimWinner((h.tables.meta_crm_events ?? []).filter(identity));
+      const claims = (h.tables.meta_crm_event_claims ??= []);
+      const sameKey = (c: Row): boolean =>
+        [c.account_id, c.dataset_id, c.meta_lead_id, c.event_name].join("|") === key;
+      if (winner) {
+        if (!claims.some(sameKey)) {
+          claims.push({
+            account_id: accountId,
+            dataset_id: datasetId,
+            meta_lead_id: metaLeadId,
+            event_name: eventName,
+            canonical_event_id: winner.id,
+            claimed_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+        }
+        return { data: [{ event_id: winner.id, deduplicated: true }], error: null };
+      }
+      const racedClaim = claims.find(sameKey);
+      if (racedClaim?.canonical_event_id) {
+        return { data: [{ event_id: racedClaim.canonical_event_id, deduplicated: true }], error: null };
+      }
+      const row: Row = {
+        id: `evt-${h.seq}`,
+        event_uuid: `uuid-${h.seq}`,
+        status: "pending",
+        attempts: 0,
+        max_attempts: 8,
+        last_error: null,
+        sent_at: null,
+        created_at: new Date().toISOString(),
+        next_retry_at: new Date(0).toISOString(),
+        account_id: accountId,
+        flow_id: (params.p_flow_id as string | null) ?? null,
+        flow_run_id: params.p_flow_run_id as string,
+        submission_id: params.p_submission_id as string,
+        meta_lead_id: metaLeadId,
+        event_name: eventName,
+        from_quality: (params.p_from_quality as string) ?? "",
+        to_quality: (params.p_to_quality as string) ?? "",
+        event_time: params.p_event_time as string,
+        dataset_id: datasetId,
+      };
+      h.seq += 1;
+      (h.tables.meta_crm_events ??= []).push(row);
+      if (racedClaim) racedClaim.canonical_event_id = row.id;
+      else {
+        claims.push({
+          account_id: accountId,
+          dataset_id: datasetId,
+          meta_lead_id: metaLeadId,
+          event_name: eventName,
+          canonical_event_id: row.id,
+          claimed_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        });
+      }
+      return { data: [{ event_id: row.id, deduplicated: false }], error: null };
+    },
     from(table: string) {
       return {
         select: () => chain(table),

@@ -18,12 +18,17 @@
 // reuse, or depend on the retired Conversions API (`meta-capi`)
 // implementation, which remains untouched and hidden.
 //
-// Deduplication: UNIQUE(account_id, flow_run_id, event_name,
-// from_quality, to_quality) — re-saving an unchanged value can
-// never create a second event; races collapse to the existing row.
-// The row's event_uuid stays internal (history/retries/auditing)
-// and is never sent to Meta — the Meta payload carries no
-// event_id, and retries resend the identical stored occurrence.
+// Deduplication: cross-table event identity (account, dataset,
+// Meta lead, event) is claimed atomically — see
+// `meta_crm_event_claims` + `enqueue_meta_crm_event()` (migration
+// 185). One identity yields at most one created event; repeats
+// return the canonical row as deduplicated, whatever the
+// quality transition. The row's event_uuid stays internal
+// (history/retries/auditing) and is never sent to Meta — the
+// Meta payload carries no event_id, and retries resend the
+// identical stored occurrence. Historical duplicates stay
+// untouched in the ledger; the queue never transmits an extra
+// copy once an equivalent event was sent (see the drain guard).
 // ============================================================
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -627,6 +632,142 @@ export type EnqueueOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
   | { enqueued: false; reason: "unchanged" | "unmapped" | "disabled" | "no_meta_lead" | "table_not_selected" };
 
+/**
+ * Atomic claim RPC name (migration 185). Acquires the
+ * (account, dataset, Meta lead, event) claim and inserts the
+ * ledger row in ONE transaction; concurrent callers serialize
+ * on the claim PK.
+ */
+const ENQUEUE_CLAIM_RPC = "enqueue_meta_crm_event";
+
+/** True when an error means the claim RPC is not deployed yet. */
+function isMissingClaimRpc(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === "42883" || code === "PGRST202") return true;
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" && message.includes(ENQUEUE_CLAIM_RPC);
+}
+
+/**
+ * Single-transaction claim + insert via `enqueue_meta_crm_event`.
+ * Returns the outcome, or null when the RPC is not deployed
+ * (pre-185 database) so callers fall back to the legacy direct
+ * insert. Unexpected failures throw — never silently duplicate.
+ */
+async function tryEnqueueViaClaimRpc(
+  db: SupabaseClient,
+  args: {
+    accountId: string;
+    flowId: string | null;
+    runId: string;
+    submissionId: string;
+    metaLeadId: string;
+    eventName: string;
+    fromQuality: string;
+    toQuality: string;
+    eventTimeIso: string;
+    datasetId: string;
+  },
+): Promise<EnqueueOutcome | null> {
+  let data: unknown;
+  let error: unknown;
+  try {
+    // Older doubles/clients may not expose rpc at all (pre-185
+    // database or minimal fakes) — fall back to the legacy path.
+    const rpcFn = (db as unknown as { rpc?: unknown }).rpc;
+    if (typeof rpcFn !== "function") return null;
+    const res = await db.rpc(ENQUEUE_CLAIM_RPC, {
+      p_account_id: args.accountId,
+      p_flow_id: args.flowId,
+      p_flow_run_id: args.runId,
+      p_submission_id: args.submissionId,
+      p_meta_lead_id: args.metaLeadId,
+      p_event_name: args.eventName,
+      p_from_quality: args.fromQuality,
+      p_to_quality: args.toQuality,
+      p_event_time: args.eventTimeIso,
+      p_dataset_id: args.datasetId,
+    });
+    data = (res as { data?: unknown }).data;
+    error = (res as { error?: unknown }).error;
+  } catch (err) {
+    if (isMissingClaimRpc(err)) return null;
+    throw err;
+  }
+  if (error) {
+    if (isMissingClaimRpc(error)) return null;
+    throw error;
+  }
+  const row = (Array.isArray(data) ? data[0] : data) as {
+    event_id?: unknown;
+    deduplicated?: unknown;
+  } | null;
+  if (!row || typeof row.event_id !== "string" || row.event_id === "") {
+    throw new Error("Failed to enqueue CRM event.");
+  }
+  return { enqueued: true, eventId: row.event_id, deduplicated: row.deduplicated === true };
+}
+
+/**
+ * Transmission guard for the drain: historical duplicates are
+ * preserved in the ledger, so a row must never be transmitted
+ * when an equivalent event was already sent — or when this row
+ * is not the canonical claim for its identity. Returns the id
+ * of the surviving event when this row must stand down, else
+ * null. Read-only; the caller marks the stood-down row skipped
+ * with an explicit duplicate reason (history preserved, no Meta
+ * call). Missing claim infrastructure (pre-185) degrades to
+ * the sent-check only — never blocks legitimate sends.
+ */
+async function findDuplicateTransmission(
+  db: SupabaseClient,
+  row: Pick<CrmEventRow, "id" | "account_id" | "dataset_id" | "meta_lead_id" | "event_name">,
+): Promise<string | null> {
+  const datasetId = typeof row.dataset_id === "string" ? row.dataset_id : "";
+  const metaLeadId = typeof row.meta_lead_id === "string" ? row.meta_lead_id.trim() : "";
+  if (!datasetId || !metaLeadId) return null;
+  const { data: sentRows, error: sentErr } = await db
+    .from("meta_crm_events")
+    .select("id")
+    .eq("account_id", row.account_id)
+    .eq("dataset_id", datasetId)
+    .eq("meta_lead_id", metaLeadId)
+    .eq("event_name", row.event_name)
+    .eq("status", "sent")
+    .limit(5);
+  if (!sentErr) {
+    const dup = ((sentRows ?? []) as Array<{ id?: unknown }>).find(
+      (r) => typeof r.id === "string" && r.id !== "" && r.id !== row.id,
+    );
+    if (dup) return dup.id as string;
+  }
+  try {
+    const { data: claim, error: claimErr } = await db
+      .from("meta_crm_event_claims")
+      .select("canonical_event_id")
+      .eq("account_id", row.account_id)
+      .eq("dataset_id", datasetId)
+      .eq("meta_lead_id", metaLeadId)
+      .eq("event_name", row.event_name)
+      .maybeSingle();
+    if (claimErr) return null;
+    const canonical = (claim as { canonical_event_id?: unknown } | null)?.canonical_event_id;
+    if (typeof canonical !== "string" || canonical === "" || canonical === row.id) return null;
+    const { data: canonRow, error: canonErr } = await db
+      .from("meta_crm_events")
+      .select("id, status")
+      .eq("id", canonical)
+      .maybeSingle();
+    if (canonErr) return null;
+    const status = (canonRow as { status?: unknown } | null)?.status;
+    if (status === "pending" || status === "sent") return canonical;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export type AutoLeadOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
   | { enqueued: false; reason: "auto_send_off" | "disabled" | "no_token" | "no_meta_lead" | "table_not_selected" };
@@ -734,9 +875,10 @@ export async function enqueueLeadQualityEvent(
   // table or run. A prior row in ANY state blocks a fresh insert
   // (pending/sent must not duplicate; failed/skipped go through
   // the controlled retry of the existing row, never a new row).
-  // This check is advisory — the partial unique index
-  // meta_crm_events_dataset_lead_event_key enforces the pending/
-  // sent subset atomically for concurrent submissions.
+  // Advisory fast path — the atomic decision happens inside
+  // `enqueue_meta_crm_event()`, which claims the identity and
+  // inserts the event in ONE transaction so concurrent
+  // submissions serialize on the claim PK.
   const crossTable = await findExistingCrmEvent(db, {
     accountId: args.accountId,
     datasetId: config.dataset_id,
@@ -746,6 +888,24 @@ export async function enqueueLeadQualityEvent(
   if (crossTable) {
     return { enqueued: true, eventId: crossTable.id, deduplicated: true };
   }
+
+  // Atomic claim + insert (migration 185). Falls back to the
+  // legacy direct insert only when the RPC does not exist yet
+  // (pre-185 database): the advisory check above plus the
+  // per-run ledger key still apply there.
+  const viaClaim = await tryEnqueueViaClaimRpc(db, {
+    accountId: args.accountId,
+    flowId: args.flowId,
+    runId: args.runId,
+    submissionId: submission.id,
+    metaLeadId: submission.meta_lead_id,
+    eventName,
+    fromQuality: from,
+    toQuality: to,
+    eventTimeIso: args.eventTimeIso,
+    datasetId: config.dataset_id,
+  });
+  if (viaClaim) return viaClaim;
 
   const { data, error } = await db
     .from("meta_crm_events")
@@ -891,6 +1051,27 @@ export async function drainCrmEventsQueue(
           .update({
             status: "skipped",
             last_error: TABLE_NOT_SELECTED_MESSAGE,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", row.id);
+        out.skipped += 1;
+        continue;
+      }
+      // Cross-table transmission guard (historical duplicates are
+      // preserved, never deleted): stand down when an equivalent
+      // event was already sent, or when this row is not the
+      // canonical claim for its identity. The row keeps its full
+      // history with an explicit duplicate reason — no Meta call.
+      const duplicateOf = await findDuplicateTransmission(db, row);
+      if (duplicateOf) {
+        await db
+          .from("meta_crm_events")
+          .update({
+            status: "skipped",
+            last_error: `Duplicate of event ${duplicateOf}; original transmission preserved — not re-sent.`.slice(
+              0,
+              500,
+            ),
             updated_at: new Date().toISOString(),
           })
           .eq("id", row.id);
