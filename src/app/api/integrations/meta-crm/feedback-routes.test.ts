@@ -503,6 +503,33 @@ describe("migration 183_meta_crm_allowed_tables", () => {
   });
 });
 
+describe("migration 184 cross-table dedup guard", () => {
+  it("adds a pending/sent-only partial unique index with a pre-check", async () => {
+    const { readFileSync } = await import("node:fs");
+    const sql = readFileSync(
+      `${process.cwd()}/supabase/migrations/184_meta_crm_cross_table_dedup.sql`,
+      "utf8",
+    );
+    // Atomic guard scoped to the cross-table event identity.
+    expect(sql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS");
+    expect(sql).toContain("meta_crm_events_dataset_lead_event_key");
+    expect(sql).toContain("dataset_id");
+    expect(sql).toContain("meta_lead_id");
+    expect(sql).toContain("event_name");
+    // In-flight + delivered rows are protected; terminal history
+    // (failed/skipped) can never block the migration.
+    expect(sql).toContain("pending");
+    expect(sql).toContain("sent");
+    expect(sql).not.toMatch(/status IN \([^)]*failed/);
+    // Fails loudly with a remediation query instead of silently
+    // applying over duplicates.
+    expect(sql).toContain("RAISE EXCEPTION");
+    // No data mutation: the migration only inspects and indexes.
+    expect(sql).not.toMatch(/DELETE FROM/i);
+    expect(sql).not.toMatch(/UPDATE public\.meta_crm_events/i);
+  });
+});
+
 describe("GET /api/integrations/meta-crm/events", () => {
   it("lists only the caller's account events with enrichment", async () => {
     h.tables.meta_crm_events = [

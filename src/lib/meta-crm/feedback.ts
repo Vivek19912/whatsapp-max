@@ -575,6 +575,54 @@ export interface EnqueueLeadQualityEventArgs {
   fetchImpl?: typeof fetch;
 }
 
+/** A previously recorded event for one dataset + lead + event name. */
+export interface ExistingCrmEvent {
+  id: string;
+  status: string;
+}
+
+/**
+ * Cross-table duplicate lookup: the newest recorded row for one
+ * Meta dataset + Meta Lead ID + event name, regardless of table,
+ * run, or quality transition. Preference order is sent, then
+ * pending, then failed, then skipped (newest first within a
+ * state), so callers report the most meaningful delivery state.
+ * Returns null when nothing was ever recorded — the ONLY case in
+ * which a new submission may be created.
+ */
+export async function findExistingCrmEvent(
+  db: SupabaseClient,
+  args: { accountId: string; datasetId: string | null; metaLeadId: string; eventName: string },
+): Promise<ExistingCrmEvent | null> {
+  if (!args.datasetId || !args.metaLeadId.trim()) return null;
+  const { data, error } = await db
+    .from("meta_crm_events")
+    .select("id, status, created_at")
+    .eq("account_id", args.accountId)
+    .eq("dataset_id", args.datasetId)
+    .eq("meta_lead_id", args.metaLeadId.trim())
+    .eq("event_name", args.eventName)
+    .order("created_at", { ascending: false })
+    .limit(25);
+  if (error) throw error;
+  const rows = ((data ?? []) as Array<{ id: unknown; status: unknown; created_at: unknown }>).filter(
+    (r) => typeof r.id === "string" && r.id !== "",
+  );
+  if (rows.length === 0) return null;
+  const rank = (s: unknown): number =>
+    s === "sent" ? 0 : s === "pending" ? 1 : s === "failed" ? 2 : s === "skipped" ? 3 : 4;
+  rows.sort((a, b) => {
+    const byStatus = rank(a.status) - rank(b.status);
+    if (byStatus !== 0) return byStatus;
+    return String(b.created_at ?? "") < String(a.created_at ?? "") ? -1 : 1;
+  });
+  const winner = rows[0];
+  return {
+    id: winner.id as string,
+    status: typeof winner.status === "string" ? winner.status : "pending",
+  };
+}
+
 export type EnqueueOutcome =
   | { enqueued: true; eventId: string; deduplicated: boolean }
   | { enqueued: false; reason: "unchanged" | "unmapped" | "disabled" | "no_meta_lead" | "table_not_selected" };
@@ -679,6 +727,24 @@ export async function enqueueLeadQualityEvent(
   // selection (even empty) is enforced by stable flow id.
   if (!(await isFlowAllowedForCrm(db, args.accountId, args.flowId))) {
     return { enqueued: false, reason: "table_not_selected" };
+  }
+
+  // Cross-table duplicate prevention: one dataset + one Meta lead
+  // + one event name = at most one submission, regardless of
+  // table or run. A prior row in ANY state blocks a fresh insert
+  // (pending/sent must not duplicate; failed/skipped go through
+  // the controlled retry of the existing row, never a new row).
+  // This check is advisory — the partial unique index
+  // meta_crm_events_dataset_lead_event_key enforces the pending/
+  // sent subset atomically for concurrent submissions.
+  const crossTable = await findExistingCrmEvent(db, {
+    accountId: args.accountId,
+    datasetId: config.dataset_id,
+    metaLeadId: submission.meta_lead_id,
+    eventName,
+  });
+  if (crossTable) {
+    return { enqueued: true, eventId: crossTable.id, deduplicated: true };
   }
 
   const { data, error } = await db

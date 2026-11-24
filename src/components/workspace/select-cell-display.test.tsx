@@ -5,6 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CustomCell } from "./custom-cell";
 import {
   CRM_TABLE_LOCKED_MESSAGE,
+  CRM_TABLE_READONLY_DROPDOWN_NOTE,
+  CRM_TABLE_READONLY_OPTION_HINT,
   filterCellOptions,
   leadQualityDeliveryLabel,
   OPTION_SEARCH_THRESHOLD,
@@ -273,16 +275,36 @@ function renderQualityCell(stored: string | null, crmAllowedFlowIds?: string[] |
 }
 
 describe("21. Lead Quality read-only for unselected CRM tables", () => {
-  it("locks the dropdown when the originating table is not selected", () => {
+  it("opens a view-only dropdown when the originating table is not selected", () => {
     const html = renderQualityCell("Qualified Lead", ["flow-other"]);
     // Badge stays visible with the saved value...
     expect(html).toContain("Qualified Lead");
-    // ...plus the lock affordance and the exact read-only message...
-    expect(html).toContain('aria-label="Qualified Lead. ' + CRM_TABLE_LOCKED_MESSAGE + '"');
-    expect(html).toContain(`title="${CRM_TABLE_LOCKED_MESSAGE}"`);
-    // ...and no interactive trigger that could open or save.
-    expect(html).not.toContain("<button");
-    expect(html).not.toContain('role="combobox"');
+    // ...plus the read-only explanation (title tooltip) ...
+    expect(html).toContain(CRM_TABLE_LOCKED_MESSAGE);
+    // ...and an interactive trigger that opens (not a dead badge).
+    expect(html).toContain("<button");
+    expect(html).toContain('role="combobox"');
+    // No lock icon beside the badge.
+    expect(html).not.toContain("lucide-lock");
+  });
+
+  it("disables every option and shows the read-only note (no save path)", () => {
+    // SSR only renders the closed trigger; option-level wiring is
+    // asserted on source: Clear + every option disabled, each with
+    // the hover hint, plus the in-dropdown note. The read-only
+    // onValueChange is a guarded no-op — save/triggerCrmEvent is
+    // unreachable from the locked branch.
+    expect(cellSrc).toContain(CRM_TABLE_READONLY_DROPDOWN_NOTE);
+    expect(cellSrc).toContain(CRM_TABLE_READONLY_OPTION_HINT);
+    expect(cellSrc).toContain('<SelectItem value="__clear__" disabled');
+    expect(cellSrc).toContain("Read-only: This Workspace table is not enabled");
+    // Locked branch never calls save/onPick and renders no icon.
+    // No Lock icon anywhere in the cell (only usage was the
+    // read-only Lead Quality badge).
+    expect(cellSrc).not.toContain("<Lock");
+    // The locked dropdown's change handler is a guarded no-op
+    // (editable branch instead calls onPick/save).
+    expect(cellSrc).toContain("onValueChange={() => {");
   });
 
   it("stays editable for selected tables, and when no selection exists", () => {

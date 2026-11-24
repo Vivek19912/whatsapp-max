@@ -269,10 +269,12 @@ describe("9/10. dates use date editing; numbers use number editing", () => {
 
   it("no select/chevron machinery on the date/number path", () => {
     // The date/number/url editor is the shared text-like branch
-    // (button → Input); only the three select paths open a trigger
-    // (assignee, single-select, Lead Quality badges).
+    // (button → Input); only the select paths open a trigger
+    // (assignee, single-select, editable Lead Quality, view-only
+    // locked Lead Quality — the locked trigger opens but every
+    // option is disabled, so nothing can be picked or saved).
     const triggerOpens = cellSrc.split("<SelectTrigger").length - 1;
-    expect(triggerOpens).toBe(3);
+    expect(triggerOpens).toBe(4);
   });
 });
 

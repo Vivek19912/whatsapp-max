@@ -812,6 +812,21 @@ describe("PUT Lead Quality → explicit selection auto-sends (deduped)", () => {
     expect(json.crmEvent.message).toBe("Booking Confirmed is already queued for delivery to Meta.");
   });
 
+  it("reports the recorded state when the duplicate lives on another table", async () => {
+    seedQuality("Qualified Lead");
+    h.crmEnqueueResult = { enqueued: true, eventId: "evt-cross", deduplicated: true };
+    h.crmEventRows = [{ id: "evt-cross", account_id: "acct-1", flow_id: "flow-2", status: "sent" }];
+    const res = await PUT(triggered("Booking Confirmed"), params);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      value: string;
+      crmEvent: { state: string; message: string };
+    };
+    expect(json.value).toBe("Booking Confirmed");
+    expect(json.crmEvent.state).toBe("duplicate");
+    expect(json.crmEvent.message).toBe("Booking Confirmed has already been sent to Meta for this lead.");
+  });
+
   it("blocks unselected tables with the exact message and still saves", async () => {
     seedQuality(null);
     h.crmEnqueueResult = { enqueued: false, reason: "table_not_selected" };

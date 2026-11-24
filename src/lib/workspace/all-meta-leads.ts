@@ -307,6 +307,10 @@ export const ALL_META_FOLLOW_UP_STATUS_OPTIONS: readonly string[] = FOLLOW_UP_ST
  * columns (normalized). Union columns skip these so shared system
  * columns are never duplicated — "Follow-Up Status" is NOT in
  * this set: it has no dedicated column and arrives via the union.
+ * "lead received" is also skipped here (UI-only): it renders as
+ * "Lead Source" and duplicates the fixed Source column, so the
+ * All-view hides it. Data, API payloads, and individual tables
+ * are untouched.
  */
 export const ALL_META_DEDICATED_FIELD_NAMES: ReadonlySet<string> = new Set([
   "assigned to",
@@ -314,6 +318,7 @@ export const ALL_META_DEDICATED_FIELD_NAMES: ReadonlySet<string> = new Set([
   "stage",
   "call status",
   "next follow-up date & time",
+  "lead received",
 ]);
 
 /** One dynamically discovered union column for the combined view. */

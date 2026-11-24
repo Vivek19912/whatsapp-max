@@ -1200,3 +1200,243 @@ describe("table allowlist enforcement", () => {
     ).toBeNull();
   });
 });
+
+describe("cross-table duplicate prevention (dataset + lead + event)", () => {
+  const SUB_A = { id: "sub-a", account_id: "acct-1", flow_run_id: "run-a", meta_lead_id: "LEADX" };
+  const SUB_B = { id: "sub-b", account_id: "acct-1", flow_run_id: "run-b", meta_lead_id: "LEADX" };
+  const SUB_C = { id: "sub-c", account_id: "acct-1", flow_run_id: "run-c", meta_lead_id: "LEADY" };
+
+  function seedCross(extraEvents: Array<Record<string, unknown>> = []) {
+    return makeDb({
+      meta_lead_submissions: [SUB_A, SUB_B, SUB_C],
+      meta_crm_config: [{ account_id: "acct-1", enabled: true, dataset_id: "DS1", access_token: encrypt(CRM_TOKEN) }],
+      flows: [
+        { id: "flow-a", account_id: "acct-1", kind: "meta_lead_ads" },
+        { id: "flow-b", account_id: "acct-1", kind: "meta_lead_ads" },
+      ],
+      flow_runs: [
+        { id: "run-a", account_id: "acct-1", flow_id: "flow-a" },
+        { id: "run-b", account_id: "acct-1", flow_id: "flow-b" },
+        { id: "run-c", account_id: "acct-1", flow_id: "flow-b" },
+      ],
+      meta_crm_events: extraEvents,
+    });
+  }
+
+  function attempt(db: unknown, flowId: string, runId: string, toQuality = "Interested Lead", fromQuality = "") {
+    return enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId,
+      runId,
+      fromQuality,
+      toQuality,
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+      actorUserId: "u1",
+    });
+  }
+
+  it("blocks the same event from a second table after it was sent", async () => {
+    const sent = {
+      id: "evt-sent",
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: "LEADX",
+      event_name: "InterestedLead",
+      from_quality: "",
+      to_quality: "InterestedLead",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: "uuid-sent",
+      dataset_id: "DS1",
+      status: "sent",
+      attempts: 1,
+      max_attempts: 8,
+      last_error: null,
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: "2026-11-22T10:01:00.000Z",
+      created_at: "2026-11-22T10:00:00.000Z",
+    };
+    const { db, tables } = seedCross([sent]);
+    const out = await attempt(db, "flow-b", "run-b");
+    expect(out).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-sent" });
+    expect(tables.meta_crm_events).toHaveLength(1);
+  });
+
+  it("blocks queued and failed cross-table duplicates without new writes", async () => {
+    for (const status of ["pending", "failed"]) {
+      const { db, tables } = seedCross([
+        {
+          id: `evt-${status}`,
+          account_id: "acct-1",
+          flow_id: "flow-a",
+          flow_run_id: "run-a",
+          submission_id: "sub-a",
+          meta_lead_id: "LEADX",
+          event_name: "InterestedLead",
+          from_quality: "",
+          to_quality: "InterestedLead",
+          event_time: "2026-11-22T10:00:00.000Z",
+          event_uuid: `uuid-${status}`,
+          dataset_id: "DS1",
+          status,
+          attempts: status === "failed" ? 8 : 0,
+          max_attempts: 8,
+          last_error: null,
+          next_retry_at: new Date(0).toISOString(),
+          sent_at: null,
+          created_at: "2026-11-22T10:00:00.000Z",
+        },
+      ]);
+      const out = await attempt(db, "flow-b", "run-b");
+      expect(out).toMatchObject({ enqueued: true, deduplicated: true });
+      expect(tables.meta_crm_events).toHaveLength(1);
+    }
+  });
+
+  it("does not treat a different event, lead, or dataset as a duplicate", async () => {
+    const sent = {
+      id: "evt-sent",
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: "LEADX",
+      event_name: "InterestedLead",
+      from_quality: "",
+      to_quality: "InterestedLead",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: "uuid-sent",
+      dataset_id: "DS1",
+      status: "sent",
+      attempts: 1,
+      max_attempts: 8,
+      last_error: null,
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: "2026-11-22T10:01:00.000Z",
+      created_at: "2026-11-22T10:00:00.000Z",
+    };
+    // Different event name on the same lead → allowed.
+    {
+      const { db, tables } = seedCross([sent]);
+      const out = await enqueueLeadQualityEvent(db as never, {
+        accountId: "acct-1",
+        flowId: "flow-b",
+        runId: "run-b",
+        fromQuality: "Interested Lead",
+        toQuality: "Qualified Lead",
+        eventTimeIso: "2026-11-22T10:00:00.000Z",
+        actorUserId: "u1",
+      });
+      expect(out.enqueued).toBe(true);
+      expect((out as { deduplicated?: boolean }).deduplicated).toBe(false);
+      expect(tables.meta_crm_events).toHaveLength(2);
+    }
+    // Same event, different lead → allowed.
+    {
+      const { db, tables } = seedCross([sent]);
+      const out = await enqueueLeadQualityEvent(db as never, {
+        accountId: "acct-1",
+        flowId: "flow-b",
+        runId: "run-c",
+        fromQuality: "",
+        toQuality: "Interested Lead",
+        eventTimeIso: "2026-11-22T10:00:00.000Z",
+        actorUserId: "u1",
+      });
+      expect(out.enqueued).toBe(true);
+      expect((out as { deduplicated?: boolean }).deduplicated).toBe(false);
+      expect(tables.meta_crm_events).toHaveLength(2);
+    }
+    // Same lead + event but a different dataset → independent.
+    {
+      const { db, tables } = seedCross([sent]);
+      (tables.meta_crm_config[0] as Record<string, unknown>).dataset_id = "DS2";
+      const out = await attempt(db, "flow-b", "run-b");
+      expect(out.enqueued).toBe(true);
+      expect((out as { deduplicated?: boolean }).deduplicated).toBe(false);
+      expect(tables.meta_crm_events).toHaveLength(2);
+    }
+  });
+
+  it("blocks a repeated event even across a different status transition", async () => {
+    const sent = {
+      id: "evt-sent",
+      account_id: "acct-1",
+      flow_id: "flow-a",
+      flow_run_id: "run-a",
+      submission_id: "sub-a",
+      meta_lead_id: "LEADX",
+      event_name: "InterestedLead",
+      from_quality: "Qualified Lead",
+      to_quality: "InterestedLead",
+      event_time: "2026-11-22T10:00:00.000Z",
+      event_uuid: "uuid-sent",
+      dataset_id: "DS1",
+      status: "sent",
+      attempts: 1,
+      max_attempts: 8,
+      last_error: null,
+      next_retry_at: new Date(0).toISOString(),
+      sent_at: "2026-11-22T10:01:00.000Z",
+      created_at: "2026-11-22T10:00:00.000Z",
+    };
+    const { db, tables } = seedCross([sent]);
+    // Different run, different from_quality — same dataset+lead+event.
+    const out = await enqueueLeadQualityEvent(db as never, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      fromQuality: "Lead",
+      toQuality: "Interested Lead",
+      eventTimeIso: "2026-11-22T11:00:00.000Z",
+      actorUserId: "u1",
+    });
+    expect(out).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-sent" });
+    expect(tables.meta_crm_events).toHaveLength(1);
+  });
+
+  it("respects the table allowlist before the cross-table check", async () => {
+    const { db, tables } = seedCross([]);
+    (tables.meta_crm_config[0] as Record<string, unknown>).allowed_flow_ids = ["flow-a"];
+    const out = await attempt(db, "flow-b", "run-b");
+    expect(out).toEqual({ enqueued: false, reason: "table_not_selected" });
+    expect(tables.meta_crm_events).toHaveLength(0);
+  });
+
+  it("auto-send is blocked cross-table with the recorded reason", async () => {
+    const { db, tables } = seedCross([
+      {
+        id: "evt-sent",
+        account_id: "acct-1",
+        flow_id: "flow-a",
+        flow_run_id: "run-a",
+        submission_id: "sub-a",
+        meta_lead_id: "LEADX",
+        event_name: "Lead",
+        from_quality: "",
+        to_quality: "Lead",
+        event_time: "2026-11-22T10:00:00.000Z",
+        event_uuid: "uuid-sent",
+        dataset_id: "DS1",
+        status: "sent",
+        attempts: 1,
+        max_attempts: 8,
+        last_error: null,
+        next_retry_at: new Date(0).toISOString(),
+        sent_at: "2026-11-22T10:01:00.000Z",
+        created_at: "2026-11-22T10:00:00.000Z",
+      },
+    ]);
+    (tables.meta_crm_config[0] as Record<string, unknown>).auto_send_lead = true;
+    (tables.meta_crm_config[0] as Record<string, unknown>).access_token = encrypt(CRM_TOKEN);
+    const out = await maybeEnqueueInitialLeadEvent(db, {
+      accountId: "acct-1",
+      flowId: "flow-b",
+      runId: "run-b",
+      eventTimeIso: "2026-11-22T10:00:00.000Z",
+    });
+    expect(out).toMatchObject({ enqueued: true, deduplicated: true, eventId: "evt-sent" });
+    expect(tables.meta_crm_events).toHaveLength(1);
+  });
+});

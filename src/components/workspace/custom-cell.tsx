@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
-import { Check, ExternalLink, Loader2, Lock } from "lucide-react";
+import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
@@ -222,10 +222,26 @@ function deliverySuffix(status: string | undefined) {
 /**
  * Shown when the Lead Quality dropdown is locked because the lead's
  * originating Workspace table is not selected for Meta CRM events.
- * The badge stays visible; only selection is disabled.
+ * The badge stays visible; selection is disabled. The dropdown
+ * itself stays viewable so every option + delivery state can be
+ * inspected — nothing can be picked, saved, or sent.
  */
 export const CRM_TABLE_LOCKED_MESSAGE =
   "Lead Quality is read-only because this Workspace table is not selected for Meta CRM events. Enable this table in CRM Integration settings to edit Lead Quality.";
+
+/**
+ * Short in-dropdown note for locked Lead Quality cells (viewable,
+ * not selectable). Display-only; the save/send paths stay untouched.
+ */
+export const CRM_TABLE_READONLY_DROPDOWN_NOTE =
+  "Read-only: This Workspace table is not enabled for Meta CRM events.";
+
+/**
+ * Hover explanation for each disabled Lead Quality option in a
+ * locked cell. Display-only.
+ */
+export const CRM_TABLE_READONLY_OPTION_HINT =
+  "Enable this Workspace table in CRM Integration settings to edit Lead Quality.";
 
 /**
  * Lead Quality dropdown with per-option delivery states. Fetches
@@ -299,40 +315,26 @@ function LeadQualitySelect({
   const selectedChip = shown ? getSelectChip(field.name, shown) : null;
   const selectedEvent = shown ? leadQualityToEvent(shown) : null;
 
-  // Locked mode: badge + recorded delivery state only. Badges are
-  // fetched once on mount (no dropdown ever opens, so there is no
-  // open-time fetch); nothing here can save or send.
+  // Locked mode: badge + recorded delivery state is fetched on
+  // mount (the popup is unmounted while closed, so open-time
+  // fetch below would otherwise leave the badge empty).
+  // Read-only: no save path is reachable from here.
   useEffect(() => {
     if (!readOnly) return;
     // Intentional mount fetch (mirrors the open-trigger fetch
-    // below): locked cells never open, so badges would otherwise
-    // never load. Read-only, no save path is reachable from here.
+    // below): locked cells never opened before, so badges would
+    // otherwise never load.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchStates();
   }, [readOnly, fetchStates]);
 
-  if (readOnly) {
-    return (
-      <span
-        className="inline-flex items-center gap-1.5"
-        title={CRM_TABLE_LOCKED_MESSAGE}
-        aria-label={`${shown ?? ""}. ${CRM_TABLE_LOCKED_MESSAGE}`}
-      >
-        {selectedChip ? (
-          <SelectChipView chip={selectedChip}>{shown as string}</SelectChipView>
-        ) : (
-          <span>{shown ?? ""}</span>
-        )}
-        {selectedEvent && selectedEvent in states ? deliverySuffix(states[selectedEvent]) : null}
-        <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-      </span>
-    );
-  }
   // Legacy columns provisioned before "Lead" became an explicit
   // option still carry the four-outcome option set — offer the
   // canonical default there too (no migration, no option
   // rewrite), first like the current spec order. Newly
   // provisioned columns already include it; never duplicated.
+  // Shared by the editable dropdown and the locked view-only
+  // dropdown below so both surfaces list identical options.
   const fieldOptions =
     isLeadQualityField(field) &&
     !(field.options ?? []).some((o) => o === LEAD_QUALITY_DEFAULT_VALUE)
@@ -345,6 +347,94 @@ function LeadQualitySelect({
         optionQuery,
       )
     : fieldOptions.map((o) => ({ value: o, label: o }));
+
+  if (readOnly) {
+    // View-only dropdown: badge stays visible and clicking it
+    // opens the popup. Every option (including Clear) is
+    // listed with its delivery badge but disabled, so nothing can
+    // be picked via mouse, touch, or keyboard — onValueChange is
+    // additionally guarded and no save/send path is reachable.
+    // Eligibility still comes from the row's originating flow id
+    // (the caller's crmLocked), never the combined view.
+    return (
+      <span onClick={(e) => e.stopPropagation()}>
+        <Select
+          value={shown ?? ""}
+          onValueChange={() => {
+            // No-op: all options are disabled; this guards against
+            // any programmatic/keyboard activation reaching save.
+          }}
+          onOpenChange={(o) => {
+            setOpen(o);
+            if (o) {
+              // Fetch on open (event-driven): the popup is
+              // unmounted while closed, so there is nothing to
+              // badge otherwise.
+              void fetchStates();
+            } else {
+              setOptionQuery("");
+            }
+          }}
+        >
+          <SelectTrigger
+            className="h-8 w-full min-w-28 border-transparent bg-transparent px-1 text-[13px] hover:border-border data-[state=open]:border-border [&>svg]:hidden"
+            aria-label={`${field.name} value (read-only)`}
+            title={CRM_TABLE_LOCKED_MESSAGE}
+          >
+            <SelectValue placeholder="">
+              {shown == null || shown === "" ? undefined : (
+                <span className="inline-flex items-center gap-1.5">
+                  {selectedChip ? (
+                    <SelectChipView chip={selectedChip}>{shown}</SelectChipView>
+                  ) : (
+                    shown
+                  )}
+                  {selectedEvent && selectedEvent in states
+                    ? deliverySuffix(states[selectedEvent])
+                    : null}
+                </span>
+              )}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent className="w-max min-w-56 max-w-[min(22rem,calc(100vw-2rem))] [&_[data-slot=select-item-text]]:break-words [&_[data-slot=select-item-text]]:whitespace-normal [&_[data-slot=select-item-text]]:flex-wrap">
+            <div
+              className="px-2.5 py-1.5 text-xs text-muted-foreground"
+              role="note"
+              aria-label={CRM_TABLE_READONLY_DROPDOWN_NOTE}
+            >
+              {CRM_TABLE_READONLY_DROPDOWN_NOTE}
+            </div>
+            <SelectItem value="__clear__" disabled title={CRM_TABLE_READONLY_OPTION_HINT}>
+              <span className="text-muted-foreground">Clear</span>
+            </SelectItem>
+            {showOptionSearch && (
+              <OptionSearchBox
+                query={optionQuery}
+                onQuery={setOptionQuery}
+                fieldName={field.name}
+              />
+            )}
+            {visibleOptions.map((o) => {
+              const chip = getSelectChip(field.name, o.value);
+              const eventName = leadQualityToEvent(o.value);
+              return (
+                <SelectItem
+                  key={o.value}
+                  value={o.value}
+                  disabled
+                  title={CRM_TABLE_READONLY_OPTION_HINT}
+                  aria-label={`${o.label}. ${CRM_TABLE_READONLY_OPTION_HINT}`}
+                >
+                  {chip ? <SelectChipView chip={chip}>{o.label}</SelectChipView> : o.label}
+                  {eventName ? deliverySuffix(states[eventName]) : null}
+                </SelectItem>
+              );
+            })}
+          </SelectContent>
+        </Select>
+      </span>
+    );
+  }
 
   return (
     <span onClick={(e) => e.stopPropagation()}>
