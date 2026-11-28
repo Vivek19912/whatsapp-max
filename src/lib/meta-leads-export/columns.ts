@@ -24,6 +24,7 @@ import {
 } from '@/lib/workspace/all-meta-leads';
 
 import type { ExportColumn } from './workbook';
+import { groupExportColumnKey } from './column-selection';
 
 /** Excel display format for Submission Time: `28-11-2026 05:34 PM`. */
 export const SUBMISSION_TIME_NUM_FMT = 'dd-mm-yyyy hh:mm AM/PM';
@@ -119,7 +120,13 @@ export function buildSingleTableExportColumns(args: {
   const responseColumns = excludeMetaFullNameColumns(ordered, fullNameKeys);
 
   const out: ExportColumn[] = [
-    { key: '__row', header: 'No.', kind: 'number', width: 6 },
+    {
+      key: '__row',
+      header: 'No.',
+      kind: 'number',
+      width: 6,
+      group: groupExportColumnKey('__row'),
+    },
   ];
   for (const c of responseColumns) {
     if (c.key === 'submission_time') {
@@ -128,11 +135,22 @@ export function buildSingleTableExportColumns(args: {
         header: 'Submission Time',
         kind: 'date',
         numFmt: SUBMISSION_TIME_NUM_FMT,
+        group: groupExportColumnKey('submission_time'),
       });
     } else if (c.key === 'name') {
-      out.push({ key: 'name', header: 'Name', kind: 'text' });
+      out.push({
+        key: 'name',
+        header: 'Name',
+        kind: 'text',
+        group: groupExportColumnKey('name'),
+      });
     } else if (c.key === 'phone') {
-      out.push({ key: 'phone', header: 'Phone Number', kind: 'text' });
+      out.push({
+        key: 'phone',
+        header: 'Phone Number',
+        kind: 'text',
+        group: groupExportColumnKey('phone'),
+      });
     } else if (c.key === 'latest_recording' || c.key === 'status') {
       continue; // UI-only badges, not lead data
     } else {
@@ -145,10 +163,12 @@ export function buildSingleTableExportColumns(args: {
       // duplicates it ("Phone number" in any casing/spacing).
       // Other question columns and custom fields are untouched.
       if (isDuplicatePhoneColumn(header)) continue;
+      const key = `answer:${c.key}`;
       out.push({
-        key: `answer:${c.key}`,
+        key,
         header,
         kind: 'text',
+        group: groupExportColumnKey(key),
       });
     }
   }
@@ -156,16 +176,36 @@ export function buildSingleTableExportColumns(args: {
   // Workspace business fields in stored position order.
   for (const f of args.workspaceFields) {
     const label = formatColumnLabel(f.name);
+    const key = `field:${f.id}`;
     out.push({
-      key: `field:${f.id}`,
+      key,
       header: label,
       kind: /follow-up|date|time/i.test(f.name) ? 'date' : 'text',
       ...(isLastContactDateColumn(label) ? { numFmt: DATE_ONLY_NUM_FMT } : {}),
+      group: groupExportColumnKey(key),
     });
   }
 
   void nameKey;
   return { columns: out, answerKeys };
+}
+
+/**
+ * Narrow an authorized full column list to the client's Step-2
+ * selection, preserving the builders' canonical order (never the
+ * order identifiers were ticked in). Unknown identifiers are
+ * reported — never trusted, never silently dropped.
+ */
+export function filterColumnsByKeys(
+  full: readonly ExportColumn[],
+  selected: readonly string[] | null
+): { columns: ExportColumn[]; unknownKeys: string[] } {
+  if (selected === null) return { columns: [...full], unknownKeys: [] };
+  const valid = new Set(full.map((c) => c.key));
+  const unknownKeys = selected.filter((k) => !valid.has(k));
+  if (unknownKeys.length > 0) return { columns: [], unknownKeys };
+  const keep = new Set(selected);
+  return { columns: full.filter((c) => keep.has(c.key)), unknownKeys: [] };
 }
 
 /**
@@ -181,7 +221,13 @@ export function buildAllMetaExportColumns(args: {
 }): ExportColumn[] {
   const fixed = allMetaFlowColumns();
   const out: ExportColumn[] = [
-    { key: '__row', header: 'No.', kind: 'number', width: 6 },
+    {
+      key: '__row',
+      header: 'No.',
+      kind: 'number',
+      width: 6,
+      group: groupExportColumnKey('__row'),
+    },
   ];
   for (const c of fixed) {
     if (c.key === 'submission_time')
@@ -190,45 +236,90 @@ export function buildAllMetaExportColumns(args: {
         header: 'Submission Time',
         kind: 'date',
         numFmt: SUBMISSION_TIME_NUM_FMT,
+        group: groupExportColumnKey('submission_time'),
       });
     else if (c.key === 'name')
-      out.push({ key: 'name', header: 'Name', kind: 'text' });
+      out.push({
+        key: 'name',
+        header: 'Name',
+        kind: 'text',
+        group: groupExportColumnKey('name'),
+      });
     else if (c.key === 'phone')
-      out.push({ key: 'phone', header: 'Phone Number', kind: 'text' });
+      out.push({
+        key: 'phone',
+        header: 'Phone Number',
+        kind: 'text',
+        group: groupExportColumnKey('phone'),
+      });
     else if (c.key === 'meta_table')
       out.push({
         key: 'meta_table',
         header: 'Meta Lead Ads Table',
         kind: 'text',
+        group: groupExportColumnKey('meta_table'),
       });
     else if (c.key === 'meta_lead_source')
-      out.push({ key: 'source', header: 'Source', kind: 'text' });
+      out.push({
+        key: 'source',
+        header: 'Source',
+        kind: 'text',
+        group: groupExportColumnKey('source'),
+      });
     else if (c.key === 'form_answers')
-      out.push({ key: 'form_answers', header: 'Form Answers', kind: 'text' });
+      out.push({
+        key: 'form_answers',
+        header: 'Form Answers',
+        kind: 'text',
+        group: groupExportColumnKey('form_answers'),
+      });
     else if (c.key === 'all_assigned_to')
-      out.push({ key: 'assigned_to', header: 'Assigned To', kind: 'text' });
+      out.push({
+        key: 'assigned_to',
+        header: 'Assigned To',
+        kind: 'text',
+        group: groupExportColumnKey('assigned_to'),
+      });
     else if (c.key === 'all_lead_type')
-      out.push({ key: 'lead_type', header: 'Type', kind: 'text' });
+      out.push({
+        key: 'lead_type',
+        header: 'Type',
+        kind: 'text',
+        group: groupExportColumnKey('lead_type'),
+      });
     else if (c.key === 'all_stage')
-      out.push({ key: 'stage', header: 'Stage', kind: 'text' });
+      out.push({
+        key: 'stage',
+        header: 'Stage',
+        kind: 'text',
+        group: groupExportColumnKey('stage'),
+      });
     else if (c.key === 'all_call_status')
-      out.push({ key: 'call_status', header: 'Call Status', kind: 'text' });
+      out.push({
+        key: 'call_status',
+        header: 'Call Status',
+        kind: 'text',
+        group: groupExportColumnKey('call_status'),
+      });
     else if (c.key === 'all_follow_up')
       out.push({
         key: 'follow_up',
         header: 'Follow-up information',
         kind: 'date',
+        group: groupExportColumnKey('follow_up'),
       });
   }
   const unions = buildAllMetaUnionColumns(args.tables, args.fieldsByFlow);
   for (const u of unions) {
+    const key = `union:${u.key}`;
     out.push({
-      key: `union:${u.key}`,
+      key,
       header: u.label,
       kind: /date|time/i.test(u.fieldType) ? 'date' : 'text',
       ...(isLastContactDateColumn(u.label)
         ? { numFmt: DATE_ONLY_NUM_FMT }
         : {}),
+      group: groupExportColumnKey(key),
     });
   }
   return out;

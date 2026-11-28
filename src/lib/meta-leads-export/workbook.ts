@@ -11,6 +11,7 @@
 import ExcelJS from 'exceljs';
 
 import { EXPORT_SHEET_NAME, sanitizeExcelValue } from './constants';
+import type { ExportColumnGroup } from './column-selection';
 
 export interface ExportColumn {
   /** Stable key (for mapping, never displayed). */
@@ -19,6 +20,12 @@ export interface ExportColumn {
   header: string;
   /** Column kind for formatting/width. */
   kind: 'text' | 'date' | 'number';
+  /**
+   * Step-2 dialog group. Every column belongs to exactly one group
+   * (`basic`: identity + form answers, no group checkbox;
+   * `management`: assignment/follow-up fields, tri-state master).
+   */
+  group: ExportColumnGroup;
   /**
    * Explicit Excel number-format code for `date` columns. When set
    * it wins over the workbook default (`yyyy-mm-dd hh:mm`), so

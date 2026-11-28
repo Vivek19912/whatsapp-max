@@ -13,9 +13,19 @@ describe('buildMetaLeadsWorkbook', () => {
   it('creates one worksheet with frozen header + autofilter + dates', async () => {
     const buf = await buildMetaLeadsWorkbook({
       columns: [
-        { key: 'submission_time', header: 'Submission Time', kind: 'date' },
-        { key: 'name', header: 'Name', kind: 'text' },
-        { key: 'phone', header: 'Phone Number', kind: 'text' },
+        {
+          key: 'submission_time',
+          header: 'Submission Time',
+          kind: 'date',
+          group: 'basic',
+        },
+        { key: 'name', header: 'Name', kind: 'text', group: 'basic' },
+        {
+          key: 'phone',
+          header: 'Phone Number',
+          kind: 'text',
+          group: 'basic',
+        },
       ],
       rows: [
         {
@@ -41,7 +51,9 @@ describe('buildMetaLeadsWorkbook', () => {
   it('rejects exports beyond Excel row limit instead of truncating', async () => {
     await expect(
       buildMetaLeadsWorkbook({
-        columns: [{ key: 'name', header: 'Name', kind: 'text' }],
+        columns: [
+          { key: 'name', header: 'Name', kind: 'text', group: 'basic' },
+        ],
         rows: Array.from({ length: EXCEL_MAX_ROWS }, (_, i) => ({
           name: `L${i}`,
         })),
@@ -51,7 +63,14 @@ describe('buildMetaLeadsWorkbook', () => {
 
   it('handles special chars + empty values consistently', async () => {
     const buf = await buildMetaLeadsWorkbook({
-      columns: [{ key: 'form_answers', header: 'Form Answers', kind: 'text' }],
+      columns: [
+        {
+          key: 'form_answers',
+          header: 'Form Answers',
+          kind: 'text',
+          group: 'basic',
+        },
+      ],
       rows: [
         { form_answers: 'Q: A\nnewline, comma,; emoji 🎉' },
         { form_answers: null },
@@ -68,15 +87,22 @@ describe('buildMetaLeadsWorkbook', () => {
           key: 'submission_time',
           header: 'Submission Time',
           kind: 'date',
+          group: 'basic',
           numFmt: 'dd-mm-yyyy hh:mm AM/PM',
         },
         {
           key: 'last_contact',
           header: 'Last Contact Date',
           kind: 'date',
+          group: 'management',
           numFmt: 'dd-mm-yyyy',
         },
-        { key: 'follow_up', header: 'Follow-up information', kind: 'date' },
+        {
+          key: 'follow_up',
+          header: 'Follow-up information',
+          kind: 'date',
+          group: 'management',
+        },
       ],
       rows: [
         {
@@ -113,8 +139,13 @@ describe('buildMetaLeadsWorkbook', () => {
   it('wraps header text with vertical centering and left alignment', async () => {
     const buf = await buildMetaLeadsWorkbook({
       columns: [
-        { key: 'name', header: 'Name', kind: 'text' },
-        { key: 'phone', header: 'Phone Number', kind: 'text' },
+        { key: 'name', header: 'Name', kind: 'text', group: 'basic' },
+        {
+          key: 'phone',
+          header: 'Phone Number',
+          kind: 'text',
+          group: 'basic',
+        },
       ],
       rows: [{ name: 'Aarav', phone: '+919999999999' }],
     });
@@ -148,8 +179,8 @@ describe('buildMetaLeadsWorkbook', () => {
     const longHeader = 'Q'.repeat(60);
     const buf = await buildMetaLeadsWorkbook({
       columns: [
-        { key: 'name', header: 'Name', kind: 'text' },
-        { key: 'q1', header: longHeader, kind: 'text' },
+        { key: 'name', header: 'Name', kind: 'text', group: 'basic' },
+        { key: 'q1', header: longHeader, kind: 'text', group: 'basic' },
       ],
       rows: [{ name: 'Aarav', q1: 'Yes' }],
     });
@@ -165,8 +196,8 @@ describe('buildMetaLeadsWorkbook', () => {
     const longHeader = 'Q'.repeat(100);
     const buf = await buildMetaLeadsWorkbook({
       columns: [
-        { key: 'name', header: 'Name', kind: 'text' },
-        { key: 'q1', header: longHeader, kind: 'text' },
+        { key: 'name', header: 'Name', kind: 'text', group: 'basic' },
+        { key: 'q1', header: longHeader, kind: 'text', group: 'basic' },
       ],
       rows: [{ name: 'Aarav', q1: 'Yes' }],
     });
@@ -182,7 +213,15 @@ describe('buildMetaLeadsWorkbook', () => {
 
   it('counts explicit newlines as separate header lines', async () => {
     const buf = await buildMetaLeadsWorkbook({
-      columns: [{ key: 'q1', header: 'AB\nCDEFGH', kind: 'text', width: 20 }],
+      columns: [
+        {
+          key: 'q1',
+          header: 'AB\nCDEFGH',
+          kind: 'text',
+          width: 20,
+          group: 'basic',
+        },
+      ],
       rows: [{ q1: 'Yes' }],
     });
     const wb = new ExcelJS.Workbook();

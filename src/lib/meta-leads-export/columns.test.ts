@@ -4,6 +4,7 @@ import {
   buildAllMetaExportColumns,
   buildSingleTableExportColumns,
   DATE_ONLY_NUM_FMT,
+  filterColumnsByKeys,
   resolveExportHeader,
   SUBMISSION_TIME_NUM_FMT,
 } from './columns';
@@ -57,10 +58,16 @@ describe('meta-leads-export columns (reuse Workspace logic)', () => {
     expect(headers).not.toContain('Lead Source');
     expect(headers).not.toContain('Meta Created Time');
     expect(headers).not.toContain('Meta Lead ID');
-    // Workspace business field uses display alias formatting.
-    expect(headers).toContain('Assigned To');
     // UI-only columns never exported.
     expect(headers).not.toContain('Latest Recording');
+    // Every column belongs to exactly one Step-2 group.
+    const byKey = new Map(columns.map((c) => [c.key, c.group]));
+    expect(byKey.get('__row')).toBe('basic');
+    expect(byKey.get('submission_time')).toBe('basic');
+    expect(byKey.get('name')).toBe('basic');
+    expect(byKey.get('phone')).toBe('basic');
+    expect(byKey.get('answer:city')).toBe('basic');
+    expect(byKey.get('field:f1')).toBe('management');
   });
 
   it('single table suppresses the Full Name twin, keeps system Name', () => {
@@ -113,6 +120,14 @@ describe('meta-leads-export columns (reuse Workspace logic)', () => {
     expect(headers).not.toContain('Lead Source');
     expect(headers).not.toContain('Meta Created Time');
     expect(headers).not.toContain('Meta Lead ID');
+    const byKey = new Map(cols.map((c) => [c.key, c.group]));
+    expect(byKey.get('__row')).toBe('basic');
+    expect(byKey.get('meta_table')).toBe('basic');
+    expect(byKey.get('source')).toBe('basic');
+    expect(byKey.get('form_answers')).toBe('basic');
+    expect(byKey.get('assigned_to')).toBe('management');
+    expect(byKey.get('stage')).toBe('management');
+    expect(byKey.get('follow_up')).toBe('management');
   });
 
   it('submission time uses dd-mm-yyyy hh:mm AM/PM in both views', () => {
@@ -282,5 +297,88 @@ describe('meta-leads-export columns (reuse Workspace logic)', () => {
         labels: { 'flow:name': 'Hacked' },
       })
     ).toBe('Name');
+  });
+
+  it('assigns every column to exactly one group', () => {
+    const { columns: single } = buildSingleTableExportColumns({
+      nodes: [
+        {
+          node_key: 'meta_q_0_city',
+          node_type: 'collect_input',
+          config: {
+            var_key: 'city',
+            prompt_text: 'city',
+            sheet_column_name: 'city',
+            sheet_include: true,
+          },
+          created_at: '2026-01-01',
+        },
+      ],
+      entryNodeKey: 'meta_q_0_city',
+      fullNameQuestions: [],
+      questionKeys: ['city'],
+      headerLabels: null,
+      workspaceFields: [
+        { id: 'f1', name: 'Assigned To', field_type: 'single_select' },
+      ],
+    });
+    const singleByKey = new Map(single.map((c) => [c.key, c.group]));
+    expect(singleByKey.get('__row')).toBe('basic');
+    expect(singleByKey.get('submission_time')).toBe('basic');
+    expect(singleByKey.get('name')).toBe('basic');
+    expect(singleByKey.get('phone')).toBe('basic');
+    expect(singleByKey.get('answer:city')).toBe('basic');
+    expect(singleByKey.get('field:f1')).toBe('management');
+
+    const all = buildAllMetaExportColumns({
+      tables: [{ flowId: 'flow-1' }],
+      fieldsByFlow: {
+        'flow-1': [{ id: 'u1', name: 'Notes', field_type: 'text' }],
+      },
+    });
+    const allByKey = new Map(all.map((c) => [c.key, c.group]));
+    expect(allByKey.get('meta_table')).toBe('basic');
+    expect(allByKey.get('source')).toBe('basic');
+    expect(allByKey.get('form_answers')).toBe('basic');
+    expect(allByKey.get('assigned_to')).toBe('management');
+    expect(allByKey.get('stage')).toBe('management');
+    expect(allByKey.get('union:all_union_notes')).toBe('management');
+    for (const c of [...single, ...all]) {
+      expect(c.group === 'basic' || c.group === 'management').toBe(true);
+    }
+  });
+
+  it('filterColumnsByKeys keeps canonical order and flags unknowns', () => {
+    const all = buildAllMetaExportColumns({ tables: [], fieldsByFlow: {} });
+    // Null selection = everything (existing single-step behavior).
+    expect(filterColumnsByKeys(all, null).columns.map((c) => c.key)).toEqual(
+      all.map((c) => c.key)
+    );
+    // Tick order does not leak into the workbook.
+    const picked = filterColumnsByKeys(all, ['stage', 'name', '__row']);
+    expect(picked.unknownKeys).toEqual([]);
+    expect(picked.columns.map((c) => c.key)).toEqual([
+      '__row',
+      'name',
+      'stage',
+    ]);
+    // Removed provenance columns can never be reintroduced.
+    for (const removed of [
+      'meta_ad',
+      'meta_campaign',
+      'meta_source_type',
+      'meta_created',
+      'meta_lead_id',
+    ]) {
+      expect(filterColumnsByKeys(all, [removed]).unknownKeys).toEqual([
+        removed,
+      ]);
+    }
+    // Duplicates collapse to a single column.
+    expect(
+      filterColumnsByKeys(all, ['name', 'name', 'phone']).columns.map(
+        (c) => c.key
+      )
+    ).toEqual(['name', 'phone']);
   });
 });

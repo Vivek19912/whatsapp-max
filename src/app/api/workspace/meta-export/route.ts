@@ -22,6 +22,8 @@
 // header-label overrides / formatColumnLabel.
 // ============================================================
 
+import type { SupabaseClient } from '@supabase/supabase-js';
+
 import { NextResponse } from 'next/server';
 
 import {
@@ -57,6 +59,7 @@ import { buildAllMetaFormAnswers } from '@/lib/workspace/all-meta-leads';
 import {
   buildAllMetaExportColumns,
   buildSingleTableExportColumns,
+  filterColumnsByKeys,
 } from '@/lib/meta-leads-export/columns';
 import {
   buildExportFilename,
@@ -69,6 +72,7 @@ import {
 } from '@/lib/meta-leads-export/constants';
 import {
   buildMetaLeadsWorkbook,
+  type ExportColumn,
   type ExportRow,
 } from '@/lib/meta-leads-export/workbook';
 import {
@@ -80,6 +84,29 @@ import type { FlowNodeLite } from '@/lib/flows/sheet-columns';
 export const runtime = 'nodejs';
 export const maxDuration = 300;
 
+/**
+ * Selected Step-2 column identifiers from repeated `col` params
+ * (comma-tolerant, trimmed, deduped, order as sent — the workbook
+ * layer re-imposes canonical order). Returns null when the client
+ * sent none, meaning "all columns" (existing single-step behavior).
+ */
+function parseSelectedColumns(url: URL): string[] | null {
+  const seen = new Set<string>();
+  for (const raw of url.searchParams.getAll('col')) {
+    for (const part of raw.split(',')) {
+      const key = part.trim();
+      if (key !== '' && !seen.has(key)) seen.add(key);
+    }
+  }
+  return seen.size > 0 ? [...seen] : null;
+}
+
+/**
+ * Step-2 column narrowing always runs through filterColumnsByKeys
+ * (columns.ts), so validation uses the same builder output that
+ * the columns endpoint lists. Unknown keys are rejected with 400;
+ * an empty result is rejected so we never emit a header-less file.
+ */
 function parseMultiValues(url: URL, key: string): string[] | null {
   const raw = url.searchParams.getAll(key);
   const seen = new Set<string>();
@@ -108,6 +135,214 @@ function textOrNull(v: unknown): string | null {
   }
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   return null;
+}
+
+/**
+ * Flow ids containing at least one lead assigned to the caller
+ * (my-tables visibility pattern: restricted agents see only their
+ * own tables). Used by the columns endpoint and by Step-2 column
+ * filtering so both agree on scoping. Empty input yields an empty
+ * set (avoids an empty SQL IN list).
+ */
+async function loadOwnedFlowIds(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string,
+  flowIds: readonly string[]
+): Promise<Set<string>> {
+  const owned = new Set<string>();
+  if (flowIds.length === 0) return owned;
+  const { data: af } = await supabase
+    .from('workspace_fields')
+    .select('id, flow_id, name')
+    .eq('account_id', accountId)
+    .in('flow_id', [...flowIds]);
+  const aFields = (
+    (af ?? []) as Array<{ id: string; flow_id: string; name: string }>
+  ).filter((f) => isAssigneeField({ name: f.name }));
+  if (aFields.length === 0) return owned;
+  const fieldToFlow = new Map(aFields.map((f) => [f.id, f.flow_id]));
+  const { data: ov } = await supabase
+    .from('workspace_values')
+    .select('field_id')
+    .eq('account_id', accountId)
+    .eq('value_text', userId)
+    .in(
+      'field_id',
+      aFields.map((f) => f.id)
+    );
+  for (const v of (ov ?? []) as Array<{ field_id: string }>) {
+    const fid = fieldToFlow.get(v.field_id);
+    if (fid) owned.add(fid);
+  }
+  return owned;
+}
+
+interface MetaWorkspaceFieldDef {
+  id: string;
+  name: string;
+  field_type: string;
+  options: string[] | null;
+  default_value: string | null;
+  position: number | null;
+}
+
+/**
+ * Workspace field definitions keyed by flow, batched in one query
+ * (never N+1). Same select + normalization as the export path so
+ * Step-2 column lists and workbooks can never disagree.
+ */
+async function loadFieldDefsByFlow(
+  supabase: SupabaseClient,
+  accountId: string,
+  flowIds: readonly string[]
+): Promise<Record<string, MetaWorkspaceFieldDef[]>> {
+  const out: Record<string, MetaWorkspaceFieldDef[]> = {};
+  if (flowIds.length === 0) return out;
+  const { data: fieldsData } = await supabase
+    .from('workspace_fields')
+    .select('id, flow_id, name, field_type, options, default_value, position')
+    .eq('account_id', accountId)
+    .in('flow_id', [...flowIds]);
+  for (const f of (fieldsData ?? []) as Array<{
+    id: string;
+    flow_id: string;
+    name: string;
+    field_type?: unknown;
+    options?: unknown;
+    default_value?: unknown;
+    position?: unknown;
+  }>) {
+    (out[f.flow_id] ??= []).push({
+      id: f.id,
+      name: f.name,
+      field_type: typeof f.field_type === 'string' ? f.field_type : 'text',
+      options: Array.isArray(f.options) ? (f.options as string[]) : null,
+      default_value:
+        typeof f.default_value === 'string' ? f.default_value : null,
+      position: typeof f.position === 'number' ? f.position : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Full export column list for one Meta Lead Ads table (same
+ * builders, same inputs as the export path): nodes, entry node,
+ * form questions, header-label overrides, workspace fields.
+ * Used by the columns endpoint so Step 2 lists exactly what the
+ * workbook can contain.
+ */
+async function loadSingleTableColumns(
+  supabase: SupabaseClient,
+  accountId: string,
+  flowId: string
+): Promise<ExportColumn[]> {
+  const { data: nodesData } = await supabase
+    .from('flow_nodes')
+    .select('node_key, node_type, config, created_at')
+    .eq('flow_id', flowId)
+    .order('created_at', { ascending: true });
+  const nodes: FlowNodeLite[] = (
+    (nodesData ?? []) as Array<{
+      node_key: string;
+      node_type: string;
+      config?: unknown;
+      created_at?: string | null;
+    }>
+  ).map((n) => ({
+    node_key: n.node_key,
+    node_type: n.node_type,
+    config: (n.config ?? {}) as Record<string, unknown>,
+    created_at: n.created_at ?? null,
+  }));
+  const { data: flowRow } = await supabase
+    .from('flows')
+    .select('id, entry_node_id, meta_form_id')
+    .eq('id', flowId)
+    .eq('account_id', accountId)
+    .maybeSingle();
+  const entryNodeKey = ((flowRow as { entry_node_id?: string | null } | null)
+    ?.entry_node_id ?? null) as string | null;
+  const formDbId = ((flowRow as { meta_form_id?: string | null } | null)
+    ?.meta_form_id ?? null) as string | null;
+
+  // Form questions (deterministic per-question storage keys, same
+  // derivation the virtual flow was built with).
+  let fullNameQuestions: Array<{
+    key: string | null;
+    label: string | null;
+    type: string | null;
+  }> = [];
+  let questionKeys: string[] = [];
+  if (formDbId) {
+    const { data: formRow } = await supabase
+      .from('meta_lead_forms')
+      .select('questions')
+      .eq('id', formDbId)
+      .eq('account_id', accountId)
+      .maybeSingle();
+    const rawQuestions = (formRow as { questions?: unknown } | null)?.questions;
+    const parsed = parseFormQuestions(rawQuestions);
+    questionKeys = questionVarKeys(parsed);
+    fullNameQuestions = parsed.map((q) => ({
+      key: q.key ?? null,
+      label: q.label ?? null,
+      type: q.type ?? null,
+    }));
+  }
+
+  // Header-label overrides (same two sources as the export path).
+  let headerLabels: Record<string, string> | null = null;
+  try {
+    const { data: labelRows } = await supabase
+      .from('meta_lead_header_labels')
+      .select('label_key, label_value')
+      .eq('account_id', accountId)
+      .eq('flow_id', flowId);
+    if (labelRows) {
+      headerLabels = {};
+      for (const l of labelRows as Array<{
+        label_key: string;
+        label_value: string;
+      }>) {
+        if (l.label_key && typeof l.label_value === 'string')
+          headerLabels[l.label_key] = l.label_value;
+      }
+    }
+  } catch {
+    headerLabels = null;
+  }
+  if (!headerLabels && formDbId) {
+    try {
+      const { data: formRow } = await supabase
+        .from('meta_lead_forms')
+        .select('header_labels')
+        .eq('id', formDbId)
+        .eq('account_id', accountId)
+        .maybeSingle();
+      const hl = (formRow as { header_labels?: unknown } | null)?.header_labels;
+      if (hl && typeof hl === 'object')
+        headerLabels = hl as Record<string, string>;
+    } catch {
+      headerLabels = null;
+    }
+  }
+
+  const fieldDefs = await loadFieldDefsByFlow(supabase, accountId, [flowId]);
+  const wsFields = (fieldDefs[flowId] ?? []).map((f) => ({
+    id: f.id,
+    name: f.name,
+    field_type: f.field_type,
+  }));
+  return buildSingleTableExportColumns({
+    nodes,
+    entryNodeKey,
+    fullNameQuestions,
+    questionKeys,
+    headerLabels,
+    workspaceFields: wsFields,
+  }).columns;
 }
 
 interface AllMetaRpcRow {
@@ -307,6 +542,12 @@ export async function GET(request: Request) {
       .slice(0, 200);
     const ad = (url.searchParams.get('ad') ?? '').trim().slice(0, 200);
     const search = url.searchParams.get('search')?.slice(0, 120) ?? '';
+
+    // Step-2 column selection (`col` params, repeatable/comma-separated).
+    // Null = no selection sent → export every column (existing
+    // single-step behavior). Validation happens against the
+    // scope-aware column definitions below, never trusted blindly.
+    const selectedKeys = parseSelectedColumns(url);
 
     // ---- Options mode (distinct campaigns/ads/forms, no file) ----
     // Same visibility contract as the export path: restricted agents
@@ -530,6 +771,120 @@ export async function GET(request: Request) {
         forms,
         campaigns: scoped.campaigns,
         ads: scoped.ads,
+      });
+    }
+
+    // ---- Columns mode (available export columns, grouped — Step 2) ----
+    // Same visibility contract as options/export: table existence and
+    // kind were validated above; restricted agents only see tables
+    // they may access (my-tables scopeToOwn pattern, fail closed).
+    // Returns the builders' canonical columns ({key, header, group})
+    // so Step 2 lists exactly what the workbook can contain. No rows
+    // are read; nothing is created, modified, or deleted.
+    if (url.searchParams.get('columns') === '1') {
+      let columnsRestricted = false;
+      if (role === 'agent') {
+        try {
+          const { resolveWorkspaceVisibility } =
+            await import('@/lib/inbox/assignment-access');
+          columnsRestricted = (
+            await resolveWorkspaceVisibility(supabase, accountId, userId, role)
+          ).restricted;
+        } catch {
+          columnsRestricted = true;
+        }
+      }
+      const columnsScopeToOwn = role === 'agent' && columnsRestricted;
+
+      const { data: colFlowsData, error: colFlowsErr } = await supabase
+        .from('flows')
+        .select('id, name, meta_form_id')
+        .eq('account_id', accountId)
+        .eq('kind', 'meta_lead_ads')
+        .order('name', { ascending: true });
+      if (colFlowsErr) throw colFlowsErr;
+      const colAllFlows = (
+        (colFlowsData ?? []) as Array<{
+          id: string;
+          name: string | null;
+          meta_form_id: string | null;
+        }>
+      ).filter((f) => typeof f.id === 'string');
+
+      if (!isAllView) {
+        // Existence + kind already validated above (404/400).
+        // Restricted agents must hold at least one own assignment
+        // in this table; otherwise 404 with the identical message
+        // (no existence oracle for table names they cannot access).
+        if (columnsScopeToOwn) {
+          const owned = await loadOwnedFlowIds(supabase, accountId, userId, [
+            rawTableId,
+          ]);
+          if (!owned.has(rawTableId)) {
+            return NextResponse.json(
+              { error: 'Table not found.' },
+              { status: 404 }
+            );
+          }
+        }
+        const singleColumns = await loadSingleTableColumns(
+          supabase,
+          accountId,
+          rawTableId
+        );
+        return NextResponse.json({
+          columns: singleColumns.map((c) => ({
+            key: c.key,
+            header: c.header,
+            group: c.group,
+          })),
+        });
+      }
+
+      // All Meta Leads: tables the caller may access…
+      let visibleFlows = colAllFlows;
+      if (columnsScopeToOwn) {
+        const owned = await loadOwnedFlowIds(
+          supabase,
+          accountId,
+          userId,
+          colAllFlows.map((f) => f.id)
+        );
+        visibleFlows = colAllFlows.filter((f) => owned.has(f.id));
+      }
+      // …optionally narrowed to one form (same validation as export).
+      const rawColFormId = (url.searchParams.get('formId') ?? '').trim();
+      if (rawColFormId) {
+        if (!colAllFlows.some((f) => f.id === rawColFormId)) {
+          return NextResponse.json(
+            { error: 'Form not found.' },
+            { status: 404 }
+          );
+        }
+        if (!visibleFlows.some((f) => f.id === rawColFormId)) {
+          return NextResponse.json(
+            { error: 'Table not found.' },
+            { status: 404 }
+          );
+        }
+        visibleFlows = visibleFlows.filter((f) => f.id === rawColFormId);
+      }
+      const scopeIds = visibleFlows.map((f) => f.id);
+      const fieldDefs = await loadFieldDefsByFlow(
+        supabase,
+        accountId,
+        scopeIds
+      );
+      const allColumns = buildAllMetaExportColumns({
+        tables: scopeIds.map((flowId) => ({ flowId })),
+        fieldsByFlow: fieldDefs,
+      });
+      return NextResponse.json({
+        columns: allColumns.map((c) => ({
+          key: c.key,
+          header: c.header,
+          group: c.group,
+        })),
       });
     }
 
@@ -883,6 +1238,81 @@ export async function GET(request: Request) {
           flowIds.map((fid) => [fid, fieldDefsByFlow[fid] ?? []])
         )
       );
+      // Step-2 column selection: validate against the scope-aware
+      // definition (identical scope to GET ?columns=1), then keep
+      // canonical order. Unselected columns are omitted from the
+      // workbook; without `col` params everything exports as before.
+      let exportColumns = columns;
+      if (selectedKeys !== null) {
+        let scopeIds = scopeFlowIds;
+        if (role === 'agent') {
+          try {
+            const { resolveWorkspaceVisibility } =
+              await import('@/lib/inbox/assignment-access');
+            const { restricted } = await resolveWorkspaceVisibility(
+              supabase,
+              accountId,
+              userId,
+              role
+            );
+            if (restricted) {
+              const owned = await loadOwnedFlowIds(
+                supabase,
+                accountId,
+                userId,
+                scopeFlowIds
+              );
+              scopeIds = scopeFlowIds.filter((id) => owned.has(id));
+            }
+          } catch {
+            // Fail closed for scoping: validate against only the
+            // rows' own tables (row-level auth still enforced).
+            scopeIds = [...new Set(filtered.map((r) => r.flow_id))];
+          }
+        }
+        const missingIds = scopeIds.filter((id) => !(id in fieldDefsByFlow));
+        let scopeDefs = fieldDefsByFlow;
+        if (missingIds.length > 0) {
+          const extra = await loadFieldDefsByFlow(
+            supabase,
+            accountId,
+            missingIds
+          );
+          scopeDefs = { ...fieldDefsByFlow, ...extra };
+        }
+        const scopeColumns = buildAllMetaExportColumns({
+          tables: scopeIds.map((flowId) => ({ flowId })),
+          fieldsByFlow: Object.fromEntries(
+            scopeIds.map((fid) => [
+              fid,
+              (scopeDefs[fid] ?? []) as Array<{
+                id: string;
+                name: string;
+                field_type: string;
+                options: string[] | null;
+                default_value: string | null;
+                position: number | null;
+              }>,
+            ])
+          ),
+        });
+        const sel = filterColumnsByKeys(scopeColumns, selectedKeys);
+        if (sel.unknownKeys.length > 0) {
+          return NextResponse.json(
+            { error: 'Unknown column selected.' },
+            { status: 400 }
+          );
+        }
+        if (sel.columns.length === 0) {
+          return NextResponse.json(
+            { error: 'Select at least one column to export.' },
+            { status: 400 }
+          );
+        }
+        exportColumns = sel.columns;
+      }
+      const showAssignedColumn =
+        selectedKeys === null || selectedKeys.includes('assigned_to');
       const rows: ExportRow[] = filtered.map((r, idx) => {
         const vars = (r.vars ?? {}) as Record<string, unknown>;
         const def = formDefByFlow.get(r.flow_id);
@@ -926,9 +1356,9 @@ export async function GET(request: Request) {
           meta_table: stripPrefix(flowName),
           source: sourceRaw,
           form_answers: combined,
-          assigned_to: displayAssignee(
-            readValue(r.run_id, r.flow_id, ['assigned to'])
-          ),
+          assigned_to: showAssignedColumn
+            ? displayAssignee(readValue(r.run_id, r.flow_id, ['assigned to']))
+            : null,
           lead_type: readValue(r.run_id, r.flow_id, ['lead type']) ?? 'Fresh',
           stage: readValue(r.run_id, r.flow_id, ['stage']) ?? 'New Lead',
           call_status: readValue(r.run_id, r.flow_id, ['call status']),
@@ -964,7 +1394,10 @@ export async function GET(request: Request) {
         return out;
       });
 
-      const buffer = await buildMetaLeadsWorkbook({ columns, rows });
+      const buffer = await buildMetaLeadsWorkbook({
+        columns: exportColumns,
+        rows,
+      });
       const filename = buildExportFilename(
         isAllView && pFlowId
           ? stripPrefix(flowNameById.get(pFlowId) ?? null)
@@ -1070,6 +1503,31 @@ export async function GET(request: Request) {
       headerLabels,
       workspaceFields: wsFields,
     });
+    // Step-2 column selection: the table's own builder output is the
+    // scope, so validation and filtering stay consistent with Step 2.
+    let singleExportColumns = columns;
+    let showSingleAssignee = true;
+    if (selectedKeys !== null) {
+      const sel = filterColumnsByKeys(columns, selectedKeys);
+      if (sel.unknownKeys.length > 0) {
+        return NextResponse.json(
+          { error: 'Unknown column selected.' },
+          { status: 400 }
+        );
+      }
+      if (sel.columns.length === 0) {
+        return NextResponse.json(
+          { error: 'Select at least one column to export.' },
+          { status: 400 }
+        );
+      }
+      singleExportColumns = sel.columns;
+      showSingleAssignee = wsFields.some(
+        (f) =>
+          isAssigneeField({ name: f.name }) &&
+          selectedKeys.includes(`field:${f.id}`)
+      );
+    }
 
     // Display-mapped answers per row (same rules as table route).
     const optionLabels = def?.optionLabels ?? new Map();
@@ -1122,7 +1580,9 @@ export async function GET(request: Request) {
         for (const f of wsFields) {
           const v = valueByRunAndField.get(r.run_id)?.get(f.id) ?? null;
           if (isAssigneeField({ name: f.name })) {
-            out[`field:${f.id}`] = displayAssignee(v);
+            out[`field:${f.id}`] = showSingleAssignee
+              ? displayAssignee(v)
+              : null;
             continue;
           }
           out[`field:${f.id}`] =
@@ -1134,7 +1594,10 @@ export async function GET(request: Request) {
         return out;
       });
 
-    const buffer = await buildMetaLeadsWorkbook({ columns, rows });
+    const buffer = await buildMetaLeadsWorkbook({
+      columns: singleExportColumns,
+      rows,
+    });
     const filename = buildExportFilename(exportLabel);
     logUnresolved();
     return new NextResponse(new Uint8Array(buffer), {

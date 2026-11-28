@@ -1024,3 +1024,297 @@ describe('meta-export — presentation: dates, removed columns, phone dedupe', (
     ).toBeNull();
   });
 });
+
+describe('meta-export — Step 2 column list (columns=1)', () => {
+  async function getColumns(query: string) {
+    const res = await GET(req(query));
+    const body = (await res.json().catch(() => null)) as {
+      columns?: Array<{ key?: unknown; header?: unknown; group?: unknown }>;
+      error?: string;
+    } | null;
+    return { res, body };
+  }
+
+  it('All view lists grouped columns, dynamic questions included, removed excluded', async () => {
+    const { res, body } = await getColumns('?tableId=all-meta-leads&columns=1');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body?.columns)).toBe(true);
+    const byKey = new Map(
+      (
+        body!.columns as Array<{ key: string; header: string; group: string }>
+      ).map((c) => [c.key, c])
+    );
+    expect(byKey.get('__row')).toMatchObject({
+      header: 'No.',
+      group: 'basic',
+    });
+    expect(byKey.get('submission_time')?.group).toBe('basic');
+    expect(byKey.get('form_answers')?.group).toBe('basic');
+    expect(byKey.get('assigned_to')).toMatchObject({
+      header: 'Assigned To',
+      group: 'management',
+    });
+    expect(byKey.get('stage')?.group).toBe('management');
+    for (const gone of [
+      'meta_ad',
+      'meta_campaign',
+      'meta_source_type',
+      'meta_created',
+      'meta_lead_id',
+      'lead_quality',
+    ]) {
+      expect(byKey.has(gone)).toBe(false);
+    }
+    for (const c of byKey.values()) {
+      expect(typeof c.key).toBe('string');
+      expect(typeof c.header).toBe('string');
+      expect(['basic', 'management']).toContain(c.group);
+    }
+  });
+
+  it('single table lists its own questions and fields only', async () => {
+    const { res, body } = await getColumns('?tableId=flow-meta-1&columns=1');
+    expect(res.status).toBe(200);
+    const cols = body!.columns as Array<{
+      key: string;
+      header: string;
+      group: string;
+    }>;
+    const byKey = new Map(cols.map((c) => [c.key, c]));
+    expect(byKey.get('answer:city')).toMatchObject({
+      header: 'City',
+      group: 'basic',
+    });
+    expect(byKey.get('field:f-assigned')).toMatchObject({
+      header: 'Assigned To',
+      group: 'management',
+    });
+    expect(byKey.has('form_answers')).toBe(false);
+    expect(byKey.has('meta_table')).toBe(false);
+    expect(byKey.has('meta_lead_id')).toBe(false);
+  });
+
+  it('unknown tables and whatsapp tables expose no columns', async () => {
+    const unknown = await GET(
+      req('?tableId=00000000-0000-0000-0000-000000000000&columns=1')
+    );
+    expect(unknown.status).toBe(404);
+    const wa = await GET(req('?tableId=flow-wa&columns=1'));
+    expect(wa.status).toBe(400);
+  });
+
+  it('restricted agents see only their own tables, not foreign ones', async () => {
+    h.role = 'agent';
+    h.userId = 'u-a';
+    h.restricted = true;
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    h.fields.push({
+      id: 'f-x2',
+      account_id: 'acct-1',
+      flow_id: 'flow-meta-2',
+      name: 'Custom X',
+      field_type: 'text',
+      options: null,
+      default_value: null,
+      position: 0,
+    });
+    // Own table is listed…
+    const own = await getColumns('?tableId=flow-meta-1&columns=1');
+    expect(own.res.status).toBe(200);
+    // …but the other table reads as not found (no existence oracle).
+    const foreign = await GET(req('?tableId=flow-meta-2&columns=1'));
+    expect(foreign.status).toBe(404);
+    expect(await foreign.text()).not.toContain('Rajasthan');
+    // All-view union skips the foreign table's custom fields.
+    const all = await getColumns('?tableId=all-meta-leads&columns=1');
+    expect(all.res.status).toBe(200);
+    expect(
+      (all.body!.columns as Array<{ header: string }>).map((c) => c.header)
+    ).not.toContain('Custom X');
+  });
+
+  it('unknown formId is rejected; foreign formId is hidden from agents', async () => {
+    const unknown = await GET(
+      req('?tableId=all-meta-leads&columns=1&formId=nope')
+    );
+    expect(unknown.status).toBe(404);
+    h.role = 'agent';
+    h.userId = 'u-a';
+    h.restricted = true;
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    const foreign = await GET(
+      req('?tableId=all-meta-leads&columns=1&formId=flow-meta-2')
+    );
+    expect(foreign.status).toBe(404);
+  });
+});
+
+describe('meta-export — Step 2 column filtering on export', () => {
+  async function exportHeaders(query: string) {
+    const res = await GET(req(query));
+    const ct = res.headers.get('Content-Type') ?? '';
+    if (!ct.includes('spreadsheetml')) {
+      return {
+        status: res.status,
+        headers: [] as string[],
+        body: (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null,
+      };
+    }
+    const buf = await res.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.getWorksheet('Leads')!;
+    const header = ws.getRow(1).values as unknown[];
+    return {
+      status: res.status,
+      headers: (header as unknown[]).slice(1).map(String),
+      body: null as { error?: string } | null,
+    };
+  }
+
+  it('selected subset exports exactly those columns in canonical order', async () => {
+    const { status, headers } = await exportHeaders(
+      '?tableId=all-meta-leads&col=stage&col=name&col=__row'
+    );
+    expect(status).toBe(200);
+    // Tick order was stage,name,__row — workbook keeps canonical order.
+    expect(headers).toEqual(['No.', 'Name', 'Stage']);
+  });
+
+  it('comma-separated and duplicate col params are tolerated', async () => {
+    const { status, headers } = await exportHeaders(
+      '?tableId=all-meta-leads&col=name,phone&col=name'
+    );
+    expect(status).toBe(200);
+    expect(headers).toEqual(['Name', 'Phone Number']);
+  });
+
+  it('unknown column keys are rejected, never silently dropped', async () => {
+    const { status, body } = await exportHeaders(
+      '?tableId=all-meta-leads&col=name&col=meta_ad'
+    );
+    expect(status).toBe(400);
+    expect(body?.error).toMatch(/Unknown column/);
+  });
+
+  it('removed columns cannot be reintroduced via col', async () => {
+    for (const removed of [
+      'meta_ad',
+      'meta_campaign',
+      'meta_source_type',
+      'meta_created',
+      'meta_lead_id',
+      'lead_quality',
+    ]) {
+      const { status, body } = await exportHeaders(
+        `?tableId=all-meta-leads&col=${removed}`
+      );
+      expect(status).toBe(400);
+      expect(body?.error).toMatch(/Unknown column/);
+    }
+  });
+
+  it('single-table selection keeps canonical order and drops unselected', async () => {
+    const { status, headers } = await exportHeaders(
+      '?tableId=flow-meta-1&col=answer:city&col=name'
+    );
+    expect(status).toBe(200);
+    expect(headers).toEqual(['Name', 'City']);
+  });
+
+  it('single-table unknown columns are rejected', async () => {
+    const { status, body } = await exportHeaders(
+      '?tableId=flow-meta-1&col=answer:nope'
+    );
+    expect(status).toBe(400);
+    expect(body?.error).toMatch(/Unknown column/);
+  });
+
+  it('deselected Assigned To skips name resolution and reporting', async () => {
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'b33ae622-7ec6-460a-8a6e-1644cfe96399',
+      },
+    ];
+    // No profiles seeded: the id is unresolvable.
+    const res = await GET(req('?tableId=all-meta-leads&col=name&col=phone'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Export-Unresolved-Assignees')).toBeNull();
+    const buf = await res.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.getWorksheet('Leads')!;
+    const header = ws.getRow(1).values as unknown[];
+    expect((header as unknown[]).slice(1).map(String)).toEqual([
+      'Name',
+      'Phone Number',
+    ]);
+    // No Unknown placeholders anywhere in the sheet.
+    for (let r = 2; r <= ws.rowCount; r++) {
+      ws.getRow(r).eachCell((cell) => {
+        expect(String(cell.value ?? '')).not.toBe('Unknown');
+      });
+    }
+  });
+
+  it('restricted agents can export their own selected columns', async () => {
+    h.role = 'agent';
+    h.userId = 'u-a';
+    h.restricted = false;
+    h.resolverThrows = false;
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    h.profiles = [
+      { user_id: 'u-a', full_name: 'Agent A', account_id: 'acct-1' },
+    ];
+    const res = await GET(
+      req('?tableId=all-meta-leads&col=name&col=assigned_to')
+    );
+    expect(res.status).toBe(200);
+    const buf = await res.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.getWorksheet('Leads')!;
+    const header = ws.getRow(1).values as unknown[];
+    expect((header as unknown[]).slice(1).map(String)).toEqual([
+      'Name',
+      'Assigned To',
+    ]);
+    const idx = (header as unknown[]).findIndex((v) => v === 'Assigned To');
+    expect(String(ws.getRow(2).getCell(idx).value)).toBe('Agent A');
+  });
+
+  it('unknown columns do not leak data across tenants', async () => {
+    const res = await GET(req('?tableId=all-meta-leads&col=meta_ad&col=x'));
+    expect(res.status).toBe(400);
+    const body = (await res.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    expect(body?.error).toMatch(/Unknown column/);
+  });
+});
