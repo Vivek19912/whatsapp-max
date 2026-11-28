@@ -1,6 +1,13 @@
 'use client';
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useSearchParams } from 'next/navigation';
 import localFont from 'next/font/local';
 import Link from 'next/link';
@@ -34,6 +41,7 @@ import {
   WorkspaceTableSelector,
 } from '@/components/workspace/workspace-header';
 import { WorkspaceActionsMenu } from '@/components/workspace/workspace-actions-menu';
+import { MetaExportButton } from '@/components/workspace/meta-export-dialog';
 import { WorkspaceFollowupKpis } from '@/components/workspace/workspace-followup-kpis';
 import {
   TableHScrollbar,
@@ -115,7 +123,12 @@ import { MetaTableSheetsDialog } from '@/components/workspace/meta-table-sheets-
 import { TableAssignmentDialog } from '@/components/workspace/table-assignment-dialog';
 import { ScheduleFollowupDialog } from '@/components/workspace/schedule-followup-dialog';
 import {
-  isWorkspaceFollowupFieldName, kpiBucketRange, localDayWindow, localDayWindowOffset, type FollowupKpiBucket } from '@/lib/followups/workspace-link';
+  isWorkspaceFollowupFieldName,
+  kpiBucketRange,
+  localDayWindow,
+  localDayWindowOffset,
+  type FollowupKpiBucket,
+} from '@/lib/followups/workspace-link';
 import { AllMetaFollowupKpis } from '@/components/workspace/workspace-followup-kpis';
 import {
   ALL_META_LEADS_ID,
@@ -290,23 +303,37 @@ interface AllMetaLeadsPayload {
   tables: AllMetaLeadsTable[];
   rows: AllMetaLeadsRow[];
   customValues: Record<string, Record<string, string | null>>;
-  fieldsByFlow: Record<string, Array<{
-    id: string;
-    name: string;
-    field_type: string;
-    options: string[] | null;
-    default_value: string | null;
-  }> | undefined>;
-  mediaByConversation: Record<string, Array<{ contentText: string | null; mediaUrl: string | null; contentType: string | null }>>;
-  latestRecordingByContact: Record<string, {
-    id: string;
-    contact_id: string;
-    duration_seconds: number | null;
-    recorded_at: string | null;
-    created_at: string;
-    file_name: string | null;
-    uploader_name: string | null;
-  }>;
+  fieldsByFlow: Record<
+    string,
+    | Array<{
+        id: string;
+        name: string;
+        field_type: string;
+        options: string[] | null;
+        default_value: string | null;
+      }>
+    | undefined
+  >;
+  mediaByConversation: Record<
+    string,
+    Array<{
+      contentText: string | null;
+      mediaUrl: string | null;
+      contentType: string | null;
+    }>
+  >;
+  latestRecordingByContact: Record<
+    string,
+    {
+      id: string;
+      contact_id: string;
+      duration_seconds: number | null;
+      recorded_at: string | null;
+      created_at: string;
+      file_name: string | null;
+      uploader_name: string | null;
+    }
+  >;
 }
 
 type SelectedLead =
@@ -346,7 +373,7 @@ function formatMetaYesNo(raw: string | null | undefined): string | null {
   return t;
 }
 
-import { LatestRecordingCell } from "@/components/workspace/latest-recording-cell";
+import { LatestRecordingCell } from '@/components/workspace/latest-recording-cell';
 
 /**
  * Lead recordings section for the row drawer: every recording
@@ -368,7 +395,9 @@ function LeadRecordings({ contactId }: { contactId: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/recordings?contact_id=${encodeURIComponent(contactId)}&limit=50`)
+    fetch(
+      `/api/recordings?contact_id=${encodeURIComponent(contactId)}&limit=50`
+    )
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => {
         if (!cancelled) {
@@ -391,7 +420,7 @@ function LeadRecordings({ contactId }: { contactId: string }) {
         </h3>
         <Link
           href={`/recordings/contact/${encodeURIComponent(contactId)}`}
-          className="text-xs text-primary hover:text-primary/80"
+          className="text-primary hover:text-primary/80 text-xs"
         >
           View All Recordings
         </Link>
@@ -410,9 +439,7 @@ function LeadRecordings({ contactId }: { contactId: string }) {
                 <span className="tabular-nums">
                   {formatDateTime(r.recorded_at ?? r.created_at)}
                 </span>
-                <span className="truncate">
-                  {r.uploader_name ?? 'Unknown'}
-                </span>
+                <span className="truncate">{r.uploader_name ?? 'Unknown'}</span>
               </div>
               <RecordingPlayerPopover
                 recordingId={r.id}
@@ -552,11 +579,7 @@ function SortableWorkspaceHeaderCell({
       <TableHead
         ref={setRefs}
         scope={scope}
-        className={cn(
-          className,
-          'group/th',
-          isDragging && 'opacity-40',
-        )}
+        className={cn(className, 'group/th', isDragging && 'opacity-40')}
         style={style}
       >
         {!disabled && (
@@ -595,7 +618,7 @@ function SortableWorkspaceHeaderCell({
  */
 function useColumnDragAutoscroll(
   viewportRef: React.RefObject<HTMLDivElement | null>,
-  dragging: boolean,
+  dragging: boolean
 ) {
   useEffect(() => {
     if (!dragging) return;
@@ -625,7 +648,8 @@ function useColumnDragAutoscroll(
 }
 
 export default function WorkspacePage() {
-  const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } = useAuth();
+  const { accountId, accountRole, canEditSettings, canSendMessages, isOwner } =
+    useAuth();
   // Agents see Workspace Meta leads according to their View All
   // Conversations grant (server-enforced per table): with it, all
   // account leads; without it, only their own assigned leads. Inbox
@@ -635,7 +659,7 @@ export default function WorkspacePage() {
   // agents holding it may reassign Workspace Meta leads to any
   // salesperson. Fetched once; owner/admin always allowed (true).
   const [canManageAssignments, setCanManageAssignments] = useState(
-    accountRole === 'owner' || accountRole === 'admin',
+    accountRole === 'owner' || accountRole === 'admin'
   );
   useEffect(() => {
     let cancelled = false;
@@ -646,7 +670,9 @@ export default function WorkspacePage() {
     if (accountRole !== 'agent') return;
     (async () => {
       try {
-        const res = await fetch('/api/account/agent-permissions/me', { cache: 'no-store' });
+        const res = await fetch('/api/account/agent-permissions/me', {
+          cache: 'no-store',
+        });
         const data = await res.json().catch(() => ({}));
         if (!cancelled && res.ok) {
           setCanManageAssignments(data?.can_manage_assignments === true);
@@ -685,17 +711,17 @@ export default function WorkspacePage() {
   const [kpiBucket, setKpiBucket] = useState<FollowupKpiBucket | null>(null);
   // Noun phrases for the active-filter indicator ("Showing 8 overdue leads").
   const KPI_BUCKET_NOUNS: Record<FollowupKpiBucket, string> = {
-    overdue: "overdue leads",
-    today: "leads due today",
-    tomorrow: "leads due tomorrow",
-    upcoming: "upcoming leads",
+    overdue: 'overdue leads',
+    today: 'leads due today',
+    tomorrow: 'leads due tomorrow',
+    upcoming: 'upcoming leads',
   };
   // KPI-specific empty states (spec wording) for the Leads table.
   const KPI_EMPTY_TITLES: Record<FollowupKpiBucket, string> = {
-    overdue: "No overdue follow-ups.",
-    today: "No follow-ups scheduled for today.",
-    tomorrow: "No follow-ups scheduled for tomorrow.",
-    upcoming: "No upcoming follow-ups.",
+    overdue: 'No overdue follow-ups.',
+    today: 'No follow-ups scheduled for today.',
+    tomorrow: 'No follow-ups scheduled for tomorrow.',
+    upcoming: 'No upcoming follow-ups.',
   };
   const [payload, setPayload] = useState<FlowTablePayload | null>(null);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
@@ -706,7 +732,9 @@ export default function WorkspacePage() {
   // + runId and every action operates on the original. Hidden +
   // disabled forms still contribute leads (backend includes all Meta
   // flows); no duplicate rows, no copies, no flow/run rewrites.
-  const [allPayload, setAllPayload] = useState<AllMetaLeadsPayload | null>(null);
+  const [allPayload, setAllPayload] = useState<AllMetaLeadsPayload | null>(
+    null
+  );
   const [allLoadedKey, setAllLoadedKey] = useState<string | null>(null);
   const [allTableError, setAllTableError] = useState<string | null>(null);
   const [allTableFilter, setAllTableFilter] = useState<string | null>(null);
@@ -732,7 +760,9 @@ export default function WorkspacePage() {
   // draft. Both are server-side: they ride the table request, so
   // pagination, views, search, visibility, and ordering are
   // preserved on the FILTERED set.
-  const [appliedDate, setAppliedDate] = useState<AppliedDateFilter | null>(null);
+  const [appliedDate, setAppliedDate] = useState<AppliedDateFilter | null>(
+    null
+  );
   const [appliedAssignee, setAppliedAssignee] =
     useState<WorkspaceAssigneeSelection>(ALL_ASSIGNEES);
   // Applied five-column filters (null-safe empty default). Rides
@@ -829,21 +859,25 @@ export default function WorkspacePage() {
           flows?: Array<{ id: string; name?: string | null }>;
           tables?: Array<{ flow_id: string; name: string | null }>;
         };
-        const list = (
-          isAgent
-            ? (json.tables ?? []).map((t) => ({ id: t.flow_id, name: t.name ?? null }))
-            : (json.flows ?? []).map((f) => ({ id: f.id, name: f.name ?? null }))
-        );
+        const list = isAgent
+          ? (json.tables ?? []).map((t) => ({
+              id: t.flow_id,
+              name: t.name ?? null,
+            }))
+          : (json.flows ?? []).map((f) => ({ id: f.id, name: f.name ?? null }));
         if (ctrl.signal.aborted) return;
         setFlows(list);
         // An explicit ?table= deep-link (e.g. from Table Assignments)
         // wins over the remembered selection when it names one of
         // this account's own flows — hidden tables included.
         const tableParam =
-          typeof window === "undefined"
+          typeof window === 'undefined'
             ? null
-            : new URLSearchParams(window.location.search).get("table");
-        const deepLinked = tableParam && list.some((f) => f.id === tableParam) ? tableParam : null;
+            : new URLSearchParams(window.location.search).get('table');
+        const deepLinked =
+          tableParam && list.some((f) => f.id === tableParam)
+            ? tableParam
+            : null;
         if (deepLinked) {
           explicitTableRef.current = deepLinked;
           setFlowId(deepLinked);
@@ -857,11 +891,14 @@ export default function WorkspacePage() {
         // remembered selections (including All) win when still listed.
         setFlowId(
           resolveInitialFlowId(
-            [ALL_META_LEADS_ID, ...visibleWorkspaceTables(list, hiddenTableIdsRef.current).map(
-              (f) => f.id
-            )],
-            loadSelectedFlowId(accountId),
-          ),
+            [
+              ALL_META_LEADS_ID,
+              ...visibleWorkspaceTables(list, hiddenTableIdsRef.current).map(
+                (f) => f.id
+              ),
+            ],
+            loadSelectedFlowId(accountId)
+          )
         );
       })
       .catch((err) => {
@@ -904,7 +941,8 @@ export default function WorkspacePage() {
 
   // Tables shown in the normal dropdown (hidden ones stay out).
   const visibleFlows = useMemo(
-    () => (flows === null ? null : visibleWorkspaceTables(flows, hiddenTableIds)),
+    () =>
+      flows === null ? null : visibleWorkspaceTables(flows, hiddenTableIds),
     [flows, hiddenTableIds]
   );
 
@@ -920,7 +958,11 @@ export default function WorkspacePage() {
     // An explicit ?table= deep-link pins the selection even when the
     // table is hidden — the user asked for that exact table.
     // Manual selection clears the pin (see selectFlow).
-    if (explicitTableRef.current !== null && explicitTableRef.current === flowId) return;
+    if (
+      explicitTableRef.current !== null &&
+      explicitTableRef.current === flowId
+    )
+      return;
     if (isAllMetaLeadsId(flowId)) return;
     const ids = visibleFlows.map((f) => f.id);
     if (flowId !== null && ids.includes(flowId)) return;
@@ -948,7 +990,8 @@ export default function WorkspacePage() {
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(
-            (body as { error?: string }).error ?? 'Could not save table options.'
+            (body as { error?: string }).error ??
+              'Could not save table options.'
           );
         }
         toast.success('Table options saved.');
@@ -975,22 +1018,32 @@ export default function WorkspacePage() {
   // stays editable. An explicit list locks the dropdown for rows
   // whose originating table is absent. Best-effort: a failed fetch
   // leaves null (editable), since the backend still blocks sending.
-  const [crmAllowedFlowIds, setCrmAllowedFlowIds] = useState<string[] | null>(null);
+  const [crmAllowedFlowIds, setCrmAllowedFlowIds] = useState<string[] | null>(
+    null
+  );
   useEffect(() => {
     if (accountId === null) return;
     const ctrl = new AbortController();
-    fetch('/api/integrations/meta-crm/config', { signal: ctrl.signal, cache: 'no-store' })
+    fetch('/api/integrations/meta-crm/config', {
+      signal: ctrl.signal,
+      cache: 'no-store',
+    })
       .then(async (res) => {
         if (!res.ok) return;
         const json = (await res.json().catch(() => null)) as {
-          config?: { showLeadQuality?: boolean; allowedFlowIds?: unknown } | null;
+          config?: {
+            showLeadQuality?: boolean;
+            allowedFlowIds?: unknown;
+          } | null;
         } | null;
         if (ctrl.signal.aborted || !json || !json.config) return;
         setShowLeadQualityColumn(json.config.showLeadQuality !== false);
         setCrmAllowedFlowIds(
           Array.isArray(json.config.allowedFlowIds)
-            ? json.config.allowedFlowIds.filter((v): v is string => typeof v === "string")
-            : null,
+            ? json.config.allowedFlowIds.filter(
+                (v): v is string => typeof v === 'string'
+              )
+            : null
         );
       })
       .catch(() => {});
@@ -1008,7 +1061,8 @@ export default function WorkspacePage() {
         const json = (await res.json().catch(() => null)) as {
           members?: Array<{ user_id: string; full_name?: string | null }>;
         } | null;
-        if (ctrl.signal.aborted || !json || !Array.isArray(json.members)) return;
+        if (ctrl.signal.aborted || !json || !Array.isArray(json.members))
+          return;
         setTeamMembers(
           json.members
             .filter((m) => typeof m?.user_id === 'string' && m.user_id)
@@ -1127,7 +1181,9 @@ export default function WorkspacePage() {
         return;
       setPinnedIds(
         new Set(
-          json.pinned.filter((v): v is string => typeof v === 'string' && v !== '')
+          json.pinned.filter(
+            (v): v is string => typeof v === 'string' && v !== ''
+          )
         )
       );
       const clean: HiddenRowInfo[] = [];
@@ -1166,21 +1222,24 @@ export default function WorkspacePage() {
     return () => window.clearTimeout(t);
   }, [search]);
 
-  const selectFlow = useCallback((id: string | null) => {
-    if (!id) return;
-    // Manual selection releases any ?table= deep-link pin.
-    explicitTableRef.current = null;
-    setFlowId(id);
-    setView('completed');
-    setKpiBucket(null);
-    setPage(0);
-    setSelected(null);
-    // All-view-specific filters reset on table change (same as view reset).
-    setAllTableFilter(null);
-    setAllStageFilter([]);
-    setAllTypeFilter([]);
-    saveSelectedFlowId(accountId, id);
-  }, [accountId]);
+  const selectFlow = useCallback(
+    (id: string | null) => {
+      if (!id) return;
+      // Manual selection releases any ?table= deep-link pin.
+      explicitTableRef.current = null;
+      setFlowId(id);
+      setView('completed');
+      setKpiBucket(null);
+      setPage(0);
+      setSelected(null);
+      // All-view-specific filters reset on table change (same as view reset).
+      setAllTableFilter(null);
+      setAllStageFilter([]);
+      setAllTypeFilter([]);
+      saveSelectedFlowId(accountId, id);
+    },
+    [accountId]
+  );
 
   const selectKpiBucket = useCallback((bucket: FollowupKpiBucket | null) => {
     setKpiBucket(bucket);
@@ -1271,7 +1330,8 @@ export default function WorkspacePage() {
         if (!res.ok) {
           const payload = await res.json().catch(() => ({}));
           throw new Error(
-            (payload as { error?: string }).error ?? 'Could not save the header name.'
+            (payload as { error?: string }).error ??
+              'Could not save the header name.'
           );
         }
       } catch (err) {
@@ -1327,7 +1387,7 @@ export default function WorkspacePage() {
   }, []);
   const kpiRange = useMemo(
     () => (kpiBucket === null ? null : kpiBucketRange(kpiBucket, kpiDayBounds)),
-    [kpiBucket, kpiDayBounds],
+    [kpiBucket, kpiDayBounds]
   );
   const effectiveColumns = useMemo(() => {
     if (kpiRange === null) return appliedColumns;
@@ -1337,12 +1397,13 @@ export default function WorkspacePage() {
     const { from, to } = intersectFollowUpRanges(current, kpiRange);
     return {
       ...appliedColumns,
-      nextFollowUp: { mode: "range" as const, from, to },
+      nextFollowUp: { mode: 'range' as const, from, to },
     };
   }, [appliedColumns, kpiRange]);
-  const requestKey = flowId && !isAllMetaLeadsId(flowId)
-    ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(effectiveColumns)}|${page}|${pageSize}`
-    : null;
+  const requestKey =
+    flowId && !isAllMetaLeadsId(flowId)
+      ? `${flowId}|${effectiveView}|${debouncedSearch}|${appliedDateRange?.from ?? ''}|${appliedDateRange?.to ?? ''}|${serializeAssigneeSelection(appliedAssignee)}|${columnFiltersRequestKey(effectiveColumns)}|${page}|${pageSize}`
+      : null;
   const loading = requestKey !== null && requestKey !== loadedKey;
   useEffect(() => {
     if (!flowId || isAllMetaLeadsId(flowId) || !requestKey) return;
@@ -1389,7 +1450,18 @@ export default function WorkspacePage() {
         setLoadedKey(requestKey);
       });
     return () => ctrl.abort();
-  }, [flowId, requestKey, effectiveView, debouncedSearch, appliedDateRange, appliedAssignee, effectiveColumns, page, pageSize, refreshSeq]);
+  }, [
+    flowId,
+    requestKey,
+    effectiveView,
+    debouncedSearch,
+    appliedDateRange,
+    appliedAssignee,
+    effectiveColumns,
+    page,
+    pageSize,
+    refreshSeq,
+  ]);
 
   // All Meta Leads virtual view: server-side combined read across every
   // Meta table (hidden + disabled included). Same search/date/assignee/
@@ -1413,8 +1485,14 @@ export default function WorkspacePage() {
       tableId: allTableFilter,
       stage: allStageFilter.length > 0 ? allStageFilter : null,
       leadType: allTypeFilter.length > 0 ? allTypeFilter : null,
-      callStatus: effectiveColumns.callStatus.length > 0 ? effectiveColumns.callStatus : null,
-      followUpStatus: effectiveColumns.followUpStatus.length > 0 ? effectiveColumns.followUpStatus : null,
+      callStatus:
+        effectiveColumns.callStatus.length > 0
+          ? effectiveColumns.callStatus
+          : null,
+      followUpStatus:
+        effectiveColumns.followUpStatus.length > 0
+          ? effectiveColumns.followUpStatus
+          : null,
       // KPI bucket → server-side follow-up datetime range (same
       // intersection as individual tables, so counts and filtering
       // always agree).
@@ -1450,7 +1528,20 @@ export default function WorkspacePage() {
         setAllLoadedKey(allRequestKey);
       });
     return () => ctrl.abort();
-  }, [isAllMetaLeads, allRequestKey, debouncedSearch, appliedDateRange, appliedAssignee, effectiveColumns, allTableFilter, allStageFilter, allTypeFilter, page, pageSize, refreshSeq]);
+  }, [
+    isAllMetaLeads,
+    allRequestKey,
+    debouncedSearch,
+    appliedDateRange,
+    appliedAssignee,
+    effectiveColumns,
+    allTableFilter,
+    allStageFilter,
+    allTypeFilter,
+    page,
+    pageSize,
+    refreshSeq,
+  ]);
 
   const totalPages = useMemo(() => {
     if (isAllMetaLeads) {
@@ -1497,7 +1588,9 @@ export default function WorkspacePage() {
   // Temporary deep-link highlight (contact id whose row gets a
   // ~4s blue wash once located) and the miss notice. Both are
   // purely visual: no record writes, no badge, no label.
-  const [highlightContactId, setHighlightContactId] = useState<string | null>(null);
+  const [highlightContactId, setHighlightContactId] = useState<string | null>(
+    null
+  );
   const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
   useEffect(() => {
     // Fail-closed ordering: never mark the param as applied before
@@ -1519,12 +1612,12 @@ export default function WorkspacePage() {
     const ctrl = new AbortController();
     fetch(
       `/api/workspace/locate-contact?contact_id=${encodeURIComponent(deepLinkContactId)}&page_size=${pageSize}`,
-      { signal: ctrl.signal, cache: 'no-store' },
+      { signal: ctrl.signal, cache: 'no-store' }
     )
       .then(async (res) => {
-        const body = (await res.json().catch(
-          () => null,
-        )) as LocateContactResponse | null;
+        const body = (await res
+          .json()
+          .catch(() => null)) as LocateContactResponse | null;
         if (!body || body.found !== true) {
           // Resolvable nowhere the caller may see: surface a
           // notice instead of leaving a silently plain table.
@@ -1558,7 +1651,11 @@ export default function WorkspacePage() {
     const el = document.querySelector(
       `tr[data-contact-id="${highlightContactId}"]`
     );
-    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    el?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'nearest',
+    });
     const t = window.setTimeout(() => setHighlightContactId(null), 4000);
     return () => window.clearTimeout(t);
   }, [highlightContactId, payload]);
@@ -1585,7 +1682,7 @@ export default function WorkspacePage() {
           // Integration): hiding drops the header, every cell, and
           // the Columns-menu entry with no empty space — values,
           // statuses, events, and tokens are untouched.
-          (showLeadQualityColumn ? true : !isLeadQualityField(f)),
+          (showLeadQualityColumn ? true : !isLeadQualityField(f))
       ),
     [isMetaTable, customFields, showLeadQualityColumn]
   );
@@ -1643,7 +1740,7 @@ export default function WorkspacePage() {
         phone: string | null;
         customValues: Record<string, string | null>;
       },
-      runId: string,
+      runId: string
     ) => {
       if (requestKey && Object.keys(patch.customValues).length > 0) {
         setValueOverrides((prev) => ({
@@ -1665,13 +1762,18 @@ export default function WorkspacePage() {
               ...(patch.name !== null ? { name: patch.name } : {}),
               ...(patch.phone !== null ? { phone: patch.phone } : {}),
               ...('answers' in prev
-                ? { answers: { ...(prev as FlowTableRow).answers, ...patch.answers } }
+                ? {
+                    answers: {
+                      ...(prev as FlowTableRow).answers,
+                      ...patch.answers,
+                    },
+                  }
                 : {}),
-            },
+            }
       );
       reloadTable();
     },
-    [reloadTable, requestKey],
+    [reloadTable, requestKey]
   );
 
   // Meta Lead Ads only: the canonical "Next Follow-up Date & Time"
@@ -1715,7 +1817,7 @@ export default function WorkspacePage() {
       },
       fieldId: string,
       initialValue: string | null,
-      originFlowId?: string | null,
+      originFlowId?: string | null
     ) => {
       const effectiveFlowId = originFlowId ?? flowId;
       if (!effectiveFlowId) return;
@@ -1737,14 +1839,21 @@ export default function WorkspacePage() {
   // override; Flow Tables never pass that override.
   // All-view rows pass their originating flowId.
   const manualAssignMetaLead = useCallback(
-    async (runId: string, raw: unknown, originFlowId?: string | null): Promise<string | null> => {
+    async (
+      runId: string,
+      raw: unknown,
+      originFlowId?: string | null
+    ): Promise<string | null> => {
       const effectiveFlowId = originFlowId ?? flowId;
       if (!effectiveFlowId) throw new Error('Could not save the value.');
-      const res = await fetch(`/api/flows/${effectiveFlowId}/leads/${runId}/assign`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: raw ?? null }),
-      });
+      const res = await fetch(
+        `/api/flows/${effectiveFlowId}/leads/${runId}/assign`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: raw ?? null }),
+        }
+      );
       const json = (await res.json().catch(() => null)) as {
         assignment?: { current: string | null };
         error?: string;
@@ -1783,7 +1892,8 @@ export default function WorkspacePage() {
       // the new status.
       const qualityField = customFields.find((f) => f.id === fieldId);
       if (qualityField && isLeadQualityField(qualityField)) {
-        const row = (payload?.rows ?? []).find((r) => r.runId === runId) ?? null;
+        const row =
+          (payload?.rows ?? []).find((r) => r.runId === runId) ?? null;
         if (row) setSelected(row);
         setCrmPreviewBump((n) => n + 1);
       }
@@ -1797,7 +1907,12 @@ export default function WorkspacePage() {
   // Assignment edits re-sync (assignee filter); all actions operate on
   // the original flow/run (never the virtual id).
   const handleAllCustomSaved = useCallback(
-    (originFlowId: string, fieldId: string, runId: string, value: string | null) => {
+    (
+      originFlowId: string,
+      fieldId: string,
+      runId: string,
+      value: string | null
+    ) => {
       if (!allRequestKey) return;
       void originFlowId;
       setValueOverrides((prev) => ({
@@ -1864,7 +1979,14 @@ export default function WorkspacePage() {
       setHiddenRows((prev) =>
         prev.some((h) => h.flow_run_id === runId)
           ? prev
-          : [...prev, { flow_run_id: runId, name: row?.name ?? null, phone: row?.phone ?? null }]
+          : [
+              ...prev,
+              {
+                flow_run_id: runId,
+                name: row?.name ?? null,
+                phone: row?.phone ?? null,
+              },
+            ]
       );
       setRowActionPending((prev) => new Set(prev).add(key));
       try {
@@ -1985,7 +2107,8 @@ export default function WorkspacePage() {
     try {
       const results = await Promise.allSettled(
         allHiddenRows.map((h) => {
-          const row = allPayload?.rows.find((r) => r.runId === h.flow_run_id) ?? null;
+          const row =
+            allPayload?.rows.find((r) => r.runId === h.flow_run_id) ?? null;
           const originFlowId = row?.flowId ?? null;
           if (!originFlowId) throw new Error('Could not restore hidden rows.');
           return fetch(`/api/flows/${originFlowId}/row-prefs`, {
@@ -1996,7 +2119,8 @@ export default function WorkspacePage() {
             if (!res.ok) {
               const body = await res.json().catch(() => ({}));
               throw new Error(
-                (body as { error?: string }).error ?? 'Could not restore hidden rows.'
+                (body as { error?: string }).error ??
+                  'Could not restore hidden rows.'
               );
             }
           });
@@ -2025,7 +2149,11 @@ export default function WorkspacePage() {
   }, [allHiddenRows, allPayload, hiddenRows, rowActionPending, reloadTable]);
 
   // All-view column visibility (virtual scope, localStorage-backed).
-  const allVisibility = useWorkspaceVisibility(accountId, isAllMetaLeads ? ALL_META_LEADS_ID : null, []);
+  const allVisibility = useWorkspaceVisibility(
+    accountId,
+    isAllMetaLeads ? ALL_META_LEADS_ID : null,
+    []
+  );
   // UI-only: the Status column is hidden — the Completed/Incomplete
   // tabs already communicate classification. The column stays in the
   // payload (drawer badges, types, API untouched).
@@ -2045,11 +2173,15 @@ export default function WorkspacePage() {
     () =>
       metaDefaultHiddenColumnIds(
         payload?.columns ?? [],
-        payload?.meta?.kind === 'meta_lead_ads',
+        payload?.meta?.kind === 'meta_lead_ads'
       ),
-    [payload?.meta?.kind, payload?.columns],
+    [payload?.meta?.kind, payload?.columns]
   );
-  const visibility = useWorkspaceVisibility(accountId, flowId, metaDefaultHiddenIds);
+  const visibility = useWorkspaceVisibility(
+    accountId,
+    flowId,
+    metaDefaultHiddenIds
+  );
   // Visible customs feed non-grid consumers (lead-received
   // detection); the GRID iterates orderedColumns (the shared order
   // model), never these arrays directly.
@@ -2069,7 +2201,9 @@ export default function WorkspacePage() {
   // same derivation the old Lead Source icon used. A manual pick
   // is stored and always wins; detection is never written back.
   const leadReceivedField = useMemo(
-    () => customFieldsVisible.find((f) => isLeadReceivedField({ name: f.name })) ?? null,
+    () =>
+      customFieldsVisible.find((f) => isLeadReceivedField({ name: f.name })) ??
+      null,
     [customFieldsVisible]
   );
   // Doubled-width defaults for "Customer Response" / "Next Action"
@@ -2092,7 +2226,9 @@ export default function WorkspacePage() {
     if (!leadReceivedField || !payload) return {} as Record<string, string>;
     const map: Record<string, string> = {};
     for (const row of payload.rows) {
-      const label = receivedDefaultLabel(adSourcePlatform(row.sourceUrl ?? null));
+      const label = receivedDefaultLabel(
+        adSourcePlatform(row.sourceUrl ?? null)
+      );
       if (label) map[row.runId] = label;
     }
     return map;
@@ -2145,7 +2281,10 @@ export default function WorkspacePage() {
   // FULL (visibility-independent) order inputs: hiding a column
   // must never move its default slot, so unhiding restores it.
   const allFlowColumns = useMemo(
-    () => (payload?.columns ?? []).filter((c) => !DISPLAY_EXCLUDED_COLUMN_KEYS.has(c.key)),
+    () =>
+      (payload?.columns ?? []).filter(
+        (c) => !DISPLAY_EXCLUDED_COLUMN_KEYS.has(c.key)
+      ),
     [payload]
   );
   const allBusinessOrdered = useMemo(
@@ -2177,7 +2316,10 @@ export default function WorkspacePage() {
     ],
     [canSendMessages, rowVisible, nameOrderId]
   );
-  const { savedOrder, saveOrder, resetOrder } = useWorkspaceColumnOrder(accountId, flowId);
+  const { savedOrder, saveOrder, resetOrder } = useWorkspaceColumnOrder(
+    accountId,
+    flowId
+  );
   // Drag-and-drop column reordering (writers only). The merged id
   // list below is the single source of truth: a drop computes the
   // next complete order via arrayMove, re-renders optimistically
@@ -2194,8 +2336,10 @@ export default function WorkspacePage() {
     // listeners, and even it needs a real movement).
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     // Touch: long-press to drag so swipes still scroll.
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 200, tolerance: 6 },
+    }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   const handleColumnDragStart = useCallback((event: DragStartEvent) => {
     setActiveColumnId(String(event.active.id));
@@ -2233,7 +2377,8 @@ export default function WorkspacePage() {
     let paint = 0;
     for (const id of mergedOrderIds) {
       if (id === ACTIONS_ORDER_ID) {
-        if (canSendMessages) out.push({ id, kind: 'actions', paintIndex: null });
+        if (canSendMessages)
+          out.push({ id, kind: 'actions', paintIndex: null });
         continue;
       }
       if (id === ROW_VIS_ID) {
@@ -2371,7 +2516,10 @@ export default function WorkspacePage() {
     () => orderedColumns.filter((e) => e.kind !== 'actions').map((e) => e.id),
     [orderedColumns]
   );
-  const pinnedColumnIdSet = useMemo(() => new Set(pinnedOrderIds), [pinnedOrderIds]);
+  const pinnedColumnIdSet = useMemo(
+    () => new Set(pinnedOrderIds),
+    [pinnedOrderIds]
+  );
   const handleColumnDragEnd = useCallback(
     (event: DragEndEvent) => {
       const activeId = String(event.active.id);
@@ -2435,7 +2583,7 @@ export default function WorkspacePage() {
       return (
         <TableHead
           key={entry.id}
-          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+          className="border-border sticky top-0 z-20 h-16 w-12 border-r border-b px-2 align-middle"
           aria-label="Row actions"
         >
           <span className="sr-only">Actions</span>
@@ -2457,11 +2605,14 @@ export default function WorkspacePage() {
           // headers would paint OVER this frozen one as
           // they slide left. Above frozen body (z-[1]).
           className={cn(
-            'sticky top-0 z-30 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0',
+            'border-border sticky top-0 z-30 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold last:border-r-0',
             frozenEdgeLeft,
             frozenEdgeRight
           )}
-          style={{ ...headStyleAt(entry.paintIndex), ...(freezeReady ? { left: 0 } : null) }}
+          style={{
+            ...headStyleAt(entry.paintIndex),
+            ...(freezeReady ? { left: 0 } : null),
+          }}
           showInsertionBar={false}
         >
           No.
@@ -2487,7 +2638,7 @@ export default function WorkspacePage() {
           label={f.name}
           disabled={dragDisabled}
           className={cn(
-            'sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+            'border-border sticky top-0 z-20 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
             // Customer Response / Next Action headers
             // center their labels within the full
             // 448px cell (the resize handle is
@@ -2502,7 +2653,7 @@ export default function WorkspacePage() {
           {formatColumnLabel(f.name)}
           {isLeadQualityField(f) && (
             <span
-              className="ml-1 inline-flex align-middle text-muted-foreground"
+              className="text-muted-foreground ml-1 inline-flex align-middle"
               title={LEAD_QUALITY_TOOLTIP}
               aria-label={LEAD_QUALITY_TOOLTIP}
               role="img"
@@ -2516,9 +2667,7 @@ export default function WorkspacePage() {
               onResize={handleResizeWidth}
               onCommit={handleCommitWidth}
               onActiveChange={(active) =>
-                setResizingKey(
-                  active ? customFieldVisId(f.id) : null
-                )
+                setResizingKey(active ? customFieldVisId(f.id) : null)
               }
             />
           )}
@@ -2538,9 +2687,7 @@ export default function WorkspacePage() {
     const renamable =
       payload?.meta.kind === 'meta_lead_ads' &&
       isRenamableMetaColumn({ key: c.key, system: c.system });
-    const customLabel = renamable
-      ? (headerLabels[visId] ?? null)
-      : null;
+    const customLabel = renamable ? (headerLabels[visId] ?? null) : null;
     // Dial is an application action column for EVERY
     // Workspace table (Meta Lead Ads, Flow, and any
     // other table with a Phone Number column): it
@@ -2549,8 +2696,7 @@ export default function WorkspacePage() {
     // flowColumnsVisible, carries no resize handle
     // / visibility id / header color, and is never
     // sent to Google Sheets.
-    const showDialAfter =
-      c.system && c.key === 'phone';
+    const showDialAfter = c.system && c.key === 'phone';
     // The system Name column freezes beside No.:
     // identity-based (system + key), never the
     // label, so a flow-collected "Name" question
@@ -2575,7 +2721,7 @@ export default function WorkspacePage() {
         // Frozen Name also owns its edge lines (see
         // frozenEdgeRight); scrollers never get them.
         className={cn(
-          'sticky top-0 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+          'border-border sticky top-0 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
           isNameCol ? 'z-30' : 'z-20',
           isNameCol && frozenEdgeRight
         )}
@@ -2590,7 +2736,7 @@ export default function WorkspacePage() {
             <TableHead
               key={dialOrderId(entry.id)}
               scope="col"
-              className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+              className="border-border [html[data-mode=dark]_&]:bg-muted sticky top-0 z-20 h-11 border-r border-b bg-[#F1F5F9] px-3 text-center align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
               style={{ minWidth: 112, width: 128 }}
             >
               <span className="block whitespace-nowrap">Dial</span>
@@ -2602,13 +2748,9 @@ export default function WorkspacePage() {
           <MetaColumnHeaderMenu
             columnKey={c.key}
             originalLabel={c.label}
-            displayLabel={
-              customLabel ?? formatColumnLabel(c.label)
-            }
+            displayLabel={customLabel ?? formatColumnLabel(c.label)}
             customLabel={customLabel}
-            onRename={(label) =>
-              handleSaveHeaderLabel(c.key, label)
-            }
+            onRename={(label) => handleSaveHeaderLabel(c.key, label)}
             onRestore={() => handleSaveHeaderLabel(c.key, null)}
           />
         ) : (
@@ -2619,9 +2761,7 @@ export default function WorkspacePage() {
             columnKey={visId}
             onResize={handleResizeWidth}
             onCommit={handleCommitWidth}
-            onActiveChange={(active) =>
-              setResizingKey(active ? visId : null)
-            }
+            onActiveChange={(active) => setResizingKey(active ? visId : null)}
           />
         )}
       </SortableWorkspaceHeaderCell>
@@ -2635,7 +2775,10 @@ export default function WorkspacePage() {
   ) => {
     if (entry.kind === 'actions') {
       return (
-        <TableCell key={entry.id} className="w-12 border-r border-border px-2 last:border-r-0">
+        <TableCell
+          key={entry.id}
+          className="border-border w-12 border-r px-2 last:border-r-0"
+        >
           <RowActionsMenu
             rowLabel={row.name ?? row.phone ?? 'row'}
             isPinned={pinnedIds.has(row.runId)}
@@ -2651,7 +2794,7 @@ export default function WorkspacePage() {
         <TableCell
           key={entry.id}
           className={cn(
-            'border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0',
+            'border-border text-muted-foreground border-r px-4 text-sm tabular-nums last:border-r-0',
             freezeReady && 'sticky left-0 z-[1]',
             // Own edge lines (see frozenEdgeRight):
             // stuck or not, the No. column keeps its
@@ -2663,16 +2806,10 @@ export default function WorkspacePage() {
           style={
             freezeReady
               ? {
-                  ...columnWidthStyle(
-                    ROW_VIS_ID,
-                    effectiveColumnWidths
-                  ),
+                  ...columnWidthStyle(ROW_VIS_ID, effectiveColumnWidths),
                   left: 0,
                 }
-              : columnWidthStyle(
-                  ROW_VIS_ID,
-                  effectiveColumnWidths
-                )
+              : columnWidthStyle(ROW_VIS_ID, effectiveColumnWidths)
           }
         >
           {workspaceRowNumber({
@@ -2694,7 +2831,7 @@ export default function WorkspacePage() {
         <TableCell
           key={entry.id}
           className={cn(
-            'overflow-hidden border-r border-border last:border-r-0',
+            'border-border overflow-hidden border-r last:border-r-0',
             // Doubled natural cap for the two
             // long-text columns (2 × max-w-56 =
             // max-w-112 = 448px): twice the room
@@ -2712,7 +2849,7 @@ export default function WorkspacePage() {
             // align-middle). Every other column
             // keeps max-w-56 + natural width.
             isWideTextColumnName(f.name)
-              ? 'max-w-112 whitespace-normal px-3 py-2'
+              ? 'max-w-112 px-3 py-2 whitespace-normal'
               : 'max-w-56 px-2.5 py-1.5 text-[13px]'
           )}
           style={columnWidthStyle(
@@ -2755,14 +2892,16 @@ export default function WorkspacePage() {
             // every Flow Table — keeps the existing inline
             // editing.
             onEditIntercept={
-              isMetaTable && followupFieldId !== null && f.id === followupFieldId
+              isMetaTable &&
+              followupFieldId !== null &&
+              f.id === followupFieldId
                 ? () =>
                     openFollowupForRow(
                       row,
                       f.id,
                       overridesForRequest[row.runId]?.[f.id] ??
                         payload?.customValues?.[row.runId]?.[f.id] ??
-                        null,
+                        null
                     )
                 : undefined
             }
@@ -2773,8 +2912,7 @@ export default function WorkspacePage() {
             // — keeps the generic save path.
             saveAssignee={
               isMetaTable && isAssigneeField(f)
-                ? async (raw) =>
-                    manualAssignMetaLead(row.runId, raw)
+                ? async (raw) => manualAssignMetaLead(row.runId, raw)
                 : undefined
             }
           />
@@ -2788,8 +2926,7 @@ export default function WorkspacePage() {
     // system columns keep their plain rendering.
     // Display = override ?? original, resolved
     // per row from the table payload.
-    const rowOverrides =
-      payload?.flowOverrides?.[row.runId];
+    const rowOverrides = payload?.flowOverrides?.[row.runId];
     const overrideFor =
       rowOverrides !== undefined &&
       Object.prototype.hasOwnProperty.call(rowOverrides, c.key)
@@ -2801,20 +2938,17 @@ export default function WorkspacePage() {
     // a link opening the file in a new tab. Null →
     // ordinary text cell, unchanged.
     const rawCellValue =
-      overrideFor !== undefined
-        ? overrideFor
-        : (row.answers[c.key] ?? '');
+      overrideFor !== undefined ? overrideFor : (row.answers[c.key] ?? '');
     const cellFileUrl = resolveAttachmentUrl(
       payload?.mediaByConversation ?? {},
       row.conversationId,
-      rawCellValue,
+      rawCellValue
     );
     // Every Workspace table: Dial action cell
     // right after Phone Number. Application-only
     // (never a sheet field, never editable, never
     // stored).
-    const showDialAfter =
-      c.system && c.key === 'phone';
+    const showDialAfter = c.system && c.key === 'phone';
     // The system Name column freezes beside No.
     // (identity-based, like its header): opaque
     // tint mirroring the row wash so scrolled
@@ -2825,7 +2959,7 @@ export default function WorkspacePage() {
         <TableCell
           key={flowColumnRenderKey(c)}
           className={cn(
-            'max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0',
+            'border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] last:border-r-0',
             freezeName && freezeReady && 'sticky z-[1]',
             freezeName && frozenEdgeRight,
             freezeName && frozenTint(row)
@@ -2839,10 +2973,7 @@ export default function WorkspacePage() {
                   ),
                   left: nameLeft,
                 }
-              : columnWidthStyle(
-                  flowColumnVisId(c.key),
-                  effectiveColumnWidths
-                )
+              : columnWidthStyle(flowColumnVisId(c.key), effectiveColumnWidths)
           }
         >
           {!c.system && flowId !== null ? (
@@ -2866,9 +2997,7 @@ export default function WorkspacePage() {
           ) : c.system && c.key === 'latest_recording' ? (
             <LatestRecordingCell
               entry={
-                (payload?.latestRecordingByContact?.[
-                  row.contactId ?? ''
-                ] ?? null)
+                payload?.latestRecordingByContact?.[row.contactId ?? ''] ?? null
               }
             />
           ) : (
@@ -2878,7 +3007,7 @@ export default function WorkspacePage() {
         {showDialAfter && (
           <TableCell
             key={dialOrderId(entry.id)}
-            className="border-r border-border px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
+            className="border-border border-r px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
             style={{ minWidth: 112, width: 128 }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -2963,11 +3092,14 @@ export default function WorkspacePage() {
 
   // Live width during a drag (no fetch); persist on release.
   // Unchanged releases skip the PUT; failures revert + toast.
-  const handleResizeWidth = useCallback((columnKey: string, widthPx: number) => {
-    setColumnWidths((prev) =>
-      prev[columnKey] === widthPx ? prev : { ...prev, [columnKey]: widthPx }
-    );
-  }, []);
+  const handleResizeWidth = useCallback(
+    (columnKey: string, widthPx: number) => {
+      setColumnWidths((prev) =>
+        prev[columnKey] === widthPx ? prev : { ...prev, [columnKey]: widthPx }
+      );
+    },
+    []
+  );
 
   const handleCommitWidth = useCallback(
     async (columnKey: string, widthPx: number) => {
@@ -3070,14 +3202,21 @@ export default function WorkspacePage() {
       } catch (err) {
         setPinnedIds(prevPinned);
         setHiddenRows(prevHidden);
-        toast.error(
-          err instanceof Error ? err.message : messages.failure
-        );
+        toast.error(err instanceof Error ? err.message : messages.failure);
       } finally {
         markRowPending(runId, false);
       }
     },
-    [flowId, rowActionPending, pinnedIds, hiddenRows, payload, markRowPending, reloadRowPrefs, reloadTable]
+    [
+      flowId,
+      rowActionPending,
+      pinnedIds,
+      hiddenRows,
+      payload,
+      markRowPending,
+      reloadRowPrefs,
+      reloadTable,
+    ]
   );
 
   const handleTogglePin = useCallback(
@@ -3088,7 +3227,10 @@ export default function WorkspacePage() {
         { pinned: !pinned },
         pinned
           ? { success: 'Row unpinned', failure: 'Could not unpin the row.' }
-          : { success: 'Row pinned to the top', failure: 'Could not pin the row.' }
+          : {
+              success: 'Row pinned to the top',
+              failure: 'Could not pin the row.',
+            }
       );
     },
     [pinnedIds, mutateRowPref]
@@ -3154,7 +3296,14 @@ export default function WorkspacePage() {
     } finally {
       markRowPending('__all__', false);
     }
-  }, [flowId, rowActionPending, hiddenRows, markRowPending, reloadRowPrefs, reloadTable]);
+  }, [
+    flowId,
+    rowActionPending,
+    hiddenRows,
+    markRowPending,
+    reloadRowPrefs,
+    reloadTable,
+  ]);
 
   // Selector options: All Meta Leads first (virtual, never hidden),
   // then the visible tables. `allFlows` stays the real tables only
@@ -3169,7 +3318,7 @@ export default function WorkspacePage() {
       if (name === ALL_META_LEADS_LABEL) return ALL_META_LEADS_LABEL;
       return flowDisplayName(name);
     },
-    [],
+    []
   );
 
   return (
@@ -3237,14 +3386,18 @@ export default function WorkspacePage() {
       ) : null}
       {isMetaTable && (followupFieldId || isAllMetaLeads) ? (
         kpiBucket === null ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-muted-foreground text-xs">
             Click any card to filter leads by follow-up schedule. Click the
             selected card again to clear the filter.
           </p>
         ) : (
           <div className="flex items-center gap-2 text-xs" aria-live="polite">
             <span className="text-muted-foreground">
-              Showing {isAllMetaLeads ? (allPayload?.meta.total ?? 0) : (payload?.meta.total ?? 0)} {kpiBucket === null ? "leads" : KPI_BUCKET_NOUNS[kpiBucket]}
+              Showing{' '}
+              {isAllMetaLeads
+                ? (allPayload?.meta.total ?? 0)
+                : (payload?.meta.total ?? 0)}{' '}
+              {kpiBucket === null ? 'leads' : KPI_BUCKET_NOUNS[kpiBucket]}
             </span>
             <Button
               variant="ghost"
@@ -3266,11 +3419,11 @@ export default function WorkspacePage() {
       ) : flows.length === 0 ? (
         <EmptyState
           icon={Table2}
-          title={isAgent ? "No leads yet" : "No flows yet"}
+          title={isAgent ? 'No leads yet' : 'No flows yet'}
           hint={
             isAgent
               ? "Leads in your account's Meta tables will appear here."
-              : "Create a flow first — each flow gets its own table here."
+              : 'Create a flow first — each flow gets its own table here.'
           }
         />
       ) : (
@@ -3311,34 +3464,41 @@ export default function WorkspacePage() {
               }}
               stageOptions={allStageOptions}
               typeOptions={allTypeOptions}
-              rows={allVisibleRows as unknown as Array<{
-                runId: string;
-                flowId: string;
-                flowName: string | null;
-                tableName: string;
-                metaLeadId: string | null;
-                contactId: string | null;
-                conversationId: string | null;
-                name: string | null;
-                phone: string | null;
-                startedAt: string;
-                source: string | null;
-                formAnswers: Array<{ key: string; question: string; answer: string; legacy: boolean }>;
-                assignedTo: string | null;
-                type: string | null;
-                stage: string | null;
-                callStatus: string | null;
-                followUpStatus: string | null;
-                nextFollowUp: string | null;
-                fieldIds: {
+              rows={
+                allVisibleRows as unknown as Array<{
+                  runId: string;
+                  flowId: string;
+                  flowName: string | null;
+                  tableName: string;
+                  metaLeadId: string | null;
+                  contactId: string | null;
+                  conversationId: string | null;
+                  name: string | null;
+                  phone: string | null;
+                  startedAt: string;
+                  source: string | null;
+                  formAnswers: Array<{
+                    key: string;
+                    question: string;
+                    answer: string;
+                    legacy: boolean;
+                  }>;
                   assignedTo: string | null;
                   type: string | null;
                   stage: string | null;
                   callStatus: string | null;
                   followUpStatus: string | null;
                   nextFollowUp: string | null;
-                };
-              }>}
+                  fieldIds: {
+                    assignedTo: string | null;
+                    type: string | null;
+                    stage: string | null;
+                    callStatus: string | null;
+                    followUpStatus: string | null;
+                    nextFollowUp: string | null;
+                  };
+                }>
+              }
               total={allPayload?.meta.total ?? 0}
               page={page}
               pageSize={pageSize}
@@ -3358,7 +3518,10 @@ export default function WorkspacePage() {
                   ...row,
                   originFlowId: row.flowId,
                   originTableName: row.tableName,
-                  metaDetails: (allPayload?.rows.find((r) => r.runId === row.runId)?.metaDetails ?? null) as unknown as FlowTableRow['metaDetails'],
+                  metaDetails: (allPayload?.rows.find(
+                    (r) => r.runId === row.runId
+                  )?.metaDetails ??
+                    null) as unknown as FlowTableRow['metaDetails'],
                   answers: {},
                   status: 'completed' as const,
                   runStatus: 'completed',
@@ -3374,246 +3537,304 @@ export default function WorkspacePage() {
               onOpenFollowup={(row, fieldId, value) =>
                 openFollowupForRow(row, fieldId, value, row.flowId)
               }
-              valueOverrides={valueOverrides.key === allRequestKey ? valueOverrides.map : {}}
+              valueOverrides={
+                valueOverrides.key === allRequestKey ? valueOverrides.map : {}
+              }
               customValues={allPayload?.customValues ?? {}}
               fieldsByFlow={allPayload?.fieldsByFlow ?? {}}
-              latestRecordingByContact={allPayload?.latestRecordingByContact ?? {}}
+              latestRecordingByContact={
+                allPayload?.latestRecordingByContact ?? {}
+              }
               crmAllowedFlowIds={crmAllowedFlowIds}
               onTogglePin={handleAllTogglePin}
               onHideRow={handleAllHideRow}
               pinnedIds={pinnedIds}
               pendingIds={rowActionPending}
               kpiBucket={kpiBucket}
-              kpiEmptyTitle={kpiBucket !== null ? KPI_EMPTY_TITLES[kpiBucket] : null}
+              kpiEmptyTitle={
+                kpiBucket !== null ? KPI_EMPTY_TITLES[kpiBucket] : null
+              }
               onClearKpiBucket={() => selectKpiBucket(null)}
             />
           ) : (
             <>
-          {/* Meta Lead Ads tables show one unified table (view=all),
+              {/* Meta Lead Ads tables show one unified table (view=all),
               so the Completed/Incomplete tabs are hidden here.
               Flow Tables keep the tabs exactly as before. */}
-          {!isMetaTable && (
-            <div
-              className="flex items-center gap-1.5"
-              role="tablist"
-              aria-label="Completion filter"
-            >
-              {VIEWS.map((v) => (
-                <Button
-                  key={v.id}
-                  role="tab"
-                  aria-selected={view === v.id}
-                  variant={view === v.id ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => selectView(v.id)}
-                  className={cn(
-                    'h-8 rounded-full px-3.5 text-sm font-medium',
-                    view !== v.id &&
-                      'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
-                  )}
+              {!isMetaTable && (
+                <div
+                  className="flex items-center gap-1.5"
+                  role="tablist"
+                  aria-label="Completion filter"
                 >
-                  {v.label}
-                </Button>
-              ))}
-            </div>
-          )}
+                  {VIEWS.map((v) => (
+                    <Button
+                      key={v.id}
+                      role="tab"
+                      aria-selected={view === v.id}
+                      variant={view === v.id ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => selectView(v.id)}
+                      className={cn(
+                        'h-8 rounded-full px-3.5 text-sm font-medium',
+                        view !== v.id &&
+                          'border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground'
+                      )}
+                    >
+                      {v.label}
+                    </Button>
+                  ))}
+                </div>
+              )}
 
-          {payload?.meta.kind === 'meta_lead_ads' ? null : payload?.meta.completionNodeId ? (
-            <p className="text-muted-foreground text-xs">
-              Completion point:{' '}
-              <code className="bg-muted rounded px-1 font-mono">
-                {payload.meta.completionNodeId}
-              </code>{' '}
-              — runs that reach it show as Completed.{' '}
-              <Link
-                href={`/flows/${payload.meta.flowId}`}
-                className="underline underline-offset-2"
-              >
-                Edit in flow builder
-              </Link>
-            </p>
-          ) : (
-            payload && (
-              <p className="text-muted-foreground text-xs">
-                No custom completion point — runs show as Completed when they
-                reach END.{' '}
-                <Link
-                  href={`/flows/${payload.meta.flowId}`}
-                  className="underline underline-offset-2"
-                >
-                  Set one in the flow builder
-                </Link>
-              </p>
-            )
-          )}
+              {payload?.meta.kind === 'meta_lead_ads' ? null : payload?.meta
+                  .completionNodeId ? (
+                <p className="text-muted-foreground text-xs">
+                  Completion point:{' '}
+                  <code className="bg-muted rounded px-1 font-mono">
+                    {payload.meta.completionNodeId}
+                  </code>{' '}
+                  — runs that reach it show as Completed.{' '}
+                  <Link
+                    href={`/flows/${payload.meta.flowId}`}
+                    className="underline underline-offset-2"
+                  >
+                    Edit in flow builder
+                  </Link>
+                </p>
+              ) : (
+                payload && (
+                  <p className="text-muted-foreground text-xs">
+                    No custom completion point — runs show as Completed when
+                    they reach END.{' '}
+                    <Link
+                      href={`/flows/${payload.meta.flowId}`}
+                      className="underline underline-offset-2"
+                    >
+                      Set one in the flow builder
+                    </Link>
+                  </p>
+                )
+              )}
 
-          <>
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-row items-center gap-2">
-              <div className="min-w-0 flex-1 lg:max-w-sm">
-                <WorkspaceSearchField
-                  value={search}
-                  onChange={setSearch}
-                />
-              </div>
-              {/* Single actions menu: the only permanently visible
+              <>
+                <div className="flex flex-col gap-2">
+                  <div className="flex flex-row items-center gap-2">
+                    <div className="min-w-0 flex-1 lg:max-w-sm">
+                      <WorkspaceSearchField
+                        value={search}
+                        onChange={setSearch}
+                      />
+                    </div>
+                    {/* Single actions menu: the only permanently visible
                   toolbar control for every secondary Workspace
                   action. Search and the table selector stay visible;
                   every tool below keeps its existing handler,
                   permissions, and behavior — the menu only groups
                   their entry points. Never reintroduce sheet
                   actions here. */}
-              <div className="flex shrink-0 items-center lg:ml-auto">
-                <WorkspaceActionsMenu
-                  filters={
-                    <WorkspaceFilters
-                      members={teamMembers}
-                      appliedDate={appliedDate}
-                      appliedAssignee={appliedAssignee}
-                      appliedColumns={appliedColumns}
-                      columnOptions={columnFilterOptions}
-                      onApply={applyFilters}
-                    />
-                  }
-                  columns={
-                    <ColumnsMenu
-                      flowId={flowId}
-                      flowColumns={payload?.columns ?? []}
-                      customFields={customFieldsScoped}
-                      hiddenIds={visibility.hiddenIds}
-                      onToggleVisibility={visibility.toggle}
-                      onShowAll={visibility.showAll}
-                      onReset={visibility.reset}
-                      onEditField={(f) => {
-                        setEditingField(f);
-                        setAddColumnOpen(true);
-                      }}
-                      onChanged={reloadTable}
-                      headerColors={headerColors}
-                      onSaveHeaderColor={handleSaveHeaderColor}
-                      canCustomizeColors={canSendMessages}
-                      headerColorMap={headerMap}
-                      onResetOrder={canSendMessages ? handleResetColumnOrder : undefined}
-                      resettingOrder={resettingOrder}
-                    />
-                  }
-                  hiddenRows={
-                    canSendMessages ? (
-                      <HiddenRowsMenu
-                        hidden={hiddenRows}
-                        pendingIds={rowActionPending}
-                        restoreAllPending={rowActionPending.has('__all__')}
-                        onRestore={handleRestoreRow}
-                        onRestoreAll={handleRestoreAllHidden}
+                    <div className="flex shrink-0 items-center gap-2 lg:ml-auto">
+                      {isMetaTable && !isAllMetaLeads && flowId ? (
+                        <MetaExportButton
+                          tableId={flowId}
+                          tableName={
+                            payload?.meta?.flowName ??
+                            activeFlowName ??
+                            'Meta_Leads'
+                          }
+                          isAllView={false}
+                          forms={[]}
+                          teamMembers={teamMembers}
+                        />
+                      ) : null}
+                      <WorkspaceActionsMenu
+                        filters={
+                          <WorkspaceFilters
+                            members={teamMembers}
+                            appliedDate={appliedDate}
+                            appliedAssignee={appliedAssignee}
+                            appliedColumns={appliedColumns}
+                            columnOptions={columnFilterOptions}
+                            onApply={applyFilters}
+                          />
+                        }
+                        columns={
+                          <ColumnsMenu
+                            flowId={flowId}
+                            flowColumns={payload?.columns ?? []}
+                            customFields={customFieldsScoped}
+                            hiddenIds={visibility.hiddenIds}
+                            onToggleVisibility={visibility.toggle}
+                            onShowAll={visibility.showAll}
+                            onReset={visibility.reset}
+                            onEditField={(f) => {
+                              setEditingField(f);
+                              setAddColumnOpen(true);
+                            }}
+                            onChanged={reloadTable}
+                            headerColors={headerColors}
+                            onSaveHeaderColor={handleSaveHeaderColor}
+                            canCustomizeColors={canSendMessages}
+                            headerColorMap={headerMap}
+                            onResetOrder={
+                              canSendMessages
+                                ? handleResetColumnOrder
+                                : undefined
+                            }
+                            resettingOrder={resettingOrder}
+                          />
+                        }
+                        hiddenRows={
+                          canSendMessages ? (
+                            <HiddenRowsMenu
+                              hidden={hiddenRows}
+                              pendingIds={rowActionPending}
+                              restoreAllPending={rowActionPending.has(
+                                '__all__'
+                              )}
+                              onRestore={handleRestoreRow}
+                              onRestoreAll={handleRestoreAllHidden}
+                            />
+                          ) : undefined
+                        }
+                        showTravelSettings={flowId !== null}
+                        onOpenTravelSettings={(mode) => {
+                          setTravelViewMode(mode === 'view');
+                          setTravelDialogOpen(true);
+                        }}
+                        canAddColumn={canEditSettings}
+                        onAddColumn={() => {
+                          setEditingField(null);
+                          setAddColumnOpen(true);
+                        }}
+                        showAssignment={isOwner}
+                        onOpenAssignment={(mode) => {
+                          setAssignmentViewMode(mode === 'view');
+                          setAssignmentDialogOpen(true);
+                        }}
                       />
-                    ) : undefined
-                  }
-                  showTravelSettings={flowId !== null}
-                  onOpenTravelSettings={(mode) => {
-                    setTravelViewMode(mode === 'view');
-                    setTravelDialogOpen(true);
-                  }}
-                  canAddColumn={canEditSettings}
-                  onAddColumn={() => {
-                    setEditingField(null);
-                    setAddColumnOpen(true);
-                  }}
-                  showAssignment={isOwner}
-                  onOpenAssignment={(mode) => {
-                    setAssignmentViewMode(mode === 'view');
-                    setAssignmentDialogOpen(true);
-                  }}
-                />
-              </div>
-            </div>
-            {hasActiveWorkspaceFilters({
-              dateRange: appliedDateRange,
-              assignee: appliedAssignee,
-              columns: appliedColumns,
-            }) ? (
-              <ActiveFilterChips
-                date={appliedDate}
-                assignee={appliedAssignee}
-                columns={appliedColumns}
-                members={teamMembers}
-                onClearDate={() => applyFilters(null, appliedAssignee, appliedColumns)}
-                onClearAssignee={() => applyFilters(appliedDate, { type: 'all' }, appliedColumns)}
-                onClearColumn={(section: ActiveColumnSectionKey) =>
-                  applyFilters(appliedDate, appliedAssignee, {
-                    ...appliedColumns,
-                    callStatus: section === 'callStatus' ? [] : appliedColumns.callStatus,
-                    callsTried: section === 'callsTried' ? null : appliedColumns.callsTried,
-                    followUpStatus: section === 'followUpStatus' ? [] : appliedColumns.followUpStatus,
-                    lastContact: section === 'lastContact' ? null : appliedColumns.lastContact,
-                    nextFollowUp: section === 'nextFollowUp' ? null : appliedColumns.nextFollowUp,
-                  })
-                }
-                onClearAll={() => applyFilters(null, { type: 'all' }, emptyColumnFilters())}
-              />
-            ) : null}
-          </div>
+                    </div>
+                  </div>
+                  {hasActiveWorkspaceFilters({
+                    dateRange: appliedDateRange,
+                    assignee: appliedAssignee,
+                    columns: appliedColumns,
+                  }) ? (
+                    <ActiveFilterChips
+                      date={appliedDate}
+                      assignee={appliedAssignee}
+                      columns={appliedColumns}
+                      members={teamMembers}
+                      onClearDate={() =>
+                        applyFilters(null, appliedAssignee, appliedColumns)
+                      }
+                      onClearAssignee={() =>
+                        applyFilters(
+                          appliedDate,
+                          { type: 'all' },
+                          appliedColumns
+                        )
+                      }
+                      onClearColumn={(section: ActiveColumnSectionKey) =>
+                        applyFilters(appliedDate, appliedAssignee, {
+                          ...appliedColumns,
+                          callStatus:
+                            section === 'callStatus'
+                              ? []
+                              : appliedColumns.callStatus,
+                          callsTried:
+                            section === 'callsTried'
+                              ? null
+                              : appliedColumns.callsTried,
+                          followUpStatus:
+                            section === 'followUpStatus'
+                              ? []
+                              : appliedColumns.followUpStatus,
+                          lastContact:
+                            section === 'lastContact'
+                              ? null
+                              : appliedColumns.lastContact,
+                          nextFollowUp:
+                            section === 'nextFollowUp'
+                              ? null
+                              : appliedColumns.nextFollowUp,
+                        })
+                      }
+                      onClearAll={() =>
+                        applyFilters(
+                          null,
+                          { type: 'all' },
+                          emptyColumnFilters()
+                        )
+                      }
+                    />
+                  ) : null}
+                </div>
 
-          {tableError ? (
-            <p className="text-destructive text-sm" role="alert">
-              {tableError}
-            </p>
-          ) : deepLinkNotice ? (
-            <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
-              <span>{deepLinkNotice}</span>
-              <button
-                type="button"
-                onClick={() => setDeepLinkNotice(null)}
-                className="font-medium text-blue-600 hover:underline dark:text-blue-400"
-              >
-                Dismiss
-              </button>
-            </p>
-          ) : loading && !payload ? (
-            <Skeleton className="h-64 w-full" />
-          ) : !payload || payload.rows.length === 0 ? (
-            kpiBucket !== null ? (
-              <div className="flex flex-col items-center gap-2">
-                <EmptyState
-                  icon={Table2}
-                  title={KPI_EMPTY_TITLES[kpiBucket]}
-                  hint="Try a different follow-up bucket — or clear the filter to see everything."
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => selectKpiBucket(null)}
-                  className="h-7 px-2 text-xs"
-                >
-                  Clear filter
-                </Button>
-              </div>
-            ) : hasActiveWorkspaceFilters({
-              dateRange: appliedDateRange,
-              assignee: appliedAssignee,
-              columns: appliedColumns,
-            }) ? (
-              <EmptyState
-                icon={Table2}
-                title="No matching runs"
-                hint="Try widening the date range or choosing a different assignee — or clear the filters to see everything."
-              />
-            ) : (
-              <EmptyState
-                icon={Table2}
-                title={
-                  effectiveView === 'all'
-                    ? 'No runs yet'
-                    : effectiveView === 'completed'
-                      ? 'No completed runs'
-                      : 'No incomplete runs'
-                }
-                hint="New flow runs appear here automatically."
-              />
-            )
-          ) : (
-            <>
-              <div className="border-border bg-card overflow-hidden rounded-xl border">
-              {/*
+                {tableError ? (
+                  <p className="text-destructive text-sm" role="alert">
+                    {tableError}
+                  </p>
+                ) : deepLinkNotice ? (
+                  <p
+                    className="text-muted-foreground flex items-center gap-2 text-sm"
+                    role="status"
+                  >
+                    <span>{deepLinkNotice}</span>
+                    <button
+                      type="button"
+                      onClick={() => setDeepLinkNotice(null)}
+                      className="font-medium text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      Dismiss
+                    </button>
+                  </p>
+                ) : loading && !payload ? (
+                  <Skeleton className="h-64 w-full" />
+                ) : !payload || payload.rows.length === 0 ? (
+                  kpiBucket !== null ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <EmptyState
+                        icon={Table2}
+                        title={KPI_EMPTY_TITLES[kpiBucket]}
+                        hint="Try a different follow-up bucket — or clear the filter to see everything."
+                      />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => selectKpiBucket(null)}
+                        className="h-7 px-2 text-xs"
+                      >
+                        Clear filter
+                      </Button>
+                    </div>
+                  ) : hasActiveWorkspaceFilters({
+                      dateRange: appliedDateRange,
+                      assignee: appliedAssignee,
+                      columns: appliedColumns,
+                    }) ? (
+                    <EmptyState
+                      icon={Table2}
+                      title="No matching runs"
+                      hint="Try widening the date range or choosing a different assignee — or clear the filters to see everything."
+                    />
+                  ) : (
+                    <EmptyState
+                      icon={Table2}
+                      title={
+                        effectiveView === 'all'
+                          ? 'No runs yet'
+                          : effectiveView === 'completed'
+                            ? 'No completed runs'
+                            : 'No incomplete runs'
+                      }
+                      hint="New flow runs appear here automatically."
+                    />
+                  )
+                ) : (
+                  <>
+                    <div className="border-border bg-card overflow-hidden rounded-xl border">
+                      {/*
                   Column drag-and-drop context wraps the whole scroll
                   viewport — never the native <table> itself. dnd-kit
                   renders screen-reader live-region divs as direct
@@ -3622,27 +3843,27 @@ export default function WorkspacePage() {
                   hydration warnings). Sortable headers below still
                   resolve through the same context.
               */}
-              <DndContext
-                sensors={columnSensors}
-                collisionDetection={closestCenter}
-                onDragStart={handleColumnDragStart}
-                onDragOver={handleColumnDragOver}
-                onDragEnd={handleColumnDragEnd}
-                onDragCancel={handleColumnDragCancel}
-              >
-              <SortableContext
-                items={sortableColumnIds}
-                strategy={horizontalListSortingStrategy}
-              >
-              <div
-                ref={viewportRef}
-                className={cn(
-                  'workspace-table-viewport max-h-[70vh] overflow-y-auto overflow-x-hidden',
-                  resizingKey !== null && 'select-none'
-                )}
-              >
-                <Table>
-                  {/* Enterprise grid: the header row sticks to the
+                      <DndContext
+                        sensors={columnSensors}
+                        collisionDetection={closestCenter}
+                        onDragStart={handleColumnDragStart}
+                        onDragOver={handleColumnDragOver}
+                        onDragEnd={handleColumnDragEnd}
+                        onDragCancel={handleColumnDragCancel}
+                      >
+                        <SortableContext
+                          items={sortableColumnIds}
+                          strategy={horizontalListSortingStrategy}
+                        >
+                          <div
+                            ref={viewportRef}
+                            className={cn(
+                              'workspace-table-viewport max-h-[70vh] overflow-x-hidden overflow-y-auto',
+                              resizingKey !== null && 'select-none'
+                            )}
+                          >
+                            <Table>
+                              {/* Enterprise grid: the header row sticks to the
                       viewport top (top-0); the No. and Name columns
                       freeze horizontally at measured offsets (see
                       frozenTint/noWidth below) while the whole table
@@ -3657,70 +3878,77 @@ export default function WorkspacePage() {
                       strip sits below the vertical viewport as a
                       card-level sibling (see after </Table>) — always
                       visible, never in the row flow. */}
-                  <TableHeader className="[&_tr]:border-b-0">
-                    <TableRow>
-                      {/* One shared column order drives every header
+                              <TableHeader className="[&_tr]:border-b-0">
+                                <TableRow>
+                                  {/* One shared column order drives every header
                           AND body cell (see orderedColumns): header
                           #k and body #k always resolve from the same
                           stable-id entry, so reordering can never
                           separate a header from its data. */}
-                      {orderedColumns.map((entry) => renderHeaderEntry(entry))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {visibleRows.map((row, rowIndex) => (
-                      <TableRow
-                        key={row.runId}
-                        data-contact-id={row.contactId ?? undefined}
-                        className={cn(
-                          'cursor-pointer',
-                          // Pinned rows read subtly highlighted (light
-                          // amber wash) while keeping the row hover.
-                          pinnedIds.has(row.runId) &&
-                            'bg-amber-50/70 dark:bg-amber-950/20',
-                          // Temporary deep-link highlight: light blue
-                          // wash with a blue left accent, fading via
-                          // the row's own color transition. No badge,
-                          // no label — the wash alone identifies it.
-                          // (Border utilities only: the grid system
-                          // forbids shadow styling on this page.)
-                          highlightContactId !== null &&
-                            row.contactId === highlightContactId &&
-                            'border-l-4 border-l-blue-500 bg-blue-100/70 duration-1000 dark:bg-blue-500/15'
-                        )}
-                        onClick={() => setSelected(row)}
-                      >
-                        {/* Same shared order as the header above:
+                                  {orderedColumns.map((entry) =>
+                                    renderHeaderEntry(entry)
+                                  )}
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {visibleRows.map((row, rowIndex) => (
+                                  <TableRow
+                                    key={row.runId}
+                                    data-contact-id={row.contactId ?? undefined}
+                                    className={cn(
+                                      'cursor-pointer',
+                                      // Pinned rows read subtly highlighted (light
+                                      // amber wash) while keeping the row hover.
+                                      pinnedIds.has(row.runId) &&
+                                        'bg-amber-50/70 dark:bg-amber-950/20',
+                                      // Temporary deep-link highlight: light blue
+                                      // wash with a blue left accent, fading via
+                                      // the row's own color transition. No badge,
+                                      // no label — the wash alone identifies it.
+                                      // (Border utilities only: the grid system
+                                      // forbids shadow styling on this page.)
+                                      highlightContactId !== null &&
+                                        row.contactId === highlightContactId &&
+                                        'border-l-4 border-l-blue-500 bg-blue-100/70 duration-1000 dark:bg-blue-500/15'
+                                    )}
+                                    onClick={() => setSelected(row)}
+                                  >
+                                    {/* Same shared order as the header above:
                             body cell #k resolves from the same entry
                             as header #k (stable id, never position). */}
-                        {orderedColumns.map((entry) => renderBodyEntry(entry, row, rowIndex))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              <DragOverlay>
-                {activeColumnId ? (
-                  <span className="bg-popover text-popover-foreground border-border inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] font-semibold whitespace-nowrap">
-                    <GripVertical className="size-3.5" aria-hidden />
-                    {(() => {
-                      const active = orderedColumns.find(
-                        (e) => e.id === activeColumnId
-                      );
-                      if (!active) return activeColumnId;
-                      if (active.kind === 'row') return 'No.';
-                      if (active.kind === 'custom')
-                        return formatColumnLabel(active.field.name);
-                      if (active.kind === 'flow')
-                        return formatColumnLabel(active.col.label);
-                      return activeColumnId;
-                    })()}
-                  </span>
-                ) : null}
-              </DragOverlay>
-              </SortableContext>
-              </DndContext>
-              {/* Single bottom thumb strip: a sibling BELOW the
+                                    {orderedColumns.map((entry) =>
+                                      renderBodyEntry(entry, row, rowIndex)
+                                    )}
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                          <DragOverlay>
+                            {activeColumnId ? (
+                              <span className="bg-popover text-popover-foreground border-border inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[13px] font-semibold whitespace-nowrap">
+                                <GripVertical
+                                  className="size-3.5"
+                                  aria-hidden
+                                />
+                                {(() => {
+                                  const active = orderedColumns.find(
+                                    (e) => e.id === activeColumnId
+                                  );
+                                  if (!active) return activeColumnId;
+                                  if (active.kind === 'row') return 'No.';
+                                  if (active.kind === 'custom')
+                                    return formatColumnLabel(active.field.name);
+                                  if (active.kind === 'flow')
+                                    return formatColumnLabel(active.col.label);
+                                  return activeColumnId;
+                                })()}
+                              </span>
+                            ) : null}
+                          </DragOverlay>
+                        </SortableContext>
+                      </DndContext>
+                      {/* Single bottom thumb strip: a sibling BELOW the
                   vertical viewport — never inside the row flow — so
                   it is structurally always visible at the table's
                   bottom edge, whether the first, middle, or last
@@ -3732,29 +3960,29 @@ export default function WorkspacePage() {
                   so it covers neither rows nor the pagination
                   below. Drives the viewport's own scroller (the
                   same element Shift+wheel and swipes share). */}
-              <div className="border-t border-border bg-card">
-                <TableHScrollbar
-                  getScroller={getScroller}
-                  getTable={getTable}
-                  contentKey={tableKey}
-                  label="Bottom table scrollbar"
-                  className="px-2 py-1"
-                />
-              </div>
-              <WorkspacePagination
-                page={page}
-                totalPages={totalPages}
-                total={payload?.meta.total ?? 0}
-                pageSize={pageSize}
-                rowsOnPage={payload?.rows.length ?? 0}
-                disabled={loading}
-                onPage={setPage}
-                onPageSize={(size) => selectPageSize(String(size))}
-              />
-              </div>
-            </>
-          )}
-          </>
+                      <div className="border-border bg-card border-t">
+                        <TableHScrollbar
+                          getScroller={getScroller}
+                          getTable={getTable}
+                          contentKey={tableKey}
+                          label="Bottom table scrollbar"
+                          className="px-2 py-1"
+                        />
+                      </div>
+                      <WorkspacePagination
+                        page={page}
+                        totalPages={totalPages}
+                        total={payload?.meta.total ?? 0}
+                        pageSize={pageSize}
+                        rowsOnPage={payload?.rows.length ?? 0}
+                        disabled={loading}
+                        onPage={setPage}
+                        onPageSize={(size) => selectPageSize(String(size))}
+                      />
+                    </div>
+                  </>
+                )}
+              </>
             </>
           )}
         </>
@@ -3828,10 +4056,13 @@ export default function WorkspacePage() {
               <SheetHeader>
                 <SheetTitle>{selected.name ?? 'Run'}</SheetTitle>
                 <SheetDescription>
-                  {('originTableName' in selected && (selected as unknown as { originTableName?: string }).originTableName)
-                    ? (selected as unknown as { originTableName: string }).originTableName
-                    : (activeFlowName ?? 'Flow run')} · started{' '}
-                  {formatDateTime(selected.startedAt)}
+                  {'originTableName' in selected &&
+                  (selected as unknown as { originTableName?: string })
+                    .originTableName
+                    ? (selected as unknown as { originTableName: string })
+                        .originTableName
+                    : (activeFlowName ?? 'Flow run')}{' '}
+                  · started {formatDateTime(selected.startedAt)}
                 </SheetDescription>
               </SheetHeader>
               <div className="mt-4 space-y-4 overflow-y-auto px-5 pb-6">
@@ -3841,7 +4072,11 @@ export default function WorkspacePage() {
                 {isMetaTable ? null : (
                   <>
                     <div className="flex items-center gap-2">
-                      <StatusBadge status={(selected as FlowTableRow).status ?? 'completed'} />
+                      <StatusBadge
+                        status={
+                          (selected as FlowTableRow).status ?? 'completed'
+                        }
+                      />
                     </div>
                     <dl className="space-y-2 text-sm">
                       <div className="flex justify-between gap-4">
@@ -3851,7 +4086,9 @@ export default function WorkspacePage() {
                         </dd>
                       </div>
                       <div className="flex justify-between gap-4">
-                        <dt className="text-muted-foreground">Submission time</dt>
+                        <dt className="text-muted-foreground">
+                          Submission time
+                        </dt>
                         <dd className="text-foreground tabular-nums">
                           {formatDateTime(selected.startedAt)}
                         </dd>
@@ -3859,7 +4096,9 @@ export default function WorkspacePage() {
                       <div className="flex justify-between gap-4">
                         <dt className="text-muted-foreground">Completed at</dt>
                         <dd className="text-foreground tabular-nums">
-                          {formatDateTime((selected as FlowTableRow).completedAt ?? null)}
+                          {formatDateTime(
+                            (selected as FlowTableRow).completedAt ?? null
+                          )}
                         </dd>
                       </div>
                       <div className="flex justify-between gap-4">
@@ -3873,18 +4112,27 @@ export default function WorkspacePage() {
                 )}
                 {/* All-view Answers: single Form Answers list with each
                     answer's own original question (never truncated). */}
-                {'formAnswers' in selected && Array.isArray((selected as unknown as { formAnswers?: unknown }).formAnswers) ? (
+                {'formAnswers' in selected &&
+                Array.isArray(
+                  (selected as unknown as { formAnswers?: unknown }).formAnswers
+                ) ? (
                   <div>
                     <h3 className="text-foreground text-sm font-semibold">
                       Answers
                     </h3>
                     <dl className="mt-2 space-y-2 text-sm">
-                      {((selected as unknown as { formAnswers: AllMetaFormAnswer[] }).formAnswers ?? []).map((a) => (
+                      {(
+                        (
+                          selected as unknown as {
+                            formAnswers: AllMetaFormAnswer[];
+                          }
+                        ).formAnswers ?? []
+                      ).map((a) => (
                         <div key={a.key} className="flex justify-between gap-4">
-                          <dt className="text-muted-foreground shrink-0 max-w-[45%] break-words whitespace-normal">
+                          <dt className="text-muted-foreground max-w-[45%] shrink-0 break-words whitespace-normal">
                             {a.question}
                           </dt>
-                          <dd className="text-foreground text-right break-words whitespace-normal max-w-[55%]">
+                          <dd className="text-foreground max-w-[55%] text-right break-words whitespace-normal">
                             {a.answer}
                           </dd>
                         </div>
@@ -3892,57 +4140,57 @@ export default function WorkspacePage() {
                     </dl>
                   </div>
                 ) : (
-                <div>
-                  <h3 className="text-foreground text-sm font-semibold">
-                    Answers
-                  </h3>
-                  {payload && payload.columns.some((c) => !c.system) ? (
-                    <dl className="mt-2 space-y-2 text-sm">
-                      {(() => {
-                        // Workspace display values (agent overrides win
-                        // where present; originals otherwise).
-                        // This branch renders individual tables only (All
-                        // rows take the formAnswers branch above).
-                        const flowRow = selected as FlowTableRow;
-                        const display = resolveFlowAnswers(
-                          flowRow.answers,
-                          payload.flowOverrides?.[flowRow.runId],
-                        );
-                        return payload.columns
-                          .filter((c) => !c.system)
-                          .map((c) => (
-                            <div
-                              key={flowColumnRenderKey(c)}
-                              className="flex justify-between gap-4"
-                            >
-                              <dt className="text-muted-foreground shrink-0">
-                                {resolveMetaHeaderDisplayLabel({
-                                  // Meta Lead Ads tables only: show the
-                                  // current custom header (same override
-                                  // map as the table header, so sidebar
-                                  // and header can never disagree).
-                                  // Every Flow Table takes the
-                                  // formatting path — labels render
-                                  // exactly as before.
-                                  flowKind: payload.meta.kind,
-                                  column: c,
-                                  labels: headerLabels,
-                                  formatOriginal: formatColumnLabel,
-                                })}
-                              </dt>
-                              <dd className="text-foreground text-right break-words">
-                                {display[c.key] ?? '—'}
-                              </dd>
-                            </div>
-                          ));
-                      })()}
-                    </dl>
-                  ) : (
-                    <p className="text-muted-foreground mt-1 text-sm">
-                      No answers collected yet.
-                    </p>
-                  )}
-                </div>
+                  <div>
+                    <h3 className="text-foreground text-sm font-semibold">
+                      Answers
+                    </h3>
+                    {payload && payload.columns.some((c) => !c.system) ? (
+                      <dl className="mt-2 space-y-2 text-sm">
+                        {(() => {
+                          // Workspace display values (agent overrides win
+                          // where present; originals otherwise).
+                          // This branch renders individual tables only (All
+                          // rows take the formAnswers branch above).
+                          const flowRow = selected as FlowTableRow;
+                          const display = resolveFlowAnswers(
+                            flowRow.answers,
+                            payload.flowOverrides?.[flowRow.runId]
+                          );
+                          return payload.columns
+                            .filter((c) => !c.system)
+                            .map((c) => (
+                              <div
+                                key={flowColumnRenderKey(c)}
+                                className="flex justify-between gap-4"
+                              >
+                                <dt className="text-muted-foreground shrink-0">
+                                  {resolveMetaHeaderDisplayLabel({
+                                    // Meta Lead Ads tables only: show the
+                                    // current custom header (same override
+                                    // map as the table header, so sidebar
+                                    // and header can never disagree).
+                                    // Every Flow Table takes the
+                                    // formatting path — labels render
+                                    // exactly as before.
+                                    flowKind: payload.meta.kind,
+                                    column: c,
+                                    labels: headerLabels,
+                                    formatOriginal: formatColumnLabel,
+                                  })}
+                                </dt>
+                                <dd className="text-foreground text-right break-words">
+                                  {display[c.key] ?? '—'}
+                                </dd>
+                              </div>
+                            ));
+                        })()}
+                      </dl>
+                    ) : (
+                      <p className="text-muted-foreground mt-1 text-sm">
+                        No answers collected yet.
+                      </p>
+                    )}
+                  </div>
                 )}
                 {selected.conversationId ? (
                   <Button
@@ -3979,8 +4227,11 @@ export default function WorkspacePage() {
                 )}
                 {(() => {
                   const originFlowId =
-                    ('originFlowId' in selected && typeof (selected as unknown as { originFlowId?: string }).originFlowId === 'string')
-                      ? (selected as unknown as { originFlowId: string }).originFlowId
+                    'originFlowId' in selected &&
+                    typeof (selected as unknown as { originFlowId?: string })
+                      .originFlowId === 'string'
+                      ? (selected as unknown as { originFlowId: string })
+                          .originFlowId
                       : flowId;
                   if (originFlowId === null) return null;
                   return (
@@ -4002,8 +4253,11 @@ export default function WorkspacePage() {
                     originating flow. */}
                 {(() => {
                   const originFlowId =
-                    ('originFlowId' in selected && typeof (selected as unknown as { originFlowId?: string }).originFlowId === 'string')
-                      ? (selected as unknown as { originFlowId: string }).originFlowId
+                    'originFlowId' in selected &&
+                    typeof (selected as unknown as { originFlowId?: string })
+                      .originFlowId === 'string'
+                      ? (selected as unknown as { originFlowId: string })
+                          .originFlowId
                       : flowId;
                   if (!isMetaTable || originFlowId === null) return null;
                   return (
@@ -4033,28 +4287,70 @@ export default function WorkspacePage() {
                         metaCreatedTime?: string | null;
                         phoneNumberVerified?: string | null;
                       };
-                      const rows: Array<{ label: string; value: string; mono?: boolean }> = [];
+                      const rows: Array<{
+                        label: string;
+                        value: string;
+                        mono?: boolean;
+                      }> = [];
                       const verified = formatMetaYesNo(d.phoneNumberVerified);
-                      if (verified) rows.push({ label: 'Phone Number Verified', value: verified });
-                      if (d.metaLeadId?.trim()) rows.push({ label: 'Meta Lead ID', value: d.metaLeadId.trim(), mono: true });
-                      if (d.formId?.trim()) rows.push({ label: 'Form ID', value: d.formId.trim(), mono: true });
-                      if (d.adId?.trim()) rows.push({ label: 'Ad ID', value: d.adId.trim(), mono: true });
-                      if (d.adName?.trim()) rows.push({ label: 'Ad Name', value: d.adName.trim() });
-                      if (d.campaignName?.trim()) rows.push({ label: 'Campaign Name', value: d.campaignName.trim() });
+                      if (verified)
+                        rows.push({
+                          label: 'Phone Number Verified',
+                          value: verified,
+                        });
+                      if (d.metaLeadId?.trim())
+                        rows.push({
+                          label: 'Meta Lead ID',
+                          value: d.metaLeadId.trim(),
+                          mono: true,
+                        });
+                      if (d.formId?.trim())
+                        rows.push({
+                          label: 'Form ID',
+                          value: d.formId.trim(),
+                          mono: true,
+                        });
+                      if (d.adId?.trim())
+                        rows.push({
+                          label: 'Ad ID',
+                          value: d.adId.trim(),
+                          mono: true,
+                        });
+                      if (d.adName?.trim())
+                        rows.push({ label: 'Ad Name', value: d.adName.trim() });
+                      if (d.campaignName?.trim())
+                        rows.push({
+                          label: 'Campaign Name',
+                          value: d.campaignName.trim(),
+                        });
                       if (typeof d.isOrganic === 'boolean')
-                        rows.push({ label: 'Organic Lead', value: d.isOrganic ? 'Yes' : 'No' });
-                      if (d.metaCreatedTime?.trim() && !Number.isNaN(Date.parse(d.metaCreatedTime.trim())))
-                        rows.push({ label: 'Meta Lead Created At', value: formatDateTime(d.metaCreatedTime.trim()) });
+                        rows.push({
+                          label: 'Organic Lead',
+                          value: d.isOrganic ? 'Yes' : 'No',
+                        });
+                      if (
+                        d.metaCreatedTime?.trim() &&
+                        !Number.isNaN(Date.parse(d.metaCreatedTime.trim()))
+                      )
+                        rows.push({
+                          label: 'Meta Lead Created At',
+                          value: formatDateTime(d.metaCreatedTime.trim()),
+                        });
                       if (rows.length === 0) return null;
                       return (
-                        <div className="border-t border-border pt-4">
+                        <div className="border-border border-t pt-4">
                           <h3 className="text-foreground text-sm font-semibold">
                             Additional Meta Details
                           </h3>
                           <dl className="mt-2 space-y-2 text-sm">
                             {rows.map((r) => (
-                              <div key={r.label} className="flex justify-between gap-4">
-                                <dt className="text-muted-foreground shrink-0">{r.label}</dt>
+                              <div
+                                key={r.label}
+                                className="flex justify-between gap-4"
+                              >
+                                <dt className="text-muted-foreground shrink-0">
+                                  {r.label}
+                                </dt>
                                 <dd
                                   className={
                                     r.mono
@@ -4081,21 +4377,22 @@ export default function WorkspacePage() {
           directly by clicking the follow-up cell (no inline
           picker, no second dialog). Flow Tables never set this
           state. All-view rows use their originating flowId. */}
-      {scheduleModal !== null && (scheduleModal.originFlowId ?? flowId) !== null && (
-        <ScheduleFollowupDialog
-          open={scheduleModal !== null}
-          onOpenChange={(v) => {
-            if (!v) setScheduleModal(null);
-          }}
-          flowId={(scheduleModal.originFlowId ?? flowId) as string}
-          runId={scheduleModal.runId}
-          fieldId={scheduleModal.fieldId}
-          leadName={scheduleModal.name}
-          leadPhone={scheduleModal.phone}
-          initialValue={scheduleModal.initialValue}
-          onSaved={reloadTable}
-        />
-      )}
+      {scheduleModal !== null &&
+        (scheduleModal.originFlowId ?? flowId) !== null && (
+          <ScheduleFollowupDialog
+            open={scheduleModal !== null}
+            onOpenChange={(v) => {
+              if (!v) setScheduleModal(null);
+            }}
+            flowId={(scheduleModal.originFlowId ?? flowId) as string}
+            runId={scheduleModal.runId}
+            fieldId={scheduleModal.fieldId}
+            leadName={scheduleModal.name}
+            leadPhone={scheduleModal.phone}
+            initialValue={scheduleModal.initialValue}
+            onSaved={reloadTable}
+          />
+        )}
     </div>
   );
 }

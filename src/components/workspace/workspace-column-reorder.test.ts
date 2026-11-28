@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Workspace drag-and-drop column reordering contracts.
@@ -181,5 +181,149 @@ describe("edge auto-scroll (programmatic viewport)", () => {
     expect(pageSrc).toContain("pointermove");
     // Shift+wheel and trackpad handlers are untouched.
     expect(pageSrc).toContain("useShiftWheel(viewportRef, tableKey)");
+  });
+});
+
+const prefH = vi.hoisted(() => ({
+  dbCalls: [] as string[],
+}));
+
+function prefFakeSupabase() {
+  const chain: Record<string, (...args: never[]) => unknown> = {};
+  chain.select = () => chain;
+  chain.eq = () => chain;
+  chain.order = () => chain;
+  chain.limit = () => chain;
+  chain.in = () => chain;
+  chain.maybeSingle = async () => {
+    prefH.dbCalls.push("maybeSingle");
+    return { data: null, error: null };
+  };
+  // Awaitable directly for plain select chains.
+  (chain as { then: unknown }).then = (
+    resolve: (v: { data: unknown; error: null }) => unknown,
+  ) => resolve({ data: [], error: null });
+  return {
+    from: (table: string) => {
+      prefH.dbCalls.push(`from:${table}`);
+      return chain;
+    },
+    rpc: async () => ({ data: null, error: null }),
+  };
+}
+
+vi.mock("@/lib/auth/account", () => ({
+  getCurrentAccount: async () => ({
+    supabase: prefFakeSupabase(),
+    accountId: "acct-1",
+    userId: "u-1",
+    role: "owner",
+    account: { id: "acct-1", name: "Test" },
+  }),
+  requireRole: async () => ({
+    supabase: prefFakeSupabase(),
+    accountId: "acct-1",
+    userId: "u-1",
+    role: "owner",
+    account: { id: "acct-1", name: "Test" },
+  }),
+  toErrorResponse: () =>
+    Response.json({ error: "Internal server error" }, { status: 500 }),
+}));
+
+const { GET: getOrders, PUT: putOrders, DELETE: deleteOrders } =
+  await import("../../app/api/flows/[id]/column-orders/route");
+const { GET: getWidths } = await import(
+  "../../app/api/flows/[id]/column-widths/route"
+);
+const { GET: getColors } = await import(
+  "../../app/api/flows/[id]/header-colors/route"
+);
+const { GET: getRowPrefs } = await import(
+  "../../app/api/flows/[id]/row-prefs/route"
+);
+
+function virtualReq(method = "GET", body?: unknown) {
+  return new Request("http://localhost/api/flows/all-meta-leads/x", {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function virtualParams() {
+  return { params: Promise.resolve({ id: "all-meta-leads" }) };
+}
+
+describe("virtual All Meta Leads table (non-UUID id)", () => {
+  // Regression tests for the HTTP 500
+  // `invalid input syntax for type uuid: "all-meta-leads"`: the
+  // virtual id must short-circuit before any UUID-column query,
+  // returning each endpoint's default shape. Writes stay rejected
+  // with the existing 404 contract.
+  beforeEach(() => {
+    prefH.dbCalls = [];
+  });
+
+  it("column-orders GET returns the default without touching the database", async () => {
+    const res = await getOrders(virtualReq(), virtualParams());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ordered_ids: null });
+    expect(prefH.dbCalls).toEqual([]);
+  });
+
+  it("column-widths GET returns the default without touching the database", async () => {
+    const res = await getWidths(virtualReq(), virtualParams());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ widths: {} });
+    expect(prefH.dbCalls).toEqual([]);
+  });
+
+  it("header-colors GET returns the default without touching the database", async () => {
+    const res = await getColors(virtualReq(), virtualParams());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ colors: {} });
+    expect(prefH.dbCalls).toEqual([]);
+  });
+
+  it("row-prefs GET returns the default without touching the database", async () => {
+    const res = await getRowPrefs(virtualReq(), virtualParams());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ pinned: [], hidden: [] });
+    expect(prefH.dbCalls).toEqual([]);
+  });
+
+  it("writes to the virtual table are rejected as unknown flows", async () => {
+    const putRes = await putOrders(
+      virtualReq("PUT", { ordered_ids: ["flow:name"] }),
+      virtualParams(),
+    );
+    expect(putRes.status).toBe(404);
+    const deleteRes = await deleteOrders(virtualReq("DELETE"), virtualParams());
+    expect(deleteRes.status).toBe(404);
+    expect(prefH.dbCalls).toEqual([]);
+  });
+
+  it("guards precede every UUID-column query in source", () => {
+    const widthsSrc = readFileSync(
+      `${root}/src/app/api/flows/[id]/column-widths/route.ts`,
+      "utf8",
+    );
+    const colorsSrc = readFileSync(
+      `${root}/src/app/api/flows/[id]/header-colors/route.ts`,
+      "utf8",
+    );
+    const prefsSrc = readFileSync(
+      `${root}/src/app/api/flows/[id]/row-prefs/route.ts`,
+      "utf8",
+    );
+    for (const s of [routeSrc, widthsSrc, colorsSrc, prefsSrc]) {
+      expect(s).toContain("id === ALL_META_LEADS_ID");
+      // The short-circuit sits before the first UUID-based flow
+      // lookup in every handler.
+      expect(s.indexOf("if (id === ALL_META_LEADS_ID)")).toBeLessThan(
+        s.indexOf("loadFlowAccount(supabase, accountId, id)"),
+      );
+    }
   });
 });

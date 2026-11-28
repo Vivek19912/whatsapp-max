@@ -1,16 +1,16 @@
-"use client";
+'use client';
 
-import { Fragment, useMemo, useRef } from "react";
-import { Table2 } from "lucide-react";
+import { Fragment, useMemo, useRef } from 'react';
+import { Table2 } from 'lucide-react';
 
-import { Button } from "@/components/ui/button";
+import { Button } from '@/components/ui/button';
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -18,27 +18,28 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import { cn } from "@/lib/utils";
-import { EmptyState } from "@/components/dashboard/empty-state";
-import { Skeleton } from "@/components/dashboard/skeleton";
-import { WorkspaceSearchField } from "@/components/workspace/workspace-header";
+} from '@/components/ui/table';
+import { cn } from '@/lib/utils';
+import { EmptyState } from '@/components/dashboard/empty-state';
+import { Skeleton } from '@/components/dashboard/skeleton';
+import { WorkspaceSearchField } from '@/components/workspace/workspace-header';
 import {
   ActiveFilterChips,
   WorkspaceFilters,
   type AppliedDateFilter,
   type ActiveColumnSectionKey,
-} from "@/components/workspace/workspace-filters";
-import { WorkspaceActionsMenu } from "@/components/workspace/workspace-actions-menu";
-import { ColumnsMenu } from "@/components/workspace/columns-menu";
-import { HiddenRowsMenu } from "@/components/workspace/hidden-rows-menu";
-import type { HiddenRowInfo } from "@/lib/flows/workspace-row-prefs";
-import { WorkspacePagination } from "@/components/workspace/workspace-pagination";
-import { CustomCell } from "@/components/workspace/custom-cell";
-import { LatestRecordingCell } from "@/components/workspace/latest-recording-cell";
-import { RowActionsMenu } from "@/components/workspace/row-actions-menu";
-import { DialAction } from "@/components/workspace/dial-action";
-import { AllMetaAnswersCell } from "@/components/workspace/all-meta-answers-cell";
+} from '@/components/workspace/workspace-filters';
+import { WorkspaceActionsMenu } from '@/components/workspace/workspace-actions-menu';
+import { MetaExportButton } from '@/components/workspace/meta-export-dialog';
+import { ColumnsMenu } from '@/components/workspace/columns-menu';
+import { HiddenRowsMenu } from '@/components/workspace/hidden-rows-menu';
+import type { HiddenRowInfo } from '@/lib/flows/workspace-row-prefs';
+import { WorkspacePagination } from '@/components/workspace/workspace-pagination';
+import { CustomCell } from '@/components/workspace/custom-cell';
+import { LatestRecordingCell } from '@/components/workspace/latest-recording-cell';
+import { RowActionsMenu } from '@/components/workspace/row-actions-menu';
+import { DialAction } from '@/components/workspace/dial-action';
+import { AllMetaAnswersCell } from '@/components/workspace/all-meta-answers-cell';
 import {
   ALL_META_BUSINESS_SPECS,
   ALL_META_COLUMN_IDS,
@@ -47,31 +48,46 @@ import {
   buildAllMetaUnionColumns,
   findUnionFieldDef,
   type AllMetaUnionColumn,
-} from "@/lib/workspace/all-meta-leads";
+} from '@/lib/workspace/all-meta-leads';
 import {
   assignHeaderBackgrounds,
   headerTextColor,
-} from "@/lib/flows/header-colors";
-import { flowColumnVisId } from "@/lib/flows/workspace-visibility";
-import { formatColumnLabel } from "@/lib/flows/column-label";
+} from '@/lib/flows/header-colors';
+import { flowColumnVisId } from '@/lib/flows/workspace-visibility';
+import { formatColumnLabel } from '@/lib/flows/column-label';
 import {
   emptyColumnFilters,
   hasActiveWorkspaceFilters,
   type WorkspaceAssigneeSelection,
   type WorkspaceColumnFilters,
-} from "@/lib/flows/workspace-filters";
-import { isAssigneeField, type AssigneeMember } from "@/lib/flows/workspace-assignee";
-import { isWorkspaceFollowupFieldName, type FollowupKpiBucket } from "@/lib/followups/workspace-link";
-import { isWideTextColumnName } from "@/lib/flows/workspace-column-widths";
-import { isWorkspaceFieldType, type WorkspaceField } from "@/lib/flows/workspace-fields";
-import { formatPhoneForDisplay } from "@/lib/whatsapp/phone-utils";
-import { workspaceRowNumber, type WorkspacePageSize } from "@/lib/flows/workspace-pagination";
-import type { FlowTableColumn, LatestRecordingEntry } from "@/lib/flows/flow-tables";
+} from '@/lib/flows/workspace-filters';
+import {
+  isAssigneeField,
+  type AssigneeMember,
+} from '@/lib/flows/workspace-assignee';
+import {
+  isWorkspaceFollowupFieldName,
+  type FollowupKpiBucket,
+} from '@/lib/followups/workspace-link';
+import { isWideTextColumnName } from '@/lib/flows/workspace-column-widths';
+import {
+  isWorkspaceFieldType,
+  type WorkspaceField,
+} from '@/lib/flows/workspace-fields';
+import { formatPhoneForDisplay } from '@/lib/whatsapp/phone-utils';
+import {
+  workspaceRowNumber,
+  type WorkspacePageSize,
+} from '@/lib/flows/workspace-pagination';
+import type {
+  FlowTableColumn,
+  LatestRecordingEntry,
+} from '@/lib/flows/flow-tables';
 import {
   TableHScrollbar,
   useShiftWheel,
   useTableFreezeMetrics,
-} from "@/components/workspace/table-scrollbars";
+} from '@/components/workspace/table-scrollbars';
 
 export interface AllMetaViewRow {
   runId: string;
@@ -85,7 +101,12 @@ export interface AllMetaViewRow {
   phone: string | null;
   startedAt: string;
   source: string | null;
-  formAnswers: Array<{ key: string; question: string; answer: string; legacy: boolean }>;
+  formAnswers: Array<{
+    key: string;
+    question: string;
+    answer: string;
+    legacy: boolean;
+  }>;
   assignedTo: string | null;
   type: string | null;
   stage: string | null;
@@ -118,35 +139,35 @@ export interface AllMetaFieldDef {
   position?: number | null;
 }
 
-type BusinessKind = "assignedTo" | "type" | "stage" | "callStatus" | "followUp";
+type BusinessKind = 'assignedTo' | 'type' | 'stage' | 'callStatus' | 'followUp';
 
 /** All-view business kind → AllMetaViewRow.fieldIds key. */
 const BUSINESS_FIELD_ID_KEY: Record<
   BusinessKind,
-  "assignedTo" | "type" | "stage" | "callStatus" | "nextFollowUp"
+  'assignedTo' | 'type' | 'stage' | 'callStatus' | 'nextFollowUp'
 > = {
-  assignedTo: "assignedTo",
-  type: "type",
-  stage: "stage",
-  callStatus: "callStatus",
-  followUp: "nextFollowUp",
+  assignedTo: 'assignedTo',
+  type: 'type',
+  stage: 'stage',
+  callStatus: 'callStatus',
+  followUp: 'nextFollowUp',
 };
 
 function formatDateTime(iso: string | null): string {
-  if (!iso) return "—";
+  if (!iso) return '—';
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString(undefined, {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
   });
 }
 
-const SELECT_ALL_TABLES = "all";
-const SELECT_ALL_STAGES = "all";
-const SELECT_ALL_TYPES = "all";
+const SELECT_ALL_TABLES = 'all';
+const SELECT_ALL_STAGES = 'all';
+const SELECT_ALL_TYPES = 'all';
 
 /**
  * Per-row Workspace field for one All-view business column.
@@ -160,19 +181,21 @@ const SELECT_ALL_TYPES = "all";
 function allRowField(
   row: AllMetaViewRow,
   kind: BusinessKind,
-  fieldsByFlow: Record<string, AllMetaFieldDef[] | undefined>,
+  fieldsByFlow: Record<string, AllMetaFieldDef[] | undefined>
 ): WorkspaceField | null {
   const realId = row.fieldIds[BUSINESS_FIELD_ID_KEY[kind]];
   if (!realId) return null;
   const def = (fieldsByFlow[row.flowId] ?? []).find((d) => d.id === realId);
   const spec = ALL_META_BUSINESS_SPECS.find((s) => s.key === kind);
   const fieldType =
-    (def && isWorkspaceFieldType(def.field_type) ? def.field_type : undefined) ??
+    (def && isWorkspaceFieldType(def.field_type)
+      ? def.field_type
+      : undefined) ??
     spec?.field_type ??
-    "single_select";
+    'single_select';
   return {
     id: realId,
-    account_id: "",
+    account_id: '',
     flow_id: row.flowId,
     name: def?.name ?? spec?.name ?? kind,
     field_type: fieldType,
@@ -180,28 +203,31 @@ function allRowField(
     options: def?.options ?? spec?.options ?? null,
     default_value: def?.default_value ?? spec?.default_value ?? null,
     currency_code: null,
-    created_at: "",
-    updated_at: "",
+    created_at: '',
+    updated_at: '',
   };
 }
 
-function businessFallback(row: AllMetaViewRow, kind: BusinessKind): string | null {
+function businessFallback(
+  row: AllMetaViewRow,
+  kind: BusinessKind
+): string | null {
   switch (kind) {
-    case "assignedTo":
+    case 'assignedTo':
       return row.assignedTo;
-    case "type":
+    case 'type':
       return row.type;
-    case "stage":
+    case 'stage':
       return row.stage;
-    case "callStatus":
+    case 'callStatus':
       return row.callStatus;
-    case "followUp":
+    case 'followUp':
       return row.nextFollowUp;
   }
 }
 
 const BUSINESS_CELL_CLASS =
-  "overflow-hidden border-r border-border last:border-r-0";
+  'overflow-hidden border-r border-border last:border-r-0';
 
 export function AllMetaLeadsView(props: {
   search: string;
@@ -212,7 +238,7 @@ export function AllMetaLeadsView(props: {
   onApplyFilters: (
     date: AppliedDateFilter | null,
     assignee: WorkspaceAssigneeSelection,
-    columns: WorkspaceColumnFilters,
+    columns: WorkspaceColumnFilters
   ) => void;
   teamMembers: AssigneeMember[];
   columnFilterOptions: {
@@ -249,9 +275,22 @@ export function AllMetaLeadsView(props: {
   canSendMessages: boolean;
   isAgent: boolean;
   canManageAssignments: boolean;
-  onCustomSaved: (flowId: string, fieldId: string, runId: string, value: string | null) => void;
-  manualAssign: (runId: string, raw: unknown, flowId: string) => Promise<string | null>;
-  onOpenFollowup: (row: AllMetaViewRow, fieldId: string, value: string | null) => void;
+  onCustomSaved: (
+    flowId: string,
+    fieldId: string,
+    runId: string,
+    value: string | null
+  ) => void;
+  manualAssign: (
+    runId: string,
+    raw: unknown,
+    flowId: string
+  ) => Promise<string | null>;
+  onOpenFollowup: (
+    row: AllMetaViewRow,
+    fieldId: string,
+    value: string | null
+  ) => void;
   valueOverrides: Record<string, Record<string, string | null>>;
   customValues: Record<string, Record<string, string | null>>;
   fieldsByFlow: Record<string, AllMetaFieldDef[] | undefined>;
@@ -340,21 +379,28 @@ export function AllMetaLeadsView(props: {
   // lacking the field render a blank cell.
   const unionColumns: AllMetaUnionColumn[] = useMemo(
     () => buildAllMetaUnionColumns(tables, fieldsByFlow),
-    [tables, fieldsByFlow],
+    [tables, fieldsByFlow]
   );
   const allFlowColumns: FlowTableColumn[] = useMemo(
     () => [
       ...allMetaFlowColumns(),
-      { key: "latest_recording", label: "Latest Recording", system: true },
-      ...unionColumns.map((u): FlowTableColumn => ({ key: u.key, label: u.label, system: false })),
+      { key: 'latest_recording', label: 'Latest Recording', system: true },
+      ...unionColumns.map((u): FlowTableColumn => ({
+        key: u.key,
+        label: u.label,
+        system: false,
+      })),
     ],
-    [unionColumns],
+    [unionColumns]
   );
-  const unionByKey = useMemo(() => new Map(unionColumns.map((u) => [u.key, u])), [unionColumns]);
+  const unionByKey = useMemo(
+    () => new Map(unionColumns.map((u) => [u.key, u])),
+    [unionColumns]
+  );
   const hidden = useMemo(() => new Set(hiddenIds), [hiddenIds]);
   const visibleColumns = useMemo(
     () => allFlowColumns.filter((c) => !hidden.has(flowColumnVisId(c.key))),
-    [allFlowColumns, hidden],
+    [allFlowColumns, hidden]
   );
   const rowVisible = !hidden.has(ALL_META_COLUMN_IDS.row);
 
@@ -363,7 +409,8 @@ export function AllMetaLeadsView(props: {
   // from, so adjacent headers never share a tint.
   const headerBackgrounds = useMemo(() => {
     const entries: Array<{ visId: string; label: string }> = [];
-    if (rowVisible) entries.push({ visId: ALL_META_COLUMN_IDS.row, label: "Row" });
+    if (rowVisible)
+      entries.push({ visId: ALL_META_COLUMN_IDS.row, label: 'Row' });
     for (const c of visibleColumns) {
       entries.push({ visId: flowColumnVisId(c.key), label: c.label });
     }
@@ -385,18 +432,18 @@ export function AllMetaLeadsView(props: {
   const tableKey = `all|${page}|${pageSize}|${rows.length}|${visibleColumns.length}|${rowVisible ? 1 : 0}`;
   const getScroller = useMemo(
     () => () => viewportRef.current as HTMLElement | null,
-    [],
+    []
   );
   const getTable = useMemo(
     () => () => {
-      const el = viewportRef.current?.querySelector("table");
+      const el = viewportRef.current?.querySelector('table');
       return el instanceof HTMLElement ? el : null;
     },
-    [],
+    []
   );
   const { noHeadRef, nameHeadRef, metrics } = useTableFreezeMetrics(
     viewportRef,
-    tableKey,
+    tableKey
   );
   useShiftWheel(viewportRef, tableKey);
   const nameLeft = rowVisible ? metrics.noWidth : 0;
@@ -407,8 +454,8 @@ export function AllMetaLeadsView(props: {
     'before:absolute before:inset-y-0 before:left-0 before:w-px before:bg-border before:content-[""]';
   const frozenTint = (row: { runId: string }) =>
     cn(
-      "bg-card transition-colors hover:bg-muted/50",
-      pinnedIds.has(row.runId) && "bg-amber-50/70 dark:bg-amber-950/20",
+      'bg-card transition-colors hover:bg-muted/50',
+      pinnedIds.has(row.runId) && 'bg-amber-50/70 dark:bg-amber-950/20'
     );
 
   const showFiltersActive =
@@ -429,8 +476,8 @@ export function AllMetaLeadsView(props: {
   // Header order mirrors individual pinned order (actions, row,
   // name first), then the fixed All columns in spec order.
   const headerOrder: string[] = [];
-  if (canSendMessages) headerOrder.push("actions");
-  if (rowVisible) headerOrder.push("row");
+  if (canSendMessages) headerOrder.push('actions');
+  if (rowVisible) headerOrder.push('row');
   for (const c of visibleColumns) headerOrder.push(c.key);
 
   // Paint positions index-aligned with headerBackgrounds: actions
@@ -438,36 +485,39 @@ export function AllMetaLeadsView(props: {
   const paintIndexById = new Map<string, number>();
   {
     let paint = 0;
-    if (rowVisible) paintIndexById.set("row", paint++);
+    if (rowVisible) paintIndexById.set('row', paint++);
     for (const c of visibleColumns) paintIndexById.set(c.key, paint++);
   }
 
   const renderHeader = (id: string) => {
     const paintIndex = paintIndexById.get(id) ?? 0;
-    if (id === "actions") {
+    if (id === 'actions') {
       if (!canSendMessages) return null;
       return (
         <TableHead
           key={id}
-          className="sticky top-0 z-20 h-16 w-12 border-r border-b border-border px-2 align-middle"
+          className="border-border sticky top-0 z-20 h-16 w-12 border-r border-b px-2 align-middle"
           aria-label="Row actions"
         >
           <span className="sr-only">Actions</span>
         </TableHead>
       );
     }
-    if (id === "row") {
+    if (id === 'row') {
       if (!rowVisible) return null;
       return (
         <TableHead
           key={id}
           ref={noHeadRef}
           className={cn(
-            "sticky top-0 z-30 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold last:border-r-0",
+            'border-border sticky top-0 z-30 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold last:border-r-0',
             frozenEdgeLeft,
-            frozenEdgeRight,
+            frozenEdgeRight
           )}
-          style={{ ...headStyleAt(paintIndex), ...(freezeReady ? { left: 0 } : null) }}
+          style={{
+            ...headStyleAt(paintIndex),
+            ...(freezeReady ? { left: 0 } : null),
+          }}
         >
           No.
         </TableHead>
@@ -475,14 +525,14 @@ export function AllMetaLeadsView(props: {
     }
     const col = visibleColumns.find((c) => c.key === id);
     if (!col) return null;
-    if (id === "name") {
+    if (id === 'name') {
       return (
         <TableHead
           key={id}
           ref={nameHeadRef}
           className={cn(
-            "sticky top-0 z-30 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0",
-            frozenEdgeRight,
+            'border-border sticky top-0 z-30 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0',
+            frozenEdgeRight
           )}
           style={
             freezeReady
@@ -494,11 +544,11 @@ export function AllMetaLeadsView(props: {
         </TableHead>
       );
     }
-    if (id === "phone") {
+    if (id === 'phone') {
       return (
         <Fragment key={id}>
           <TableHead
-            className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+            className="border-border sticky top-0 z-20 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
             style={headStyleAt(paintIndex)}
           >
             {formatColumnLabel(col.label)}
@@ -506,7 +556,7 @@ export function AllMetaLeadsView(props: {
           <TableHead
             key="dial"
             scope="col"
-            className="sticky top-0 z-20 h-11 border-r border-b border-border bg-[#F1F5F9] px-3 align-middle text-center text-[13px] font-semibold whitespace-nowrap [html[data-mode=dark]_&]:bg-muted last:border-r-0"
+            className="border-border [html[data-mode=dark]_&]:bg-muted sticky top-0 z-20 h-11 border-r border-b bg-[#F1F5F9] px-3 text-center align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
             style={{ minWidth: 112, width: 128 }}
           >
             <span className="block whitespace-nowrap">Dial</span>
@@ -517,7 +567,7 @@ export function AllMetaLeadsView(props: {
     return (
       <TableHead
         key={id}
-        className="sticky top-0 z-20 h-11 truncate border-r border-b border-border px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
+        className="border-border sticky top-0 z-20 h-11 truncate border-r border-b px-3 align-middle text-[13px] font-semibold whitespace-nowrap last:border-r-0"
         style={headStyleAt(paintIndex)}
       >
         {formatColumnLabel(col.label)}
@@ -525,7 +575,11 @@ export function AllMetaLeadsView(props: {
     );
   };
 
-  const renderBody = (columnKey: string, row: AllMetaViewRow, rowIndex: number) => {
+  const renderBody = (
+    columnKey: string,
+    row: AllMetaViewRow,
+    rowIndex: number
+  ) => {
     const overrides = valueOverrides[row.runId] ?? {};
     const stored = customValues[row.runId] ?? {};
     const resolveStored = (fieldId: string | null, fallback: string | null) => {
@@ -535,12 +589,15 @@ export function AllMetaLeadsView(props: {
       return fallback;
     };
 
-    if (columnKey === "actions") {
+    if (columnKey === 'actions') {
       if (!canSendMessages) return null;
       return (
-        <TableCell key={columnKey} className="w-12 border-r border-border px-2 last:border-r-0">
+        <TableCell
+          key={columnKey}
+          className="border-border w-12 border-r px-2 last:border-r-0"
+        >
           <RowActionsMenu
-            rowLabel={row.name ?? row.phone ?? "row"}
+            rowLabel={row.name ?? row.phone ?? 'row'}
             isPinned={pinnedIds.has(row.runId)}
             pending={rowActionPending(row.flowId, row.runId)}
             onTogglePin={() => onTogglePin(row.flowId, row.runId)}
@@ -549,49 +606,53 @@ export function AllMetaLeadsView(props: {
         </TableCell>
       );
     }
-    if (columnKey === "row") {
+    if (columnKey === 'row') {
       if (!rowVisible) return null;
       return (
         <TableCell
           key={columnKey}
           className={cn(
-            "border-r border-border px-4 text-sm tabular-nums text-muted-foreground last:border-r-0",
-            freezeReady && "sticky left-0 z-[1]",
+            'border-border text-muted-foreground border-r px-4 text-sm tabular-nums last:border-r-0',
+            freezeReady && 'sticky left-0 z-[1]',
             frozenEdgeLeft,
             frozenEdgeRight,
-            frozenTint(row),
+            frozenTint(row)
           )}
           style={freezeReady ? { left: 0 } : undefined}
         >
-          {workspaceRowNumber({ page, pageSize, index: rowIndex }).toLocaleString()}
+          {workspaceRowNumber({
+            page,
+            pageSize,
+            index: rowIndex,
+          }).toLocaleString()}
         </TableCell>
       );
     }
-    if (columnKey === "name") {
+    if (columnKey === 'name') {
       return (
         <TableCell
           key={columnKey}
           className={cn(
-            "max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0",
-            freezeReady && "sticky z-[1]",
+            'border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] last:border-r-0',
+            freezeReady && 'sticky z-[1]',
             frozenEdgeRight,
-            frozenTint(row),
+            frozenTint(row)
           )}
           style={freezeReady ? { left: nameLeft } : undefined}
         >
-          {row.name ?? ""}
+          {row.name ?? ''}
         </TableCell>
       );
     }
-    if (columnKey === "phone") {
+    if (columnKey === 'phone') {
       return (
         <Fragment key={columnKey}>
-          <TableCell className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0">
+          <TableCell className="border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] last:border-r-0">
             {formatPhoneForDisplay(row.phone)}
           </TableCell>
           <TableCell
             key="dial"
-            className="border-r border-border px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
+            className="border-border border-r px-2 py-1.5 text-center align-middle whitespace-nowrap last:border-r-0"
             style={{ minWidth: 112, width: 128 }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -607,44 +668,50 @@ export function AllMetaLeadsView(props: {
         </Fragment>
       );
     }
-    if (columnKey === "submission_time") {
+    if (columnKey === 'submission_time') {
       return (
         <TableCell
           key={columnKey}
-          className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] tabular-nums last:border-r-0"
+          className="border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] tabular-nums last:border-r-0"
         >
           {formatDateTime(row.startedAt)}
         </TableCell>
       );
     }
-    if (columnKey === "meta_table" || columnKey === "meta_lead_source") {
-      const value = columnKey === "meta_table" ? (row.tableName ?? "") : (row.source ?? "");
+    if (columnKey === 'meta_table' || columnKey === 'meta_lead_source') {
+      const value =
+        columnKey === 'meta_table' ? (row.tableName ?? '') : (row.source ?? '');
       return (
         <TableCell
           key={columnKey}
-          className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
+          className="border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] last:border-r-0"
         >
           {value}
         </TableCell>
       );
     }
-    if (columnKey === "form_answers") {
+    if (columnKey === 'form_answers') {
       return (
         <TableCell
           key={columnKey}
-          className="border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
+          className="border-border border-r px-2.5 py-1.5 text-[13px] last:border-r-0"
         >
-          <AllMetaAnswersCell answers={row.formAnswers} tableName={row.tableName} />
+          <AllMetaAnswersCell
+            answers={row.formAnswers}
+            tableName={row.tableName}
+          />
         </TableCell>
       );
     }
-    if (columnKey === "latest_recording") {
+    if (columnKey === 'latest_recording') {
       return (
         <TableCell
           key={columnKey}
-          className="max-w-56 truncate border-r border-border px-2.5 py-1.5 text-[13px] last:border-r-0"
+          className="border-border max-w-56 truncate border-r px-2.5 py-1.5 text-[13px] last:border-r-0"
         >
-          <LatestRecordingCell entry={latestRecordingByContact[row.contactId ?? ""] ?? null} />
+          <LatestRecordingCell
+            entry={latestRecordingByContact[row.contactId ?? ''] ?? null}
+          />
         </TableCell>
       );
     }
@@ -661,7 +728,7 @@ export function AllMetaLeadsView(props: {
         def && isWorkspaceFieldType(def.field_type)
           ? {
               id: def.id,
-              account_id: "",
+              account_id: '',
               flow_id: row.flowId,
               name: def.name,
               field_type: def.field_type,
@@ -669,20 +736,27 @@ export function AllMetaLeadsView(props: {
               options: def.options ?? null,
               default_value: def.default_value ?? null,
               currency_code: null,
-              created_at: "",
-              updated_at: "",
+              created_at: '',
+              updated_at: '',
             }
           : null;
       const realFieldId = def?.id ?? null;
       const canEditCell =
         canSendMessages &&
-        !(isAgent && isAssigneeField({ name: field?.name ?? "" }) && !canManageAssignments);
+        !(
+          isAgent &&
+          isAssigneeField({ name: field?.name ?? '' }) &&
+          !canManageAssignments
+        );
       const storedValue = resolveStored(realFieldId, null);
       if (!field || !canEditCell) {
         return (
           <TableCell
             key={columnKey}
-            className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+            className={cn(
+              BUSINESS_CELL_CLASS,
+              'max-w-56 px-2.5 py-1.5 text-[13px]'
+            )}
           >
             {field ? (
               <CustomCell
@@ -691,13 +765,15 @@ export function AllMetaLeadsView(props: {
                 field={field}
                 stored={storedValue}
                 canEdit={false}
-                onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+                onSaved={(fieldId, runId, value) =>
+                  onCustomSaved(row.flowId, fieldId, runId, value)
+                }
                 members={teamMembers}
                 twoLineClamp={isWideTextColumnName(field.name)}
                 crmAllowedFlowIds={crmAllowedFlowIds}
               />
             ) : (
-              <span>{storedValue ?? ""}</span>
+              <span>{storedValue ?? ''}</span>
             )}
           </TableCell>
         );
@@ -705,7 +781,10 @@ export function AllMetaLeadsView(props: {
       return (
         <TableCell
           key={columnKey}
-          className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+          className={cn(
+            BUSINESS_CELL_CLASS,
+            'max-w-56 px-2.5 py-1.5 text-[13px]'
+          )}
           onClick={(e) => e.stopPropagation()}
         >
           <CustomCell
@@ -714,18 +793,15 @@ export function AllMetaLeadsView(props: {
             field={field}
             stored={storedValue}
             canEdit={canEditCell}
-            onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+            onSaved={(fieldId, runId, value) =>
+              onCustomSaved(row.flowId, fieldId, runId, value)
+            }
             members={teamMembers}
             twoLineClamp={isWideTextColumnName(field.name)}
             crmAllowedFlowIds={crmAllowedFlowIds}
             onEditIntercept={
               isWorkspaceFollowupFieldName(field.name)
-                ? () =>
-                    onOpenFollowup(
-                      row,
-                      field.id,
-                      storedValue,
-                    )
+                ? () => onOpenFollowup(row, field.id, storedValue)
                 : undefined
             }
             saveAssignee={
@@ -738,40 +814,53 @@ export function AllMetaLeadsView(props: {
       );
     }
     const businessKind =
-      columnKey === "all_assigned_to"
-        ? ("assignedTo" as const)
-        : columnKey === "all_lead_type"
-          ? ("type" as const)
-          : columnKey === "all_stage"
-            ? ("stage" as const)
-            : columnKey === "all_call_status"
-              ? ("callStatus" as const)
-              : columnKey === "all_follow_up"
-                ? ("followUp" as const)
+      columnKey === 'all_assigned_to'
+        ? ('assignedTo' as const)
+        : columnKey === 'all_lead_type'
+          ? ('type' as const)
+          : columnKey === 'all_stage'
+            ? ('stage' as const)
+            : columnKey === 'all_call_status'
+              ? ('callStatus' as const)
+              : columnKey === 'all_follow_up'
+                ? ('followUp' as const)
                 : null;
     if (businessKind !== null) {
       const field = allRowField(row, businessKind, fieldsByFlow);
       const realFieldId = row.fieldIds[BUSINESS_FIELD_ID_KEY[businessKind]];
       const canEditCell =
         canSendMessages &&
-        !(isAgent && isAssigneeField({ name: field?.name ?? "" }) && !canManageAssignments);
+        !(
+          isAgent &&
+          isAssigneeField({ name: field?.name ?? '' }) &&
+          !canManageAssignments
+        );
       // Flows missing the field render read-only (stored value or
       // blank) — never a write path that could 404.
       if (!field || !canEditCell) {
-        const shown = resolveStored(realFieldId, businessFallback(row, businessKind)) ?? "";
+        const shown =
+          resolveStored(realFieldId, businessFallback(row, businessKind)) ?? '';
         return (
           <TableCell
             key={columnKey}
-            className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+            className={cn(
+              BUSINESS_CELL_CLASS,
+              'max-w-56 px-2.5 py-1.5 text-[13px]'
+            )}
           >
             {field ? (
               <CustomCell
                 flowId={row.flowId}
                 runId={row.runId}
                 field={field}
-                stored={resolveStored(realFieldId, businessFallback(row, businessKind))}
+                stored={resolveStored(
+                  realFieldId,
+                  businessFallback(row, businessKind)
+                )}
                 canEdit={false}
-                onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+                onSaved={(fieldId, runId, value) =>
+                  onCustomSaved(row.flowId, fieldId, runId, value)
+                }
                 members={teamMembers}
                 twoLineClamp={isWideTextColumnName(field.name)}
                 crmAllowedFlowIds={crmAllowedFlowIds}
@@ -785,16 +874,24 @@ export function AllMetaLeadsView(props: {
       return (
         <TableCell
           key={columnKey}
-          className={cn(BUSINESS_CELL_CLASS, "max-w-56 px-2.5 py-1.5 text-[13px]")}
+          className={cn(
+            BUSINESS_CELL_CLASS,
+            'max-w-56 px-2.5 py-1.5 text-[13px]'
+          )}
           onClick={(e) => e.stopPropagation()}
         >
           <CustomCell
             flowId={row.flowId}
             runId={row.runId}
             field={field}
-            stored={resolveStored(realFieldId, businessFallback(row, businessKind))}
+            stored={resolveStored(
+              realFieldId,
+              businessFallback(row, businessKind)
+            )}
             canEdit={canEditCell}
-            onSaved={(fieldId, runId, value) => onCustomSaved(row.flowId, fieldId, runId, value)}
+            onSaved={(fieldId, runId, value) =>
+              onCustomSaved(row.flowId, fieldId, runId, value)
+            }
             members={teamMembers}
             twoLineClamp={isWideTextColumnName(field.name)}
             crmAllowedFlowIds={crmAllowedFlowIds}
@@ -804,7 +901,10 @@ export function AllMetaLeadsView(props: {
                     onOpenFollowup(
                       row,
                       field.id,
-                      resolveStored(realFieldId, businessFallback(row, businessKind)),
+                      resolveStored(
+                        realFieldId,
+                        businessFallback(row, businessKind)
+                      )
                     )
                 : undefined
             }
@@ -834,14 +934,19 @@ export function AllMetaLeadsView(props: {
         <div className="flex shrink-0 flex-wrap items-center gap-2 lg:ml-auto">
           <Select
             value={tableFilter ?? SELECT_ALL_TABLES}
-            onValueChange={(v) => onTableFilter(v === SELECT_ALL_TABLES ? null : v)}
+            onValueChange={(v) =>
+              onTableFilter(v === SELECT_ALL_TABLES ? null : v)
+            }
           >
-            <SelectTrigger className="h-9 w-[200px] text-sm" aria-label="Filter by Meta Lead Ads Table">
+            <SelectTrigger
+              className="h-9 w-[200px] text-sm"
+              aria-label="Filter by Meta Lead Ads Table"
+            >
               <SelectValue placeholder="All tables" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={SELECT_ALL_TABLES}>
-                All tables{tables.length > 0 ? ` (${tables.length})` : ""}
+                All tables{tables.length > 0 ? ` (${tables.length})` : ''}
               </SelectItem>
               {tables.map((t) => (
                 <SelectItem key={t.flowId} value={t.flowId}>
@@ -854,11 +959,14 @@ export function AllMetaLeadsView(props: {
             value={stageFilter[0] ?? SELECT_ALL_STAGES}
             onValueChange={(v) =>
               onStageFilter(
-                typeof v === "string" && v !== SELECT_ALL_STAGES ? [v] : [],
+                typeof v === 'string' && v !== SELECT_ALL_STAGES ? [v] : []
               )
             }
           >
-            <SelectTrigger className="h-9 w-[160px] text-sm" aria-label="Filter by Stage">
+            <SelectTrigger
+              className="h-9 w-[160px] text-sm"
+              aria-label="Filter by Stage"
+            >
               <SelectValue placeholder="All stages" />
             </SelectTrigger>
             <SelectContent>
@@ -874,11 +982,14 @@ export function AllMetaLeadsView(props: {
             value={typeFilter[0] ?? SELECT_ALL_TYPES}
             onValueChange={(v) =>
               onTypeFilter(
-                typeof v === "string" && v !== SELECT_ALL_TYPES ? [v] : [],
+                typeof v === 'string' && v !== SELECT_ALL_TYPES ? [v] : []
               )
             }
           >
-            <SelectTrigger className="h-9 w-[150px] text-sm" aria-label="Filter by Type">
+            <SelectTrigger
+              className="h-9 w-[150px] text-sm"
+              aria-label="Filter by Type"
+            >
               <SelectValue placeholder="All types" />
             </SelectTrigger>
             <SelectContent>
@@ -890,6 +1001,16 @@ export function AllMetaLeadsView(props: {
               ))}
             </SelectContent>
           </Select>
+          <MetaExportButton
+            tableId={ALL_META_LEADS_ID}
+            tableName="All_Meta_Leads"
+            isAllView
+            forms={tables.map((t) => ({
+              flowId: t.flowId,
+              tableName: t.tableName,
+            }))}
+            teamMembers={teamMembers}
+          />
           <WorkspaceActionsMenu
             filters={
               <WorkspaceFilters
@@ -922,7 +1043,7 @@ export function AllMetaLeadsView(props: {
                 <HiddenRowsMenu
                   hidden={hiddenRows}
                   pendingIds={pendingIds}
-                  restoreAllPending={pendingIds.has("__all__")}
+                  restoreAllPending={pendingIds.has('__all__')}
                   onRestore={onRestoreRow}
                   onRestoreAll={onRestoreAllHidden}
                 />
@@ -943,20 +1064,31 @@ export function AllMetaLeadsView(props: {
           assignee={appliedAssignee}
           columns={appliedColumns}
           members={teamMembers}
-          onClearDate={() => onApplyFilters(null, appliedAssignee, appliedColumns)}
-          onClearAssignee={() => onApplyFilters(appliedDate, { type: "all" }, appliedColumns)}
+          onClearDate={() =>
+            onApplyFilters(null, appliedAssignee, appliedColumns)
+          }
+          onClearAssignee={() =>
+            onApplyFilters(appliedDate, { type: 'all' }, appliedColumns)
+          }
           onClearColumn={(section: ActiveColumnSectionKey) =>
             onApplyFilters(appliedDate, appliedAssignee, {
               ...appliedColumns,
-              callStatus: section === "callStatus" ? [] : appliedColumns.callStatus,
-              callsTried: section === "callsTried" ? null : appliedColumns.callsTried,
-              followUpStatus: section === "followUpStatus" ? [] : appliedColumns.followUpStatus,
-              lastContact: section === "lastContact" ? null : appliedColumns.lastContact,
-              nextFollowUp: section === "nextFollowUp" ? null : appliedColumns.nextFollowUp,
+              callStatus:
+                section === 'callStatus' ? [] : appliedColumns.callStatus,
+              callsTried:
+                section === 'callsTried' ? null : appliedColumns.callsTried,
+              followUpStatus:
+                section === 'followUpStatus'
+                  ? []
+                  : appliedColumns.followUpStatus,
+              lastContact:
+                section === 'lastContact' ? null : appliedColumns.lastContact,
+              nextFollowUp:
+                section === 'nextFollowUp' ? null : appliedColumns.nextFollowUp,
             })
           }
           onClearAll={() => {
-            onApplyFilters(null, { type: "all" }, emptyColumnFilters());
+            onApplyFilters(null, { type: 'all' }, emptyColumnFilters());
             onTableFilter(null);
             onStageFilter([]);
             onTypeFilter([]);
@@ -1004,7 +1136,7 @@ export function AllMetaLeadsView(props: {
           <div className="border-border bg-card overflow-hidden rounded-xl border">
             <div
               ref={viewportRef}
-              className="workspace-table-viewport max-h-[70vh] overflow-y-auto overflow-x-hidden"
+              className="workspace-table-viewport max-h-[70vh] overflow-x-hidden overflow-y-auto"
             >
               <Table>
                 <TableHeader className="[&_tr]:border-b-0">
@@ -1018,9 +1150,9 @@ export function AllMetaLeadsView(props: {
                       key={row.runId}
                       data-contact-id={row.contactId ?? undefined}
                       className={cn(
-                        "cursor-pointer",
+                        'cursor-pointer',
                         pinnedIds.has(row.runId) &&
-                          "bg-amber-50/70 dark:bg-amber-950/20",
+                          'bg-amber-50/70 dark:bg-amber-950/20'
                       )}
                       onClick={() => onRowSelect(row)}
                     >
@@ -1034,7 +1166,7 @@ export function AllMetaLeadsView(props: {
                 </TableBody>
               </Table>
             </div>
-            <div className="border-t border-border bg-card">
+            <div className="border-border bg-card border-t">
               <TableHScrollbar
                 getScroller={getScroller}
                 getTable={getTable}

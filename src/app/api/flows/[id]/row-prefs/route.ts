@@ -6,6 +6,7 @@ import {
   requireRole,
   toErrorResponse,
 } from "@/lib/auth/account";
+import { ALL_META_LEADS_ID } from "@/lib/workspace/all-meta-leads";
 import type { HiddenRowInfo } from "@/lib/flows/workspace-row-prefs";
 import { isAssigneeField } from "@/lib/flows/workspace-assignee";
 import { isRunOwnedByUser } from "@/lib/flows/workspace-ownership";
@@ -88,6 +89,14 @@ export async function GET(
   try {
     const { id } = await params;
     const { supabase, accountId, userId, role } = await getCurrentAccount();
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table: pin/hide preferences are keyed by
+      // real flow UUIDs (per-flow prefs, own rows only), so the
+      // virtual view holds none — return the default (same shape as
+      // a table with no saved prefs). Never passed to UUID columns
+      // or database functions.
+      return NextResponse.json({ pinned: [], hidden: [] });
+    }
     const flow = await loadFlowAccount(supabase, accountId, id);
     if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
@@ -225,6 +234,12 @@ export async function PUT(
   try {
     const { id } = await params;
     const { supabase, accountId, userId, role } = await requireRole("agent");
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table has no flow row and no stored
+      // preferences — writes are rejected like any unknown flow.
+      // (All-view pin/hide act on originating real flows instead.)
+      return NextResponse.json({ error: "Flow not found." }, { status: 404 });
+    }
     const flow = await loadFlowAccount(supabase, accountId, id);
     if (!flow) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
@@ -324,6 +339,11 @@ export async function DELETE(
   try {
     const { id } = await params;
     const { supabase, accountId } = await requireRole("agent");
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table has no flow row and no stored
+      // preferences — writes are rejected like any unknown flow.
+      return NextResponse.json({ error: "Flow not found." }, { status: 404 });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }

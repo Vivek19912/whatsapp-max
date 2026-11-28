@@ -6,6 +6,7 @@ import {
   requireRole,
   toErrorResponse,
 } from "@/lib/auth/account";
+import { ALL_META_LEADS_ID } from "@/lib/workspace/all-meta-leads";
 import {
   clampColumnWidth,
   WORKSPACE_COLUMN_MAX_WIDTH,
@@ -68,6 +69,13 @@ export async function GET(
   try {
     const { id } = await params;
     const { supabase, accountId } = await getCurrentAccount();
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table: widths are keyed by real flow UUIDs,
+      // so nothing is ever stored — return the default (same shape
+      // as a table with no saved widths). Never passed to UUID
+      // columns or database functions.
+      return NextResponse.json({ widths: {} });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
@@ -94,6 +102,11 @@ export async function PUT(
   try {
     const { id } = await params;
     const { supabase, accountId } = await requireRole("agent");
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table has no flow row and no stored
+      // preferences — writes are rejected like any unknown flow.
+      return NextResponse.json({ error: "Flow not found." }, { status: 404 });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }

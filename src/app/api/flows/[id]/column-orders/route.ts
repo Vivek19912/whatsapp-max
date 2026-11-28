@@ -6,6 +6,7 @@ import {
   requireRole,
   toErrorResponse,
 } from "@/lib/auth/account";
+import { ALL_META_LEADS_ID } from "@/lib/workspace/all-meta-leads";
 
 /**
  * Per-user, per-table Workspace column order (drag-and-drop
@@ -67,6 +68,13 @@ export async function GET(
   try {
     const { id } = await params;
     const { supabase, accountId, userId } = await getCurrentAccount();
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table: per-table preferences are keyed by
+      // real flow UUIDs, so no stored order can exist — return the
+      // default (same shape as a table with no saved preference).
+      // Never passed to UUID columns or database functions.
+      return NextResponse.json({ ordered_ids: null });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
@@ -95,6 +103,11 @@ export async function PUT(
   try {
     const { id } = await params;
     const { supabase, accountId, userId } = await requireRole("agent");
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table has no flow row and no stored
+      // preferences — writes are rejected like any unknown flow.
+      return NextResponse.json({ error: "Flow not found." }, { status: 404 });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
@@ -135,6 +148,11 @@ export async function DELETE(
   try {
     const { id } = await params;
     const { supabase, accountId, userId } = await requireRole("agent");
+    if (id === ALL_META_LEADS_ID) {
+      // Virtual combined table has no flow row and no stored
+      // preferences — writes are rejected like any unknown flow.
+      return NextResponse.json({ error: "Flow not found." }, { status: 404 });
+    }
     if (!(await loadFlowAccount(supabase, accountId, id))) {
       return NextResponse.json({ error: "Flow not found." }, { status: 404 });
     }
