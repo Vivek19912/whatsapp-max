@@ -77,6 +77,90 @@ function matchesFilters(
   });
 }
 
+function filterMockAssignee(
+  rows: Array<Record<string, unknown>>,
+  rawAssignee: string
+): Array<Record<string, unknown>> {
+  if (rawAssignee === '' || rawAssignee.toLowerCase() === 'all') return rows;
+  const assigneeIds = new Set(
+    h.fields
+      .filter(
+        (f) =>
+          String(f.name ?? '')
+            .trim()
+            .toLowerCase() === 'assigned to'
+      )
+      .map((f) => f.id)
+  );
+  if (rawAssignee.toLowerCase() === 'unassigned') {
+    return rows.filter(
+      (r) =>
+        !h.values.some(
+          (v) =>
+            v.flow_run_id === r.run_id &&
+            assigneeIds.has(v.field_id) &&
+            typeof v.value_text === 'string' &&
+            v.value_text.trim() !== '' &&
+            v.value_text !== 'Unassigned'
+        )
+    );
+  }
+  return rows.filter((r) =>
+    h.values.some(
+      (v) =>
+        v.flow_run_id === r.run_id &&
+        assigneeIds.has(v.field_id) &&
+        v.value_text === rawAssignee
+    )
+  );
+}
+
+/**
+ * DISTINCT ON (meta_lead_id) mirror for the counts mock: one row
+ * per lead (newest started_at wins), so duplicate submissions can
+ * never double-count — exactly the SQL contract under test.
+ */
+function dedupeMockLeads(
+  rows: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const r of rows) {
+    const id = String(r.meta_lead_id ?? r.run_id);
+    const prev = byId.get(id);
+    if (!prev || String(r.started_at) >= String(prev.started_at))
+      byId.set(id, r);
+  }
+  return [...byId.values()];
+}
+
+/** Aggregate behind get_meta_export_form_counts in tests. */
+function mockFormCounts(params: Record<string, unknown>) {
+  let rows = dedupeMockLeads([...h.rpcRows]);
+  rows = rows.filter((r) => (r.account_id ?? 'acct-1') === h.accountId);
+  const flowId = params.p_flow_id as string | null;
+  if (flowId) rows = rows.filter((r) => r.flow_id === flowId);
+  const from = params.p_started_from as string | null;
+  const to = params.p_started_to as string | null;
+  if (from) rows = rows.filter((r) => String(r.started_at) >= from);
+  if (to) rows = rows.filter((r) => String(r.started_at) < to);
+  const rawAssignee =
+    typeof params.p_assignee === 'string' ? params.p_assignee.trim() : '';
+  rows = filterMockAssignee(rows, rawAssignee);
+  const byFlow = new Map<string, number>();
+  for (const r of rows)
+    byFlow.set(String(r.flow_id), (byFlow.get(String(r.flow_id)) ?? 0) + 1);
+  return {
+    data: {
+      all: rows.length,
+      forms: [...byFlow.entries()].map(([flow_id, count]) => ({
+        flow_id,
+        count,
+      })),
+    },
+    error: null,
+  };
+}
+
 function fakeSupabase() {
   const apiFor = (
     table: string,
@@ -132,6 +216,7 @@ function fakeSupabase() {
   return {
     from: (table: string) => apiFor(table, []),
     rpc: async (fn: string, params: Record<string, unknown>) => {
+      if (fn === 'get_meta_export_form_counts') return mockFormCounts(params);
       if (fn !== 'get_all_meta_leads')
         return { data: null, error: { message: 'unknown fn' } };
       let rows = [...h.rpcRows];
@@ -145,40 +230,7 @@ function fakeSupabase() {
       // 'unassigned' matches runs with no live assignment.
       const rawAssignee =
         typeof params.p_assignee === 'string' ? params.p_assignee.trim() : '';
-      if (rawAssignee !== '' && rawAssignee.toLowerCase() !== 'all') {
-        const assigneeIds = new Set(
-          h.fields
-            .filter(
-              (f) =>
-                String(f.name ?? '')
-                  .trim()
-                  .toLowerCase() === 'assigned to'
-            )
-            .map((f) => f.id)
-        );
-        if (rawAssignee.toLowerCase() === 'unassigned') {
-          rows = rows.filter(
-            (r) =>
-              !h.values.some(
-                (v) =>
-                  v.flow_run_id === r.run_id &&
-                  assigneeIds.has(v.field_id) &&
-                  typeof v.value_text === 'string' &&
-                  v.value_text.trim() !== '' &&
-                  v.value_text !== 'Unassigned'
-              )
-          );
-        } else {
-          rows = rows.filter((r) =>
-            h.values.some(
-              (v) =>
-                v.flow_run_id === r.run_id &&
-                assigneeIds.has(v.field_id) &&
-                v.value_text === rawAssignee
-            )
-          );
-        }
-      }
+      rows = filterMockAssignee(rows, rawAssignee);
       const page = Number(params.p_page ?? 0);
       const pageSize = Number(params.p_page_size ?? 100);
       const total = rows.length;
@@ -1316,5 +1368,208 @@ describe('meta-export — Step 2 column filtering on export', () => {
       error?: string;
     } | null;
     expect(body?.error).toMatch(/Unknown column/);
+  });
+});
+
+describe('meta-export — Step-1 form counts (counts=1)', () => {
+  interface CountsBody {
+    all: { total: number; matching: number };
+    forms: Array<{ flowId: string; total: number; matching: number }>;
+  }
+
+  async function getCounts(query: string) {
+    const res = await GET(req(query));
+    const body = (await res.json().catch(() => null)) as CountsBody | null;
+    return { status: res.status, body };
+  }
+
+  function byId(body: CountsBody | null) {
+    return new Map((body?.forms ?? []).map((f) => [f.flowId, f]));
+  }
+
+  it('returns per-form totals and matching plus the combined All row', async () => {
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1'
+    );
+    expect(status).toBe(200);
+    expect(byId(body).get('flow-meta-1')).toEqual({
+      flowId: 'flow-meta-1',
+      total: 1,
+      matching: 1,
+    });
+    expect(byId(body).get('flow-meta-2')).toEqual({
+      flowId: 'flow-meta-2',
+      total: 1,
+      matching: 1,
+    });
+    expect(body?.all).toEqual({ total: 2, matching: 2 });
+  });
+
+  it('totals ignore Submission Time and Assignment; matching respects both', async () => {
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    // Window covers only run-1 (2026-11-25); run-2 (2026-11-20)
+    // falls outside. assignee=u-nobody matches nothing.
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1' +
+        '&dateFrom=2026-11-24T00:00:00.000Z&dateTo=2026-11-26T00:00:00.000Z' +
+        '&assignee=u-nobody'
+    );
+    expect(status).toBe(200);
+    const m = byId(body);
+    // Totals ignore both filters…
+    expect(m.get('flow-meta-1')?.total).toBe(1);
+    expect(m.get('flow-meta-2')?.total).toBe(1);
+    expect(body?.all.total).toBe(2);
+    // …matching respects both (nothing matches u-nobody).
+    expect(body?.all.matching).toBe(0);
+    expect(m.get('flow-meta-1')?.matching).toBe(0);
+    expect(m.get('flow-meta-2')?.matching).toBe(0);
+  });
+
+  it('matching respects Submission Time alone', async () => {
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1' +
+        '&dateFrom=2026-11-24T00:00:00.000Z&dateTo=2026-11-26T00:00:00.000Z'
+    );
+    expect(status).toBe(200);
+    const m = byId(body);
+    expect(m.get('flow-meta-1')).toEqual({
+      flowId: 'flow-meta-1',
+      total: 1,
+      matching: 1,
+    });
+    expect(m.get('flow-meta-2')).toEqual({
+      flowId: 'flow-meta-2',
+      total: 1,
+      matching: 0,
+    });
+    expect(body?.all).toEqual({ total: 2, matching: 1 });
+  });
+
+  it('matching respects Assignment alone; totals still ignore it', async () => {
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1&assignee=u-a'
+    );
+    expect(status).toBe(200);
+    const m = byId(body);
+    expect(m.get('flow-meta-1')?.matching).toBe(1);
+    expect(m.get('flow-meta-2')?.matching).toBe(0);
+    expect(m.get('flow-meta-1')?.total).toBe(1);
+    expect(m.get('flow-meta-2')?.total).toBe(1);
+    expect(body?.all).toEqual({ total: 2, matching: 1 });
+  });
+
+  it('restricted agents see only owned forms with own counts', async () => {
+    h.role = 'agent';
+    h.userId = 'u-a';
+    h.restricted = true;
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1'
+    );
+    expect(status).toBe(200);
+    // flow-meta-2 holds no own lead: hidden entirely (no name,
+    // no zero row that would confirm its existence via counts).
+    expect(body?.forms.map((f) => f.flowId)).toEqual(['flow-meta-1']);
+    expect(body?.all).toEqual({ total: 1, matching: 1 });
+  });
+
+  it('restricted agents cannot probe a foreign table via counts', async () => {
+    h.role = 'agent';
+    h.userId = 'u-a';
+    h.restricted = true;
+    h.values = [
+      {
+        account_id: 'acct-1',
+        field_id: 'f-assigned',
+        flow_run_id: 'run-1',
+        value_text: 'u-a',
+      },
+    ];
+    const { status } = await getCounts('?tableId=flow-meta-2&counts=1');
+    expect(status).toBe(404);
+  });
+
+  it('single table returns only that flow', async () => {
+    const { status, body } = await getCounts('?tableId=flow-meta-1&counts=1');
+    expect(status).toBe(200);
+    expect(body?.forms).toEqual([
+      { flowId: 'flow-meta-1', total: 1, matching: 1 },
+    ]);
+    expect(body?.all).toEqual({ total: 1, matching: 1 });
+  });
+
+  it('duplicate submissions never double-count', async () => {
+    h.rpcRows = [
+      ...h.rpcRows,
+      rpcRow({
+        run_id: 'run-1-dup',
+        flow_id: 'flow-meta-1',
+        meta_lead_id: 'lead-1',
+        started_at: '2026-11-26T10:00:00.000Z',
+      }),
+    ];
+    const { status, body } = await getCounts(
+      '?tableId=all-meta-leads&counts=1'
+    );
+    expect(status).toBe(200);
+    expect(body?.all).toEqual({ total: 2, matching: 2 });
+    expect(byId(body).get('flow-meta-1')).toEqual({
+      flowId: 'flow-meta-1',
+      total: 1,
+      matching: 1,
+    });
+  });
+
+  it('counts ignore the search param (dialog never sends one)', async () => {
+    const plain = await getCounts('?tableId=all-meta-leads&counts=1');
+    const searched = await getCounts(
+      '?tableId=all-meta-leads&counts=1&search=aarav'
+    );
+    expect(searched.status).toBe(200);
+    expect(searched.body).toEqual(plain.body);
+  });
+
+  it('counts enforce the same gates as export', async () => {
+    expect((await getCounts('?tableId=flow-wa&counts=1')).status).toBe(400);
+    expect(
+      (
+        await getCounts(
+          '?tableId=00000000-0000-0000-0000-000000000000&counts=1'
+        )
+      ).status
+    ).toBe(404);
+    expect(
+      (
+        await getCounts(
+          '?tableId=all-meta-leads&counts=1&dateFrom=2026-11-26T00:00:00.000Z&dateTo=2026-11-24T00:00:00.000Z'
+        )
+      ).status
+    ).toBe(400);
+    expect((await getCounts('?tableId=all-meta-leads&counts=1')).status).toBe(
+      200
+    );
   });
 });

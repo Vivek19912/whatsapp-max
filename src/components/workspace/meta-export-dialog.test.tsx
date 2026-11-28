@@ -7,27 +7,73 @@ const src = readFileSync(
 );
 
 describe('meta-export dialog — two-step workflow wiring', () => {
-  it('Step 1 keeps the remaining filters; Source/Campaign/Ad are gone', () => {
+  it('Step 1 shows only Submission Time, Form and Assignment; Search/Source/Campaign/Ad are gone', () => {
     for (const label of [
       'Submission Time',
       'meta-export-form',
       'meta-export-assignee',
-      'meta-export-search',
     ]) {
       expect(src).toContain(label);
     }
     for (const removed of [
+      'meta-export-search',
       'meta-export-source',
       'meta-export-campaign',
       'meta-export-ad',
       'Lead Source',
       'All Campaigns',
       'All Ads',
+      "qs.set('search'",
+      'setSearch',
     ]) {
       expect(src).not.toContain(removed);
     }
     expect(src).toContain('Clear All');
     expect(src).toContain('Next: Select Columns');
+  });
+
+  it('never renders the internal __all value; All Forms leads with counts', () => {
+    // The old self-closing trigger rendered the raw select value
+    // (`__all`) instead of a label — it must stay gone.
+    expect(src).not.toContain('<SelectValue placeholder="All forms" />');
+    expect(src).not.toContain('>__all<');
+    expect(src).not.toContain('>{__all}<');
+    // The trigger shows an explicit label, not the raw value.
+    expect(src).toContain('{formTriggerLabel}');
+    expect(src).toContain('All Forms${formatFormCountsSuffix(allCounts)}');
+    // First option stays All Forms; every form shows both counts
+    // (suffix text itself is asserted in form-counts.test.ts).
+    expect(src).toContain('<SelectItem value="__all">{allFormsLabel}');
+    expect(src).toContain('formatFormCountsSuffix(allCounts)');
+    expect(src).toContain('formatFormCountsSuffix(formCounts?.[f.flowId])');
+    expect(src).toContain('formatFormCountsSuffix(formCounts?.[formFilter])');
+  });
+
+  it('Step-1 counts refresh when Submission Time or Assignment changes', () => {
+    expect(src).toContain("qs.set('counts', '1')");
+    expect(src).toContain('normalizeFormCountsResponse');
+    // The counts effect is keyed on the dialog filters (never on search).
+    const fxStart = src.indexOf('setAllCounts(null);');
+    const fxEnd = src.indexOf('const clearAll', fxStart);
+    const fx = src.slice(fxStart, fxEnd);
+    for (const dep of [
+      'preset',
+      'customFrom',
+      'customTo',
+      'assignee',
+      'formIdsKey',
+    ]) {
+      expect(fx).toContain(dep);
+    }
+    expect(fx).not.toContain('search');
+    expect(src).toContain('setFormCounts(normalized.byFlowId)');
+    expect(src).toContain('setAllCounts(normalized.all)');
+    // Counts never reach the export request.
+    const buildStart = src.indexOf('const buildFilterParams');
+    const buildEnd = src.indexOf('const handleNext');
+    const build = src.slice(buildStart, buildEnd);
+    expect(build).not.toContain('counts');
+    expect(build).not.toContain('search');
   });
 
   it('Form dropdown menu sizes to long names and wraps instead of truncating', () => {
@@ -38,7 +84,7 @@ describe('meta-export dialog — two-step workflow wiring', () => {
     // Long form names wrap onto multiple lines; full name on hover.
     expect(src).toContain('[&>span]:whitespace-normal');
     expect(src).toContain('[&>span]:break-words');
-    expect(src).toContain('title={f.tableName}');
+    expect(src).toContain('title={`${f.tableName}');
   });
 
   it('Step 1 ends with Next (not Download); Download lives in Step 2', () => {

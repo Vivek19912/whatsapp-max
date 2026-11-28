@@ -32,6 +32,11 @@ import {
   type ExportDatePreset,
 } from '@/lib/meta-leads-export/date-presets';
 import {
+  formatFormCountsSuffix,
+  normalizeFormCountsResponse,
+  type FormLeadCounts,
+} from '@/lib/meta-leads-export/form-counts';
+import {
   applyGroupMaster,
   deselectAllColumns,
   orderedSelectedKeys,
@@ -110,7 +115,6 @@ function MetaExportDialog(
   const [customTo, setCustomTo] = useState('');
   const [formFilter, setFormFilter] = useState<string>('__all');
   const [assignee, setAssignee] = useState<string>('all');
-  const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<1 | 2>(1);
   const [columns, setColumns] = useState<
@@ -123,12 +127,19 @@ function MetaExportDialog(
   >({ basic: true, management: true });
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const [loadingColumns, setLoadingColumns] = useState(false);
+  // Step-1 form counts (All view only): server-computed per-form
+  // totals + matching counts. Null = not loaded yet (bare names
+  // render until the first fetch resolves).
+  const [formCounts, setFormCounts] = useState<Record<
+    string,
+    FormLeadCounts
+  > | null>(null);
+  const [allCounts, setAllCounts] = useState<FormLeadCounts | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setFormFilter('__all');
     setAssignee('all');
-    setSearch('');
     setPreset('last30');
     setCustomFrom('');
     setCustomTo('');
@@ -139,7 +150,75 @@ function MetaExportDialog(
     setExpandedGroups({ basic: true, management: true });
     setLoadedScope(null);
     setLoadingColumns(false);
+    setFormCounts(null);
+    setAllCounts(null);
   }, [open, tableId]);
+
+  // Stable key for the visible form set (the parent builds `forms`
+  // inline, so the array identity changes every render — the raw
+  // array must not be an effect dependency).
+  const formIdsKey = forms.map((f) => f.flowId).join('|');
+
+  // Step-1 form counts for the All-view dropdown: total leads per
+  // form (Submission Time + Assignment ignored) alongside matching
+  // leads (both respected). Refreshes whenever either filter
+  // changes; skipped while a custom range is incomplete. Counts
+  // never gate the export and never leave this dialog.
+  useEffect(() => {
+    if (!open || !isAllView || !tableId || step !== 1) return;
+    let range: { from: string | null; to: string | null };
+    try {
+      const resolved = resolveExportDateRange(preset, {
+        from: customFrom || null,
+        to: customTo || null,
+      });
+      range = { from: resolved?.from ?? null, to: resolved?.to ?? null };
+    } catch {
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      (async () => {
+        try {
+          const qs = new URLSearchParams({ tableId });
+          if (range.from && range.to) {
+            qs.set('dateFrom', range.from);
+            qs.set('dateTo', range.to);
+          }
+          if (assignee && assignee !== 'all') qs.set('assignee', assignee);
+          qs.set('counts', '1');
+          const res = await fetch(
+            `/api/workspace/meta-export?${qs.toString()}`
+          );
+          if (!res.ok || cancelled) return;
+          const data = await res.json().catch(() => null);
+          if (cancelled) return;
+          const normalized = normalizeFormCountsResponse(
+            data,
+            formIdsKey === '' ? [] : formIdsKey.split('|')
+          );
+          setFormCounts(normalized.byFlowId);
+          setAllCounts(normalized.all);
+        } catch {
+          // Keep the last counts (or bare names) on failure.
+        }
+      })();
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    open,
+    isAllView,
+    tableId,
+    step,
+    preset,
+    customFrom,
+    customTo,
+    assignee,
+    formIdsKey,
+  ]);
 
   const canExport = useMemo(() => {
     if (!tableId) return false;
@@ -153,7 +232,6 @@ function MetaExportDialog(
     setCustomTo('');
     setFormFilter('__all');
     setAssignee('all');
-    setSearch('');
   }, []);
 
   // Step-2 scope: the selected form (All view) or the single table.
@@ -190,10 +268,9 @@ function MetaExportDialog(
         qs.set('dateTo', dateTo);
       }
       if (assignee && assignee !== 'all') qs.set('assignee', assignee);
-      if (search.trim()) qs.set('search', search.trim().slice(0, 120));
       return qs;
     },
-    [tableId, isAllView, formFilter, assignee, search]
+    [tableId, isAllView, formFilter, assignee]
   );
 
   const handleNext = useCallback(async () => {
@@ -338,6 +415,16 @@ function MetaExportDialog(
     onOpenChange,
   ]);
 
+  // Step-1 dropdown labels. The internal `__all` value is never
+  // rendered; the trigger and the first option always read
+  // "All Forms" with the combined counts once loaded.
+  const allFormsLabel = `All Forms${formatFormCountsSuffix(allCounts)}`;
+  const selectedForm = forms.find((f) => f.flowId === formFilter);
+  const formTriggerLabel =
+    formFilter === '__all' || !selectedForm
+      ? allFormsLabel
+      : `${selectedForm.tableName}${formatFormCountsSuffix(formCounts?.[formFilter])}`;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -415,7 +502,9 @@ function MetaExportDialog(
                     }}
                   >
                     <SelectTrigger id="meta-export-form" className="h-9">
-                      <SelectValue placeholder="All forms" />
+                      <SelectValue placeholder="All forms">
+                        {formTriggerLabel}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent
                       className="max-w-[calc(100vw-2rem)]"
@@ -430,17 +519,15 @@ function MetaExportDialog(
                         maxWidth: 'calc(100vw - 2rem)',
                       }}
                     >
-                      <SelectItem value="__all">
-                        All Forms{forms.length > 0 ? ` (${forms.length})` : ''}
-                      </SelectItem>
+                      <SelectItem value="__all">{allFormsLabel}</SelectItem>
                       {forms.map((f) => (
                         <SelectItem
                           key={f.flowId}
                           value={f.flowId}
-                          title={f.tableName}
+                          title={`${f.tableName}${formatFormCountsSuffix(formCounts?.[f.flowId])}`}
                           className="[&>span]:min-w-0 [&>span]:shrink [&>span]:break-words [&>span]:whitespace-normal"
                         >
-                          {f.tableName}
+                          {`${f.tableName}${formatFormCountsSuffix(formCounts?.[f.flowId])}`}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -469,17 +556,6 @@ function MetaExportDialog(
                     ))}
                   </SelectContent>
                 </Select>
-              </div>
-
-              <div className="grid gap-2">
-                <Label htmlFor="meta-export-search">Search</Label>
-                <Input
-                  id="meta-export-search"
-                  placeholder="Name, phone, answer…"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  maxLength={120}
-                />
               </div>
             </div>
 

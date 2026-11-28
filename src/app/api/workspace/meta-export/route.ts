@@ -11,6 +11,8 @@
 //   callStatus[], followUpStatus[],
 //   source=all|organic|paid, campaign, ad
 //   options=1 (distinct filter options, no file)
+//   columns=1 (available export columns, grouped — Step 2)
+//   counts=1 (per-form total + matching lead counts, no file)
 //
 // Auth: getCurrentAccount (RLS). Agent isolation mirrors
 // GET /api/workspace/all-meta-leads (forced own assignee when
@@ -885,6 +887,139 @@ export async function GET(request: Request) {
           header: c.header,
           group: c.group,
         })),
+      });
+    }
+
+    // ---- Form counts mode (Step-1 dropdown labels — no file) ----
+    // Same visibility contract as options/export: table existence
+    // and kind were validated above; restricted agents only see
+    // their own tables and their own leads (my-tables scopeToOwn
+    // pattern + forced own assignee, fail closed). Two aggregate
+    // RPC calls — totals (Submission Time and the selected
+    // assignee ignored) and matching (both respected) — so the
+    // cost is O(1) no matter how many forms exist and no lead
+    // records are ever downloaded. The caller's own counts are
+    // never trusted: both integers come from the server.
+    if (url.searchParams.get('counts') === '1') {
+      let countsRestricted = false;
+      if (role === 'agent') {
+        try {
+          const { resolveWorkspaceVisibility } =
+            await import('@/lib/inbox/assignment-access');
+          countsRestricted = (
+            await resolveWorkspaceVisibility(supabase, accountId, userId, role)
+          ).restricted;
+        } catch {
+          countsRestricted = true;
+        }
+      }
+      const countsScopeToOwn = role === 'agent' && countsRestricted;
+
+      const { data: countFlowsData, error: countFlowsErr } = await supabase
+        .from('flows')
+        .select('id')
+        .eq('account_id', accountId)
+        .eq('kind', 'meta_lead_ads')
+        .order('name', { ascending: true });
+      if (countFlowsErr) throw countFlowsErr;
+      const countAllIds = ((countFlowsData ?? []) as Array<{ id: string }>)
+        .map((f) => f.id)
+        .filter((id) => typeof id === 'string');
+
+      let visibleCountIds: string[];
+      if (!isAllView) {
+        // Existence + kind already validated above (404/400).
+        // Restricted agents must hold at least one own assignment
+        // in this table; otherwise 404 with the identical message
+        // (no existence oracle for tables they cannot access).
+        if (!countAllIds.includes(rawTableId)) {
+          return NextResponse.json(
+            { error: 'Table not found.' },
+            { status: 404 }
+          );
+        }
+        if (countsScopeToOwn) {
+          const owned = await loadOwnedFlowIds(supabase, accountId, userId, [
+            rawTableId,
+          ]);
+          if (!owned.has(rawTableId)) {
+            return NextResponse.json(
+              { error: 'Table not found.' },
+              { status: 404 }
+            );
+          }
+        }
+        visibleCountIds = [rawTableId];
+      } else if (countsScopeToOwn) {
+        const owned = await loadOwnedFlowIds(
+          supabase,
+          accountId,
+          userId,
+          countAllIds
+        );
+        visibleCountIds = countAllIds.filter((id) => owned.has(id));
+      } else {
+        visibleCountIds = countAllIds;
+      }
+
+      // One aggregate call per filter set (never per form, never
+      // per lead). Totals ignore the dialog's date + assignee but
+      // keep the authorization assignee: restricted agents count
+      // only their own leads, everyone else counts the account.
+      // Matching respects both the dialog filters and auth.
+      async function fetchCounts(args: {
+        from: string | null;
+        to: string | null;
+        assignee: string;
+      }): Promise<Map<string, number>> {
+        const { data, error } = await supabase.rpc(
+          'get_meta_export_form_counts',
+          {
+            p_started_from: args.from,
+            p_started_to: args.to,
+            p_assignee: args.assignee,
+            p_flow_id: !isAllView ? rawTableId : null,
+          }
+        );
+        if (error) throw new Error(`Counts read failed: ${error.message}`);
+        const out = new Map<string, number>();
+        const forms = ((data as { forms?: unknown } | null)?.forms ??
+          []) as Array<{ flow_id?: unknown; count?: unknown }>;
+        for (const f of forms) {
+          if (typeof f?.flow_id !== 'string') continue;
+          const n = Number(f?.count);
+          out.set(f.flow_id, Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+        }
+        return out;
+      }
+
+      const totalsAssignee = countsScopeToOwn ? userId : 'all';
+      const matchingAssignee = countsScopeToOwn
+        ? userId
+        : serializeAssigneeSelection(assignee);
+      const [totals, matching] = await Promise.all([
+        fetchCounts({ from: null, to: null, assignee: totalsAssignee }),
+        fetchCounts({
+          from: dateRange?.from ?? null,
+          to: dateRange?.to ?? null,
+          assignee: matchingAssignee,
+        }),
+      ]);
+
+      // Intersect with the visible scope (agents never observe
+      // other tables' counts) and zero-fill visible forms with no
+      // leads so every dropdown option shows both counts.
+      const forms = visibleCountIds.map((flowId) => ({
+        flowId,
+        total: totals.get(flowId) ?? 0,
+        matching: matching.get(flowId) ?? 0,
+      }));
+      return NextResponse.json({
+        all: {
+          total: forms.reduce((sum, f) => sum + f.total, 0),
+          matching: forms.reduce((sum, f) => sum + f.matching, 0),
+        },
+        forms,
       });
     }
 
