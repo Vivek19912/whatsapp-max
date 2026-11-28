@@ -7,20 +7,38 @@ const src = readFileSync(
 );
 
 describe('meta-export dialog — two-step workflow wiring', () => {
-  it('Step 1 keeps all existing filters', () => {
+  it('Step 1 keeps the remaining filters; Source/Campaign/Ad are gone', () => {
     for (const label of [
       'Submission Time',
       'meta-export-form',
       'meta-export-assignee',
-      'meta-export-source',
-      'meta-export-campaign',
-      'meta-export-ad',
       'meta-export-search',
     ]) {
       expect(src).toContain(label);
     }
+    for (const removed of [
+      'meta-export-source',
+      'meta-export-campaign',
+      'meta-export-ad',
+      'Lead Source',
+      'All Campaigns',
+      'All Ads',
+    ]) {
+      expect(src).not.toContain(removed);
+    }
     expect(src).toContain('Clear All');
     expect(src).toContain('Next: Select Columns');
+  });
+
+  it('Form dropdown menu sizes to long names and wraps instead of truncating', () => {
+    // max-content width with the trigger as the floor, capped at the viewport.
+    expect(src).toContain("width: 'max-content'");
+    expect(src).toContain("minWidth: 'var(--anchor-width)'");
+    expect(src).toContain('max-w-[calc(100vw-2rem)]');
+    // Long form names wrap onto multiple lines; full name on hover.
+    expect(src).toContain('[&>span]:whitespace-normal');
+    expect(src).toContain('[&>span]:break-words');
+    expect(src).toContain('title={f.tableName}');
   });
 
   it('Step 1 ends with Next (not Download); Download lives in Step 2', () => {

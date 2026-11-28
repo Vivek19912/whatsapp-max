@@ -110,12 +110,7 @@ function MetaExportDialog(
   const [customTo, setCustomTo] = useState('');
   const [formFilter, setFormFilter] = useState<string>('__all');
   const [assignee, setAssignee] = useState<string>('all');
-  const [source, setSource] = useState<string>('all');
-  const [campaign, setCampaign] = useState<string>('__all');
-  const [ad, setAd] = useState<string>('__all');
   const [search, setSearch] = useState('');
-  const [campaigns, setCampaigns] = useState<string[]>([]);
-  const [ads, setAds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState<1 | 2>(1);
   const [columns, setColumns] = useState<
@@ -133,9 +128,6 @@ function MetaExportDialog(
     if (!open) return;
     setFormFilter('__all');
     setAssignee('all');
-    setSource('all');
-    setCampaign('__all');
-    setAd('__all');
     setSearch('');
     setPreset('last30');
     setCustomFrom('');
@@ -147,28 +139,6 @@ function MetaExportDialog(
     setExpandedGroups({ basic: true, management: true });
     setLoadedScope(null);
     setLoadingColumns(false);
-  }, [open, tableId]);
-
-  useEffect(() => {
-    if (!open || !tableId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const qs = new URLSearchParams({ tableId, options: '1' });
-        const res = await fetch(`/api/workspace/meta-export?${qs.toString()}`);
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (!data || cancelled) return;
-        if (Array.isArray(data.campaigns))
-          setCampaigns(data.campaigns.slice(0, 200));
-        if (Array.isArray(data.ads)) setAds(data.ads.slice(0, 200));
-      } catch {
-        // Best-effort: dropdowns fall back to All-only.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
   }, [open, tableId]);
 
   const canExport = useMemo(() => {
@@ -183,9 +153,6 @@ function MetaExportDialog(
     setCustomTo('');
     setFormFilter('__all');
     setAssignee('all');
-    setSource('all');
-    setCampaign('__all');
-    setAd('__all');
     setSearch('');
   }, []);
 
@@ -223,13 +190,10 @@ function MetaExportDialog(
         qs.set('dateTo', dateTo);
       }
       if (assignee && assignee !== 'all') qs.set('assignee', assignee);
-      if (source && source !== 'all') qs.set('source', source);
-      if (campaign && campaign !== '__all') qs.set('campaign', campaign);
-      if (ad && ad !== '__all') qs.set('ad', ad);
       if (search.trim()) qs.set('search', search.trim().slice(0, 120));
       return qs;
     },
-    [tableId, isAllView, formFilter, assignee, source, campaign, ad, search]
+    [tableId, isAllView, formFilter, assignee, search]
   );
 
   const handleNext = useCallback(async () => {
@@ -453,12 +417,29 @@ function MetaExportDialog(
                     <SelectTrigger id="meta-export-form" className="h-9">
                       <SelectValue placeholder="All forms" />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent
+                      className="max-w-[calc(100vw-2rem)]"
+                      style={{
+                        // Size to the longest form name instead of the
+                        // trigger: never narrower than the trigger, never
+                        // wider than the viewport. Inline style wins over
+                        // the base `w-(--anchor-width)` class
+                        // deterministically.
+                        width: 'max-content',
+                        minWidth: 'var(--anchor-width)',
+                        maxWidth: 'calc(100vw - 2rem)',
+                      }}
+                    >
                       <SelectItem value="__all">
                         All Forms{forms.length > 0 ? ` (${forms.length})` : ''}
                       </SelectItem>
                       {forms.map((f) => (
-                        <SelectItem key={f.flowId} value={f.flowId}>
+                        <SelectItem
+                          key={f.flowId}
+                          value={f.flowId}
+                          title={f.tableName}
+                          className="[&>span]:min-w-0 [&>span]:shrink [&>span]:break-words [&>span]:whitespace-normal"
+                        >
                           {f.tableName}
                         </SelectItem>
                       ))}
@@ -467,92 +448,27 @@ function MetaExportDialog(
                 </div>
               ) : null}
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="grid gap-2">
-                  <Label htmlFor="meta-export-assignee">Assignment</Label>
-                  <Select
-                    value={assignee}
-                    onValueChange={(v: string | null) => {
-                      if (typeof v === 'string') setAssignee(v);
-                    }}
-                  >
-                    <SelectTrigger id="meta-export-assignee" className="h-9">
-                      <SelectValue placeholder="All agents" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Agents</SelectItem>
-                      <SelectItem value="unassigned">Unassigned</SelectItem>
-                      {teamMembers.map((m) => (
-                        <SelectItem key={m.user_id} value={m.user_id}>
-                          {assigneeDisplayName(m)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="meta-export-source">Lead Source</Label>
-                  <Select
-                    value={source}
-                    onValueChange={(v: string | null) => {
-                      if (typeof v === 'string') setSource(v);
-                    }}
-                  >
-                    <SelectTrigger id="meta-export-source" className="h-9">
-                      <SelectValue placeholder="All sources" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All (Organic + Paid)</SelectItem>
-                      <SelectItem value="organic">Organic</SelectItem>
-                      <SelectItem value="paid">Paid</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="grid gap-2">
-                  <Label htmlFor="meta-export-campaign">Campaign</Label>
-                  <Select
-                    value={campaign}
-                    onValueChange={(v: string | null) => {
-                      if (typeof v === 'string') setCampaign(v);
-                    }}
-                  >
-                    <SelectTrigger id="meta-export-campaign" className="h-9">
-                      <SelectValue placeholder="All campaigns" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__all">All Campaigns</SelectItem>
-                      {campaigns.map((c) => (
-                        <SelectItem key={c} value={c}>
-                          {c}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="meta-export-ad">Ad</Label>
-                  <Select
-                    value={ad}
-                    onValueChange={(v: string | null) => {
-                      if (typeof v === 'string') setAd(v);
-                    }}
-                  >
-                    <SelectTrigger id="meta-export-ad" className="h-9">
-                      <SelectValue placeholder="All ads" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__all">All Ads</SelectItem>
-                      {ads.map((a) => (
-                        <SelectItem key={a} value={a}>
-                          {a}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="grid gap-2">
+                <Label htmlFor="meta-export-assignee">Assignment</Label>
+                <Select
+                  value={assignee}
+                  onValueChange={(v: string | null) => {
+                    if (typeof v === 'string') setAssignee(v);
+                  }}
+                >
+                  <SelectTrigger id="meta-export-assignee" className="h-9">
+                    <SelectValue placeholder="All agents" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Agents</SelectItem>
+                    <SelectItem value="unassigned">Unassigned</SelectItem>
+                    {teamMembers.map((m) => (
+                      <SelectItem key={m.user_id} value={m.user_id}>
+                        {assigneeDisplayName(m)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="grid gap-2">
