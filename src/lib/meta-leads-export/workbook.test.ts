@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import ExcelJS from 'exceljs';
 
-import { buildMetaLeadsWorkbook } from './workbook';
+import {
+  buildMetaLeadsWorkbook,
+  fitColumnWidthToHeader,
+  headerWrappedLineCount,
+} from './workbook';
 import { EXCEL_MAX_ROWS } from './constants';
 
 describe('buildMetaLeadsWorkbook', () => {
@@ -104,5 +108,98 @@ describe('buildMetaLeadsWorkbook', () => {
     // Empty dates stay empty, never epoch text.
     expect(ws!.getRow(3).getCell(idxOf('Submission Time')).value).toBeNull();
     expect(ws!.getRow(3).getCell(idxOf('Last Contact Date')).value).toBeNull();
+  });
+
+  it('wraps header text with vertical centering and left alignment', async () => {
+    const buf = await buildMetaLeadsWorkbook({
+      columns: [
+        { key: 'name', header: 'Name', kind: 'text' },
+        { key: 'phone', header: 'Phone Number', kind: 'text' },
+      ],
+      rows: [{ name: 'Aarav', phone: '+919999999999' }],
+    });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Uint8Array.from(buf).buffer);
+    const ws = wb.getWorksheet('Leads');
+    expect(ws).toBeDefined();
+    // Short headers stay single-line: row height fits one line.
+    expect(ws!.getRow(1).height).toBe(15);
+    ws!.getRow(1).eachCell((cell) => {
+      expect(cell.alignment).toMatchObject({
+        vertical: 'middle',
+        horizontal: 'left',
+        wrapText: true,
+      });
+    });
+    // Header styling is untouched.
+    expect(ws!.getRow(1).font).toMatchObject({ bold: true });
+    expect(ws!.getRow(1).fill).toMatchObject({
+      type: 'pattern',
+      pattern: 'solid',
+    });
+    // Autofilter + frozen header row survive.
+    expect(ws!.autoFilter).toBe('A1:B1');
+    expect(ws!.views).toContainEqual(
+      expect.objectContaining({ state: 'frozen', ySplit: 1 })
+    );
+  });
+
+  it('grows the header row so 2-3 line question headers stay visible', async () => {
+    const longHeader = 'Q'.repeat(60);
+    const buf = await buildMetaLeadsWorkbook({
+      columns: [
+        { key: 'name', header: 'Name', kind: 'text' },
+        { key: 'q1', header: longHeader, kind: 'text' },
+      ],
+      rows: [{ name: 'Aarav', q1: 'Yes' }],
+    });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Uint8Array.from(buf).buffer);
+    const ws = wb.getWorksheet('Leads');
+    // 60 chars at width 32 (usable 29) wrap to 3 lines → 45pt.
+    expect(ws!.getColumn(2).width).toBe(32);
+    expect(ws!.getRow(1).height).toBe(45);
+  });
+
+  it('widens very long headers instead of stacking endless lines', async () => {
+    const longHeader = 'Q'.repeat(100);
+    const buf = await buildMetaLeadsWorkbook({
+      columns: [
+        { key: 'name', header: 'Name', kind: 'text' },
+        { key: 'q1', header: longHeader, kind: 'text' },
+      ],
+      rows: [{ name: 'Aarav', q1: 'Yes' }],
+    });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Uint8Array.from(buf).buffer);
+    const ws = wb.getWorksheet('Leads');
+    // ceil(100/3)+3 = 37 chars: short headers keep their width.
+    expect(ws!.getColumn(2).width).toBe(37);
+    expect(ws!.getColumn(1).width).toBe(22);
+    // 100 chars in 34 usable chars wrap to 3 lines.
+    expect(ws!.getRow(1).height).toBe(45);
+  });
+
+  it('counts explicit newlines as separate header lines', async () => {
+    const buf = await buildMetaLeadsWorkbook({
+      columns: [{ key: 'q1', header: 'AB\nCDEFGH', kind: 'text', width: 20 }],
+      rows: [{ q1: 'Yes' }],
+    });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Uint8Array.from(buf).buffer);
+    const ws = wb.getWorksheet('Leads');
+    // 'AB' → 1 line, 'CDEFGH' fits one line at usable width 17.
+    expect(ws!.getRow(1).height).toBe(30);
+  });
+
+  it('header line estimation never clips and never narrows columns', () => {
+    expect(headerWrappedLineCount('Name', 22)).toBe(1);
+    expect(headerWrappedLineCount('', 22)).toBe(1);
+    expect(headerWrappedLineCount('AB\nCDEFGH', 20)).toBe(2);
+    // Short headers keep their width; long ones widen (capped at 50).
+    expect(fitColumnWidthToHeader(22, 'Name')).toBe(22);
+    expect(fitColumnWidthToHeader(32, 'Q'.repeat(60))).toBe(32);
+    expect(fitColumnWidthToHeader(32, 'Q'.repeat(100))).toBe(37);
+    expect(fitColumnWidthToHeader(10, 'Q'.repeat(500))).toBe(50);
   });
 });

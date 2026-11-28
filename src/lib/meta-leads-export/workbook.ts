@@ -46,6 +46,61 @@ function columnLetter(n: number): string {
   return s;
 }
 
+/** Excel row height (pt) of one wrapped Calibri-11 text line. */
+const HEADER_LINE_HEIGHT_PT = 15;
+/** Long headers are widened so wrapped text fits in ~this many lines. */
+const HEADER_TARGET_MAX_LINES = 3;
+/**
+ * Characters reserved at the end of every header cell so the
+ * autofilter dropdown arrow never covers header text.
+ */
+const HEADER_AUTOFILTER_RESERVE_CHARS = 3;
+/** Floor for the usable wrap width, keeping estimates sane. */
+const HEADER_MIN_USABLE_CHARS = 8;
+
+/**
+ * Estimated wrapped line count for one header at the given column
+ * width (Excel character units). Explicit newlines start new lines;
+ * every segment needs at least one line. Conservative by design
+ * (bold headers, proportional font): the row may end up slightly
+ * tall, but header text is never clipped.
+ */
+export function headerWrappedLineCount(
+  header: string,
+  columnWidthChars: number
+): number {
+  const usable = Math.max(
+    HEADER_MIN_USABLE_CHARS,
+    Math.floor(columnWidthChars) - HEADER_AUTOFILTER_RESERVE_CHARS
+  );
+  let lines = 0;
+  for (const segment of String(header).split('\n')) {
+    lines += Math.max(1, Math.ceil(segment.length / usable));
+  }
+  return lines;
+}
+
+/**
+ * Widen a column when its header would otherwise wrap past the
+ * target line count. Never narrows (data readability keeps the
+ * existing default), never exceeds the workbook width cap.
+ */
+export function fitColumnWidthToHeader(
+  baseWidthChars: number,
+  header: string
+): number {
+  const longest = Math.max(
+    ...String(header)
+      .split('\n')
+      .map((s) => s.length),
+    0
+  );
+  const fitted =
+    Math.ceil(longest / HEADER_TARGET_MAX_LINES) +
+    HEADER_AUTOFILTER_RESERVE_CHARS;
+  return Math.min(50, Math.max(baseWidthChars, fitted));
+}
+
 function defaultWidth(kind: ExportColumn['kind'], header: string): number {
   if (kind === 'date') return 20;
   const h = header.length;
@@ -81,13 +136,17 @@ export async function buildMetaLeadsWorkbook(args: {
   const sheetName = (rawName || EXPORT_SHEET_NAME).slice(0, 31);
   const ws = workbook.addWorksheet(sheetName);
 
-  ws.columns = columns.map((c) => ({
-    header: c.header,
-    key: c.key,
-    width: Math.min(
+  const finalWidths = columns.map((c) => {
+    const baseWidth = Math.min(
       Math.max(c.width ?? defaultWidth(c.kind, c.header), 10),
       50
-    ),
+    );
+    return fitColumnWidthToHeader(baseWidth, c.header);
+  });
+  ws.columns = columns.map((c, idx) => ({
+    header: c.header,
+    key: c.key,
+    width: finalWidths[idx],
   }));
 
   const headerRow = ws.getRow(1);
@@ -97,8 +156,20 @@ export async function buildMetaLeadsWorkbook(args: {
     pattern: 'solid',
     fgColor: { argb: 'FF1F2937' },
   };
-  headerRow.alignment = { vertical: 'middle', wrapText: true };
-  headerRow.height = 22;
+  // Header cells wrap, are vertically centered + left aligned, and
+  // the row is tall enough for the longest wrapped header (2–3 line
+  // form-question headers stay fully visible). Autofilter arrows
+  // overlay the reserved trailing space, never the text.
+  headerRow.eachCell((cell) => {
+    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+  });
+  const headerLines = Math.max(
+    1,
+    ...columns.map((c, idx) =>
+      headerWrappedLineCount(c.header, finalWidths[idx])
+    )
+  );
+  headerRow.height = headerLines * HEADER_LINE_HEIGHT_PT;
 
   for (const row of rows) {
     const values: Record<string, unknown> = {};
