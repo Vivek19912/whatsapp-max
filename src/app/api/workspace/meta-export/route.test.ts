@@ -897,3 +897,130 @@ describe('meta-export — Assigned To shows names, never UUIDs', () => {
     expect(res.headers.get('X-Export-Unresolved-Assignees')).toBe('1');
   });
 });
+
+describe('meta-export — presentation: dates, removed columns, phone dedupe', () => {
+  async function loadSheet(res: Response) {
+    const buf = await res.arrayBuffer();
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.getWorksheet('Leads');
+    expect(ws).toBeDefined();
+    const header = ws!.getRow(1).values as unknown[];
+    const headers = (header as unknown[]).slice(1).map(String);
+    const idxOf = (h: string) =>
+      (header as unknown[]).findIndex((v) => v === h);
+    return { ws: ws!, headers, idxOf };
+  }
+
+  const normPhone = (h: string) =>
+    h
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_]+/g, '');
+
+  it('All export omits provenance columns and formats Submission Time', async () => {
+    const res = await GET(req('?tableId=all-meta-leads'));
+    expect(res.status).toBe(200);
+    const { ws, headers, idxOf } = await loadSheet(res);
+    for (const removed of [
+      'Ad Name',
+      'Campaign Name',
+      'Lead Source',
+      'Meta Created Time',
+      'Meta Lead ID',
+    ]) {
+      expect(headers).not.toContain(removed);
+    }
+    // Column D remains the system Phone Number.
+    expect(headers.slice(0, 4)).toEqual([
+      'No.',
+      'Submission Time',
+      'Name',
+      'Phone Number',
+    ]);
+    // Exactly one phone-number column (case-insensitive).
+    expect(headers.filter((hh) => normPhone(hh) === 'phonenumber')).toEqual([
+      'Phone Number',
+    ]);
+    // Submission Time is a real date with 12-hour AM/PM formatting.
+    const cell = ws.getRow(2).getCell(idxOf('Submission Time'));
+    expect(cell.value).toBeInstanceOf(Date);
+    expect(cell.numFmt).toBe('dd-mm-yyyy hh:mm AM/PM');
+    void ws;
+  });
+
+  it('single-table export drops the duplicate phone question column', async () => {
+    h.nodes.push({
+      flow_id: 'flow-meta-1',
+      node_key: 'meta_q_1_phone',
+      node_type: 'collect_input',
+      config: {
+        var_key: 'phone_number',
+        prompt_text: 'Phone number',
+        sheet_column_name: 'Phone number',
+        sheet_include: true,
+      },
+      created_at: '2026-01-03',
+    });
+    const res = await GET(req('?tableId=flow-meta-1'));
+    expect(res.status).toBe(200);
+    const { headers } = await loadSheet(res);
+    expect(headers.slice(0, 4)).toEqual([
+      'No.',
+      'Submission Time',
+      'Name',
+      'Phone Number',
+    ]);
+    expect(headers.filter((hh) => normPhone(hh) === 'phonenumber')).toEqual([
+      'Phone Number',
+    ]);
+    for (const removed of [
+      'Ad Name',
+      'Campaign Name',
+      'Lead Source',
+      'Meta Created Time',
+      'Meta Lead ID',
+    ]) {
+      expect(headers).not.toContain(removed);
+    }
+    // Other dynamic question columns survive.
+    expect(headers).toContain('City');
+  });
+
+  it('Last Contact Date renders date-only while other dates keep time', async () => {
+    h.fields.push({
+      id: 'f-lcd',
+      account_id: 'acct-1',
+      flow_id: 'flow-meta-1',
+      name: 'Last Contact Date',
+      field_type: 'text',
+      options: null,
+      default_value: null,
+      position: 2,
+    });
+    h.values.push({
+      account_id: 'acct-1',
+      field_id: 'f-lcd',
+      flow_run_id: 'run-1',
+      value_text: '2026-11-27',
+    });
+    const res = await GET(req('?tableId=flow-meta-1'));
+    expect(res.status).toBe(200);
+    const { ws, idxOf } = await loadSheet(res);
+    const lcdIdx = idxOf('Last Contact Date');
+    expect(lcdIdx).toBeGreaterThan(0);
+    const lcdCell = ws.getRow(2).getCell(lcdIdx);
+    expect(lcdCell.value).toBeInstanceOf(Date);
+    expect(lcdCell.numFmt).toBe('dd-mm-yyyy');
+    // Empty dates stay empty.
+    h.values = h.values.filter(
+      (v) => !(v.field_id === 'f-lcd' && v.flow_run_id === 'run-1')
+    );
+    const res2 = await GET(req('?tableId=flow-meta-1'));
+    expect(res2.status).toBe(200);
+    const second = await loadSheet(res2);
+    expect(
+      second.ws.getRow(2).getCell(second.idxOf('Last Contact Date')).value
+    ).toBeNull();
+  });
+});

@@ -3,8 +3,9 @@
 //
 // One worksheet per file. Headers match Workspace display names.
 // Values pass through sanitizeExcelValue (formula-injection guard).
-// Submission/Meta/Follow-up times render as real Excel dates.
-// Freeze header row + autofilter. Sensible widths, no truncation.
+// Date columns render as real Excel dates (per-column numFmt;
+// default yyyy-mm-dd hh:mm). Freeze header row + autofilter.
+// Sensible widths, no truncation.
 // ============================================================
 
 import ExcelJS from 'exceljs';
@@ -18,6 +19,14 @@ export interface ExportColumn {
   header: string;
   /** Column kind for formatting/width. */
   kind: 'text' | 'date' | 'number';
+  /**
+   * Explicit Excel number-format code for `date` columns. When set
+   * it wins over the workbook default (`yyyy-mm-dd hh:mm`), so
+   * individual columns (Submission Time, Last Contact Date) can
+   * carry their own display format while the stored Date value
+   * stays a real Excel date.
+   */
+  numFmt?: string;
   /** Preferred width override (chars). */
   width?: number;
 }
@@ -116,13 +125,16 @@ export async function buildMetaLeadsWorkbook(args: {
     r.alignment = { vertical: 'top', wrapText: true };
   }
 
-  // Date formatting (readable, locale-independent).
+  // Date formatting (readable, locale-independent). A column with
+  // an explicit numFmt keeps it; all other dates use the workbook
+  // default. Values stay real Excel dates — never plain text.
   ws.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
     columns.forEach((c, idx) => {
       if (c.kind !== 'date') return;
       const cell = row.getCell(idx + 1);
-      if (cell.value instanceof Date) cell.numFmt = 'yyyy-mm-dd hh:mm';
+      if (cell.value instanceof Date)
+        cell.numFmt = c.numFmt ?? 'yyyy-mm-dd hh:mm';
     });
   });
 

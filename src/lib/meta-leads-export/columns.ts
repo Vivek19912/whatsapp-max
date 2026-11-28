@@ -25,6 +25,40 @@ import {
 
 import type { ExportColumn } from './workbook';
 
+/** Excel display format for Submission Time: `28-11-2026 05:34 PM`. */
+export const SUBMISSION_TIME_NUM_FMT = 'dd-mm-yyyy hh:mm AM/PM';
+
+/** Excel display format for date-only columns (Last Contact Date). */
+export const DATE_ONLY_NUM_FMT = 'dd-mm-yyyy';
+
+/**
+ * Canonical phone-number identity for header deduping: the system
+ * column renders "Phone Number", while an Instant Form question may
+ * contribute "Phone number" / "phone_number" / "PhoneNumber" as a
+ * dynamic column. All spellings collapse to one key.
+ */
+function normalizedPhoneHeader(header: string): string {
+  return header
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '');
+}
+
+/** True for a dynamic column duplicating the system Phone Number. */
+function isDuplicatePhoneColumn(header: string): boolean {
+  return normalizedPhoneHeader(header) === 'phonenumber';
+}
+
+/** True for the Last Contact Date business column (any casing). */
+function isLastContactDateColumn(header: string): boolean {
+  return (
+    header
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_]+/g, '') === 'lastcontactdate'
+  );
+}
+
 export interface WorkspaceFieldLite {
   id: string;
   name: string;
@@ -48,7 +82,9 @@ export function resolveExportHeader(args: {
  * Build export columns for ONE Meta Lead Ads table.
  * Mirrors GET /api/flows/[id]/table column order exactly:
  * system cols + flow Name twin@1 + dynamic + Source-at-end +
- * workspace business fields + provenance.
+ * workspace business fields. Provenance columns (Ad Name,
+ * Campaign Name, Lead Source, Meta Created Time, Meta Lead ID)
+ * are intentionally not exported.
  */
 export function buildSingleTableExportColumns(args: {
   nodes: FlowNodeLite[];
@@ -91,6 +127,7 @@ export function buildSingleTableExportColumns(args: {
         key: 'submission_time',
         header: 'Submission Time',
         kind: 'date',
+        numFmt: SUBMISSION_TIME_NUM_FMT,
       });
     } else if (c.key === 'name') {
       out.push({ key: 'name', header: 'Name', kind: 'text' });
@@ -99,9 +136,18 @@ export function buildSingleTableExportColumns(args: {
     } else if (c.key === 'latest_recording' || c.key === 'status') {
       continue; // UI-only badges, not lead data
     } else {
+      const header = resolveExportHeader({
+        column: c,
+        labels: args.headerLabels,
+      });
+      // The system Phone Number column above is the single source
+      // of truth — drop a dynamic Instant Form question column that
+      // duplicates it ("Phone number" in any casing/spacing).
+      // Other question columns and custom fields are untouched.
+      if (isDuplicatePhoneColumn(header)) continue;
       out.push({
         key: `answer:${c.key}`,
-        header: resolveExportHeader({ column: c, labels: args.headerLabels }),
+        header,
         kind: 'text',
       });
     }
@@ -114,15 +160,9 @@ export function buildSingleTableExportColumns(args: {
       key: `field:${f.id}`,
       header: label,
       kind: /follow-up|date|time/i.test(f.name) ? 'date' : 'text',
+      ...(isLastContactDateColumn(label) ? { numFmt: DATE_ONLY_NUM_FMT } : {}),
     });
   }
-
-  // Fixed Meta provenance (always present, never invented).
-  out.push({ key: 'meta_ad', header: 'Ad Name', kind: 'text' });
-  out.push({ key: 'meta_campaign', header: 'Campaign Name', kind: 'text' });
-  out.push({ key: 'meta_source_type', header: 'Lead Source', kind: 'text' });
-  out.push({ key: 'meta_created', header: 'Meta Created Time', kind: 'date' });
-  out.push({ key: 'meta_lead_id', header: 'Meta Lead ID', kind: 'text' });
 
   void nameKey;
   return { columns: out, answerKeys };
@@ -130,8 +170,10 @@ export function buildSingleTableExportColumns(args: {
 
 /**
  * Build export columns for the All Meta Leads union.
- * Fixed All-view columns + dynamic union of workspace fields +
- * provenance. Order matches defaultAllMetaColumnOrder().
+ * Fixed All-view columns + dynamic union of workspace fields.
+ * Order matches defaultAllMetaColumnOrder(). Provenance columns
+ * (Ad Name, Campaign Name, Lead Source, Meta Created Time,
+ * Meta Lead ID) are intentionally not exported.
  */
 export function buildAllMetaExportColumns(args: {
   tables: ReadonlyArray<{ flowId: string }>;
@@ -147,6 +189,7 @@ export function buildAllMetaExportColumns(args: {
         key: 'submission_time',
         header: 'Submission Time',
         kind: 'date',
+        numFmt: SUBMISSION_TIME_NUM_FMT,
       });
     else if (c.key === 'name')
       out.push({ key: 'name', header: 'Name', kind: 'text' });
@@ -183,12 +226,10 @@ export function buildAllMetaExportColumns(args: {
       key: `union:${u.key}`,
       header: u.label,
       kind: /date|time/i.test(u.fieldType) ? 'date' : 'text',
+      ...(isLastContactDateColumn(u.label)
+        ? { numFmt: DATE_ONLY_NUM_FMT }
+        : {}),
     });
   }
-  out.push({ key: 'meta_ad', header: 'Ad Name', kind: 'text' });
-  out.push({ key: 'meta_campaign', header: 'Campaign Name', kind: 'text' });
-  out.push({ key: 'meta_source_type', header: 'Lead Source', kind: 'text' });
-  out.push({ key: 'meta_created', header: 'Meta Created Time', kind: 'date' });
-  out.push({ key: 'meta_lead_id', header: 'Meta Lead ID', kind: 'text' });
   return out;
 }
